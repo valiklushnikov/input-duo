@@ -8,6 +8,8 @@ constexpr uint8_t kMouseDataPin = 9;
 constexpr uint8_t kMouseClockPin = 10;
 constexpr uint8_t kReceiverAddress = 0x02;
 constexpr uint32_t kPs2EdgeTimeoutUs = 25000;
+constexpr uint32_t kPs2BatTimeoutUs = 750000;
+constexpr uint32_t kPs2DeviceIdTimeoutUs = 250000;
 constexpr uint32_t kReconnectIntervalMs = 1000;
 constexpr uint32_t kRemoteCreditTimeoutMs = 25;
 constexpr bool kDebug = false;
@@ -73,12 +75,9 @@ bool ps2WriteByte(uint8_t value) {
   delayMicroseconds(10);
   releaseLine(kMouseClockPin);
 
-  // Keep START asserted through the first complete device clock so the mouse
-  // samples DATA low on the rising edge.  DATA bits are changed only while
-  // Clock is low below.
-  if (!waitForPinLevel(kMouseClockPin, LOW) ||
-      !waitForPinLevel(kMouseClockPin, HIGH) ||
-      !waitForPinLevel(kMouseClockPin, LOW)) {
+  // Request-to-send itself supplies START.  Once the mouse takes Clock low,
+  // place bit 0 on DATA; the mouse samples it on the following rising edge.
+  if (!waitForPinLevel(kMouseClockPin, LOW)) {
     return failPs2Operation();
   }
 
@@ -107,34 +106,40 @@ bool ps2WriteByte(uint8_t value) {
     return failPs2Operation();
   }
 
-  // Release DATA for STOP while Clock is low, then hold it high through the
-  // rising sampling edge and the following falling edge.
+  // Release DATA for STOP while Clock is low.  The mouse samples STOP on the
+  // rising edge, asserts the transport ACK by taking DATA low while Clock is
+  // high, then completes ACK on the following falling edge.
   releaseLine(kMouseDataPin);
   if (!waitForPinLevel(kMouseClockPin, HIGH) ||
+      !waitForPinLevel(kMouseDataPin, LOW) ||
       !waitForPinLevel(kMouseClockPin, LOW)) {
     return failPs2Operation();
   }
 
-  // The device acknowledges transport by asserting DATA low for one final
-  // clock.  Observe the full low/high/low ACK clock before both lines idle high.
-  if (!waitForPinLevel(kMouseDataPin, LOW) ||
-      !waitForPinLevel(kMouseClockPin, HIGH) ||
-      !waitForPinLevel(kMouseClockPin, LOW) ||
-      !waitForPinLevel(kMouseDataPin, HIGH) ||
+  // Wait for idle, then inhibit Clock immediately.  This prevents a fast
+  // command response from starting before ps2ReadByte() is ready for it.
+  if (!waitForPinLevel(kMouseDataPin, HIGH) ||
       !waitForPinLevel(kMouseClockPin, HIGH)) {
     return failPs2Operation();
   }
+  assertLineLow(kMouseClockPin);
   return true;
 }
 
-bool ps2ReadByte(uint8_t& value) {
+bool ps2ReadByte(uint8_t& value,
+                 uint32_t firstEdgeTimeoutUs = kPs2EdgeTimeoutUs) {
   value = 0;
   uint8_t parity = 1;
   releaseLine(kMouseDataPin);
   releaseLine(kMouseClockPin);
 
-  if (!waitForPinLevel(kMouseClockPin, LOW) ||
-      digitalRead(kMouseDataPin) != LOW ||
+  const uint32_t startedAt = micros();
+  while (digitalRead(kMouseClockPin) != LOW) {
+    if (static_cast<uint32_t>(micros() - startedAt) >= firstEdgeTimeoutUs) {
+      return failPs2Operation();
+    }
+  }
+  if (digitalRead(kMouseDataPin) != LOW ||
       !waitForPinLevel(kMouseClockPin, HIGH)) {
     return failPs2Operation();
   }
@@ -167,6 +172,10 @@ bool ps2ReadByte(uint8_t& value) {
   if (!waitForPinLevel(kMouseClockPin, HIGH) || !stopBitHigh) {
     return failPs2Operation();
   }
+  // Hold the device between bytes.  Multi-byte reset and report responses can
+  // otherwise begin before the next ps2ReadByte() call reaches its first wait.
+  releaseLine(kMouseDataPin);
+  assertLineLow(kMouseClockPin);
   return true;
 }
 
@@ -196,8 +205,8 @@ bool readMouseId(uint8_t& deviceId) {
 bool initializeMouse() {
   uint8_t response = 0;
   if (!ps2WriteByte(0xFF) || !ps2ReadByte(response) || response != 0xFA ||
-      !ps2ReadByte(response) || response != 0xAA ||
-      !ps2ReadByte(response)) {
+      !ps2ReadByte(response, kPs2BatTimeoutUs) || response != 0xAA ||
+      !ps2ReadByte(response, kPs2DeviceIdTimeoutUs)) {
     return failPs2Operation();
   }
 
