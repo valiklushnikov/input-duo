@@ -12,9 +12,25 @@ constexpr bool kDebug = false;
 
 enum class Target : uint8_t { LocalLaptop, RemoteLaptop };
 
+constexpr int8_t decodeWheelByte(uint8_t deviceId, uint8_t value) {
+  return deviceId == 0x04
+             ? ((value & 0x08) != 0
+                    ? static_cast<int8_t>((value & 0x0F) - 16)
+                    : static_cast<int8_t>(value & 0x0F))
+             : static_cast<int8_t>(value);
+}
+
+static_assert(decodeWheelByte(0x04, 0x0F) == -1,
+              "ID 0x04 wheel nibble must be sign-extended");
+static_assert(decodeWheelByte(0x04, 0x3F) == -1,
+              "ID 0x04 extra-button bits must not affect wheel");
+static_assert(decodeWheelByte(0x03, 0x0F) == 15,
+              "ID 0x03 must retain signed-byte wheel behavior");
+
 Target target = Target::RemoteLaptop;
 bool mouseConnected = false;
 bool wheelAvailable = false;
+uint8_t mouseId = 0x00;
 bool previousMiddlePressed = false;
 bool localLeftPressed = false;
 bool localRightPressed = false;
@@ -52,7 +68,12 @@ bool ps2WriteByte(uint8_t value) {
   delayMicroseconds(10);
   releaseLine(kMouseClockPin);
 
-  if (!waitForPinLevel(kMouseClockPin, LOW)) {
+  // Keep START asserted through the first complete device clock so the mouse
+  // samples DATA low on the rising edge.  DATA bits are changed only while
+  // Clock is low below.
+  if (!waitForPinLevel(kMouseClockPin, LOW) ||
+      !waitForPinLevel(kMouseClockPin, HIGH) ||
+      !waitForPinLevel(kMouseClockPin, LOW)) {
     return false;
   }
 
@@ -81,9 +102,21 @@ bool ps2WriteByte(uint8_t value) {
     return false;
   }
 
+  // Release DATA for STOP while Clock is low, then hold it high through the
+  // rising sampling edge and the following falling edge.
   releaseLine(kMouseDataPin);
   if (!waitForPinLevel(kMouseClockPin, HIGH) ||
-      !waitForPinLevel(kMouseDataPin, HIGH)) {
+      !waitForPinLevel(kMouseClockPin, LOW)) {
+    return false;
+  }
+
+  // The device acknowledges transport by asserting DATA low for one final
+  // clock.  Observe the full low/high/low ACK clock before both lines idle high.
+  if (!waitForPinLevel(kMouseDataPin, LOW) ||
+      !waitForPinLevel(kMouseClockPin, HIGH) ||
+      !waitForPinLevel(kMouseClockPin, LOW) ||
+      !waitForPinLevel(kMouseDataPin, HIGH) ||
+      !waitForPinLevel(kMouseClockPin, HIGH)) {
     return false;
   }
   return true;
@@ -154,7 +187,8 @@ bool initializeMouse() {
       !sendCommand(0xF2) || !ps2ReadByte(response)) {
     return false;
   }
-  wheelAvailable = response == 0x03 || response == 0x04;
+  mouseId = response;
+  wheelAvailable = mouseId == 0x03 || mouseId == 0x04;
   if (response != 0x00 && !wheelAvailable) {
     return false;
   }
@@ -178,7 +212,7 @@ bool pollMouse(uint8_t& status, int8_t& rawX, int8_t& rawY, int8_t& rawWheel) {
     if (!ps2ReadByte(byte)) {
       return false;
     }
-    rawWheel = static_cast<int8_t>(byte);
+    rawWheel = decodeWheelByte(mouseId, byte);
   }
   return true;
 }
