@@ -140,6 +140,12 @@ static_assert(!shouldAttemptExplorerUpgrade(0x00),
               "Standard mouse ID must not trigger Explorer negotiation");
 static_assert(!shouldAttemptExplorerUpgrade(0x04),
               "Explorer ID must not repeat Explorer negotiation");
+static_assert(!shouldReconnectAfterPs2Failure(1, 3),
+              "One damaged PS/2 report must be ignored");
+static_assert(!shouldReconnectAfterPs2Failure(2, 3),
+              "Two damaged PS/2 reports must not reset the mouse");
+static_assert(shouldReconnectAfterPs2Failure(3, 3),
+              "The configured consecutive-failure limit must reconnect");
 
 static_assert(kPacketSize == 7, "Unexpected packet size");
 static_assert(checksumBytes(0xA1, 0x7F, 0x80, 0x7F, 0xFF, 0x03) == 0xDD,

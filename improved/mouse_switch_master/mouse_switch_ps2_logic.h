@@ -31,4 +31,9 @@ constexpr bool shouldAttemptExplorerUpgrade(uint8_t deviceId) {
   return deviceId == 0x03;
 }
 
+constexpr bool shouldReconnectAfterPs2Failure(uint8_t consecutiveFailures,
+                                              uint8_t failureLimit) {
+  return failureLimit != 0 && consecutiveFailures >= failureLimit;
+}
+
 #endif

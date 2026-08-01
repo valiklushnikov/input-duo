@@ -12,6 +12,7 @@ constexpr uint32_t kPs2BatTimeoutUs = 750000;
 constexpr uint32_t kPs2DeviceIdTimeoutUs = 250000;
 constexpr uint32_t kReconnectIntervalMs = 1000;
 constexpr uint32_t kRemoteCreditTimeoutMs = 25;
+constexpr uint8_t kPs2FailuresBeforeReconnect = 3;
 constexpr bool kDebug = false;
 
 enum class Target : uint8_t { LocalLaptop, RemoteLaptop };
@@ -32,6 +33,7 @@ bool previousMiddlePressed = false;
 bool localLeftPressed = false;
 bool localRightPressed = false;
 uint8_t sequence = 0;
+uint8_t consecutivePs2Failures = 0;
 uint32_t lastReconnectAttemptMs = 0;
 
 void releaseLine(uint8_t pin) {
@@ -390,6 +392,7 @@ void handleMouseFailure() {
   releaseActiveTarget();
   mouseConnected = false;
   previousMiddlePressed = false;
+  consecutivePs2Failures = 0;
   lastReconnectAttemptMs = millis();
 }
 
@@ -417,6 +420,7 @@ void loop() {
       lastReconnectAttemptMs = now;
       mouseConnected = initializeMouse();
       previousMiddlePressed = false;
+      consecutivePs2Failures = 0;
       if (!mouseConnected) {
         releasePs2Lines();
         return;
@@ -427,9 +431,17 @@ void loop() {
 
   MouseReport report = {0, 0, 0, 0, 0};
   if (!pollMouse(report)) {
-    handleMouseFailure();
+    releasePs2Lines();
+    if (consecutivePs2Failures < UINT8_MAX) {
+      ++consecutivePs2Failures;
+    }
+    if (shouldReconnectAfterPs2Failure(consecutivePs2Failures,
+                                       kPs2FailuresBeforeReconnect)) {
+      handleMouseFailure();
+    }
     return;
   }
+  consecutivePs2Failures = 0;
 
   const bool middlePressed = (report.status & 0x04) != 0;
   if (isMiddlePressEdge(middlePressed, previousMiddlePressed)) {
