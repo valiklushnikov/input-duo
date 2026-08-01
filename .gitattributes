@@ -1,1 +1,1 @@
-legacy/**/*.ino -text whitespace=cr-at-eol,-blank-at-eol
+legacy/**/*.ino -text whitespace=cr-at-eol,-blank-at-eol,-blank-at-eof

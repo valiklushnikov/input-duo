@@ -15,7 +15,7 @@ bool leftPressed = false;
 bool rightPressed = false;
 
 void receiveEvent(int byteCount) {
-  if (byteCount != kPacketSize) {
+  if (!packetLengthIsValid(static_cast<size_t>(byteCount))) {
     while (Wire.available()) {
       Wire.read();
     }
@@ -86,9 +86,9 @@ void loop() {
       lastValidPacketMs = millis();
 
       if (packet.type == kReportPacketType) {
-        Mouse.move(packet.dx, packet.dy, packet.wheel);
         setButtonStates((packet.buttons & 0x01) != 0,
                         (packet.buttons & 0x02) != 0);
+        Mouse.move(packet.dx, packet.dy, packet.wheel);
       } else {
         setButtonStates(false, false);
       }

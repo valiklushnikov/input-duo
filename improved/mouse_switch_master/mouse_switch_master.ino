@@ -2,6 +2,7 @@
 #include <Wire.h>
 
 #include "mouse_switch_protocol.h"
+#include "mouse_switch_ps2_logic.h"
 
 constexpr uint8_t kMouseDataPin = 9;
 constexpr uint8_t kMouseClockPin = 10;
@@ -12,20 +13,13 @@ constexpr bool kDebug = false;
 
 enum class Target : uint8_t { LocalLaptop, RemoteLaptop };
 
-constexpr int8_t decodeWheelByte(uint8_t deviceId, uint8_t value) {
-  return deviceId == 0x04
-             ? ((value & 0x08) != 0
-                    ? static_cast<int8_t>((value & 0x0F) - 16)
-                    : static_cast<int8_t>(value & 0x0F))
-             : static_cast<int8_t>(value);
-}
-
-static_assert(decodeWheelByte(0x04, 0x0F) == -1,
-              "ID 0x04 wheel nibble must be sign-extended");
-static_assert(decodeWheelByte(0x04, 0x3F) == -1,
-              "ID 0x04 extra-button bits must not affect wheel");
-static_assert(decodeWheelByte(0x03, 0x0F) == 15,
-              "ID 0x03 must retain signed-byte wheel behavior");
+struct MouseReport {
+  uint8_t status;
+  int16_t dx;
+  int16_t dy;
+  int8_t wheel;
+  uint8_t buttons;
+};
 
 Target target = Target::RemoteLaptop;
 bool mouseConnected = false;
@@ -41,6 +35,16 @@ void releaseLine(uint8_t pin) {
   pinMode(pin, INPUT_PULLUP);
 }
 
+void releasePs2Lines() {
+  releaseLine(kMouseDataPin);
+  releaseLine(kMouseClockPin);
+}
+
+bool failPs2Operation() {
+  releasePs2Lines();
+  return false;
+}
+
 void assertLineLow(uint8_t pin) {
   digitalWrite(pin, LOW);
   pinMode(pin, OUTPUT);
@@ -50,7 +54,7 @@ bool waitForPinLevel(uint8_t pin, uint8_t level) {
   const uint32_t startedAt = micros();
   while (digitalRead(pin) != level) {
     if (static_cast<uint32_t>(micros() - startedAt) >= kPs2EdgeTimeoutUs) {
-      return false;
+      return failPs2Operation();
     }
   }
   return true;
@@ -74,7 +78,7 @@ bool ps2WriteByte(uint8_t value) {
   if (!waitForPinLevel(kMouseClockPin, LOW) ||
       !waitForPinLevel(kMouseClockPin, HIGH) ||
       !waitForPinLevel(kMouseClockPin, LOW)) {
-    return false;
+    return failPs2Operation();
   }
 
   for (uint8_t bit = 0; bit < 8; ++bit) {
@@ -88,7 +92,7 @@ bool ps2WriteByte(uint8_t value) {
 
     if (!waitForPinLevel(kMouseClockPin, HIGH) ||
         !waitForPinLevel(kMouseClockPin, LOW)) {
-      return false;
+      return failPs2Operation();
     }
   }
 
@@ -99,7 +103,7 @@ bool ps2WriteByte(uint8_t value) {
   }
   if (!waitForPinLevel(kMouseClockPin, HIGH) ||
       !waitForPinLevel(kMouseClockPin, LOW)) {
-    return false;
+    return failPs2Operation();
   }
 
   // Release DATA for STOP while Clock is low, then hold it high through the
@@ -107,7 +111,7 @@ bool ps2WriteByte(uint8_t value) {
   releaseLine(kMouseDataPin);
   if (!waitForPinLevel(kMouseClockPin, HIGH) ||
       !waitForPinLevel(kMouseClockPin, LOW)) {
-    return false;
+    return failPs2Operation();
   }
 
   // The device acknowledges transport by asserting DATA low for one final
@@ -117,7 +121,7 @@ bool ps2WriteByte(uint8_t value) {
       !waitForPinLevel(kMouseClockPin, LOW) ||
       !waitForPinLevel(kMouseDataPin, HIGH) ||
       !waitForPinLevel(kMouseClockPin, HIGH)) {
-    return false;
+    return failPs2Operation();
   }
   return true;
 }
@@ -131,48 +135,61 @@ bool ps2ReadByte(uint8_t& value) {
   if (!waitForPinLevel(kMouseClockPin, LOW) ||
       digitalRead(kMouseDataPin) != LOW ||
       !waitForPinLevel(kMouseClockPin, HIGH)) {
-    return false;
+    return failPs2Operation();
   }
 
   for (uint8_t bit = 0; bit < 8; ++bit) {
     if (!waitForPinLevel(kMouseClockPin, LOW)) {
-      return false;
+      return failPs2Operation();
     }
     const uint8_t dataBit = digitalRead(kMouseDataPin) == HIGH ? 1 : 0;
     value |= static_cast<uint8_t>(dataBit << bit);
     parity ^= dataBit;
     if (!waitForPinLevel(kMouseClockPin, HIGH)) {
-      return false;
+      return failPs2Operation();
     }
   }
 
   if (!waitForPinLevel(kMouseClockPin, LOW)) {
-    return false;
+    return failPs2Operation();
   }
   const bool parityBitHigh = digitalRead(kMouseDataPin) == HIGH;
   if (!waitForPinLevel(kMouseClockPin, HIGH) ||
       parityBitHigh != (parity != 0)) {
-    return false;
+    return failPs2Operation();
   }
 
   if (!waitForPinLevel(kMouseClockPin, LOW)) {
-    return false;
+    return failPs2Operation();
   }
   const bool stopBitHigh = digitalRead(kMouseDataPin) == HIGH;
   if (!waitForPinLevel(kMouseClockPin, HIGH) || !stopBitHigh) {
-    return false;
+    return failPs2Operation();
   }
   return true;
 }
 
 bool sendCommand(uint8_t command) {
   uint8_t acknowledgement = 0;
-  return ps2WriteByte(command) && ps2ReadByte(acknowledgement) &&
-         acknowledgement == 0xFA;
+  if (!ps2WriteByte(command) || !ps2ReadByte(acknowledgement) ||
+      acknowledgement != 0xFA) {
+    return failPs2Operation();
+  }
+  return true;
 }
 
 bool setSampleRate(uint8_t rate) {
-  return sendCommand(0xF3) && sendCommand(rate);
+  if (!sendCommand(0xF3) || !sendCommand(rate)) {
+    return failPs2Operation();
+  }
+  return true;
+}
+
+bool readMouseId(uint8_t& deviceId) {
+  if (!sendCommand(0xF2) || !ps2ReadByte(deviceId)) {
+    return failPs2Operation();
+  }
+  return true;
 }
 
 bool initializeMouse() {
@@ -180,45 +197,67 @@ bool initializeMouse() {
   if (!ps2WriteByte(0xFF) || !ps2ReadByte(response) || response != 0xFA ||
       !ps2ReadByte(response) || response != 0xAA ||
       !ps2ReadByte(response)) {
-    return false;
+    return failPs2Operation();
   }
 
   if (!setSampleRate(200) || !setSampleRate(100) || !setSampleRate(80) ||
-      !sendCommand(0xF2) || !ps2ReadByte(response)) {
-    return false;
+      !readMouseId(response)) {
+    return failPs2Operation();
   }
+
+  if (shouldAttemptExplorerUpgrade(response)) {
+    if (!setSampleRate(200) || !setSampleRate(200) || !setSampleRate(80) ||
+        !readMouseId(response)) {
+      return failPs2Operation();
+    }
+  }
+
   mouseId = response;
   wheelAvailable = mouseId == 0x03 || mouseId == 0x04;
   if (response != 0x00 && !wheelAvailable) {
-    return false;
+    return failPs2Operation();
   }
 
-  return sendCommand(0xE8) && sendCommand(0x03) && sendCommand(0xE6) &&
-         setSampleRate(40) && sendCommand(0xF4) && sendCommand(0xF0);
-}
-
-bool pollMouse(uint8_t& status, int8_t& rawX, int8_t& rawY, int8_t& rawWheel) {
-  uint8_t byte = 0;
-  if (!sendCommand(0xEB) || !ps2ReadByte(status) || !ps2ReadByte(byte)) {
-    return false;
-  }
-  rawX = static_cast<int8_t>(byte);
-  if (!ps2ReadByte(byte)) {
-    return false;
-  }
-  rawY = static_cast<int8_t>(byte);
-  rawWheel = 0;
-  if (wheelAvailable) {
-    if (!ps2ReadByte(byte)) {
-      return false;
-    }
-    rawWheel = decodeWheelByte(mouseId, byte);
+  if (!sendCommand(0xE8) || !sendCommand(0x03) || !sendCommand(0xE6) ||
+      !setSampleRate(40) || !sendCommand(0xF4) || !sendCommand(0xF0)) {
+    return failPs2Operation();
   }
   return true;
 }
 
-int8_t negatePs2Delta(int8_t value) {
-  return value == -128 ? 127 : static_cast<int8_t>(-value);
+bool pollMouse(MouseReport& report) {
+  uint8_t status = 0;
+  uint8_t rawX = 0;
+  uint8_t rawY = 0;
+  uint8_t rawWheel = 0;
+  if (!sendCommand(0xEB) || !ps2ReadByte(status) || !ps2ReadByte(rawX) ||
+      !ps2ReadByte(rawY)) {
+    return failPs2Operation();
+  }
+
+  if (wheelAvailable && !ps2ReadByte(rawWheel)) {
+    return failPs2Operation();
+  }
+
+  const bool xSignSet = (status & 0x10) != 0;
+  const bool ySignSet = (status & 0x20) != 0;
+  const int16_t ps2X = (status & 0x40) != 0
+                           ? (xSignSet ? -256 : 255)
+                           : decodePs2Axis(rawX, xSignSet);
+  const int16_t ps2Y = (status & 0x80) != 0
+                           ? (ySignSet ? -256 : 255)
+                           : decodePs2Axis(rawY, ySignSet);
+
+  report.status = status;
+  report.dx = ps2X;
+  report.dy = negatePs2Axis(ps2Y);
+  report.wheel = 0;
+  if (wheelAvailable) {
+    report.wheel = hidDisplacementChunk(
+        negatePs2Axis(static_cast<int16_t>(decodePs2Wheel(mouseId, rawWheel))));
+  }
+  report.buttons = status & kAllowedButtonMask;
+  return true;
 }
 
 void setLocalButtons(uint8_t buttons) {
@@ -278,17 +317,37 @@ void toggleTarget() {
   }
 }
 
-void applyReport(int8_t dx, int8_t dy, int8_t wheel, uint8_t buttons) {
+void applyReport(const MouseReport& report) {
   if (target == Target::LocalLaptop) {
-    Mouse.move(dx, dy, wheel);
-    setLocalButtons(buttons);
-  } else {
-    const MousePacket packet = makeReportPacket(sequence++, dx, dy, wheel, buttons);
-    sendPacket(packet);
+    setLocalButtons(report.buttons);
+  }
+
+  int16_t remainingX = report.dx;
+  int16_t remainingY = report.dy;
+  bool firstChunk = true;
+  while (remainingX != 0 || remainingY != 0 ||
+         (firstChunk &&
+          (report.wheel != 0 || target == Target::RemoteLaptop))) {
+    const int8_t dx = hidDisplacementChunk(remainingX);
+    const int8_t dy = hidDisplacementChunk(remainingY);
+    const int8_t wheel = firstChunk ? report.wheel : 0;
+
+    if (target == Target::LocalLaptop) {
+      Mouse.move(dx, dy, wheel);
+    } else {
+      const MousePacket packet =
+          makeReportPacket(sequence++, dx, dy, wheel, report.buttons);
+      sendPacket(packet);
+    }
+
+    remainingX -= dx;
+    remainingY -= dy;
+    firstChunk = false;
   }
 }
 
 void handleMouseFailure() {
+  releasePs2Lines();
   releaseActiveTarget();
   mouseConnected = false;
   previousMiddlePressed = false;
@@ -296,8 +355,7 @@ void handleMouseFailure() {
 }
 
 void setup() {
-  releaseLine(kMouseDataPin);
-  releaseLine(kMouseClockPin);
+  releasePs2Lines();
   Mouse.begin();
   Wire.begin();
   Wire.setWireTimeout(25000, true);
@@ -308,6 +366,7 @@ void setup() {
   mouseConnected = initializeMouse();
   lastReconnectAttemptMs = millis();
   if (!mouseConnected) {
+    releasePs2Lines();
     releaseActiveTarget();
   }
 }
@@ -320,30 +379,24 @@ void loop() {
       mouseConnected = initializeMouse();
       previousMiddlePressed = false;
       if (!mouseConnected) {
+        releasePs2Lines();
         return;
       }
     }
     return;
   }
 
-  uint8_t status = 0;
-  int8_t rawX = 0;
-  int8_t rawY = 0;
-  int8_t rawWheel = 0;
-  if (!pollMouse(status, rawX, rawY, rawWheel)) {
+  MouseReport report = {0, 0, 0, 0, 0};
+  if (!pollMouse(report)) {
     handleMouseFailure();
     return;
   }
 
-  const bool middlePressed = (status & 0x04) != 0;
+  const bool middlePressed = (report.status & 0x04) != 0;
   if (isMiddlePressEdge(middlePressed, previousMiddlePressed)) {
     toggleTarget();
   }
   previousMiddlePressed = middlePressed;
 
-  const int8_t dx = rawX;
-  const int8_t dy = negatePs2Delta(rawY);
-  const int8_t wheel = negatePs2Delta(rawWheel);
-  const uint8_t buttons = status & kAllowedButtonMask;
-  applyReport(dx, dy, wheel, buttons);
+  applyReport(report);
 }
