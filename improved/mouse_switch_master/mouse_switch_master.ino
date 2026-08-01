@@ -9,6 +9,7 @@ constexpr uint8_t kMouseClockPin = 10;
 constexpr uint8_t kReceiverAddress = 0x02;
 constexpr uint32_t kPs2EdgeTimeoutUs = 25000;
 constexpr uint32_t kReconnectIntervalMs = 1000;
+constexpr uint32_t kRemoteCreditTimeoutMs = 25;
 constexpr bool kDebug = false;
 
 enum class Target : uint8_t { LocalLaptop, RemoteLaptop };
@@ -284,7 +285,36 @@ void releaseLocal() {
   }
 }
 
-bool sendPacket(const MousePacket& packet) {
+bool waitForRemoteCredit() {
+  const uint32_t startedAt = millis();
+  do {
+    const uint8_t received =
+        Wire.requestFrom(kReceiverAddress, static_cast<uint8_t>(1));
+    if (received != 1 || Wire.available() != 1) {
+      if (Wire.available()) {
+        Wire.read();
+      }
+      return false;
+    }
+
+    const int freeSlots = Wire.read();
+    if (freeSlots > 0) {
+      return true;
+    }
+  } while (static_cast<uint32_t>(millis() - startedAt) <
+           kRemoteCreditTimeoutMs);
+
+  return false;
+}
+
+bool sendRemotePacket(const MousePacket& packet) {
+  if (!waitForRemoteCredit()) {
+    if (kDebug) {
+      Serial.println(F("I2C credit failure"));
+    }
+    return false;
+  }
+
   Wire.beginTransmission(kReceiverAddress);
   const size_t written = Wire.write(reinterpret_cast<const uint8_t*>(&packet), kPacketSize);
   const uint8_t result = Wire.endTransmission();
@@ -294,9 +324,9 @@ bool sendPacket(const MousePacket& packet) {
   return written == kPacketSize && result == 0;
 }
 
-void sendRemoteRelease() {
+bool sendRemoteRelease() {
   const MousePacket packet = makeReleasePacket(sequence++);
-  sendPacket(packet);
+  return sendRemotePacket(packet);
 }
 
 void releaseActiveTarget() {
@@ -337,7 +367,7 @@ void applyReport(const MouseReport& report) {
     } else {
       const MousePacket packet =
           makeReportPacket(sequence++, dx, dy, wheel, report.buttons);
-      sendPacket(packet);
+      sendRemotePacket(packet);
     }
 
     remainingX -= dx;

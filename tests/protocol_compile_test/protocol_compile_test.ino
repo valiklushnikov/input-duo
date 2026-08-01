@@ -1,5 +1,72 @@
 #include "mouse_switch_protocol.h"
 #include "../../improved/mouse_switch_master/mouse_switch_ps2_logic.h"
+#include "../../improved/mouse_switch_receiver/mouse_switch_packet_queue.h"
+
+constexpr PacketQueueState kEmptyQueue = makeEmptyPacketQueueState();
+static_assert(packetQueueFreeSlots(kEmptyQueue) == 4,
+              "An empty receiver queue must advertise four credits");
+
+constexpr uint8_t kFirstPacketSlot = packetQueueEnqueueSlot(kEmptyQueue);
+static_assert(kFirstPacketSlot == 0,
+              "The first queued packet must use slot zero");
+constexpr PacketQueueState kQueueAfterFirst =
+    packetQueueAfterEnqueue(kEmptyQueue);
+static_assert(packetQueueFreeSlots(kQueueAfterFirst) == 3,
+              "One queued packet must consume one credit");
+
+constexpr uint8_t kSecondPacketSlot =
+    packetQueueEnqueueSlot(kQueueAfterFirst);
+static_assert(kSecondPacketSlot == 1,
+              "The second queued packet must use slot one");
+constexpr PacketQueueState kQueueAfterSecond =
+    packetQueueAfterEnqueue(kQueueAfterFirst);
+static_assert(packetQueueFreeSlots(kQueueAfterSecond) == 2,
+              "Two queued packets must leave two credits");
+
+constexpr uint8_t kThirdPacketSlot =
+    packetQueueEnqueueSlot(kQueueAfterSecond);
+static_assert(kThirdPacketSlot == 2,
+              "The third queued packet must use slot two");
+constexpr PacketQueueState kQueueAfterThird =
+    packetQueueAfterEnqueue(kQueueAfterSecond);
+static_assert(packetQueueFreeSlots(kQueueAfterThird) == 1,
+              "A three-packet burst must leave one credit");
+static_assert(packetQueueDequeueSlot(kQueueAfterThird) == 0,
+              "The first queued packet must be consumed first");
+
+constexpr PacketQueueState kQueueAfterFirstConsumed =
+    packetQueueAfterDequeue(kQueueAfterThird);
+static_assert(packetQueueFreeSlots(kQueueAfterFirstConsumed) == 2,
+              "Consuming one packet must restore one credit");
+static_assert(packetQueueDequeueSlot(kQueueAfterFirstConsumed) == 1,
+              "The second queued packet must be consumed second");
+
+constexpr PacketQueueState kQueueAfterSecondConsumed =
+    packetQueueAfterDequeue(kQueueAfterFirstConsumed);
+static_assert(packetQueueFreeSlots(kQueueAfterSecondConsumed) == 3,
+              "Consuming two packets must restore two credits");
+static_assert(packetQueueDequeueSlot(kQueueAfterSecondConsumed) == 2,
+              "The third queued packet must be consumed third");
+
+constexpr PacketQueueState kQueueAfterThirdConsumed =
+    packetQueueAfterDequeue(kQueueAfterSecondConsumed);
+static_assert(packetQueueFreeSlots(kQueueAfterThirdConsumed) == 4,
+              "Consuming the burst must restore all credits");
+static_assert(!packetQueueCanDequeue(kQueueAfterThirdConsumed),
+              "The queue must be empty after consuming the burst");
+
+constexpr PacketQueueState kFullQueue = packetQueueAfterEnqueue(
+    packetQueueAfterEnqueue(
+        packetQueueAfterEnqueue(packetQueueAfterEnqueue(kEmptyQueue))));
+static_assert(packetQueueFreeSlots(kFullQueue) == 0,
+              "All four receiver queue slots must be usable");
+static_assert(kFullQueue.tail == 0,
+              "The four-slot queue tail must wrap to slot zero");
+static_assert(!packetQueueCanEnqueue(kFullQueue),
+              "A full queue must reject another enqueue reservation");
+static_assert(packetQueueAfterEnqueue(kFullQueue).count ==
+                  kPacketQueueCapacity,
+              "A rejected enqueue must not overwrite queued packets");
 
 static_assert(decodePs2Axis(0x80, false) == 128,
               "Positive axis values must not be narrowed to int8_t");
