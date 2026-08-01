@@ -1,5 +1,6 @@
 import hashlib
 from pathlib import Path
+import subprocess
 import unittest
 
 
@@ -23,6 +24,26 @@ class LegacyHashTests(unittest.TestCase):
             "legacy/receiver_original/receiver_original.ino",
             "459B63339A2FE01F2D136C811D628D8CB474ED592B58B268AA1D4E4E4F507D39",
         )
+
+    def test_committed_legacy_blobs_preserve_recovered_bytes(self) -> None:
+        expected_hashes = {
+            "legacy/master_original/master_original.ino":
+                "5CA98439289B9A39A76EF7386333D013898548ADE97329AC723F5578562E98F3",
+            "legacy/receiver_original/receiver_original.ino":
+                "459B63339A2FE01F2D136C811D628D8CB474ED592B58B268AA1D4E4E4F507D39",
+        }
+        for relative_path, expected_hash in expected_hashes.items():
+            with self.subTest(relative_path=relative_path):
+                committed_bytes = subprocess.run(
+                    ["git", "show", f"HEAD:{relative_path}"],
+                    cwd=REPOSITORY_ROOT,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                ).stdout
+                self.assertEqual(
+                    hashlib.sha256(committed_bytes).hexdigest().upper(),
+                    expected_hash,
+                )
 
 
 if __name__ == "__main__":
