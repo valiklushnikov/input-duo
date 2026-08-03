@@ -1,6 +1,8 @@
+#include <Keyboard.h>
 #include <Mouse.h>
 #include <Wire.h>
 
+#include "mouse_switch_macro_logic.h"
 #include "mouse_switch_protocol.h"
 #include "mouse_switch_ps2_logic.h"
 
@@ -14,6 +16,8 @@ constexpr uint32_t kReconnectIntervalMs = 1000;
 constexpr uint32_t kRemoteCreditTimeoutMs = 25;
 constexpr uint8_t kPs2FailuresBeforeReconnect = 3;
 constexpr uint8_t kSwitchSideButtonMask = 0x10;
+constexpr uint8_t kTargetMacroSideButtonMask = 0x20;
+constexpr uint16_t kTargetMacroDebounceMs = 25;
 constexpr bool kDebug = false;
 
 enum class Target : uint8_t { LocalLaptop, RemoteLaptop };
@@ -27,6 +31,12 @@ struct MouseReport {
   uint8_t sideButtons;
 };
 
+struct TargetMacroRuntime {
+  bool active;
+  uint8_t eventIndex;
+  uint32_t nextEventAtMs;
+};
+
 Target target = Target::RemoteLaptop;
 bool mouseConnected = false;
 bool wheelAvailable = false;
@@ -37,6 +47,9 @@ bool localRightPressed = false;
 uint8_t sequence = 0;
 uint8_t consecutivePs2Failures = 0;
 uint32_t lastReconnectAttemptMs = 0;
+DebouncedButtonState targetMacroButtonState =
+    makeInitialDebouncedButtonState();
+TargetMacroRuntime targetMacro = {false, 0, 0};
 
 void releaseLine(uint8_t pin) {
   pinMode(pin, INPUT_PULLUP);
@@ -390,11 +403,63 @@ void applyReport(const MouseReport& report) {
   }
 }
 
+bool timeReached(uint32_t nowMs, uint32_t deadlineMs) {
+  return static_cast<int32_t>(nowMs - deadlineMs) >= 0;
+}
+
+uint16_t randomDelayInclusive(uint16_t minimumMs, uint16_t maximumMs) {
+  return static_cast<uint16_t>(
+      random(minimumMs, static_cast<long>(maximumMs) + 1));
+}
+
+void startTargetMacro(uint32_t nowMs) {
+  targetMacro.active = true;
+  targetMacro.eventIndex = 0;
+  targetMacro.nextEventAtMs = nowMs;
+}
+
+void serviceTargetMacro(uint32_t nowMs) {
+  if (!targetMacro.active ||
+      !timeReached(nowMs, targetMacro.nextEventAtMs)) {
+    return;
+  }
+
+  const uint8_t currentIndex = targetMacro.eventIndex;
+  const TargetMacroEvent event = targetMacroEventAt(currentIndex);
+  if (event.type == TargetMacroEventType::Enter) {
+    Keyboard.write(KEY_RETURN);
+  } else if (event.type == TargetMacroEventType::Character) {
+    Keyboard.write(static_cast<uint8_t>(event.character));
+  }
+
+  ++targetMacro.eventIndex;
+  if (targetMacro.eventIndex >= kTargetMacroEventCount) {
+    targetMacro.active = false;
+    return;
+  }
+
+  targetMacro.nextEventAtMs =
+      nowMs + randomDelayInclusive(delayMinAfterEvent(currentIndex),
+                                   delayMaxAfterEvent(currentIndex));
+}
+
+void updateTargetMacroButton(uint8_t sideButtons, uint32_t nowMs) {
+  const bool rawPressed =
+      isPs2SideButtonPressed(sideButtons, kTargetMacroSideButtonMask);
+  const DebouncedButtonUpdate update = updateDebouncedButton(
+      targetMacroButtonState, rawPressed, nowMs, kTargetMacroDebounceMs);
+  targetMacroButtonState = update.state;
+  if (shouldStartTargetMacro(update.pressedEdge, targetMacro.active)) {
+    startTargetMacro(nowMs);
+  }
+}
+
 void handleMouseFailure() {
   releasePs2Lines();
   releaseActiveTarget();
   mouseConnected = false;
   previousSwitchButtonPressed = false;
+  targetMacroButtonState = makeInitialDebouncedButtonState();
   consecutivePs2Failures = 0;
   lastReconnectAttemptMs = millis();
 }
@@ -402,6 +467,8 @@ void handleMouseFailure() {
 void setup() {
   releasePs2Lines();
   Mouse.begin();
+  Keyboard.begin();
+  randomSeed(micros());
   Wire.begin();
   Wire.setWireTimeout(25000, true);
   if (kDebug) {
@@ -417,12 +484,16 @@ void setup() {
 }
 
 void loop() {
+  const uint32_t loopNowMs = millis();
+  serviceTargetMacro(loopNowMs);
+
   if (!mouseConnected) {
     const uint32_t now = millis();
     if (static_cast<uint32_t>(now - lastReconnectAttemptMs) >= kReconnectIntervalMs) {
       lastReconnectAttemptMs = now;
       mouseConnected = initializeMouse();
       previousSwitchButtonPressed = false;
+      targetMacroButtonState = makeInitialDebouncedButtonState();
       consecutivePs2Failures = 0;
       if (!mouseConnected) {
         releasePs2Lines();
@@ -452,6 +523,8 @@ void loop() {
     toggleTarget();
   }
   previousSwitchButtonPressed = switchButtonPressed;
+
+  updateTargetMacroButton(report.sideButtons, loopNowMs);
 
   applyReport(report);
 }
