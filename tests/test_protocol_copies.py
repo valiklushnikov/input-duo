@@ -14,6 +14,19 @@ class ProtocolCopyTest(unittest.TestCase):
         self.assertEqual(contents[0], contents[1])
         self.assertEqual(contents[0], contents[2])
 
+    def test_side_button_finder_headers_match_master(self):
+        root = Path(__file__).resolve().parent.parent
+        master = root / "improved" / "mouse_switch_master"
+        finder = root / "diagnostics" / "side_button_finder"
+        self.assertEqual(
+            (master / "mouse_switch_protocol.h").read_bytes(),
+            (finder / "mouse_switch_protocol.h").read_bytes(),
+        )
+        self.assertEqual(
+            (master / "mouse_switch_ps2_logic.h").read_bytes(),
+            (finder / "mouse_switch_ps2_logic.h").read_bytes(),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
