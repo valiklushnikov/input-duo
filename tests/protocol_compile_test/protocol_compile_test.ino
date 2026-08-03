@@ -1,4 +1,5 @@
 #include "mouse_switch_protocol.h"
+#include "../../improved/mouse_switch_master/mouse_switch_macro_logic.h"
 #include "../../improved/mouse_switch_master/mouse_switch_ps2_logic.h"
 #include "../../improved/mouse_switch_receiver/mouse_switch_packet_queue.h"
 
@@ -164,6 +165,72 @@ static_assert(!shouldReconnectAfterPs2Failure(2, 3),
               "Two damaged PS/2 reports must not reset the mouse");
 static_assert(shouldReconnectAfterPs2Failure(3, 3),
               "The configured consecutive-failure limit must reconnect");
+
+static_assert(constexprStringsEqual(kTargetMacroText, "/target KYPKYMA"),
+              "Target macro payload must remain exact");
+static_assert(kTargetMacroTextLength == 15,
+              "Target macro payload length changed");
+static_assert(targetMacroEventAt(0).type == TargetMacroEventType::Enter,
+              "The macro must open chat with Enter");
+static_assert(targetMacroEventAt(1).character == '/',
+              "The first payload character must be slash");
+static_assert(targetMacroEventAt(15).character == 'A',
+              "The final payload character must remain A");
+static_assert(targetMacroEventAt(16).type == TargetMacroEventType::Enter,
+              "The macro must submit with Enter");
+static_assert(targetMacroEventAt(17).type == TargetMacroEventType::None,
+              "Out-of-range events must be empty");
+static_assert(kCharacterDelayMinMs == 35 && kCharacterDelayMaxMs == 80,
+              "Human typing delay bounds changed");
+static_assert(kCommandPauseMinMs == 80 && kCommandPauseMaxMs == 140,
+              "Command pause bounds changed");
+static_assert(delayMinAfterEvent(0) == 80 && delayMaxAfterEvent(0) == 140,
+              "Opening Enter must use the longer pause");
+static_assert(delayMinAfterEvent(1) == 35 && delayMaxAfterEvent(1) == 80,
+              "Text characters must use human typing delays");
+static_assert(delayMinAfterEvent(15) == 80 && delayMaxAfterEvent(15) == 140,
+              "Last character must use the pre-submit pause");
+
+constexpr DebouncedButtonState kDebounceInitial =
+    makeInitialDebouncedButtonState();
+constexpr DebouncedButtonUpdate kInitialReleased =
+    updateDebouncedButton(kDebounceInitial, false, 100, 25);
+static_assert(!kInitialReleased.pressedEdge && kInitialReleased.state.armed,
+              "An initial released sample must arm without firing");
+constexpr DebouncedButtonUpdate kPressChanged =
+    updateDebouncedButton(kInitialReleased.state, true, 110, 25);
+constexpr DebouncedButtonUpdate kPressTooEarly =
+    updateDebouncedButton(kPressChanged.state, true, 134, 25);
+constexpr DebouncedButtonUpdate kPressStable =
+    updateDebouncedButton(kPressTooEarly.state, true, 135, 25);
+static_assert(!kPressChanged.pressedEdge && !kPressTooEarly.pressedEdge,
+              "A press must remain stable for the full debounce interval");
+static_assert(kPressStable.pressedEdge && !kPressStable.state.armed,
+              "A stable press must fire once and disarm");
+constexpr DebouncedButtonUpdate kHeldPress =
+    updateDebouncedButton(kPressStable.state, true, 500, 25);
+static_assert(!kHeldPress.pressedEdge,
+              "A held button must not repeat");
+constexpr DebouncedButtonUpdate kReleaseChanged =
+    updateDebouncedButton(kHeldPress.state, false, 510, 25);
+constexpr DebouncedButtonUpdate kReleaseStable =
+    updateDebouncedButton(kReleaseChanged.state, false, 535, 25);
+static_assert(kReleaseStable.state.armed && !kReleaseStable.pressedEdge,
+              "A stable release must re-arm without firing");
+constexpr DebouncedButtonUpdate kSecondPressChanged =
+    updateDebouncedButton(kReleaseStable.state, true, 540, 25);
+constexpr DebouncedButtonUpdate kSecondPressStable =
+    updateDebouncedButton(kSecondPressChanged.state, true, 565, 25);
+static_assert(kSecondPressStable.pressedEdge,
+              "A new stable press after release must fire");
+constexpr DebouncedButtonUpdate kReconnectHeld =
+    updateDebouncedButton(kDebounceInitial, true, 700, 25);
+static_assert(!kReconnectHeld.pressedEdge && !kReconnectHeld.state.armed,
+              "A held button at startup or reconnect must not synthesize a macro");
+static_assert(shouldStartTargetMacro(true, false),
+              "A debounced edge must start an idle macro");
+static_assert(!shouldStartTargetMacro(true, true),
+              "An active macro must ignore a new edge");
 
 static_assert(kPacketSize == 7, "Unexpected packet size");
 static_assert(checksumBytes(0xA1, 0x7F, 0x80, 0x7F, 0xFF, 0x03) == 0xDD,
