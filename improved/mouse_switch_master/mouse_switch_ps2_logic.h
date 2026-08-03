@@ -27,6 +27,11 @@ constexpr int8_t decodePs2Wheel(uint8_t deviceId, uint8_t raw) {
              : static_cast<int8_t>(raw);
 }
 
+constexpr uint8_t decodePs2SideButtons(uint8_t deviceId,
+                                       uint8_t rawFourthByte) {
+  return deviceId == 0x04 ? static_cast<uint8_t>(rawFourthByte & 0x30) : 0;
+}
+
 constexpr bool shouldAttemptExplorerUpgrade(uint8_t deviceId) {
   return deviceId == 0x03;
 }

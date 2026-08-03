@@ -134,6 +134,16 @@ static_assert(decodePs2Wheel(0x03, 0x80) == -128,
               "IntelliMouse wheel must retain signed-byte behavior");
 static_assert(decodePs2Wheel(0x03, 0x7F) == 127,
               "IntelliMouse positive wheel boundary must be preserved");
+static_assert(decodePs2SideButtons(0x04, 0x10) == 0x10,
+              "Explorer button 4 must be visible");
+static_assert(decodePs2SideButtons(0x04, 0x20) == 0x20,
+              "Explorer button 5 must be visible");
+static_assert(decodePs2SideButtons(0x04, 0x3F) == 0x30,
+              "Wheel nibble must not enter the side-button mask");
+static_assert(decodePs2SideButtons(0x03, 0x30) == 0,
+              "IntelliMouse reports do not expose Explorer buttons");
+static_assert(decodePs2SideButtons(0x00, 0x30) == 0,
+              "Standard reports do not contain a fourth byte");
 static_assert(shouldAttemptExplorerUpgrade(0x03),
               "IntelliMouse ID must trigger Explorer negotiation");
 static_assert(!shouldAttemptExplorerUpgrade(0x00),
