@@ -32,6 +32,11 @@ constexpr uint8_t decodePs2SideButtons(uint8_t deviceId,
   return deviceId == 0x04 ? static_cast<uint8_t>(rawFourthByte & 0x30) : 0;
 }
 
+constexpr bool isPs2SideButtonPressed(uint8_t sideButtons,
+                                      uint8_t selectedMask) {
+  return selectedMask != 0 && (sideButtons & selectedMask) != 0;
+}
+
 constexpr bool shouldAttemptExplorerUpgrade(uint8_t deviceId) {
   return deviceId == 0x03;
 }

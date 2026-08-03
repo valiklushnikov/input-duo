@@ -144,6 +144,14 @@ static_assert(decodePs2SideButtons(0x03, 0x30) == 0,
               "IntelliMouse reports do not expose Explorer buttons");
 static_assert(decodePs2SideButtons(0x00, 0x30) == 0,
               "Standard reports do not contain a fourth byte");
+static_assert(isPs2SideButtonPressed(0x10, 0x10),
+              "The measured 0x10 button must activate switching");
+static_assert(isPs2SideButtonPressed(0x30, 0x10),
+              "The selected button must remain visible with both held");
+static_assert(!isPs2SideButtonPressed(0x20, 0x10),
+              "The other side button must not activate switching");
+static_assert(!isPs2SideButtonPressed(0x00, 0x10),
+              "Released side buttons must not activate switching");
 static_assert(shouldAttemptExplorerUpgrade(0x03),
               "IntelliMouse ID must trigger Explorer negotiation");
 static_assert(!shouldAttemptExplorerUpgrade(0x00),

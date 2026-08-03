@@ -13,6 +13,7 @@ constexpr uint32_t kPs2DeviceIdTimeoutUs = 250000;
 constexpr uint32_t kReconnectIntervalMs = 1000;
 constexpr uint32_t kRemoteCreditTimeoutMs = 25;
 constexpr uint8_t kPs2FailuresBeforeReconnect = 3;
+constexpr uint8_t kSwitchSideButtonMask = 0x10;
 constexpr bool kDebug = false;
 
 enum class Target : uint8_t { LocalLaptop, RemoteLaptop };
@@ -23,13 +24,14 @@ struct MouseReport {
   int16_t dy;
   int8_t wheel;
   uint8_t buttons;
+  uint8_t sideButtons;
 };
 
 Target target = Target::RemoteLaptop;
 bool mouseConnected = false;
 bool wheelAvailable = false;
 uint8_t mouseId = 0x00;
-bool previousMiddlePressed = false;
+bool previousSwitchButtonPressed = false;
 bool localLeftPressed = false;
 bool localRightPressed = false;
 uint8_t sequence = 0;
@@ -269,6 +271,7 @@ bool pollMouse(MouseReport& report) {
         negatePs2Axis(static_cast<int16_t>(decodePs2Wheel(mouseId, rawWheel))));
   }
   report.buttons = status & kAllowedButtonMask;
+  report.sideButtons = decodePs2SideButtons(mouseId, rawWheel);
   return true;
 }
 
@@ -391,7 +394,7 @@ void handleMouseFailure() {
   releasePs2Lines();
   releaseActiveTarget();
   mouseConnected = false;
-  previousMiddlePressed = false;
+  previousSwitchButtonPressed = false;
   consecutivePs2Failures = 0;
   lastReconnectAttemptMs = millis();
 }
@@ -419,7 +422,7 @@ void loop() {
     if (static_cast<uint32_t>(now - lastReconnectAttemptMs) >= kReconnectIntervalMs) {
       lastReconnectAttemptMs = now;
       mouseConnected = initializeMouse();
-      previousMiddlePressed = false;
+      previousSwitchButtonPressed = false;
       consecutivePs2Failures = 0;
       if (!mouseConnected) {
         releasePs2Lines();
@@ -429,7 +432,7 @@ void loop() {
     return;
   }
 
-  MouseReport report = {0, 0, 0, 0, 0};
+  MouseReport report = {0, 0, 0, 0, 0, 0};
   if (!pollMouse(report)) {
     releasePs2Lines();
     if (consecutivePs2Failures < UINT8_MAX) {
@@ -443,11 +446,12 @@ void loop() {
   }
   consecutivePs2Failures = 0;
 
-  const bool middlePressed = (report.status & 0x04) != 0;
-  if (isMiddlePressEdge(middlePressed, previousMiddlePressed)) {
+  const bool switchButtonPressed =
+      isPs2SideButtonPressed(report.sideButtons, kSwitchSideButtonMask);
+  if (isMiddlePressEdge(switchButtonPressed, previousSwitchButtonPressed)) {
     toggleTarget();
   }
-  previousMiddlePressed = middlePressed;
+  previousSwitchButtonPressed = switchButtonPressed;
 
   applyReport(report);
 }
