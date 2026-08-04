@@ -67,3 +67,16 @@ Physical acceptance verifies:
 - pressing `F8/8` produces no input at all on laptop 2;
 - all other laptop-2 panel buttons remain responsive during the laptop-1 macro;
 - selectors, GUI+1, GUI+2, and every non-target mapped key retain their current behavior.
+
+## Verified artifacts
+
+AVR compilation and automated checks completed on 2026-08-04. SHA-256:
+
+- Primary `keyboard.ino`: `A0E732AD9D6E6BCE7E2179DB2BB01BD2A6073B88A7CFBCE5FEEBE862CDCD9625`
+- Pre-change backup `keyboard.ino.bak-2026-08-04`: `4B4F7073E1D0043C48FC322EF8D0A97F859910C226E8E2BCEF3F8F3232C4AB2B`
+- Secondary `keyboard_secondary.ino`: `3D52B8EE62C9408CC1F21D410363088DF4A85093871D2BB768DA65CC371387B1`
+
+Compiled sizes for ATmega32U4/Leonardo:
+
+- Primary: 7,268 bytes flash (`.text + .data`) and 419 bytes SRAM (`.data + .bss`).
+- Secondary: 6,356 bytes flash and 392 bytes SRAM.
