@@ -1,7 +1,7 @@
 # Duo Input: прошивки и Windows-конфигуратор — техническая спецификация MVP
 
 Дата: 2026-08-25  
-Статус: согласованный дизайн, ожидает финального просмотра перед планом реализации
+Статус: утверждён пользователем; подробные implementation plans подготовлены
 
 ## 1. Назначение
 
@@ -767,3 +767,11 @@ duo-input/
 7. UI;
 8. Nuitka/installer;
 9. HIL и приёмочная матрица.
+
+Подробное исполнение разбито на документы:
+
+- `docs/superpowers/plans/2026-08-25-duo-input-roadmap.md`;
+- `docs/superpowers/plans/2026-08-25-duo-input-foundation.md`;
+- `docs/superpowers/plans/2026-08-25-duo-input-core-firmware.md`;
+- `docs/superpowers/plans/2026-08-25-duo-input-input-mapping-macros.md`;
+- `docs/superpowers/plans/2026-08-25-duo-input-configurator-release.md`.
