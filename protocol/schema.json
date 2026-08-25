@@ -12,6 +12,47 @@
     "SPI_ENDPOINT": 1024,
     "TEST_MACRO": 64
   },
+  "keyboard_routes": {
+    "BOTH": 3,
+    "PC1": 1,
+    "PC2": 2
+  },
+  "mouse_routes": {
+    "PC1": 1,
+    "PC2": 2
+  },
+  "target_modes": {
+    "BOTH": 3,
+    "INHERIT": 0,
+    "PC1": 1,
+    "PC2": 2
+  },
+  "mouse_route_commands": {
+    "PC1": 1,
+    "PC2": 2,
+    "TOGGLE": 3
+  },
+  "text_layouts": {
+    "RU": 2,
+    "UA": 3,
+    "US": 1
+  },
+  "trigger_kinds": {
+    "KEYBOARD_USAGE": 1,
+    "MOUSE_BUTTON": 2
+  },
+  "binding_modes": {
+    "ADD": 2,
+    "REPLACE": 1
+  },
+  "action_kinds": {
+    "RUN_MACRO": 1,
+    "SET_KEYBOARD_ROUTE": 3,
+    "SET_MOUSE_ROUTE": 5,
+    "SET_PROFILE": 6,
+    "TOGGLE_KEYBOARD_ROUTE": 2,
+    "TOGGLE_MOUSE_ROUTE": 4
+  },
   "cdc_messages": {
     "CAPTURE_BEGIN": 13,
     "CAPTURE_END": 15,

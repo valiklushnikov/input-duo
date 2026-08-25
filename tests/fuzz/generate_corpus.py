@@ -90,18 +90,38 @@ def config_with_length(valid: bytes, declared_length: int, *, corrupt_crc: bool 
     return bytes(result)
 
 
-def shared_vectors() -> tuple[bytes, bytes, bytes, bytes]:
+def shared_vectors() -> tuple[bytes, bytes, bytes, bytes, bytes]:
     frame_vectors = json.loads((ROOT / "tests/vectors/frame_vectors.json").read_text(encoding="utf-8"))
     return (
         bytes.fromhex(frame_vectors["cdc"]["transport"]),
         bytes.fromhex(frame_vectors["spi"]["frame"]),
         (ROOT / "tests/vectors/config_vectors/valid_minimal.bin").read_bytes(),
         bytes.fromhex(frame_vectors["cdc"]["raw"]),
+        (ROOT / "tests/vectors/config_vectors/valid_full.bin").read_bytes(),
     )
 
 
+def config_step_descriptor(config: bytes, step_type: int) -> int:
+    macro_offset = struct.unpack_from("<I", config, 64 + 24)[0]
+    step_count = struct.unpack_from("<H", config, macro_offset + 10)[0]
+    step_offset = struct.unpack_from("<I", config, macro_offset + 12)[0]
+    for index in range(step_count):
+        descriptor = step_offset + index * 12
+        if config[descriptor] == step_type:
+            return descriptor
+    raise AssertionError(f"missing config step type {step_type}")
+
+
+def repaired_config_mutation(config: bytes, offset: int, value: int) -> bytes:
+    mutated = bytearray(config)
+    mutated[offset] = value
+    mutated[12:16] = b"\0\0\0\0"
+    mutated[12:16] = struct.pack("<I", zlib.crc32(mutated))
+    return bytes(mutated)
+
+
 def expected_corpus() -> dict[str, dict[str, bytes]]:
-    valid_cdc, valid_spi, valid_config, valid_cdc_raw = shared_vectors()
+    valid_cdc, valid_spi, valid_config, valid_cdc_raw, valid_full_config = shared_vectors()
     cdc = {"valid-shared-vector.bin": valid_cdc}
     for label, declared, payload_size in (
         ("0000", 0, 0),
@@ -140,7 +160,10 @@ def expected_corpus() -> dict[str, dict[str, bytes]]:
         "invalid-flags-crc-valid.bin": spi_frame(0, 0, flags=1),
     })
 
-    config = {"valid-minimal-shared-vector.bin": valid_config}
+    config = {
+        "valid-minimal-shared-vector.bin": valid_config,
+        "valid-full-shared-vector.bin": valid_full_config,
+    }
     for label, declared in (
         ("0000", 0),
         ("max", CONFIG_MAX_BYTES),
@@ -158,7 +181,29 @@ def expected_corpus() -> dict[str, dict[str, bytes]]:
         "truncated-profile-table.bin": valid_config[:351],
         "truncated-data.bin": valid_config[:-1],
         "invalid-flags-crc-valid.bin": config_with_length(valid_config, len(valid_config), flags=1),
+        "profile-mouse-both-crc-valid.bin": repaired_config_mutation(
+            valid_full_config, 64 + 2, 3
+        ),
+        "text-layout-unknown-crc-valid.bin": repaired_config_mutation(
+            valid_full_config, 64 + 3, 4
+        ),
     })
+    binding_offset = struct.unpack_from("<I", valid_full_config, 64 + 16)[0]
+    config["binding-set-mouse-toggle-crc-valid.bin"] = repaired_config_mutation(
+        valid_full_config, binding_offset + 3 * 12 + 5, 3
+    )
+    key_tap = 1
+    key_down = 2
+    key_up = 3
+    config["key-tap-one-byte-crc-valid.bin"] = repaired_config_mutation(
+        valid_full_config, config_step_descriptor(valid_full_config, key_down), key_tap
+    )
+    config["key-down-two-byte-crc-valid.bin"] = repaired_config_mutation(
+        valid_full_config, config_step_descriptor(valid_full_config, key_tap), key_down
+    )
+    config["key-up-two-byte-crc-valid.bin"] = repaired_config_mutation(
+        valid_full_config, config_step_descriptor(valid_full_config, key_tap), key_up
+    )
     return {"cdc": cdc, "spi": spi, "config": config}
 
 

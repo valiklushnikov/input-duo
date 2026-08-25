@@ -140,10 +140,10 @@ bool validate_spi_frame(const SpiFrame& frame) {
 
 }  // namespace
 
-bool is_minor_compatible(std::uint8_t minor, std::uint16_t required_capabilities,
-                         std::uint16_t supported_capabilities) {
+bool is_minor_compatible(std::uint8_t minor, std::uint32_t required_capabilities,
+                         std::uint32_t supported_capabilities) {
     return minor == PROTOCOL_VERSION_MINOR ||
-           (required_capabilities & static_cast<std::uint16_t>(~supported_capabilities)) == 0;
+           (required_capabilities & ~supported_capabilities) == 0;
 }
 
 bool encode_cdc_frame(const CdcFrame& frame, MutableByteView output, MutableByteView scratch,
@@ -181,7 +181,7 @@ bool encode_cdc_frame(const CdcFrame& frame, MutableByteView output, MutableByte
 }
 
 bool decode_cdc_frame(ByteView transport, MutableByteView scratch, DecodeResult& result,
-                      std::uint16_t required_capabilities, std::uint16_t supported_capabilities) {
+                      std::uint32_t required_capabilities, std::uint32_t supported_capabilities) {
     if (!has_valid_data(transport) || !has_valid_data(scratch) || transport.size == 0 ||
         transport.data[transport.size - 1U] != 0) {
         return fail(result, FrameError::INVALID_INPUT);
@@ -264,8 +264,8 @@ bool encode_spi_frame(const SpiFrame& frame, MutableByteView output, std::size_t
     return true;
 }
 
-bool decode_spi_frame(ByteView transport, DecodeResult& result, std::uint16_t required_capabilities,
-                      std::uint16_t supported_capabilities) {
+bool decode_spi_frame(ByteView transport, DecodeResult& result, std::uint32_t required_capabilities,
+                      std::uint32_t supported_capabilities) {
     if (!has_valid_data(transport) || transport.size != ProtocolLimits::SPI_FRAME_SIZE) {
         return fail(result, FrameError::INVALID_INPUT);
     }

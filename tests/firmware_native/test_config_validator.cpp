@@ -21,6 +21,22 @@ using duo_input::config::ValidationResult;
 using duo_input::config::validate_config;
 using duo_input::protocol::ByteView;
 
+static_assert(std::is_same_v<duo_input::config::KeyboardRoute,
+                             duo_input::protocol::KeyboardRoute>);
+static_assert(std::is_same_v<duo_input::config::MouseRoute,
+                             duo_input::protocol::MouseRoute>);
+static_assert(std::is_same_v<duo_input::config::TargetMode,
+                             duo_input::protocol::TargetMode>);
+static_assert(std::is_same_v<duo_input::config::MouseRouteCommand,
+                             duo_input::protocol::MouseRouteCommand>);
+static_assert(std::is_same_v<duo_input::config::TextLayout,
+                             duo_input::protocol::TextLayout>);
+static_assert(std::is_same_v<duo_input::config::TriggerKind,
+                             duo_input::protocol::TriggerKind>);
+static_assert(std::is_same_v<duo_input::config::BindingMode,
+                             duo_input::protocol::BindingMode>);
+static_assert(std::is_same_v<duo_input::config::ActionKind,
+                             duo_input::protocol::ActionKind>);
 static_assert(!std::is_constructible_v<ValidationResult, ValidationError>);
 static_assert(!std::is_constructible_v<ValidationResult, ValidationError, ConfigView>);
 static_assert(std::is_same_v<decltype(std::declval<const ValidationResult&>().error()),
@@ -145,6 +161,117 @@ TEST_CASE(config_validator_accepts_python_vectors_and_exposes_bounded_views) {
     CHECK(macro.step_at(4U, step));
     CHECK_EQ(step.payload().size, 4U);
     CHECK_FALSE(macro.step_at(9U, step));
+}
+
+TEST_CASE(config_validator_accepts_ru_and_ua_layouts_from_python_vector) {
+    const std::vector<std::uint8_t> full = read_vector("valid_full.bin");
+    const auto result = validate_config({full.data(), full.size()});
+    CHECK(result);
+    duo_input::config::ProfileView ru{};
+    duo_input::config::ProfileView ua{};
+    CHECK(result.view().profile_at(0U, ru));
+    CHECK(result.view().profile_at(1U, ua));
+    CHECK_EQ(ru.text_layout(), duo_input::config::TextLayout::RU);
+    CHECK_EQ(ua.text_layout(), duo_input::config::TextLayout::UA);
+}
+
+TEST_CASE(config_validator_accepts_target_inherit_and_mouse_step_toggle_from_python_vector) {
+    const std::vector<std::uint8_t> full = read_vector("valid_full.bin");
+    const auto result = validate_config({full.data(), full.size()});
+    CHECK(result);
+    duo_input::config::ProfileView profile{};
+    duo_input::config::MacroView macro{};
+    CHECK(result.view().profile_at(0U, profile));
+    CHECK(profile.macro_at(0U, macro));
+    CHECK_EQ(macro.target(), duo_input::config::TargetMode::INHERIT);
+    const std::size_t descriptor = step_descriptor(
+        full, duo_input::protocol::MacroStepType::SET_MOUSE_ROUTE);
+    CHECK(descriptor < full.size());
+    CHECK_EQ(read_u16(full, descriptor + 2U), 1U);
+    CHECK_EQ(full[read_u32(full, descriptor + 4U)],
+             static_cast<std::uint8_t>(duo_input::config::MouseRouteCommand::TOGGLE));
+}
+
+TEST_CASE(config_validator_rejects_mouse_profile_both) {
+    std::vector<std::uint8_t> bytes = read_vector("valid_full.bin");
+    bytes[64U + 2U] = static_cast<std::uint8_t>(duo_input::config::KeyboardRoute::BOTH);
+    repair_crc(bytes);
+    CHECK(rejects(bytes));
+}
+
+TEST_CASE(config_validator_rejects_binding_set_mouse_route_toggle_value) {
+    std::vector<std::uint8_t> bytes = read_vector("valid_full.bin");
+    const std::size_t binding_offset = read_u32(bytes, 64U + 16U);
+    const std::size_t set_mouse_binding = binding_offset + 3U * 12U;
+    CHECK_EQ(bytes[set_mouse_binding + 4U],
+             static_cast<std::uint8_t>(duo_input::config::ActionKind::SET_MOUSE_ROUTE));
+    bytes[set_mouse_binding + 5U] =
+        static_cast<std::uint8_t>(duo_input::config::MouseRouteCommand::TOGGLE);
+    repair_crc(bytes);
+    CHECK(rejects(bytes));
+}
+
+TEST_CASE(config_validator_rejects_unknown_text_layout) {
+    std::vector<std::uint8_t> bytes = read_vector("valid_full.bin");
+    bytes[64U + 3U] = 4U;
+    repair_crc(bytes);
+    CHECK(rejects(bytes));
+}
+
+TEST_CASE(config_validator_accepts_key_tap_modifier_and_nonzero_usage_shape) {
+    const std::vector<std::uint8_t> bytes = read_vector("valid_full.bin");
+    const std::size_t descriptor = step_descriptor(bytes, duo_input::protocol::MacroStepType::KEY_TAP);
+    CHECK_EQ(read_u16(bytes, descriptor + 2U), 2U);
+    const std::size_t payload = read_u32(bytes, descriptor + 4U);
+    CHECK_EQ(bytes[payload], 2U);
+    CHECK_EQ(bytes[payload + 1U], 4U);
+    CHECK(validate_config({bytes.data(), bytes.size()}));
+}
+
+TEST_CASE(config_validator_rejects_key_tap_one_byte_or_zero_usage_shape) {
+    const std::vector<std::uint8_t> valid = read_vector("valid_full.bin");
+    std::vector<std::uint8_t> one_byte = valid;
+    one_byte[step_descriptor(one_byte, duo_input::protocol::MacroStepType::KEY_DOWN)] =
+        static_cast<std::uint8_t>(duo_input::protocol::MacroStepType::KEY_TAP);
+    repair_crc(one_byte);
+    CHECK(rejects(one_byte));
+    CHECK(rejects(mutate_step_payload(valid, duo_input::protocol::MacroStepType::KEY_TAP, 1U, 0U)));
+}
+
+TEST_CASE(config_validator_accepts_key_down_single_nonzero_usage_shape) {
+    const std::vector<std::uint8_t> bytes = read_vector("valid_full.bin");
+    const std::size_t descriptor = step_descriptor(bytes, duo_input::protocol::MacroStepType::KEY_DOWN);
+    CHECK_EQ(read_u16(bytes, descriptor + 2U), 1U);
+    CHECK(bytes[read_u32(bytes, descriptor + 4U)] != 0U);
+    CHECK(validate_config({bytes.data(), bytes.size()}));
+}
+
+TEST_CASE(config_validator_rejects_key_down_two_bytes_or_zero_usage_shape) {
+    const std::vector<std::uint8_t> valid = read_vector("valid_full.bin");
+    std::vector<std::uint8_t> two_bytes = valid;
+    two_bytes[step_descriptor(two_bytes, duo_input::protocol::MacroStepType::KEY_TAP)] =
+        static_cast<std::uint8_t>(duo_input::protocol::MacroStepType::KEY_DOWN);
+    repair_crc(two_bytes);
+    CHECK(rejects(two_bytes));
+    CHECK(rejects(mutate_step_payload(valid, duo_input::protocol::MacroStepType::KEY_DOWN, 0U, 0U)));
+}
+
+TEST_CASE(config_validator_accepts_key_up_single_nonzero_usage_shape) {
+    const std::vector<std::uint8_t> bytes = read_vector("valid_full.bin");
+    const std::size_t descriptor = step_descriptor(bytes, duo_input::protocol::MacroStepType::KEY_UP);
+    CHECK_EQ(read_u16(bytes, descriptor + 2U), 1U);
+    CHECK(bytes[read_u32(bytes, descriptor + 4U)] != 0U);
+    CHECK(validate_config({bytes.data(), bytes.size()}));
+}
+
+TEST_CASE(config_validator_rejects_key_up_two_bytes_or_zero_usage_shape) {
+    const std::vector<std::uint8_t> valid = read_vector("valid_full.bin");
+    std::vector<std::uint8_t> two_bytes = valid;
+    two_bytes[step_descriptor(two_bytes, duo_input::protocol::MacroStepType::KEY_TAP)] =
+        static_cast<std::uint8_t>(duo_input::protocol::MacroStepType::KEY_UP);
+    repair_crc(two_bytes);
+    CHECK(rejects(two_bytes));
+    CHECK(rejects(mutate_step_payload(valid, duo_input::protocol::MacroStepType::KEY_UP, 0U, 0U)));
 }
 
 TEST_CASE(config_validator_rejects_crc_damage_and_representative_truncations) {
@@ -303,5 +430,6 @@ TEST_CASE(config_validator_rejects_each_independent_malformed_generated_step_pay
     CHECK(rejects(mutate_step_payload(valid, MacroStepType::DELAY, 3U, 0xFFU)));
     CHECK(rejects(mutate_step_payload(valid, MacroStepType::SET_KEYBOARD_ROUTE, 0U, 0U)));
     CHECK(rejects(mutate_step_payload(valid, MacroStepType::SET_MOUSE_ROUTE, 0U, 0U)));
+    CHECK(rejects(mutate_step_payload(valid, MacroStepType::SET_MOUSE_ROUTE, 0U, 4U)));
     CHECK(rejects(mutate_step_payload(valid, MacroStepType::SET_PROFILE, 0U, 9U)));
 }

@@ -72,14 +72,29 @@ std::uint32_t config_crc(protocol::ByteView bytes) {
     return crc ^ 0xFFFFFFFFU;
 }
 
-bool valid_route(std::uint8_t value) {
-    return value >= static_cast<std::uint8_t>(Route::U1) &&
-           value <= static_cast<std::uint8_t>(Route::BOTH);
+bool valid_keyboard_route(std::uint8_t value) {
+    return value >= static_cast<std::uint8_t>(KeyboardRoute::PC1) &&
+           value <= static_cast<std::uint8_t>(KeyboardRoute::BOTH);
+}
+
+bool valid_mouse_route(std::uint8_t value) {
+    return value >= static_cast<std::uint8_t>(MouseRoute::PC1) &&
+           value <= static_cast<std::uint8_t>(MouseRoute::PC2);
+}
+
+bool valid_target_mode(std::uint8_t value) {
+    return value >= static_cast<std::uint8_t>(TargetMode::INHERIT) &&
+           value <= static_cast<std::uint8_t>(TargetMode::BOTH);
+}
+
+bool valid_mouse_route_command(std::uint8_t value) {
+    return value >= static_cast<std::uint8_t>(MouseRouteCommand::PC1) &&
+           value <= static_cast<std::uint8_t>(MouseRouteCommand::TOGGLE);
 }
 
 bool valid_layout(std::uint8_t value) {
     return value >= static_cast<std::uint8_t>(TextLayout::US) &&
-           value <= static_cast<std::uint8_t>(TextLayout::DE);
+           value <= static_cast<std::uint8_t>(TextLayout::UA);
 }
 
 bool valid_utf8_name(protocol::ByteView bytes, std::size_t offset, std::size_t length) {
@@ -166,9 +181,10 @@ bool validate_step_payload(protocol::ByteView bytes, std::uint8_t type, std::siz
     }
     switch (static_cast<protocol::MacroStepType>(type)) {
         case protocol::MacroStepType::KEY_TAP:
+            return length == 2U && bytes.data[offset + 1U] != 0U;
         case protocol::MacroStepType::KEY_DOWN:
         case protocol::MacroStepType::KEY_UP:
-            return length == 2U && bytes.data[offset + 1U] != 0U;
+            return length == 1U && bytes.data[offset] != 0U;
         case protocol::MacroStepType::CONSUMER_TAP:
             return length == 2U && read_u16(bytes, offset) != 0U;
         case protocol::MacroStepType::TEXT:
@@ -185,8 +201,9 @@ bool validate_step_payload(protocol::ByteView bytes, std::uint8_t type, std::siz
             return length == 4U && read_u16(bytes, offset) <= read_u16(bytes, offset + 2U) &&
                    read_u16(bytes, offset + 2U) <= protocol::ProtocolLimits::MAX_DELAY_MS;
         case protocol::MacroStepType::SET_KEYBOARD_ROUTE:
+            return length == 1U && valid_keyboard_route(bytes.data[offset]);
         case protocol::MacroStepType::SET_MOUSE_ROUTE:
-            return length == 1U && valid_route(bytes.data[offset]);
+            return length == 1U && valid_mouse_route_command(bytes.data[offset]);
         case protocol::MacroStepType::SET_PROFILE:
             return length == 1U && bytes.data[offset] >= 1U &&
                    bytes.data[offset] <= protocol::ProtocolLimits::PROFILES;
@@ -220,8 +237,9 @@ bool validate_binding(protocol::ByteView bytes, std::size_t offset, std::size_t 
         case ActionKind::TOGGLE_MOUSE_ROUTE:
             return argument == 0U;
         case ActionKind::SET_KEYBOARD_ROUTE:
+            return valid_keyboard_route(argument);
         case ActionKind::SET_MOUSE_ROUTE:
-            return valid_route(argument);
+            return valid_mouse_route(argument);
         case ActionKind::SET_PROFILE:
             return argument >= 1U && argument <= protocol::ProtocolLimits::PROFILES;
         default:
@@ -288,8 +306,10 @@ ValidationResult validate_config(protocol::ByteView input) {
         const std::size_t profile = PROFILE_TABLE_OFFSET + profile_index * PROFILE_DESCRIPTOR_SIZE;
         const std::size_t binding_count = read_u16(input, profile + 14U);
         const std::size_t macro_count = read_u16(input, profile + 22U);
-        if (input.data[profile] != profile_index + 1U || !valid_route(input.data[profile + 1U]) ||
-            !valid_route(input.data[profile + 2U]) || !valid_layout(input.data[profile + 3U]) ||
+        if (input.data[profile] != profile_index + 1U ||
+            !valid_keyboard_route(input.data[profile + 1U]) ||
+            !valid_mouse_route(input.data[profile + 2U]) ||
+            !valid_layout(input.data[profile + 3U]) ||
             input.data[profile + 7U] != 0U ||
             binding_count > protocol::ProtocolLimits::BINDINGS_PER_PROFILE ||
             read_u16(input, profile + 20U) != BINDING_RECORD_SIZE ||
@@ -322,7 +342,7 @@ ValidationResult validate_config(protocol::ByteView input) {
             const std::uint8_t macro_id = input.data[macro];
             const std::size_t step_count = read_u16(input, macro + 10U);
             const std::size_t step_offset = read_u32(input, macro + 12U);
-            if (macro_id == 0U || !valid_route(input.data[macro + 1U]) ||
+            if (macro_id == 0U || !valid_target_mode(input.data[macro + 1U]) ||
                 read_u16(input, macro + 2U) != 0U ||
                 step_count > protocol::ProtocolLimits::MACRO_STEPS_PER_MACRO ||
                 read_u16(input, macro + 16U) != STEP_DESCRIPTOR_SIZE ||
@@ -393,8 +413,12 @@ bool ConfigView::profile_at(std::size_t index, ProfileView& output) const {
 }
 
 std::uint8_t ProfileView::id() const { return bytes_.data[offset_]; }
-Route ProfileView::keyboard_route() const { return static_cast<Route>(bytes_.data[offset_ + 1U]); }
-Route ProfileView::mouse_route() const { return static_cast<Route>(bytes_.data[offset_ + 2U]); }
+KeyboardRoute ProfileView::keyboard_route() const {
+    return static_cast<KeyboardRoute>(bytes_.data[offset_ + 1U]);
+}
+MouseRoute ProfileView::mouse_route() const {
+    return static_cast<MouseRoute>(bytes_.data[offset_ + 2U]);
+}
 TextLayout ProfileView::text_layout() const { return static_cast<TextLayout>(bytes_.data[offset_ + 3U]); }
 protocol::ByteView ProfileView::name() const {
     return {bytes_.data + read_u32(bytes_, offset_ + 8U), read_u16(bytes_, offset_ + 12U)};
@@ -420,7 +444,7 @@ ActionKind BindingView::action_kind() const { return static_cast<ActionKind>(byt
 std::uint8_t BindingView::action_argument() const { return bytes_.data[offset_ + 5U]; }
 
 std::uint8_t MacroView::id() const { return bytes_.data[offset_]; }
-Route MacroView::target() const { return static_cast<Route>(bytes_.data[offset_ + 1U]); }
+TargetMode MacroView::target() const { return static_cast<TargetMode>(bytes_.data[offset_ + 1U]); }
 protocol::ByteView MacroView::name() const {
     return {bytes_.data + read_u32(bytes_, offset_ + 4U), read_u16(bytes_, offset_ + 8U)};
 }

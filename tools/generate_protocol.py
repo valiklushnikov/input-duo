@@ -62,7 +62,19 @@ def render_cpp(schema: dict[str, object]) -> str:
     lines.append("")
     lines.extend(_cpp_enum("MacroStepType", "std::uint8_t", _items(schema, "macro_steps")))
     lines.append("")
-    lines.extend(_cpp_enum("Capability", "std::uint16_t", _items(schema, "capabilities")))
+    for enum_name, schema_key in (
+        ("KeyboardRoute", "keyboard_routes"),
+        ("MouseRoute", "mouse_routes"),
+        ("TargetMode", "target_modes"),
+        ("MouseRouteCommand", "mouse_route_commands"),
+        ("TextLayout", "text_layouts"),
+        ("TriggerKind", "trigger_kinds"),
+        ("BindingMode", "binding_modes"),
+        ("ActionKind", "action_kinds"),
+    ):
+        lines.extend(_cpp_enum(enum_name, "std::uint8_t", _items(schema, schema_key)))
+        lines.append("")
+    lines.extend(_cpp_enum("Capability", "std::uint32_t", _items(schema, "capabilities")))
     lines.extend(["", "}  // namespace duo_input::protocol", ""])
     return "\n".join(lines)
 
@@ -101,6 +113,18 @@ def render_python(schema: dict[str, object]) -> str:
     lines.append("")
     lines.extend(_python_enum("MacroStepType", "IntEnum", _items(schema, "macro_steps")))
     lines.append("")
+    for enum_name, schema_key in (
+        ("KeyboardRoute", "keyboard_routes"),
+        ("MouseRoute", "mouse_routes"),
+        ("TargetMode", "target_modes"),
+        ("MouseRouteCommand", "mouse_route_commands"),
+        ("TextLayout", "text_layouts"),
+        ("TriggerKind", "trigger_kinds"),
+        ("BindingMode", "binding_modes"),
+        ("ActionKind", "action_kinds"),
+    ):
+        lines.extend(_python_enum(enum_name, "IntEnum", _items(schema, schema_key)))
+        lines.append("")
     lines.extend(_python_enum("Capability", "IntFlag", _items(schema, "capabilities")))
     lines.append("")
     return "\n".join(lines)

@@ -11,10 +11,13 @@ from duo_input.domain.models import (
     Binding,
     BindingMode,
     DeviceConfig,
+    KeyboardRoute,
     Macro,
     MacroStep,
+    MouseRoute,
+    MouseRouteCommand,
     Profile,
-    Route,
+    TargetMode,
     TextLayout,
     Trigger,
     TriggerKind,
@@ -30,8 +33,8 @@ def empty_profile(profile_id: int, *, name: str | None = None) -> Profile:
         id=profile_id,
         name=name or f"Profile {profile_id}",
         color_rgb=(profile_id, profile_id + 1, profile_id + 2),
-        keyboard_route=Route.U1,
-        mouse_route=Route.U1,
+        keyboard_route=KeyboardRoute.PC1,
+        mouse_route=MouseRoute.PC1,
         text_layout=TextLayout.US,
         bindings=(),
         macros=(),
@@ -45,18 +48,18 @@ def minimal_config() -> DeviceConfig:
 def full_config() -> DeviceConfig:
     all_steps = (
         MacroStep(MacroStepType.KEY_TAP, b"\x02\x04"),
-        MacroStep(MacroStepType.KEY_DOWN, b"\x00\x05"),
-        MacroStep(MacroStepType.KEY_UP, b"\x00\x05"),
+        MacroStep(MacroStepType.KEY_DOWN, b"\x05"),
+        MacroStep(MacroStepType.KEY_UP, b"\x05"),
         MacroStep(MacroStepType.CONSUMER_TAP, b"\xe9\x00"),
         MacroStep(MacroStepType.TEXT, b"\x02\x0b\x00\x0c"),
         MacroStep(MacroStepType.DELAY, (12).to_bytes(2, "little") + (60000).to_bytes(2, "little")),
-        MacroStep(MacroStepType.SET_KEYBOARD_ROUTE, bytes([Route.BOTH])),
-        MacroStep(MacroStepType.SET_MOUSE_ROUTE, bytes([Route.U2])),
+        MacroStep(MacroStepType.SET_KEYBOARD_ROUTE, bytes([KeyboardRoute.BOTH])),
+        MacroStep(MacroStepType.SET_MOUSE_ROUTE, bytes([MouseRouteCommand.TOGGLE])),
         MacroStep(MacroStepType.SET_PROFILE, b"\x08"),
     )
     macros = (
-        Macro(id=1, name="Привіт 🌍", target=Route.BOTH, steps=all_steps),
-        Macro(id=255, name="Maximum ID", target=Route.U2, steps=()),
+        Macro(id=1, name="Привіт 🌍", target=TargetMode.INHERIT, steps=all_steps),
+        Macro(id=255, name="Maximum ID", target=TargetMode.PC2, steps=()),
     )
     bindings = (
         Binding(
@@ -77,11 +80,14 @@ def full_config() -> DeviceConfig:
         Binding(
             Trigger(TriggerKind.KEYBOARD_USAGE, 8),
             BindingMode.ADD,
-            Action(ActionKind.SET_MOUSE_ROUTE, Route.BOTH),
+            Action(ActionKind.SET_MOUSE_ROUTE, MouseRoute.PC2),
         ),
     )
     profiles = [empty_profile(i, name=f"Профіль {i}") for i in range(1, 9)]
-    profiles[0] = replace(profiles[0], bindings=bindings, macros=macros)
+    profiles[0] = replace(
+        profiles[0], text_layout=TextLayout.RU, bindings=bindings, macros=macros
+    )
+    profiles[1] = replace(profiles[1], text_layout=TextLayout.UA)
     return DeviceConfig(active_profile_id=8, profiles=tuple(profiles))
 
 
@@ -141,7 +147,7 @@ def test_compile_rejects_129th_binding_and_duplicate_trigger():
 
 
 def test_compile_rejects_33rd_macro_duplicate_macro_id_and_65th_step():
-    macros = tuple(Macro(i, f"Macro {i}", Route.U1, ()) for i in range(1, 34))
+    macros = tuple(Macro(i, f"Macro {i}", TargetMode.PC1, ()) for i in range(1, 34))
     profile = replace(empty_profile(1), macros=macros)
     with pytest.raises(ConfigError, match="32 macros"):
         compile_device_config(replace(minimal_config(), profiles=(profile,) + minimal_config().profiles[1:]))
@@ -152,7 +158,7 @@ def test_compile_rejects_package_over_360_kib_limit():
     macro = Macro(
         1,
         "oversized",
-        Route.U1,
+        TargetMode.PC1,
         tuple(MacroStep(MacroStepType.TEXT, largest_record_payload) for _ in range(6)),
     )
     profile = replace(empty_profile(1), macros=(macro,))
@@ -160,12 +166,12 @@ def test_compile_rejects_package_over_360_kib_limit():
     with pytest.raises(ConfigError, match="maximum size"):
         compile_device_config(replace(minimal_config(), profiles=(profile,) + minimal_config().profiles[1:]))
 
-    duplicate = Macro(1, "duplicate", Route.U1, ())
+    duplicate = Macro(1, "duplicate", TargetMode.PC1, ())
     profile = replace(empty_profile(1), macros=(duplicate, duplicate))
     with pytest.raises(ConfigError, match="duplicate macro"):
         compile_device_config(replace(minimal_config(), profiles=(profile,) + minimal_config().profiles[1:]))
 
-    too_many_steps = Macro(1, "large", Route.U1, tuple(MacroStep(MacroStepType.KEY_TAP, b"\0\x04") for _ in range(65)))
+    too_many_steps = Macro(1, "large", TargetMode.PC1, tuple(MacroStep(MacroStepType.KEY_TAP, b"\0\x04") for _ in range(65)))
     profile = replace(empty_profile(1), macros=(too_many_steps,))
     with pytest.raises(ConfigError, match="64 steps"):
         compile_device_config(replace(minimal_config(), profiles=(profile,) + minimal_config().profiles[1:]))
@@ -201,7 +207,7 @@ def test_compile_rejects_unknown_or_out_of_range_binding_fields(binding):
     [
         MacroStep(255, b""),
         MacroStep(MacroStepType.KEY_TAP, b"\0"),
-        MacroStep(MacroStepType.KEY_DOWN, b"\0\0"),
+        MacroStep(MacroStepType.KEY_DOWN, b"\0"),
         MacroStep(MacroStepType.CONSUMER_TAP, b"\0\0"),
         MacroStep(MacroStepType.TEXT, b""),
         MacroStep(MacroStepType.TEXT, b"\0\x04\0"),
@@ -214,10 +220,103 @@ def test_compile_rejects_unknown_or_out_of_range_binding_fields(binding):
     ],
 )
 def test_compile_rejects_unknown_or_malformed_step_payloads(step):
-    macro = Macro(1, "bad", Route.U1, (step,))
+    macro = Macro(1, "bad", TargetMode.PC1, (step,))
     profile = replace(empty_profile(1), macros=(macro,))
     with pytest.raises(ConfigError):
         compile_device_config(replace(minimal_config(), profiles=(profile,) + minimal_config().profiles[1:]))
+
+
+def config_with_first_profile(profile: Profile) -> DeviceConfig:
+    base = minimal_config()
+    return replace(base, profiles=(profile,) + base.profiles[1:])
+
+
+def config_with_only_step(step: MacroStep, *, target: TargetMode = TargetMode.INHERIT) -> DeviceConfig:
+    profile = replace(empty_profile(1), macros=(Macro(1, "shape", target, (step,)),))
+    return config_with_first_profile(profile)
+
+
+def test_compile_and_decode_accept_ru_and_ua_layouts():
+    base = minimal_config()
+    profiles = list(base.profiles)
+    profiles[0] = replace(profiles[0], text_layout=TextLayout.RU)
+    profiles[1] = replace(profiles[1], text_layout=TextLayout.UA)
+
+    decoded = decode_device_config(compile_device_config(replace(base, profiles=tuple(profiles))))
+
+    assert decoded.profiles[0].text_layout is TextLayout.RU
+    assert decoded.profiles[1].text_layout is TextLayout.UA
+
+
+def test_compile_and_decode_accept_target_inherit_and_mouse_step_toggle():
+    config = config_with_only_step(
+        MacroStep(MacroStepType.SET_MOUSE_ROUTE, bytes([MouseRouteCommand.TOGGLE]))
+    )
+
+    decoded = decode_device_config(compile_device_config(config))
+
+    assert decoded.profiles[0].macros[0].target is TargetMode.INHERIT
+    assert decoded.profiles[0].macros[0].steps[0].payload == bytes([MouseRouteCommand.TOGGLE])
+
+
+def test_compile_rejects_unknown_mouse_step_command():
+    with pytest.raises(ConfigError, match="mouse route command"):
+        compile_device_config(
+            config_with_only_step(MacroStep(MacroStepType.SET_MOUSE_ROUTE, b"\x04"))
+        )
+
+
+def test_compile_rejects_mouse_profile_both():
+    with pytest.raises(ConfigError, match="mouse route"):
+        compile_device_config(config_with_first_profile(replace(empty_profile(1), mouse_route=3)))
+
+
+def test_compile_rejects_binding_set_mouse_route_toggle_value():
+    binding = Binding(
+        Trigger(TriggerKind.KEYBOARD_USAGE, 4),
+        BindingMode.REPLACE,
+        Action(ActionKind.SET_MOUSE_ROUTE, MouseRouteCommand.TOGGLE),
+    )
+    with pytest.raises(ConfigError, match="mouse route"):
+        compile_device_config(config_with_first_profile(replace(empty_profile(1), bindings=(binding,))))
+
+
+def test_compile_rejects_unknown_text_layout():
+    with pytest.raises(ConfigError, match="text layout"):
+        compile_device_config(config_with_first_profile(replace(empty_profile(1), text_layout=4)))
+
+
+def test_key_tap_accepts_exact_modifier_and_nonzero_usage_shape():
+    step = MacroStep(MacroStepType.KEY_TAP, b"\x02\x04")
+    assert decode_device_config(compile_device_config(config_with_only_step(step))).profiles[0].macros[0].steps == (step,)
+
+
+@pytest.mark.parametrize("payload", [b"\x04", b"\x00\x04\x05", b"\x02\x00"])
+def test_key_tap_rejects_every_other_shape(payload):
+    with pytest.raises(ConfigError, match="KEY_TAP"):
+        compile_device_config(config_with_only_step(MacroStep(MacroStepType.KEY_TAP, payload)))
+
+
+def test_key_down_accepts_exact_nonzero_usage_shape():
+    step = MacroStep(MacroStepType.KEY_DOWN, b"\x05")
+    assert decode_device_config(compile_device_config(config_with_only_step(step))).profiles[0].macros[0].steps == (step,)
+
+
+@pytest.mark.parametrize("payload", [b"", b"\x00", b"\x00\x05"])
+def test_key_down_rejects_every_other_shape(payload):
+    with pytest.raises(ConfigError, match="KEY_DOWN"):
+        compile_device_config(config_with_only_step(MacroStep(MacroStepType.KEY_DOWN, payload)))
+
+
+def test_key_up_accepts_exact_nonzero_usage_shape():
+    step = MacroStep(MacroStepType.KEY_UP, b"\x06")
+    assert decode_device_config(compile_device_config(config_with_only_step(step))).profiles[0].macros[0].steps == (step,)
+
+
+@pytest.mark.parametrize("payload", [b"", b"\x00", b"\x00\x06"])
+def test_key_up_rejects_every_other_shape(payload):
+    with pytest.raises(ConfigError, match="KEY_UP"):
+        compile_device_config(config_with_only_step(MacroStep(MacroStepType.KEY_UP, payload)))
 
 
 def repair_crc(data: bytearray) -> bytes:
@@ -267,3 +366,52 @@ def test_decode_rejects_crc_damage_truncation_invalid_utf8_and_trailing_bytes():
 
     with pytest.raises(ConfigError, match="length"):
         decode_device_config(encoded + b"\0")
+
+
+def first_step_descriptor(data: bytes, step_type: MacroStepType) -> int:
+    macro_offset = int.from_bytes(data[64 + 24 : 64 + 28], "little")
+    step_count = int.from_bytes(data[macro_offset + 10 : macro_offset + 12], "little")
+    step_offset = int.from_bytes(data[macro_offset + 12 : macro_offset + 16], "little")
+    for index in range(step_count):
+        descriptor = step_offset + index * 12
+        if data[descriptor] == step_type:
+            return descriptor
+    raise AssertionError(f"missing step {step_type.name}")
+
+
+def test_decode_rejects_mouse_profile_both_binding_toggle_value_and_unknown_layout():
+    encoded = compile_device_config(full_config())
+    mutations = []
+
+    mouse_both = bytearray(encoded)
+    mouse_both[64 + 2] = KeyboardRoute.BOTH
+    mutations.append((mouse_both, "mouse route"))
+
+    unknown_layout = bytearray(encoded)
+    unknown_layout[64 + 3] = 4
+    mutations.append((unknown_layout, "text layout"))
+
+    binding_toggle = bytearray(encoded)
+    binding_offset = int.from_bytes(binding_toggle[64 + 16 : 64 + 20], "little")
+    binding_toggle[binding_offset + 3 * 12 + 5] = MouseRouteCommand.TOGGLE
+    mutations.append((binding_toggle, "mouse route"))
+
+    for malformed, message in mutations:
+        with pytest.raises(ConfigError, match=message):
+            decode_device_config(repair_crc(malformed))
+
+
+@pytest.mark.parametrize(
+    ("source_type", "malformed_type", "message"),
+    [
+        (MacroStepType.KEY_DOWN, MacroStepType.KEY_TAP, "KEY_TAP"),
+        (MacroStepType.KEY_TAP, MacroStepType.KEY_DOWN, "KEY_DOWN"),
+        (MacroStepType.KEY_TAP, MacroStepType.KEY_UP, "KEY_UP"),
+    ],
+)
+def test_decode_rejects_wrong_key_payload_shape(source_type, malformed_type, message):
+    malformed = bytearray(compile_device_config(full_config()))
+    malformed[first_step_descriptor(malformed, source_type)] = malformed_type
+
+    with pytest.raises(ConfigError, match=message):
+        decode_device_config(repair_crc(malformed))

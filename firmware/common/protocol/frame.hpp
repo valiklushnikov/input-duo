@@ -47,8 +47,8 @@ struct DecodeResult {
 
 // A matching minor is always compatible. A different minor requires every
 // required capability to be present in the locally supported capability mask.
-bool is_minor_compatible(std::uint8_t minor, std::uint16_t required_capabilities = 0,
-                         std::uint16_t supported_capabilities = 0);
+bool is_minor_compatible(std::uint8_t minor, std::uint32_t required_capabilities = 0,
+                         std::uint32_t supported_capabilities = 0);
 
 // CDC encoding and decoding are allocation-free. The caller owns both output
 // buffers. On successful CDC decode, result.cdc.payload points into scratch;
@@ -56,14 +56,14 @@ bool is_minor_compatible(std::uint8_t minor, std::uint16_t required_capabilities
 bool encode_cdc_frame(const CdcFrame& frame, MutableByteView output, MutableByteView scratch,
                       std::size_t& output_size);
 bool decode_cdc_frame(ByteView transport, MutableByteView scratch, DecodeResult& result,
-                      std::uint16_t required_capabilities = 0,
-                      std::uint16_t supported_capabilities = 0);
+                      std::uint32_t required_capabilities = 0,
+                      std::uint32_t supported_capabilities = 0);
 
 // SPI encoding is allocation-free. On successful SPI decode, result.spi.payload
 // points into transport; it is valid only while transport remains alive and unchanged.
 bool encode_spi_frame(const SpiFrame& frame, MutableByteView output, std::size_t& output_size);
 bool decode_spi_frame(ByteView transport, DecodeResult& result,
-                      std::uint16_t required_capabilities = 0,
-                      std::uint16_t supported_capabilities = 0);
+                      std::uint32_t required_capabilities = 0,
+                      std::uint32_t supported_capabilities = 0);
 
 }  // namespace duo_input::protocol

@@ -17,10 +17,13 @@ from duo_input.domain.models import (  # noqa: E402
     Binding,
     BindingMode,
     DeviceConfig,
+    KeyboardRoute,
     Macro,
     MacroStep,
+    MouseRoute,
+    MouseRouteCommand,
     Profile,
-    Route,
+    TargetMode,
     TextLayout,
     Trigger,
     TriggerKind,
@@ -34,23 +37,26 @@ OUTPUT = ROOT / "tests" / "vectors" / "config_vectors"
 def empty_profile(profile_id: int, name: str | None = None) -> Profile:
     return Profile(profile_id, name or f"Profile {profile_id}",
                    (profile_id, profile_id + 1, profile_id + 2),
-                   Route.U1, Route.U1, TextLayout.US, (), ())
+                   KeyboardRoute.PC1, MouseRoute.PC1, TextLayout.US, (), ())
 
 
 def vector_configs() -> tuple[DeviceConfig, DeviceConfig]:
     minimal = DeviceConfig(1, tuple(empty_profile(i) for i in range(1, 9)))
     steps = (
         MacroStep(MacroStepType.KEY_TAP, b"\x02\x04"),
-        MacroStep(MacroStepType.KEY_DOWN, b"\x00\x05"),
-        MacroStep(MacroStepType.KEY_UP, b"\x00\x05"),
+        MacroStep(MacroStepType.KEY_DOWN, b"\x05"),
+        MacroStep(MacroStepType.KEY_UP, b"\x05"),
         MacroStep(MacroStepType.CONSUMER_TAP, b"\xe9\x00"),
         MacroStep(MacroStepType.TEXT, b"\x02\x0b\x00\x0c"),
         MacroStep(MacroStepType.DELAY, b"\x0c\x00\x60\xea"),
-        MacroStep(MacroStepType.SET_KEYBOARD_ROUTE, bytes([Route.BOTH])),
-        MacroStep(MacroStepType.SET_MOUSE_ROUTE, bytes([Route.U2])),
+        MacroStep(MacroStepType.SET_KEYBOARD_ROUTE, bytes([KeyboardRoute.BOTH])),
+        MacroStep(MacroStepType.SET_MOUSE_ROUTE, bytes([MouseRouteCommand.TOGGLE])),
         MacroStep(MacroStepType.SET_PROFILE, b"\x08"),
     )
-    macros = (Macro(1, "Привіт 🌍", Route.BOTH, steps), Macro(255, "Maximum ID", Route.U2, ()))
+    macros = (
+        Macro(1, "Привіт 🌍", TargetMode.INHERIT, steps),
+        Macro(255, "Maximum ID", TargetMode.PC2, ()),
+    )
     bindings = (
         Binding(Trigger(TriggerKind.KEYBOARD_USAGE, 4, 2), BindingMode.REPLACE,
                 Action(ActionKind.RUN_MACRO, 255)),
@@ -59,10 +65,13 @@ def vector_configs() -> tuple[DeviceConfig, DeviceConfig]:
         Binding(Trigger(TriggerKind.KEYBOARD_USAGE, 7), BindingMode.ADD,
                 Action(ActionKind.TOGGLE_KEYBOARD_ROUTE)),
         Binding(Trigger(TriggerKind.KEYBOARD_USAGE, 8), BindingMode.ADD,
-                Action(ActionKind.SET_MOUSE_ROUTE, Route.BOTH)),
+                Action(ActionKind.SET_MOUSE_ROUTE, MouseRoute.PC2)),
     )
     profiles = [empty_profile(i, f"Профіль {i}") for i in range(1, 9)]
-    profiles[0] = replace(profiles[0], bindings=bindings, macros=macros)
+    profiles[0] = replace(
+        profiles[0], text_layout=TextLayout.RU, bindings=bindings, macros=macros
+    )
+    profiles[1] = replace(profiles[1], text_layout=TextLayout.UA)
     return minimal, DeviceConfig(8, tuple(profiles))
 
 

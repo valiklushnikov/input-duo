@@ -10,11 +10,15 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace {
 
 using duo_input::protocol::ByteView;
+
+static_assert(std::is_same_v<std::underlying_type_t<duo_input::protocol::Capability>,
+                             std::uint32_t>);
 
 bool bytes_equal(const std::uint8_t* actual, const std::uint8_t* expected, std::size_t size) {
     for (std::size_t index = 0; index < size; ++index) {
@@ -268,9 +272,9 @@ TEST_CASE(spi_frame_reaches_each_repaired_header_padding_and_crc_validation) {
 }
 
 TEST_CASE(frame_codecs_accept_and_reject_different_minors_by_capability) {
-    constexpr std::uint16_t keyboard = static_cast<std::uint16_t>(
+    constexpr std::uint32_t keyboard = static_cast<std::uint32_t>(
         duo_input::protocol::Capability::KEYBOARD_HID);
-    constexpr std::uint16_t capture = static_cast<std::uint16_t>(duo_input::protocol::Capability::CAPTURE);
+    constexpr std::uint32_t capture = static_cast<std::uint32_t>(duo_input::protocol::Capability::CAPTURE);
 
     std::vector<std::uint8_t> cdc_raw = decode_cdc_transport(
         hex_bytes(vector_value(vector_document(), "cdc", "transport")));
@@ -296,5 +300,35 @@ TEST_CASE(frame_codecs_accept_and_reject_different_minors_by_capability) {
     CHECK_EQ(spi_result.spi.minor, 9U);
     CHECK_FALSE(duo_input::protocol::decode_spi_frame({spi.data(), spi.size()}, spi_result, capture,
                                                       keyboard));
+    CHECK_EQ(spi_result.error, duo_input::protocol::FrameError::INCOMPATIBLE_MINOR);
+}
+
+TEST_CASE(frame_codecs_preserve_bit_31_in_capability_compatibility_masks) {
+    constexpr std::uint32_t high_bit = UINT32_C(1) << 31U;
+    CHECK(duo_input::protocol::is_minor_compatible(9U, high_bit, high_bit));
+    CHECK_FALSE(duo_input::protocol::is_minor_compatible(9U, high_bit, 0U));
+
+    std::vector<std::uint8_t> cdc_raw = decode_cdc_transport(
+        hex_bytes(vector_value(vector_document(), "cdc", "transport")));
+    cdc_raw[3] = 9U;
+    const std::vector<std::uint8_t> cdc = encode_cdc_raw_with_crc(cdc_raw);
+    std::array<std::uint8_t, 1038> scratch{};
+    duo_input::protocol::DecodeResult cdc_result{};
+    CHECK(duo_input::protocol::decode_cdc_frame({cdc.data(), cdc.size()},
+                                                {scratch.data(), scratch.size()}, cdc_result,
+                                                high_bit, high_bit));
+    CHECK_FALSE(duo_input::protocol::decode_cdc_frame({cdc.data(), cdc.size()},
+                                                      {scratch.data(), scratch.size()}, cdc_result,
+                                                      high_bit, 0U));
+    CHECK_EQ(cdc_result.error, duo_input::protocol::FrameError::INCOMPATIBLE_MINOR);
+
+    std::vector<std::uint8_t> spi = hex_bytes(vector_value(vector_document(), "spi", "frame"));
+    spi[3] = 9U;
+    spi = repair_spi_crc(spi);
+    duo_input::protocol::DecodeResult spi_result{};
+    CHECK(duo_input::protocol::decode_spi_frame({spi.data(), spi.size()}, spi_result, high_bit,
+                                                high_bit));
+    CHECK_FALSE(duo_input::protocol::decode_spi_frame({spi.data(), spi.size()}, spi_result, high_bit,
+                                                      0U));
     CHECK_EQ(spi_result.error, duo_input::protocol::FrameError::INCOMPATIBLE_MINOR);
 }

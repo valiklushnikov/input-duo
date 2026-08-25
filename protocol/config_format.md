@@ -15,19 +15,23 @@ The generated `MacroStepType` values are the sole ABI source for step types: KEY
 KEY_DOWN=2, KEY_UP=3, CONSUMER_TAP=4, TEXT=5, DELAY=6,
 SET_KEYBOARD_ROUTE=7, SET_MOUSE_ROUTE=8, SET_PROFILE=9.
 
-The remaining stable u8 values are defined in both `domain/models.py` and `format.hpp`:
+All stable binary-config u8 enums are generated from `protocol/schema.json`. Python domain
+models re-export the generated types and C++ `config/format.hpp` aliases them:
 
 | Type | Values |
 | --- | --- |
-| Route / macro target | U1=1, U2=2, BOTH=3 |
-| TextLayout | US=1, UK=2, DE=3 |
+| KeyboardRoute | PC1=1, PC2=2, BOTH=3 |
+| MouseRoute | PC1=1, PC2=2 |
+| TargetMode | INHERIT=0, PC1=1, PC2=2, BOTH=3 |
+| MouseRouteCommand | PC1=1, PC2=2, TOGGLE=3 |
+| TextLayout | US=1, RU=2, UA=3 |
 | TriggerKind | KEYBOARD_USAGE=1, MOUSE_BUTTON=2 |
 | BindingMode | REPLACE=1, ADD=2 |
 | ActionKind | RUN_MACRO=1, TOGGLE_KEYBOARD_ROUTE=2, SET_KEYBOARD_ROUTE=3, TOGGLE_MOUSE_ROUTE=4, SET_MOUSE_ROUTE=5, SET_PROFILE=6 |
 
 Profile IDs are exactly 1..8 in ascending descriptor order. Macro IDs are 1..255 and unique
 within a profile. Keyboard usage codes are 1..255. Mouse buttons are 1..5 and have zero
-modifiers. Routes and targets use the table above.
+modifiers. Every route, target, command, and layout field uses its context-specific type above.
 
 ## Package header (64 bytes)
 
@@ -60,9 +64,9 @@ access. The string blob is followed by zero bytes to the next four-byte boundary
 | Offset | Size | Field |
 | ---: | ---: | --- |
 | 0 | 1 | profile ID |
-| 1 | 1 | keyboard route |
-| 2 | 1 | mouse route |
-| 3 | 1 | text layout |
+| 1 | 1 | keyboard route (`KeyboardRoute`) |
+| 2 | 1 | mouse route (`MouseRoute`) |
+| 3 | 1 | text layout (`TextLayout`) |
 | 4 | 3 | RGB color |
 | 7 | 1 | reserved, zero |
 | 8 | 4 | absolute UTF-8 name offset |
@@ -100,15 +104,16 @@ four-byte boundary. A zero-count table has its canonical cursor as its offset.
 | 8 | 4 | reserved, zero |
 
 Exact `(kind, code, modifiers)` trigger duplicates are invalid within a profile. RUN_MACRO refers
-to an existing macro ID. Toggle actions require argument zero. Set-route actions use Route.
-SET_PROFILE refers to profile 1..8.
+to an existing macro ID. Toggle actions require argument zero. SET_KEYBOARD_ROUTE uses
+KeyboardRoute. SET_MOUSE_ROUTE uses MouseRoute and therefore rejects value 3; mouse toggle has
+its own action kind. SET_PROFILE refers to profile 1..8.
 
 ### Macro descriptor (24 bytes)
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
 | 0 | 1 | macro ID |
-| 1 | 1 | target route |
+| 1 | 1 | target mode (`TargetMode`) |
 | 2 | 2 | reserved, zero |
 | 4 | 4 | absolute UTF-8 name offset |
 | 8 | 2 | name byte length |
@@ -128,12 +133,14 @@ SET_PROFILE refers to profile 1..8.
 | 4 | 4 | absolute payload offset, four-byte aligned |
 | 8 | 4 | reserved, zero |
 
-Payloads follow the step table in step order, with zero alignment padding. KEY_TAP, KEY_DOWN,
-and KEY_UP contain `(modifier u8, nonzero keyboard usage u8)`. CONSUMER_TAP contains a nonzero
-u16 usage. TEXT contains one or more `(modifier u8, nonzero keyboard usage u8)` pairs; source
+Payloads follow the step table in step order, with zero alignment padding. KEY_TAP contains
+exactly `(modifier u8, nonzero keyboard usage u8)`. KEY_DOWN and KEY_UP each contain exactly one
+nonzero keyboard usage u8 and no modifier byte. CONSUMER_TAP contains a nonzero u16 usage. TEXT
+contains one or more `(modifier u8, nonzero keyboard usage u8)` pairs; source
 Unicode is never stored, and compiled length is bounded only by the u16 record and package
 limits. DELAY contains `(minimum_ms u16, maximum_ms u16)`, with minimum <= maximum <= the
-generated 60000 ms limit. Set-route payloads contain one Route byte. SET_PROFILE contains one
+generated 60000 ms limit. SET_KEYBOARD_ROUTE contains one KeyboardRoute byte;
+SET_MOUSE_ROUTE contains one MouseRouteCommand byte, including TOGGLE=3. SET_PROFILE contains one
 profile ID byte. Unknown step types and every other payload shape are invalid.
 
 ## Reader requirements

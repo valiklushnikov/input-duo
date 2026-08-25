@@ -74,6 +74,47 @@ class MacroStepType(IntEnum):
     SET_PROFILE = 0x09
     TEXT = 0x05
 
+class KeyboardRoute(IntEnum):
+    BOTH = 0x03
+    PC1 = 0x01
+    PC2 = 0x02
+
+class MouseRoute(IntEnum):
+    PC1 = 0x01
+    PC2 = 0x02
+
+class TargetMode(IntEnum):
+    BOTH = 0x03
+    INHERIT = 0x00
+    PC1 = 0x01
+    PC2 = 0x02
+
+class MouseRouteCommand(IntEnum):
+    PC1 = 0x01
+    PC2 = 0x02
+    TOGGLE = 0x03
+
+class TextLayout(IntEnum):
+    RU = 0x02
+    UA = 0x03
+    US = 0x01
+
+class TriggerKind(IntEnum):
+    KEYBOARD_USAGE = 0x01
+    MOUSE_BUTTON = 0x02
+
+class BindingMode(IntEnum):
+    ADD = 0x02
+    REPLACE = 0x01
+
+class ActionKind(IntEnum):
+    RUN_MACRO = 0x01
+    SET_KEYBOARD_ROUTE = 0x03
+    SET_MOUSE_ROUTE = 0x05
+    SET_PROFILE = 0x06
+    TOGGLE_KEYBOARD_ROUTE = 0x02
+    TOGGLE_MOUSE_ROUTE = 0x04
+
 class Capability(IntFlag):
     CAPTURE = 0x20
     CONFIG_READ = 0x08

@@ -71,7 +71,56 @@ enum class MacroStepType : std::uint8_t {
     TEXT = 0x05,
 };
 
-enum class Capability : std::uint16_t {
+enum class KeyboardRoute : std::uint8_t {
+    BOTH = 0x03,
+    PC1 = 0x01,
+    PC2 = 0x02,
+};
+
+enum class MouseRoute : std::uint8_t {
+    PC1 = 0x01,
+    PC2 = 0x02,
+};
+
+enum class TargetMode : std::uint8_t {
+    BOTH = 0x03,
+    INHERIT = 0x00,
+    PC1 = 0x01,
+    PC2 = 0x02,
+};
+
+enum class MouseRouteCommand : std::uint8_t {
+    PC1 = 0x01,
+    PC2 = 0x02,
+    TOGGLE = 0x03,
+};
+
+enum class TextLayout : std::uint8_t {
+    RU = 0x02,
+    UA = 0x03,
+    US = 0x01,
+};
+
+enum class TriggerKind : std::uint8_t {
+    KEYBOARD_USAGE = 0x01,
+    MOUSE_BUTTON = 0x02,
+};
+
+enum class BindingMode : std::uint8_t {
+    ADD = 0x02,
+    REPLACE = 0x01,
+};
+
+enum class ActionKind : std::uint8_t {
+    RUN_MACRO = 0x01,
+    SET_KEYBOARD_ROUTE = 0x03,
+    SET_MOUSE_ROUTE = 0x05,
+    SET_PROFILE = 0x06,
+    TOGGLE_KEYBOARD_ROUTE = 0x02,
+    TOGGLE_MOUSE_ROUTE = 0x04,
+};
+
+enum class Capability : std::uint32_t {
     CAPTURE = 0x20,
     CONFIG_READ = 0x08,
     CONFIG_WRITE = 0x10,

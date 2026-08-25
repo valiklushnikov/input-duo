@@ -41,7 +41,7 @@ class MacroView {
 public:
     MacroView() = default;
     std::uint8_t id() const;
-    Route target() const;
+    TargetMode target() const;
     protocol::ByteView name() const;
     std::size_t step_count() const;
     bool step_at(std::size_t index, StepView& output) const;
@@ -74,8 +74,8 @@ class ProfileView {
 public:
     ProfileView() = default;
     std::uint8_t id() const;
-    Route keyboard_route() const;
-    Route mouse_route() const;
+    KeyboardRoute keyboard_route() const;
+    MouseRoute mouse_route() const;
     TextLayout text_layout() const;
     protocol::ByteView name() const;
     std::size_t binding_count() const;

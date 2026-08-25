@@ -10,7 +10,7 @@ import pytest
 from duo_input.device.emulator import ErrorCode, U1Emulator
 from duo_input.device.transport import AbstractByteTransport
 from duo_input.domain.config_binary import compile_device_config, decode_device_config
-from duo_input.domain.models import Macro, Route
+from duo_input.domain.models import Macro, TargetMode
 from duo_input.generated.protocol import (
     PROTOCOL_VERSION_MAJOR,
     PROTOCOL_VERSION_MINOR,
@@ -378,7 +378,7 @@ def test_stop_clears_capture_and_staging_and_increments_once(config_b: bytes):
 
 def test_profile_and_macro_requests_validate_installed_references(config_a: bytes):
     base = decode_device_config(config_a)
-    profile = replace(base.profiles[0], macros=(Macro(7, "test", Route.U1, ()),))
+    profile = replace(base.profiles[0], macros=(Macro(7, "test", TargetMode.PC1, ()),))
     package = compile_device_config(replace(base, profiles=(profile,) + base.profiles[1:]))
     emulator = U1Emulator()
     emulator.install_active(package)

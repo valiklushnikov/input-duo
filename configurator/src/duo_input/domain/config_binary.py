@@ -9,10 +9,13 @@ from duo_input.domain.models import (
     Binding,
     BindingMode,
     DeviceConfig,
+    KeyboardRoute,
     Macro,
     MacroStep,
+    MouseRoute,
+    MouseRouteCommand,
     Profile,
-    Route,
+    TargetMode,
     TextLayout,
     Trigger,
     TriggerKind,
@@ -88,9 +91,12 @@ def _validate_step(step: MacroStep) -> tuple[MacroStepType, bytes]:
     payload = step.payload
     if len(payload) > 0xFFFF:
         raise ConfigError("macro step payload is too large")
-    if step_type in (MacroStepType.KEY_TAP, MacroStepType.KEY_DOWN, MacroStepType.KEY_UP):
+    if step_type is MacroStepType.KEY_TAP:
         if len(payload) != 2 or payload[1] == 0:
-            raise ConfigError("key step requires modifier and nonzero usage")
+            raise ConfigError("KEY_TAP requires modifier and nonzero usage")
+    elif step_type in (MacroStepType.KEY_DOWN, MacroStepType.KEY_UP):
+        if len(payload) != 1 or payload[0] == 0:
+            raise ConfigError(f"{step_type.name} requires one nonzero usage byte")
     elif step_type is MacroStepType.CONSUMER_TAP:
         if len(payload) != 2 or int.from_bytes(payload, "little") == 0:
             raise ConfigError("consumer step requires a nonzero u16 usage")
@@ -103,10 +109,14 @@ def _validate_step(step: MacroStep) -> tuple[MacroStepType, bytes]:
         minimum, maximum = struct.unpack("<HH", payload)
         if minimum > maximum or maximum > MAX_DELAY_MS:
             raise ConfigError("delay range is invalid")
-    elif step_type in (MacroStepType.SET_KEYBOARD_ROUTE, MacroStepType.SET_MOUSE_ROUTE):
+    elif step_type is MacroStepType.SET_KEYBOARD_ROUTE:
         if len(payload) != 1:
-            raise ConfigError("route step requires one byte")
-        _enum(payload[0], Route, "route")
+            raise ConfigError("keyboard route step requires one byte")
+        _enum(payload[0], KeyboardRoute, "keyboard route")
+    elif step_type is MacroStepType.SET_MOUSE_ROUTE:
+        if len(payload) != 1:
+            raise ConfigError("mouse route step requires one byte")
+        _enum(payload[0], MouseRouteCommand, "mouse route command")
     elif step_type is MacroStepType.SET_PROFILE:
         if len(payload) != 1 or not 1 <= payload[0] <= PROFILES:
             raise ConfigError("profile step references an unknown profile")
@@ -140,8 +150,8 @@ def _validate_model(config: DeviceConfig):
             raise ConfigError("profile color must be three u8 values")
         for component in profile.color_rgb:
             _u8(component, "profile color")
-        keyboard_route = _enum(profile.keyboard_route, Route, "keyboard route")
-        mouse_route = _enum(profile.mouse_route, Route, "mouse route")
+        keyboard_route = _enum(profile.keyboard_route, KeyboardRoute, "keyboard route")
+        mouse_route = _enum(profile.mouse_route, MouseRoute, "mouse route")
         text_layout = _enum(profile.text_layout, TextLayout, "text layout")
         if len(profile.bindings) > BINDINGS_PER_PROFILE:
             raise ConfigError(f"profile may contain at most {BINDINGS_PER_PROFILE} bindings")
@@ -165,7 +175,7 @@ def _validate_model(config: DeviceConfig):
                 (
                     macro_id,
                     _name(macro.name, "macro"),
-                    _enum(macro.target, Route, "macro target"),
+                    _enum(macro.target, TargetMode, "macro target"),
                     tuple(_validate_step(step) for step in macro.steps),
                 )
             )
@@ -197,8 +207,10 @@ def _validate_model(config: DeviceConfig):
             elif action_kind in (ActionKind.TOGGLE_KEYBOARD_ROUTE, ActionKind.TOGGLE_MOUSE_ROUTE):
                 if argument != 0:
                     raise ConfigError("toggle action argument must be zero")
-            elif action_kind in (ActionKind.SET_KEYBOARD_ROUTE, ActionKind.SET_MOUSE_ROUTE):
-                _enum(argument, Route, "action route")
+            elif action_kind is ActionKind.SET_KEYBOARD_ROUTE:
+                _enum(argument, KeyboardRoute, "keyboard route")
+            elif action_kind is ActionKind.SET_MOUSE_ROUTE:
+                _enum(argument, MouseRoute, "mouse route")
             elif action_kind is ActionKind.SET_PROFILE:
                 if argument not in ids:
                     raise ConfigError("set-profile action references an unknown profile")
@@ -383,8 +395,8 @@ def decode_device_config(data: bytes) -> DeviceConfig:
         ) = fields
         if profile_id != index + 1:
             raise ConfigError("profile IDs must be unique and ordered 1..8")
-        keyboard_route = _enum(keyboard_route, Route, "keyboard route")
-        mouse_route = _enum(mouse_route, Route, "mouse route")
+        keyboard_route = _enum(keyboard_route, KeyboardRoute, "keyboard route")
+        mouse_route = _enum(mouse_route, MouseRoute, "mouse route")
         text_layout = _enum(text_layout, TextLayout, "text layout")
         if profile_reserved or profile_reserved2 or profile_reserved3:
             raise ConfigError("profile reserved fields must be zero")
@@ -420,7 +432,7 @@ def decode_device_config(data: bytes) -> DeviceConfig:
             if macro_id == 0 or macro_id in macro_ids:
                 raise ConfigError("duplicate or zero macro ID")
             macro_ids.add(macro_id)
-            target = _enum(target, Route, "macro target")
+            target = _enum(target, TargetMode, "macro target")
             if macro_reserved or macro_reserved2 or macro_reserved3:
                 raise ConfigError("macro reserved fields must be zero")
             if step_count > MACRO_STEPS_PER_MACRO or step_size != STEP_SIZE:
