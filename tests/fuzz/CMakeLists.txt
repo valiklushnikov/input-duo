@@ -20,7 +20,7 @@ function(duo_add_corpus_smoke name source)
     add_test(NAME fuzz_corpus_${name} COMMAND ${target})
 endfunction()
 
-if(BUILD_TESTING)
+if(BUILD_TESTING AND DUO_NATIVE_TESTS AND NOT DUO_FUZZ_TESTS)
     duo_add_corpus_smoke(cdc fuzz_cdc_frame.cpp)
     duo_add_corpus_smoke(spi fuzz_spi_frame.cpp)
     duo_add_corpus_smoke(config fuzz_config.cpp)

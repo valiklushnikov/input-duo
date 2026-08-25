@@ -18,12 +18,17 @@ cmake --build build/native-fuzz-smoke
 ctest --test-dir build/native-fuzz-smoke --output-on-failure -R '^fuzz_corpus_'
 ```
 
+These smoke targets are intentionally built only for `DUO_NATIVE_TESTS=ON`; a
+`DUO_FUZZ_TESTS=ON` Clang build contains only libFuzzer targets, so it does not link its
+sanitizer-instrumented parser library into non-sanitized smoke executables.
+
 The generator's `--check` mode verifies exact byte content and rejects extra corpus files.  Each
 seed is below 4 KiB.  CDC's `valid-shared-vector.bin` and SPI's equivalent are byte-for-byte
 copies of the shared frame vectors; configuration's `valid-minimal-shared-vector.bin` is a
 byte-for-byte copy of the minimal committed configuration vector.  The other seeds cover declared
 length 0, legal maximum, maximum plus one, and `0xFFFF` with separately named valid and corrupt
-CRC variants; header/payload/CRC truncations; and unknown type or nonzero flags.
+CRC variants; a valid-header config seed whose only mutation is its CRC field; header/payload/CRC
+truncations; and unknown type or nonzero flags.
 
 ## Sanitizer campaign
 

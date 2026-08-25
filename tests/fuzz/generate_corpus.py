@@ -86,7 +86,7 @@ def config_with_length(valid: bytes, declared_length: int, *, corrupt_crc: bool 
     result[12:16] = b"\0\0\0\0"
     result[12:16] = struct.pack("<I", zlib.crc32(result))
     if corrupt_crc:
-        result[-1] ^= 0x80
+        result[15] ^= 0x80
     return bytes(result)
 
 
@@ -150,6 +150,9 @@ def expected_corpus() -> dict[str, dict[str, bytes]]:
         config[f"length-{label}-crc-valid.bin"] = config_with_length(valid_config, declared)
         config[f"length-{label}-crc-corrupt.bin"] = config_with_length(valid_config, declared, corrupt_crc=True)
     config.update({
+        "crc-corrupt-valid-header.bin": config_with_length(
+            valid_config, len(valid_config), corrupt_crc=True
+        ),
         "truncated-before-header.bin": valid_config[:63],
         "truncated-header.bin": valid_config[:64],
         "truncated-profile-table.bin": valid_config[:351],
