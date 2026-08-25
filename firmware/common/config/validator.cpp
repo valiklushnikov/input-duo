@@ -229,51 +229,57 @@ bool validate_binding(protocol::ByteView bytes, std::size_t offset, std::size_t 
     }
 }
 
-ValidationResult failure(ValidationError error) { return ValidationResult{error}; }
-
 }  // namespace
+
+ValidationResult ValidationResult::failure(ValidationError error) {
+    return {error == ValidationError::NONE ? ValidationError::INVALID_FORMAT : error, ConfigView{}};
+}
+
+ValidationResult ValidationResult::success(protocol::ByteView input) {
+    return {ValidationError::NONE, ConfigView{input}};
+}
 
 ValidationResult validate_config(protocol::ByteView input) {
     if ((input.data == nullptr && input.size != 0U)) {
-        return failure(ValidationError::INVALID_INPUT);
+        return ValidationResult::failure(ValidationError::INVALID_INPUT);
     }
     if (input.size < CONFIG_HEADER_SIZE ||
         input.size > protocol::ProtocolLimits::BINARY_CONFIG_MAX_BYTES) {
-        return failure(ValidationError::INVALID_LENGTH);
+        return ValidationResult::failure(ValidationError::INVALID_LENGTH);
     }
     if (input.data[0] != MAGIC[0] || input.data[1] != MAGIC[1] || input.data[2] != MAGIC[2] ||
         input.data[3] != MAGIC[3] || input.data[4] != protocol::SCHEMA_VERSION_MAJOR ||
         input.data[6] != 0U || input.data[7] != 0U || read_u32(input, 8U) != input.size) {
-        return failure(ValidationError::INVALID_FORMAT);
+        return ValidationResult::failure(ValidationError::INVALID_FORMAT);
     }
     if (read_u32(input, HEADER_CRC_OFFSET) != config_crc(input)) {
-        return failure(ValidationError::INVALID_CRC);
+        return ValidationResult::failure(ValidationError::INVALID_CRC);
     }
     if (input.data[16] != protocol::ProtocolLimits::PROFILES || input.data[17] < 1U ||
         input.data[17] > protocol::ProtocolLimits::PROFILES ||
         input.data[18] != PROFILE_DESCRIPTOR_SIZE || input.data[19] != 0U ||
         read_u32(input, 20U) != PROFILE_TABLE_OFFSET || !all_zero(input, 40U, 64U)) {
-        return failure(ValidationError::INVALID_FORMAT);
+        return ValidationResult::failure(ValidationError::INVALID_FORMAT);
     }
 
     std::size_t profile_end = 0U;
     if (!checked_table(input, PROFILE_TABLE_OFFSET, protocol::ProtocolLimits::PROFILES,
                        PROFILE_DESCRIPTOR_SIZE, profile_end)) {
-        return failure(ValidationError::INVALID_LENGTH);
+        return ValidationResult::failure(ValidationError::INVALID_LENGTH);
     }
     const std::size_t string_offset = read_u32(input, 24U);
     const std::size_t string_length = read_u32(input, 28U);
     const std::size_t data_offset = read_u32(input, 32U);
     const std::size_t data_length = read_u32(input, 36U);
     if (string_offset != profile_end || !has_region(input, string_offset, string_length)) {
-        return failure(ValidationError::INVALID_FORMAT);
+        return ValidationResult::failure(ValidationError::INVALID_FORMAT);
     }
     const std::size_t string_end = string_offset + string_length;
     std::size_t aligned_string_end = 0U;
     if (!align4(string_end, aligned_string_end) || data_offset != aligned_string_end ||
         (data_offset & 3U) != 0U || !all_zero(input, string_end, data_offset) ||
         !has_region(input, data_offset, data_length) || data_length != input.size - data_offset) {
-        return failure(ValidationError::INVALID_FORMAT);
+        return ValidationResult::failure(ValidationError::INVALID_FORMAT);
     }
 
     std::size_t expected_string = string_offset;
@@ -292,7 +298,7 @@ ValidationResult validate_config(protocol::ByteView input) {
             read_u16(input, profile + 30U) != 0U || read_u32(input, profile + 32U) != 0U ||
             !consume_name(input, string_end, read_u32(input, profile + 8U),
                           read_u16(input, profile + 12U), expected_string)) {
-            return failure(ValidationError::INVALID_FORMAT);
+            return ValidationResult::failure(ValidationError::INVALID_FORMAT);
         }
     }
 
@@ -308,7 +314,7 @@ ValidationResult validate_config(protocol::ByteView input) {
             !checked_table(input, binding_offset, binding_count, BINDING_RECORD_SIZE, cursor) ||
             macro_offset != cursor || (macro_offset & 3U) != 0U ||
             !checked_table(input, macro_offset, macro_count, MACRO_DESCRIPTOR_SIZE, cursor)) {
-            return failure(ValidationError::INVALID_FORMAT);
+            return ValidationResult::failure(ValidationError::INVALID_FORMAT);
         }
 
         for (std::size_t macro_index = 0; macro_index < macro_count; ++macro_index) {
@@ -325,11 +331,11 @@ ValidationResult validate_config(protocol::ByteView input) {
                               read_u16(input, macro + 8U), expected_string) ||
                 step_offset != cursor || (step_offset & 3U) != 0U ||
                 !checked_table(input, step_offset, step_count, STEP_DESCRIPTOR_SIZE, cursor)) {
-                return failure(ValidationError::INVALID_FORMAT);
+                return ValidationResult::failure(ValidationError::INVALID_FORMAT);
             }
             for (std::size_t previous = 0; previous < macro_index; ++previous) {
                 if (input.data[macro_offset + previous * MACRO_DESCRIPTOR_SIZE] == macro_id) {
-                    return failure(ValidationError::INVALID_FORMAT);
+                    return ValidationResult::failure(ValidationError::INVALID_FORMAT);
                 }
             }
             for (std::size_t step_index = 0; step_index < step_count; ++step_index) {
@@ -342,13 +348,13 @@ ValidationResult validate_config(protocol::ByteView input) {
                     !all_zero(input, cursor, aligned_cursor) ||
                     !has_region(input, payload_offset, payload_length) ||
                     !validate_step_payload(input, input.data[step], payload_offset, payload_length)) {
-                    return failure(ValidationError::INVALID_FORMAT);
+                    return ValidationResult::failure(ValidationError::INVALID_FORMAT);
                 }
                 cursor = payload_offset + payload_length;
             }
             std::size_t aligned_cursor = 0U;
             if (!align4(cursor, aligned_cursor) || !all_zero(input, cursor, aligned_cursor)) {
-                return failure(ValidationError::INVALID_FORMAT);
+                return ValidationResult::failure(ValidationError::INVALID_FORMAT);
             }
             cursor = aligned_cursor;
         }
@@ -356,22 +362,22 @@ ValidationResult validate_config(protocol::ByteView input) {
         for (std::size_t binding_index = 0; binding_index < binding_count; ++binding_index) {
             const std::size_t binding = binding_offset + binding_index * BINDING_RECORD_SIZE;
             if (!validate_binding(input, binding, macro_offset, macro_count)) {
-                return failure(ValidationError::INVALID_FORMAT);
+                return ValidationResult::failure(ValidationError::INVALID_FORMAT);
             }
             for (std::size_t previous = 0; previous < binding_index; ++previous) {
                 const std::size_t earlier = binding_offset + previous * BINDING_RECORD_SIZE;
                 if (input.data[earlier] == input.data[binding] &&
                     input.data[earlier + 1U] == input.data[binding + 1U] &&
                     input.data[earlier + 2U] == input.data[binding + 2U]) {
-                    return failure(ValidationError::INVALID_FORMAT);
+                    return ValidationResult::failure(ValidationError::INVALID_FORMAT);
                 }
             }
         }
     }
     if (expected_string != string_end || cursor != input.size) {
-        return failure(ValidationError::INVALID_FORMAT);
+        return ValidationResult::failure(ValidationError::INVALID_FORMAT);
     }
-    return {ValidationError::NONE, ConfigView{input}};
+    return ValidationResult::success(input);
 }
 
 std::uint8_t ConfigView::active_profile_id() const {

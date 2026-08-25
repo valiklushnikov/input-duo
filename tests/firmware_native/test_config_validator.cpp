@@ -9,13 +9,27 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace {
 
 using duo_input::config::ConfigView;
+using duo_input::config::ValidationError;
+using duo_input::config::ValidationResult;
 using duo_input::config::validate_config;
 using duo_input::protocol::ByteView;
+
+static_assert(!std::is_constructible_v<ValidationResult, ValidationError>);
+static_assert(!std::is_constructible_v<ValidationResult, ValidationError, ConfigView>);
+static_assert(std::is_same_v<decltype(std::declval<const ValidationResult&>().error()),
+                             ValidationError>);
+static_assert(std::is_same_v<decltype(std::declval<const ValidationResult&>().view()),
+                             const ConfigView&>);
+static_assert(!std::is_assignable_v<decltype(std::declval<const ValidationResult&>().error()),
+                                    ValidationError>);
+static_assert(!std::is_copy_assignable_v<ValidationResult>);
 
 std::vector<std::uint8_t> read_vector(const char* name) {
     const std::string path = std::string{DUO_CONFIG_VECTORS_PATH} + "/" + name;
@@ -56,6 +70,44 @@ bool rejects(const std::vector<std::uint8_t>& bytes) {
     return !validate_config({bytes.data(), bytes.size()});
 }
 
+std::size_t first_macro_offset(const std::vector<std::uint8_t>& bytes) {
+    return read_u32(bytes, 64U + 24U);
+}
+
+std::size_t step_descriptor(const std::vector<std::uint8_t>& bytes,
+                            duo_input::protocol::MacroStepType type) {
+    const std::size_t macro = first_macro_offset(bytes);
+    const std::size_t step_count = read_u16(bytes, macro + 10U);
+    const std::size_t steps = read_u32(bytes, macro + 12U);
+    for (std::size_t index = 0; index < step_count; ++index) {
+        const std::size_t descriptor = steps + index * 12U;
+        if (bytes[descriptor] == static_cast<std::uint8_t>(type)) {
+            return descriptor;
+        }
+    }
+    return bytes.size();
+}
+
+std::vector<std::uint8_t> mutate_step_payload(const std::vector<std::uint8_t>& valid,
+                                              duo_input::protocol::MacroStepType type,
+                                              std::size_t payload_index,
+                                              std::uint8_t value) {
+    std::vector<std::uint8_t> bytes = valid;
+    const std::size_t descriptor = step_descriptor(bytes, type);
+    CHECK(descriptor < bytes.size());
+    if (descriptor >= bytes.size()) {
+        return valid;
+    }
+    const std::size_t payload = read_u32(bytes, descriptor + 4U);
+    CHECK(payload_index < read_u16(bytes, descriptor + 2U));
+    if (payload_index >= read_u16(bytes, descriptor + 2U)) {
+        return valid;
+    }
+    bytes[payload + payload_index] = value;
+    repair_crc(bytes);
+    return bytes;
+}
+
 }  // namespace
 
 TEST_CASE(config_validator_accepts_python_vectors_and_exposes_bounded_views) {
@@ -66,16 +118,17 @@ TEST_CASE(config_validator_accepts_python_vectors_and_exposes_bounded_views) {
 
     CHECK(minimal_result);
     CHECK(full_result);
-    CHECK_EQ(minimal_result.view.active_profile_id(), 1U);
-    CHECK_EQ(full_result.view.active_profile_id(), 8U);
-    CHECK_EQ(full_result.view.profile_count(), 8U);
+    CHECK_EQ(minimal_result.error(), ValidationError::NONE);
+    CHECK_EQ(minimal_result.view().active_profile_id(), 1U);
+    CHECK_EQ(full_result.view().active_profile_id(), 8U);
+    CHECK_EQ(full_result.view().profile_count(), 8U);
 
     duo_input::config::ProfileView profile{};
-    CHECK(full_result.view.profile_at(0U, profile));
+    CHECK(full_result.view().profile_at(0U, profile));
     CHECK_EQ(profile.id(), 1U);
     CHECK_EQ(profile.binding_count(), 4U);
     CHECK_EQ(profile.macro_count(), 2U);
-    CHECK_FALSE(full_result.view.profile_at(8U, profile));
+    CHECK_FALSE(full_result.view().profile_at(8U, profile));
 
     duo_input::config::BindingView binding{};
     CHECK(profile.binding_at(0U, binding));
@@ -100,9 +153,10 @@ TEST_CASE(config_validator_rejects_crc_damage_and_representative_truncations) {
     damaged.back() ^= 1U;
     CHECK(rejects(damaged));
     const auto damaged_result = validate_config({damaged.data(), damaged.size()});
-    CHECK_EQ(damaged_result.view.profile_count(), 0U);
+    CHECK_EQ(damaged_result.error(), ValidationError::INVALID_CRC);
+    CHECK_EQ(damaged_result.view().profile_count(), 0U);
     duo_input::config::ProfileView absent{};
-    CHECK_FALSE(damaged_result.view.profile_at(0U, absent));
+    CHECK_FALSE(damaged_result.view().profile_at(0U, absent));
 
     const std::uint32_t string_offset = read_u32(valid, 24U);
     const std::uint32_t data_offset = read_u32(valid, 32U);
@@ -222,4 +276,32 @@ TEST_CASE(config_validator_rejects_repaired_unknown_enums_duplicates_and_invalid
     invalid_utf8[name_offset] = 0xFFU;
     repair_crc(invalid_utf8);
     CHECK(rejects(invalid_utf8));
+}
+
+TEST_CASE(config_validator_rejects_independent_missing_action_references) {
+    const std::vector<std::uint8_t> valid = read_vector("valid_full.bin");
+    const std::size_t binding_offset = read_u32(valid, 64U + 16U);
+
+    std::vector<std::uint8_t> missing_macro = valid;
+    missing_macro[binding_offset + 5U] = 254U;
+    repair_crc(missing_macro);
+    CHECK(rejects(missing_macro));
+
+    std::vector<std::uint8_t> missing_profile = valid;
+    missing_profile[binding_offset + 12U + 5U] = 9U;
+    repair_crc(missing_profile);
+    CHECK(rejects(missing_profile));
+}
+
+TEST_CASE(config_validator_rejects_each_independent_malformed_generated_step_payload) {
+    using duo_input::protocol::MacroStepType;
+    const std::vector<std::uint8_t> valid = read_vector("valid_full.bin");
+
+    CHECK(rejects(mutate_step_payload(valid, MacroStepType::CONSUMER_TAP, 0U, 0U)));
+    CHECK(rejects(mutate_step_payload(valid, MacroStepType::TEXT, 1U, 0U)));
+    CHECK(rejects(mutate_step_payload(valid, MacroStepType::DELAY, 2U, 0xFFU)));
+    CHECK(rejects(mutate_step_payload(valid, MacroStepType::DELAY, 3U, 0xFFU)));
+    CHECK(rejects(mutate_step_payload(valid, MacroStepType::SET_KEYBOARD_ROUTE, 0U, 0U)));
+    CHECK(rejects(mutate_step_payload(valid, MacroStepType::SET_MOUSE_ROUTE, 0U, 0U)));
+    CHECK(rejects(mutate_step_payload(valid, MacroStepType::SET_PROFILE, 0U, 9U)));
 }

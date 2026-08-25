@@ -14,7 +14,7 @@ class ProfileView;
 class BindingView;
 class MacroView;
 class StepView;
-struct ValidationResult;
+class ValidationResult;
 
 enum class ValidationError : std::uint8_t {
     NONE = 0,
@@ -97,19 +97,26 @@ public:
     bool profile_at(std::size_t index, ProfileView& output) const;
 
 private:
-    friend struct ValidationResult;
+    friend class ValidationResult;
     friend ValidationResult validate_config(protocol::ByteView input);
     ConfigView() = default;
     explicit ConfigView(protocol::ByteView bytes) : bytes_(bytes) {}
     protocol::ByteView bytes_{nullptr, 0U};
 };
 
-struct ValidationResult {
-    explicit ValidationResult(ValidationError value) : error(value), view() {}
-    ValidationResult(ValidationError value, ConfigView config) : error(value), view(config) {}
-    ValidationError error;
-    ConfigView view;
-    explicit operator bool() const { return error == ValidationError::NONE; }
+class ValidationResult {
+public:
+    ValidationError error() const { return error_; }
+    const ConfigView& view() const { return view_; }
+    explicit operator bool() const { return error_ == ValidationError::NONE; }
+
+private:
+    friend ValidationResult validate_config(protocol::ByteView input);
+    ValidationResult(ValidationError error, ConfigView view) : error_(error), view_(view) {}
+    static ValidationResult failure(ValidationError error);
+    static ValidationResult success(protocol::ByteView input);
+    const ValidationError error_;
+    const ConfigView view_;
 };
 
 ValidationResult validate_config(protocol::ByteView input);
