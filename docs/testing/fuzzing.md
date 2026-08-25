@@ -20,7 +20,8 @@ ctest --test-dir build/native-fuzz-smoke --output-on-failure -R '^fuzz_corpus_'
 
 These smoke targets are intentionally built only for `DUO_NATIVE_TESTS=ON`; a
 `DUO_FUZZ_TESTS=ON` Clang build contains only libFuzzer targets, so it does not link its
-sanitizer-instrumented parser library into non-sanitized smoke executables.
+sanitizer-instrumented parser library into non-sanitized smoke executables. The two options are
+mutually exclusive; use separate build directories for the native corpus smoke and fuzz campaign.
 
 The generator's `--check` mode verifies exact byte content and rejects extra corpus files.  Each
 seed is below 4 KiB.  CDC's `valid-shared-vector.bin` and SPI's equivalent are byte-for-byte

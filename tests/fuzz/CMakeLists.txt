@@ -24,6 +24,12 @@ if(BUILD_TESTING AND DUO_NATIVE_TESTS AND NOT DUO_FUZZ_TESTS)
     duo_add_corpus_smoke(cdc fuzz_cdc_frame.cpp)
     duo_add_corpus_smoke(spi fuzz_spi_frame.cpp)
     duo_add_corpus_smoke(config fuzz_config.cpp)
+    add_test(NAME fuzz_option_combination
+        COMMAND ${CMAKE_COMMAND}
+            -DDUO_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+            -DDUO_OPTION_COMBINATION_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/option-combination
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/verify_option_combination.cmake
+    )
 endif()
 
 if(DUO_FUZZ_TESTS)
