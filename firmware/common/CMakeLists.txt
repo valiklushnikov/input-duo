@@ -1,4 +1,5 @@
 add_library(duo_common STATIC
+    config/validator.cpp
     protocol/cobs.cpp
     protocol/crc.cpp
     protocol/frame.cpp

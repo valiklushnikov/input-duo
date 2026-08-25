@@ -17,3 +17,19 @@ endif()
 
 add_test(NAME firmware_native COMMAND duo_firmware_native_test)
 add_test(NAME transport COMMAND duo_firmware_native_test)
+
+add_executable(duo_config_validator_test
+    test_main.cpp
+    test_config_validator.cpp
+)
+
+target_link_libraries(duo_config_validator_test PRIVATE duo_common)
+target_compile_definitions(duo_config_validator_test PRIVATE
+    DUO_CONFIG_VECTORS_PATH="${CMAKE_SOURCE_DIR}/tests/vectors/config_vectors"
+)
+
+if(MSVC)
+    target_compile_options(duo_config_validator_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME config_validator COMMAND duo_config_validator_test)
