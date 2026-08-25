@@ -5,6 +5,9 @@ add_executable(duo_firmware_native_test
 )
 
 target_link_libraries(duo_firmware_native_test PRIVATE duo_common)
+target_compile_definitions(duo_firmware_native_test PRIVATE
+    DUO_TRANSPORT_VECTORS_PATH="${CMAKE_SOURCE_DIR}/tests/vectors/transport_vectors.json"
+)
 
 if(MSVC)
     target_compile_options(duo_firmware_native_test PRIVATE /EHsc)

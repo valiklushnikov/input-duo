@@ -1,6 +1,7 @@
 #include "protocol/cobs.hpp"
 
 #include <cstdint>
+#include <limits>
 
 namespace duo_input::protocol {
 
@@ -23,7 +24,26 @@ bool cobs_encode(ByteView input, MutableByteView output, std::size_t& output_siz
         return false;
     }
 
-    const std::size_t required_size = input.size + (input.size / 254U) + 1U;
+    const std::size_t additional_code_bytes = input.size / 254U;
+    if (input.size > std::numeric_limits<std::size_t>::max() - additional_code_bytes - 1U) {
+        return false;
+    }
+
+    std::size_t required_size = 1;
+    std::uint8_t code = 1;
+    for (std::size_t index = 0; index < input.size; ++index) {
+        if (input.data[index] == 0) {
+            ++required_size;
+            code = 1;
+        } else {
+            ++required_size;
+            ++code;
+            if (code == COBS_MAX_CODE) {
+                ++required_size;
+                code = 1;
+            }
+        }
+    }
     if (output.size < required_size) {
         return false;
     }
@@ -31,7 +51,7 @@ bool cobs_encode(ByteView input, MutableByteView output, std::size_t& output_siz
     std::size_t read_index = 0;
     std::size_t write_index = 1;
     std::size_t code_index = 0;
-    std::uint8_t code = 1;
+    code = 1;
 
     while (read_index < input.size) {
         const std::uint8_t byte = input.data[read_index++];
