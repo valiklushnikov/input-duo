@@ -145,6 +145,37 @@ def test_minor_capability_intersection_rejects_unnegotiated_operation(config_a: 
     assert not emulator.staging_active
 
 
+@pytest.mark.parametrize(
+    ("message_type", "payload"),
+    [
+        (CdcMessageType.WRITE_BEGIN, b""),
+        (CdcMessageType.READ_CONFIG_CHUNK, b""),
+        (CdcMessageType.SET_ACTIVE_PROFILE, b""),
+        (CdcMessageType.TEST_MACRO, b"\x01"),
+    ],
+)
+def test_malformed_fixed_payload_precedes_session_and_capability_gates(message_type, payload):
+    without_session = U1Emulator()
+    baseline = (
+        without_session.active_profile,
+        without_session.capture_active,
+        without_session.staging_active,
+        without_session.release_all_count,
+    )
+    assert _error(_request(without_session, message_type, payload)) is ErrorCode.INVALID_REQUEST
+    assert (
+        without_session.active_profile,
+        without_session.capture_active,
+        without_session.staging_active,
+        without_session.release_all_count,
+    ) == baseline
+
+    without_capability = U1Emulator()
+    _hello(without_capability, 0)
+    assert _error(_request(without_capability, message_type, payload)) is ErrorCode.INVALID_REQUEST
+    assert not without_capability.staging_active
+
+
 def test_major_mismatch_is_reported_and_blocks_state_changes(config_a: bytes):
     emulator = U1Emulator()
     request = CdcFrame(CdcMessageType.HELLO, 9, struct.pack("<I", 0xFFFFFFFF))
@@ -163,6 +194,24 @@ def test_major_mismatch_is_reported_and_blocks_state_changes(config_a: bytes):
     assert not emulator.staging_active
 
 
+def test_malformed_hello_does_not_replace_valid_negotiation(config_a: bytes):
+    emulator = U1Emulator()
+    _hello(emulator, sequence=200)
+
+    malformed = _request(emulator, CdcMessageType.HELLO, b"\0", 201)
+    assert _error(malformed) is ErrorCode.INVALID_REQUEST
+    assert not emulator.staging_active
+
+    begin = _request(
+        emulator,
+        CdcMessageType.WRITE_BEGIN,
+        struct.pack("<I", len(config_a)) + hashlib.sha256(config_a).digest(),
+        202,
+    )
+    assert _error(begin) is ErrorCode.OK
+    assert emulator.staging_active
+
+
 def test_major_mismatch_with_bad_crc_is_dropped_before_negotiation():
     emulator = U1Emulator()
     wire = bytearray(
@@ -172,6 +221,26 @@ def test_major_mismatch_with_bad_crc_is_dropped_before_negotiation():
 
     assert emulator.feed(bytes(wire)) == b""
     assert emulator.last_sequence is None
+
+
+def test_non_v1_stateful_requests_are_rejected_before_dispatch(config_a: bytes):
+    emulator = U1Emulator()
+    _hello(emulator, sequence=50)
+
+    write_begin = CdcFrame(
+        CdcMessageType.WRITE_BEGIN,
+        51,
+        struct.pack("<I", len(config_a)) + hashlib.sha256(config_a).digest(),
+    )
+    write_reply = _decode_stream(emulator.feed(_wire_with_major(write_begin, 99)))[0]
+    assert _error(write_reply) is ErrorCode.INCOMPATIBLE_MAJOR
+    assert not emulator.staging_active
+
+    stop_reply = _decode_stream(
+        emulator.feed(_wire_with_major(CdcFrame(CdcMessageType.STOP_AND_RELEASE_ALL, 52, b""), 99))
+    )[0]
+    assert _error(stop_reply) is ErrorCode.INCOMPATIBLE_MAJOR
+    assert emulator.release_all_count == 0
 
 
 def test_exact_retry_is_byte_identical_and_bad_sequence_does_not_repeat_side_effects():
@@ -400,6 +469,18 @@ def test_bad_crc_response_injection_corrupts_one_response_once():
         decode_cdc_frame(wire)
     retry = emulator.feed(encode_cdc_frame(CdcFrame(CdcMessageType.HELLO, 3, struct.pack("<I", 0))))
     assert _error(decode_cdc_frame(retry)) is ErrorCode.OK
+
+
+def test_bad_crc_response_injection_preserves_cobs_for_long_zero_ping():
+    emulator = U1Emulator()
+    emulator.inject_bad_crc_response()
+    request = encode_cdc_frame(CdcFrame(CdcMessageType.PING, 1, bytes(639)))
+
+    wire = emulator.feed(request)
+
+    cobs_decode(wire[:-1])
+    with pytest.raises(FrameError, match="CRC"):
+        decode_cdc_frame(wire)
 
 
 def test_ping_rejects_payload_that_cannot_fit_error_prefixed_reply():

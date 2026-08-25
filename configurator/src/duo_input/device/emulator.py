@@ -41,19 +41,24 @@ class ErrorCode(IntEnum):
 
 DEVICE_CAPABILITIES = sum(int(capability) for capability in Capability)
 _ZERO_HASH = b"\0" * 32
-_EMPTY_REQUESTS = {
-    CdcMessageType.GET_STATUS,
-    CdcMessageType.GET_ACTIVE_CONFIG_INFO,
-    CdcMessageType.READ_CONFIG_BEGIN,
-    CdcMessageType.WRITE_VERIFY,
-    CdcMessageType.WRITE_COMMIT,
-    CdcMessageType.WRITE_ABORT,
-    CdcMessageType.CAPTURE_BEGIN,
-    CdcMessageType.CAPTURE_END,
-    CdcMessageType.STOP_AND_RELEASE_ALL,
-    CdcMessageType.GET_DIAGNOSTICS,
-    CdcMessageType.FACTORY_RESET_ARM,
-    CdcMessageType.FACTORY_RESET_COMMIT,
+_FIXED_REQUEST_SIZES = {
+    CdcMessageType.HELLO: 4,
+    CdcMessageType.GET_STATUS: 0,
+    CdcMessageType.GET_ACTIVE_CONFIG_INFO: 0,
+    CdcMessageType.READ_CONFIG_BEGIN: 0,
+    CdcMessageType.READ_CONFIG_CHUNK: 6,
+    CdcMessageType.WRITE_BEGIN: 36,
+    CdcMessageType.WRITE_VERIFY: 0,
+    CdcMessageType.WRITE_COMMIT: 0,
+    CdcMessageType.WRITE_ABORT: 0,
+    CdcMessageType.SET_ACTIVE_PROFILE: 1,
+    CdcMessageType.CAPTURE_BEGIN: 0,
+    CdcMessageType.CAPTURE_END: 0,
+    CdcMessageType.TEST_MACRO: 2,
+    CdcMessageType.STOP_AND_RELEASE_ALL: 0,
+    CdcMessageType.GET_DIAGNOSTICS: 0,
+    CdcMessageType.FACTORY_RESET_ARM: 0,
+    CdcMessageType.FACTORY_RESET_COMMIT: 0,
 }
 _REQUIRED_CAPABILITY = {
     CdcMessageType.GET_ACTIVE_CONFIG_INFO: Capability.CONFIG_READ,
@@ -196,7 +201,7 @@ class U1Emulator(AbstractByteTransport):
                 continue
             if self._bad_crc_response_once:
                 self._bad_crc_response_once = False
-                response = self._corrupt_transport_byte(response)
+                response = self._corrupt_response_crc(response)
             responses.extend(response)
 
         if data == b"" and self._capture_active and self._capture_event is not None:
@@ -311,10 +316,16 @@ class U1Emulator(AbstractByteTransport):
 
     def _dispatch(self, frame: CdcFrame, major: int) -> tuple[CdcMessageType, bytes]:
         if frame.type is CdcMessageType.HELLO:
+            if not self._payload_shape_is_valid(frame):
+                return CdcMessageType.DEVICE_INFO, self._device_info_payload(
+                    ErrorCode.INVALID_REQUEST, 0
+                )
             return CdcMessageType.DEVICE_INFO, self._hello(frame.payload, major)
+        if major != PROTOCOL_VERSION_MAJOR:
+            return frame.type, self._error_payload(frame, ErrorCode.INCOMPATIBLE_MAJOR)
         if frame.type in (CdcMessageType.DEVICE_INFO, CdcMessageType.CAPTURE_EVENT):
             return frame.type, bytes((ErrorCode.INVALID_REQUEST,))
-        if frame.type in _EMPTY_REQUESTS and frame.payload:
+        if not self._payload_shape_is_valid(frame):
             return frame.type, self._error_payload(frame, ErrorCode.INVALID_REQUEST)
 
         if frame.type not in (CdcMessageType.PING, CdcMessageType.STOP_AND_RELEASE_ALL):
@@ -326,6 +337,13 @@ class U1Emulator(AbstractByteTransport):
 
         handler = getattr(self, f"_handle_{frame.type.name.lower()}")
         return frame.type, handler(frame.payload)
+
+    @staticmethod
+    def _payload_shape_is_valid(frame: CdcFrame) -> bool:
+        if frame.type is CdcMessageType.WRITE_CHUNK:
+            return 5 <= len(frame.payload) <= 4 + CONFIG_CHUNK_MAX_BYTES
+        expected = _FIXED_REQUEST_SIZES.get(frame.type)
+        return expected is None or len(frame.payload) == expected
 
     def _error_payload(self, frame: CdcFrame, error: ErrorCode) -> bytes:
         if frame.type is CdcMessageType.HELLO:
@@ -345,10 +363,6 @@ class U1Emulator(AbstractByteTransport):
         return bytes((error,))
 
     def _hello(self, payload: bytes, major: int) -> bytes:
-        if len(payload) != 4:
-            self._negotiated_capabilities = None
-            self._negotiation_error = ErrorCode.INVALID_REQUEST
-            return self._device_info_payload(ErrorCode.INVALID_REQUEST, 0)
         if major != PROTOCOL_VERSION_MAJOR:
             self._negotiated_capabilities = None
             self._negotiation_error = ErrorCode.INCOMPATIBLE_MAJOR
@@ -565,14 +579,10 @@ class U1Emulator(AbstractByteTransport):
         return bytes((ErrorCode.OK,)) + payload
 
     @staticmethod
-    def _corrupt_transport_byte(response: bytes) -> bytes:
-        damaged = bytearray(response)
-        if len(damaged) < 2:
-            return response
-        damaged[-2] ^= 1
-        if damaged[-2] == 0:
-            damaged[-2] = 2
-        return bytes(damaged)
+    def _corrupt_response_crc(response: bytes) -> bytes:
+        raw = bytearray(cobs_decode(response[:-1]))
+        raw[-1] ^= 1
+        return cobs_encode(raw) + b"\0"
 
 
 __all__ = ["DEVICE_CAPABILITIES", "ErrorCode", "U1Emulator"]
