@@ -1,5 +1,7 @@
 #include "test_support.hpp"
 
+#include "protocol/cobs.hpp"
+#include "protocol/crc.hpp"
 #include "protocol/frame.hpp"
 
 #include <array>
@@ -61,6 +63,71 @@ std::vector<std::uint8_t> hex_bytes(const std::string& value) {
                                                   hex_digit(value[index + 1U])));
     }
     return bytes;
+}
+
+void write_u16(std::uint8_t* bytes, std::uint16_t value) {
+    bytes[0] = static_cast<std::uint8_t>(value & 0xFFU);
+    bytes[1] = static_cast<std::uint8_t>(value >> 8U);
+}
+
+void write_u32(std::uint8_t* bytes, std::uint32_t value) {
+    bytes[0] = static_cast<std::uint8_t>(value & 0xFFU);
+    bytes[1] = static_cast<std::uint8_t>((value >> 8U) & 0xFFU);
+    bytes[2] = static_cast<std::uint8_t>((value >> 16U) & 0xFFU);
+    bytes[3] = static_cast<std::uint8_t>((value >> 24U) & 0xFFU);
+}
+
+std::vector<std::uint8_t> decode_cdc_transport(const std::vector<std::uint8_t>& transport) {
+    std::vector<std::uint8_t> raw(transport.size());
+    std::size_t raw_size = 0;
+    if (transport.empty() || !duo_input::protocol::cobs_decode(
+                                 {transport.data(), transport.size() - 1U},
+                                 {raw.data(), raw.size()}, raw_size)) {
+        return {};
+    }
+    raw.resize(raw_size);
+    return raw;
+}
+
+std::vector<std::uint8_t> encode_cdc_raw_with_crc(std::vector<std::uint8_t> raw) {
+    if (raw.size() < 14U) {
+        return {};
+    }
+    write_u32(raw.data() + raw.size() - 4U,
+              duo_input::protocol::crc32_ieee({raw.data(), raw.size() - 4U}));
+    std::vector<std::uint8_t> transport(raw.size() + raw.size() / 254U + 2U);
+    std::size_t transport_size = 0;
+    if (!duo_input::protocol::cobs_encode({raw.data(), raw.size()},
+                                          {transport.data(), transport.size()}, transport_size)) {
+        return {};
+    }
+    transport.resize(transport_size);
+    transport.push_back(0);
+    return transport;
+}
+
+std::vector<std::uint8_t> repair_spi_crc(std::vector<std::uint8_t> frame) {
+    if (frame.size() != 64U) {
+        return {};
+    }
+    write_u16(frame.data() + 62U, duo_input::protocol::crc16_ccitt({frame.data(), 62U}));
+    return frame;
+}
+
+void check_cdc_error(const std::vector<std::uint8_t>& transport,
+                     duo_input::protocol::FrameError expected) {
+    std::array<std::uint8_t, 1038> scratch{};
+    duo_input::protocol::DecodeResult result{};
+    CHECK_FALSE(duo_input::protocol::decode_cdc_frame({transport.data(), transport.size()},
+                                                      {scratch.data(), scratch.size()}, result));
+    CHECK_EQ(result.error, expected);
+}
+
+void check_spi_error(const std::vector<std::uint8_t>& transport,
+                     duo_input::protocol::FrameError expected) {
+    duo_input::protocol::DecodeResult result{};
+    CHECK_FALSE(duo_input::protocol::decode_spi_frame({transport.data(), transport.size()}, result));
+    CHECK_EQ(result.error, expected);
 }
 
 }  // namespace
@@ -134,22 +201,100 @@ TEST_CASE(cdc_frame_rejects_every_transport_truncation_and_crc_damage) {
                                                       {scratch.data(), scratch.size()}, result));
 }
 
-TEST_CASE(frame_rejects_invalid_headers_and_spi_padding) {
-    std::vector<std::uint8_t> spi = hex_bytes(vector_value(vector_document(), "spi", "frame"));
+TEST_CASE(cdc_frame_distinguishes_malformed_cobs_from_insufficient_scratch) {
+    const std::vector<std::uint8_t> transport =
+        hex_bytes(vector_value(vector_document(), "cdc", "transport"));
+    std::array<std::uint8_t, 16> small_scratch{};
     duo_input::protocol::DecodeResult result{};
 
-    CHECK_FALSE(duo_input::protocol::decode_spi_frame({spi.data(), spi.size() - 1U}, result));
-    spi[20] = 1;
-    CHECK_FALSE(duo_input::protocol::decode_spi_frame({spi.data(), spi.size()}, result));
-    CHECK_FALSE(duo_input::protocol::decode_spi_frame({spi.data(), spi.size()}, result,
-                                                      0U, 0U));
+    CHECK_FALSE(duo_input::protocol::decode_cdc_frame({transport.data(), transport.size()},
+                                                      {small_scratch.data(), small_scratch.size()}, result));
+    CHECK_EQ(result.error, duo_input::protocol::FrameError::INSUFFICIENT_CAPACITY);
+    check_cdc_error({2U, 0U}, duo_input::protocol::FrameError::INVALID_INPUT);
 }
 
-TEST_CASE(minor_compatibility_uses_capability_intersection) {
+TEST_CASE(cdc_frame_reaches_each_repaired_header_validation) {
+    const std::vector<std::uint8_t> raw = decode_cdc_transport(
+        hex_bytes(vector_value(vector_document(), "cdc", "transport")));
+    struct Mutation {
+        std::size_t offset;
+        std::uint8_t value;
+        duo_input::protocol::FrameError error;
+    };
+    const std::array<Mutation, 5> mutations{{
+        {0U, 0U, duo_input::protocol::FrameError::INVALID_MAGIC},
+        {2U, 2U, duo_input::protocol::FrameError::INCOMPATIBLE_MAJOR},
+        {5U, 1U, duo_input::protocol::FrameError::INVALID_FLAGS},
+        {4U, 0xFFU, duo_input::protocol::FrameError::INVALID_TYPE},
+        {8U, 4U, duo_input::protocol::FrameError::INVALID_LENGTH},
+    }};
+
+    for (const Mutation& mutation : mutations) {
+        std::vector<std::uint8_t> mutated = raw;
+        mutated[mutation.offset] = mutation.value;
+        check_cdc_error(encode_cdc_raw_with_crc(mutated), mutation.error);
+    }
+    check_cdc_error({2U, 0U}, duo_input::protocol::FrameError::INVALID_INPUT);
+}
+
+TEST_CASE(spi_frame_reaches_each_repaired_header_padding_and_crc_validation) {
+    const std::vector<std::uint8_t> spi = hex_bytes(vector_value(vector_document(), "spi", "frame"));
+    struct Mutation {
+        std::size_t offset;
+        std::uint8_t value;
+        duo_input::protocol::FrameError error;
+    };
+    const std::array<Mutation, 5> mutations{{
+        {0U, 0U, duo_input::protocol::FrameError::INVALID_MAGIC},
+        {2U, 2U, duo_input::protocol::FrameError::INCOMPATIBLE_MAJOR},
+        {5U, 1U, duo_input::protocol::FrameError::INVALID_FLAGS},
+        {4U, 0xFFU, duo_input::protocol::FrameError::INVALID_TYPE},
+        {8U, 53U, duo_input::protocol::FrameError::INVALID_LENGTH},
+    }};
+
+    check_spi_error(std::vector<std::uint8_t>(spi.begin(), spi.end() - 1U),
+                    duo_input::protocol::FrameError::INVALID_INPUT);
+    for (const Mutation& mutation : mutations) {
+        std::vector<std::uint8_t> mutated = spi;
+        mutated[mutation.offset] = mutation.value;
+        check_spi_error(repair_spi_crc(mutated), mutation.error);
+    }
+    std::vector<std::uint8_t> nonzero_padding = spi;
+    nonzero_padding[20U] = 1U;
+    check_spi_error(repair_spi_crc(nonzero_padding), duo_input::protocol::FrameError::INVALID_PADDING);
+    std::vector<std::uint8_t> damaged_crc = spi;
+    damaged_crc[63U] ^= 1U;
+    check_spi_error(damaged_crc, duo_input::protocol::FrameError::INVALID_CRC);
+}
+
+TEST_CASE(frame_codecs_accept_and_reject_different_minors_by_capability) {
     constexpr std::uint16_t keyboard = static_cast<std::uint16_t>(
         duo_input::protocol::Capability::KEYBOARD_HID);
     constexpr std::uint16_t capture = static_cast<std::uint16_t>(duo_input::protocol::Capability::CAPTURE);
 
-    CHECK(duo_input::protocol::is_minor_compatible(9, keyboard, keyboard));
-    CHECK_FALSE(duo_input::protocol::is_minor_compatible(9, capture, keyboard));
+    std::vector<std::uint8_t> cdc_raw = decode_cdc_transport(
+        hex_bytes(vector_value(vector_document(), "cdc", "transport")));
+    cdc_raw[3] = 9U;
+    const std::vector<std::uint8_t> cdc = encode_cdc_raw_with_crc(cdc_raw);
+    std::array<std::uint8_t, 1038> scratch{};
+    duo_input::protocol::DecodeResult cdc_result{};
+    CHECK(duo_input::protocol::decode_cdc_frame({cdc.data(), cdc.size()},
+                                                {scratch.data(), scratch.size()}, cdc_result,
+                                                keyboard, keyboard));
+    CHECK_EQ(cdc_result.cdc.minor, 9U);
+    CHECK_FALSE(duo_input::protocol::decode_cdc_frame({cdc.data(), cdc.size()},
+                                                      {scratch.data(), scratch.size()}, cdc_result,
+                                                      capture, keyboard));
+    CHECK_EQ(cdc_result.error, duo_input::protocol::FrameError::INCOMPATIBLE_MINOR);
+
+    std::vector<std::uint8_t> spi = hex_bytes(vector_value(vector_document(), "spi", "frame"));
+    spi[3] = 9U;
+    spi = repair_spi_crc(spi);
+    duo_input::protocol::DecodeResult spi_result{};
+    CHECK(duo_input::protocol::decode_spi_frame({spi.data(), spi.size()}, spi_result, keyboard,
+                                                keyboard));
+    CHECK_EQ(spi_result.spi.minor, 9U);
+    CHECK_FALSE(duo_input::protocol::decode_spi_frame({spi.data(), spi.size()}, spi_result, capture,
+                                                      keyboard));
+    CHECK_EQ(spi_result.error, duo_input::protocol::FrameError::INCOMPATIBLE_MINOR);
 }

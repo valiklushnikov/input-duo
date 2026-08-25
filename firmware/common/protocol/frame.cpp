@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 namespace duo_input::protocol {
 
@@ -23,6 +24,36 @@ bool has_valid_data(ByteView view) {
 
 bool has_valid_data(MutableByteView view) {
     return view.size == 0 || view.data != nullptr;
+}
+
+bool cobs_decoded_size(ByteView input, std::size_t& decoded_size) {
+    if (!has_valid_data(input) || input.size == 0) {
+        return false;
+    }
+
+    std::size_t read_index = 0;
+    decoded_size = 0;
+    while (read_index < input.size) {
+        const std::uint8_t code = input.data[read_index++];
+        if (code == 0) {
+            return false;
+        }
+
+        const std::size_t block_size = static_cast<std::size_t>(code - 1U);
+        if (block_size > input.size - read_index ||
+            decoded_size > std::numeric_limits<std::size_t>::max() - block_size) {
+            return false;
+        }
+        read_index += block_size;
+        decoded_size += block_size;
+        if (read_index < input.size && code != 0xFFU) {
+            if (decoded_size == std::numeric_limits<std::size_t>::max()) {
+                return false;
+            }
+            ++decoded_size;
+        }
+    }
+    return true;
 }
 
 bool fail(DecodeResult& result, FrameError error) {
@@ -161,8 +192,15 @@ bool decode_cdc_frame(ByteView transport, MutableByteView scratch, DecodeResult&
         }
     }
 
+    const ByteView encoded{transport.data, transport.size - 1U};
     std::size_t raw_size = 0;
-    if (!cobs_decode({transport.data, transport.size - 1U}, scratch, raw_size)) {
+    if (!cobs_decoded_size(encoded, raw_size)) {
+        return fail(result, FrameError::INVALID_INPUT);
+    }
+    if (scratch.size < raw_size) {
+        return fail(result, FrameError::INSUFFICIENT_CAPACITY);
+    }
+    if (!cobs_decode(encoded, scratch, raw_size)) {
         return fail(result, FrameError::INVALID_INPUT);
     }
     if (raw_size < CDC_MIN_RAW_SIZE) {
