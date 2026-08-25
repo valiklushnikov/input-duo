@@ -1,0 +1,79 @@
+{
+  "capabilities": {
+    "CAPTURE": 32,
+    "CONFIG_READ": 8,
+    "CONFIG_WRITE": 16,
+    "CONSUMER_HID": 4,
+    "DIAGNOSTICS": 128,
+    "FACTORY_RESET": 256,
+    "KEYBOARD_HID": 1,
+    "MOUSE_HID": 2,
+    "ROUTE_CONTROL": 512,
+    "SPI_ENDPOINT": 1024,
+    "TEST_MACRO": 64
+  },
+  "cdc_messages": {
+    "CAPTURE_BEGIN": 13,
+    "CAPTURE_END": 15,
+    "CAPTURE_EVENT": 14,
+    "DEVICE_INFO": 2,
+    "FACTORY_RESET_ARM": 19,
+    "FACTORY_RESET_COMMIT": 20,
+    "GET_ACTIVE_CONFIG_INFO": 4,
+    "GET_DIAGNOSTICS": 18,
+    "GET_STATUS": 3,
+    "HELLO": 1,
+    "PING": 21,
+    "READ_CONFIG_BEGIN": 5,
+    "READ_CONFIG_CHUNK": 6,
+    "SET_ACTIVE_PROFILE": 12,
+    "STOP_AND_RELEASE_ALL": 17,
+    "TEST_MACRO": 16,
+    "WRITE_ABORT": 11,
+    "WRITE_BEGIN": 7,
+    "WRITE_CHUNK": 8,
+    "WRITE_COMMIT": 10,
+    "WRITE_VERIFY": 9
+  },
+  "limits": {
+    "binary_config_max_bytes": 368640,
+    "bindings_per_profile": 128,
+    "cdc_max_payload": 1024,
+    "config_chunk_max_bytes": 512,
+    "macro_steps_per_macro": 64,
+    "macros_per_profile": 32,
+    "max_delay_ms": 60000,
+    "profiles": 8,
+    "queued_macro_starts": 4,
+    "spi_frame_size": 64,
+    "text_characters_per_step": 1024
+  },
+  "macro_steps": {
+    "CONSUMER_TAP": 4,
+    "DELAY": 6,
+    "KEY_DOWN": 2,
+    "KEY_TAP": 1,
+    "KEY_UP": 3,
+    "SET_KEYBOARD_ROUTE": 7,
+    "SET_MOUSE_ROUTE": 8,
+    "SET_PROFILE": 9,
+    "TEXT": 5
+  },
+  "protocol_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "schema_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "spi_messages": {
+    "CONSUMER_STATE": 3,
+    "CONTROL_RELEASE_ALL": 5,
+    "ENDPOINT_STATUS": 7,
+    "HANDSHAKE": 1,
+    "HEARTBEAT": 6,
+    "KBD_STATE": 2,
+    "MOUSE_DELTA": 4
+  }
+}
