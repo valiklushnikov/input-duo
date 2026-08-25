@@ -126,6 +126,13 @@ TEST_CASE(cobs_encodes_254_nonzero_bytes_vector) {
                                            {encoded.data(), encoded.size()}, encoded_size));
     CHECK_EQ(encoded_size, expected.size());
     CHECK(bytes_equal(encoded.data(), expected.data(), encoded_size));
+
+    std::array<std::uint8_t, 254> decoded{};
+    std::size_t decoded_size = 0;
+    CHECK(duo_input::protocol::cobs_decode({encoded.data(), encoded_size},
+                                           {decoded.data(), decoded.size()}, decoded_size));
+    CHECK_EQ(decoded_size, raw.size());
+    CHECK(bytes_equal(decoded.data(), raw.data(), raw.size()));
 }
 
 TEST_CASE(cobs_rejects_malformed_vectors_without_changing_output_size) {
