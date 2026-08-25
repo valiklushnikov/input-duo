@@ -1,0 +1,19 @@
+{
+  "cdc": {
+    "name": "ping_with_embedded_zero",
+    "raw": "444901001500341203001000209933898a",
+    "transport": "04444901021504341203021006209933898a00",
+    "minor": 0,
+    "type": "PING",
+    "sequence": 4660,
+    "payload": "100020"
+  },
+  "spi": {
+    "name": "heartbeat",
+    "frame": "4453010006002a000300aabbcc000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003fc0",
+    "minor": 0,
+    "type": "HEARTBEAT",
+    "sequence": 42,
+    "payload": "aabbcc"
+  }
+}

@@ -2,11 +2,13 @@ add_executable(duo_firmware_native_test
     test_main.cpp
     test_smoke.cpp
     test_transport.cpp
+    test_frames.cpp
 )
 
 target_link_libraries(duo_firmware_native_test PRIVATE duo_common)
 target_compile_definitions(duo_firmware_native_test PRIVATE
     DUO_TRANSPORT_VECTORS_PATH="${CMAKE_SOURCE_DIR}/tests/vectors/transport_vectors.json"
+    DUO_FRAME_VECTORS_PATH="${CMAKE_SOURCE_DIR}/tests/vectors/frame_vectors.json"
 )
 
 if(MSVC)
