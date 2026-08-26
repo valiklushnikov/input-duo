@@ -315,7 +315,15 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
     put_u32(out + 9, diagnostics_.timeout);
     put_u32(out + 13, diagnostics_.bad_sequence);
     put_u32(out + 17, diagnostics_.aborted_staging);
-    return 21;
+
+    // Appended after the counters the host already knew about, so an older
+    // configurator reading the first 21 bytes still reads them correctly.
+    out[21] = link_state_.answered ? 1 : 0;
+    out[22] = link_state_.mounted ? 1 : 0;
+    put_u32(out + 23, link_state_.frames_sent);
+    put_u32(out + 27, link_state_.crc_errors);
+    put_u32(out + 31, link_state_.echoed_frames);
+    return 35;
 #endif
 }
 

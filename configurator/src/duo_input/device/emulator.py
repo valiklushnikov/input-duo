@@ -126,6 +126,14 @@ class U1Emulator(AbstractByteTransport):
         self._factory_reset_armed = False
         self.physical_confirmation = False
         self._diagnostics = _Diagnostics()
+        # What the emulated U1 says about its link to U2. A real device reports
+        # these, so the emulator has to as well, or the configurator cannot be
+        # exercised against the state that matters most to an operator.
+        self.endpoint_answering = True
+        self.endpoint_mounted = True
+        self.link_frames_sent = 0
+        self.link_crc_errors = 0
+        self.link_echoed_frames = 0
         self._timeout_once = False
         self._disconnect_once = False
         self._bad_crc_response_once = False
@@ -542,13 +550,24 @@ class U1Emulator(AbstractByteTransport):
         return bytes((ErrorCode.OK,))
 
     def _handle_get_diagnostics(self, payload: bytes) -> bytes:
-        return bytes((ErrorCode.OK,)) + struct.pack(
-            "<IIIII",
-            self._diagnostics.bad_crc,
-            self._diagnostics.disconnect,
-            self._diagnostics.timeout,
-            self._diagnostics.bad_sequence,
-            self._diagnostics.aborted_staging,
+        return (
+            bytes((ErrorCode.OK,))
+            + struct.pack(
+                "<IIIII",
+                self._diagnostics.bad_crc,
+                self._diagnostics.disconnect,
+                self._diagnostics.timeout,
+                self._diagnostics.bad_sequence,
+                self._diagnostics.aborted_staging,
+            )
+            + struct.pack(
+                "<BBIII",
+                1 if self.endpoint_answering else 0,
+                1 if self.endpoint_mounted else 0,
+                self.link_frames_sent,
+                self.link_crc_errors,
+                self.link_echoed_frames,
+            )
         )
 
     def _handle_factory_reset_arm(self, payload: bytes) -> bytes:

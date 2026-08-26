@@ -59,8 +59,12 @@ class DiagnosticSnapshot:
     advertised_capabilities: tuple[str, ...] = ()
     device_generation: str = UNKNOWN
     device_hash: str = UNKNOWN
-    spi_crc_errors: str = UNKNOWN
+    spi_crc_errors: int | str = UNKNOWN
     spi_timeouts: str = UNKNOWN
+    spi_frames_sent: int | str = UNKNOWN
+    spi_echoed_frames: int | str = UNKNOWN
+    endpoint_answering: str = UNKNOWN
+    endpoint_usb: str = UNKNOWN
     cdc_bad_crc: int | str = UNKNOWN
     cdc_bad_sequence: int | str = UNKNOWN
     cdc_timeout: int | str = UNKNOWN
@@ -102,10 +106,28 @@ class DiagnosticSnapshot:
             cdc_timeout=_counter(counters, "timeout"),
             cdc_disconnect=_counter(counters, "disconnect"),
             cdc_aborted_staging=_counter(counters, "aborted_staging"),
+            spi_crc_errors=_counter(counters, "link_crc_errors"),
+            spi_frames_sent=_counter(counters, "link_frames_sent"),
+            spi_echoed_frames=_counter(counters, "link_echoed_frames"),
+            endpoint_answering=_yes_no(counters, "endpoint_answering"),
+            endpoint_usb=_yes_no(counters, "endpoint_mounted"),
         )
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _yes_no(counters: object, field: str) -> str:
+    """A plain yes or no, because this is the line someone reads first.
+
+    Firmware predating the field reports nothing rather than guessing, and the
+    report then says unknown - which is not the same as "no" and must stay
+    different from it.
+    """
+    value = getattr(counters, field, None)
+    if value is None:
+        return UNKNOWN
+    return "yes" if value else "no"
 
 
 def _counter(counters: object, name: str) -> int | str:

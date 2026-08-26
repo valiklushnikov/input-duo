@@ -433,7 +433,13 @@ def test_diagnostics_count_crc_disconnect_timeout_bad_sequence_and_aborts(config
     _hello(emulator, sequence=20)
 
     diagnostics = _request(emulator, CdcMessageType.GET_DIAGNOSTICS, sequence=21)
-    assert diagnostics.payload == bytes((ErrorCode.OK,)) + struct.pack("<IIIII", 1, 1, 1, 1, 1)
+    # The five counters, then the link state that follows them. An emulator
+    # with nothing wrong reports a link that is answering.
+    assert diagnostics.payload == (
+        bytes((ErrorCode.OK,))
+        + struct.pack("<IIIII", 1, 1, 1, 1, 1)
+        + struct.pack("<BBIII", 1, 1, 0, 0, 0)
+    )
 
 
 def test_malformed_payloads_and_output_only_types_do_not_mutate_state(config_b: bytes):

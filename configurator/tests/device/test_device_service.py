@@ -694,3 +694,43 @@ def test_disconnecting_forgets_the_counters(qtbot, service, emulator, config_a):
     service.disconnect_device()
 
     assert service.diagnostics is None
+
+
+# ------------------------------------------------------ link state over CDC
+
+
+def test_diagnostics_report_whether_the_second_board_is_answering() -> None:
+    """The counters beside these all count failures, and a link that never
+    started produces none of them. During bring-up every reading this port
+    offered was zero while the second board was not there at all - which is
+    the one thing an operator most needs to be told."""
+    import struct
+
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = struct.pack(
+        "<BIIIII", 0, 1, 2, 3, 4, 5
+    ) + struct.pack("<BBIII", 1, 1, 900, 7, 3)
+
+    counters = parse_diagnostics(payload)
+
+    assert counters.bad_crc == 1
+    assert counters.endpoint_answering is True
+    assert counters.endpoint_mounted is True
+    assert counters.link_frames_sent == 900
+    assert counters.link_crc_errors == 7
+    assert counters.link_echoed_frames == 3
+
+
+def test_diagnostics_from_firmware_without_link_state_still_parse() -> None:
+    """Firmware predating the link fields answers with the counters alone.
+    Refusing that reply would turn an older device into an unreachable one."""
+    import struct
+
+    from duo_input.device.transactions import parse_diagnostics
+
+    counters = parse_diagnostics(struct.pack("<BIIIII", 0, 1, 2, 3, 4, 5))
+
+    assert counters.bad_crc == 1
+    assert counters.endpoint_answering is None
+    assert counters.link_frames_sent is None

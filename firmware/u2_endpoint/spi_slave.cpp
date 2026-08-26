@@ -86,19 +86,25 @@ void SpiSlave::rearm() {
     dma_channel_abort(rx_channel_);
     dma_channel_abort(tx_channel_);
 
-    // Whatever the queues still hold belongs to the frame that just ended.
+    // The transmit queue has to be genuinely emptied, and only a reset of the
+    // block does that.
     //
-    // Draining the receive side is not enough. Bytes the aborted transfer had
-    // already pushed towards the master are still queued to go out, and they
-    // would be sent ahead of the next frame - shifting it by however many were
-    // left and making every frame after it wrong, which is the desynchronised
-    // link this is supposed to recover from. There is no flush for that queue,
-    // so the block is switched off and on, which empties both.
-    hw_clear_bits(&spi_get_hw(kSpi)->cr1, SPI_SSPCR1_SSE_BITS);
-    while (spi_is_readable(kSpi)) {
-        (void)spi_get_hw(kSpi)->dr;
-    }
-    hw_set_bits(&spi_get_hw(kSpi)->cr1, SPI_SSPCR1_SSE_BITS);
+    // Bytes are handed to that queue ahead of the clock, so when a transfer
+    // ends there are still some in it that never went out. They are not
+    // discarded by aborting the transfer and not by disabling the block -
+    // they simply wait, and then lead the next frame. That shifts it by
+    // however many were left, which puts its checksum past the end of the
+    // master's 64-byte window, so the frame can never verify - and because
+    // each round leaves the same remainder, the shift repeats forever.
+    //
+    // On the bench this looked like a link that carried perfect data and
+    // rejected all of it: U2's answer arrived complete and correct, three
+    // bytes late, every single time.
+    //
+    // spi_init resets the block, which is the point of calling it here.
+    spi_init(kSpi, kSpiBaudRate);
+    spi_set_slave(kSpi, true);
+    spi_set_format(kSpi, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
 
     arm();
 }

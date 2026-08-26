@@ -26,6 +26,11 @@ using duo_input::u1::ConfigService;
 
 namespace {
 
+std::uint32_t read_u32(const std::uint8_t* at) {
+    return static_cast<std::uint32_t>(at[0]) | (static_cast<std::uint32_t>(at[1]) << 8) |
+           (static_cast<std::uint32_t>(at[2]) << 16) | (static_cast<std::uint32_t>(at[3]) << 24);
+}
+
 class MemoryFlash : public FlashBackend {
 public:
     MemoryFlash() : bytes_(duo_input::storage::kFlashSize, 0xFF) {}
@@ -537,7 +542,50 @@ TEST_CASE(diagnostics_carry_every_counter_the_host_expects) {
     const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
 
     CHECK_EQ(error_of(reply), CdcError::Ok);
-    CHECK_EQ(reply.payload.size, 21u);
+    CHECK_EQ(reply.payload.size, 35u);
+}
+
+TEST_CASE(diagnostics_say_whether_the_endpoint_is_answering) {
+    // Without this the host cannot tell a working device from one whose second
+    // board is dead, and neither could the people building it: the link was
+    // silent for days and every reading available over this port said nothing
+    // either way. The counters that existed were all counters of errors, which
+    // a link that never started does not produce.
+    Link link;
+    link.hello();
+    duo_input::u1::LinkState state;
+    state.answered = true;
+    state.mounted = true;
+    state.frames_sent = 0x11223344;
+    state.crc_errors = 7;
+    state.echoed_frames = 3;
+    link.service.set_link_state(state);
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::uint8_t* p = reply.payload.data;
+
+    CHECK_EQ(p[21], 1u);
+    CHECK_EQ(p[22], 1u);
+    CHECK_EQ(read_u32(p + 23), 0x11223344u);
+    CHECK_EQ(read_u32(p + 27), 7u);
+    CHECK_EQ(read_u32(p + 31), 3u);
+}
+
+TEST_CASE(a_silent_endpoint_is_reported_as_silent) {
+    Link link;
+    link.hello();
+    duo_input::u1::LinkState state;
+    state.answered = false;
+    state.frames_sent = 900;
+    link.service.set_link_state(state);
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::uint8_t* p = reply.payload.data;
+
+    // Frames going out and nothing coming back is the exact shape of the fault
+    // that took days to find, and it is now one reading.
+    CHECK_EQ(p[21], 0u);
+    CHECK_EQ(read_u32(p + 23), 900u);
 }
 
 TEST_CASE(running_a_macro_is_refused_because_the_device_cannot_yet) {

@@ -58,6 +58,23 @@ public:
 /// Largest wire frame: header, maximum payload, CRC, COBS overhead, delimiter.
 inline constexpr std::size_t kMaxWireFrame = 1100;
 
+/// What the link to U2 is doing, as the host needs to see it.
+///
+/// The counters beside this one all count failures, and a link that never
+/// started produces none of them - it was possible for every reading this
+/// device offered to be zero while the second board was not there at all.
+/// These say what is happening rather than what went wrong.
+struct LinkState {
+    /// U2 replied to the last frame with something only U2 could have sent.
+    bool answered = false;
+    /// U2 says its own USB is up.
+    bool mounted = false;
+    std::uint32_t frames_sent = 0;
+    std::uint32_t crc_errors = 0;
+    /// Frames U1 received that only U1 could have sent - see spi_master.hpp.
+    std::uint32_t echoed_frames = 0;
+};
+
 class ConfigService {
 public:
     ConfigService(storage::AbStore& store, CdcSink& sink) : store_(store), sink_(sink) {}
@@ -73,6 +90,11 @@ public:
     /// Called when the host goes away. An abandoned staging slot has no header
     /// so it is already nothing, but the counter should say it happened.
     void on_disconnect();
+
+    /// Publish what the link is doing, for GET_DIAGNOSTICS to report.
+    void set_link_state(const LinkState& state) { link_state_ = state; }
+
+    const LinkState& link_state() const { return link_state_; }
 
     /// Which profile the device is running.
     std::uint8_t active_profile() const { return active_profile_; }
@@ -155,6 +177,7 @@ private:
     bool factory_armed_ = false;
 
     CdcDiagnostics diagnostics_{};
+    LinkState link_state_{};
 
 #if DUO_SPI_DEBUG
     std::uint8_t link_debug_[48] = {};

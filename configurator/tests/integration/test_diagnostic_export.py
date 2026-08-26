@@ -262,3 +262,38 @@ def test_a_russian_project_survives_the_round_trip(tmp_path):
     )
 
     assert "привет".encode("utf-8") in _members(archive)[PROJECT_MEMBER]
+
+
+def test_the_report_says_whether_the_second_board_is_answering(qtbot, emulator):
+    """A report from a device whose second board is dead must not look like one
+    where everything works. Every other counter here counts failures, and a
+    link that never started produces none of them - so without this, both
+    devices export the same five zeros. During bring-up that is exactly what
+    happened: the link was silent for days and no reading said so."""
+    emulator.endpoint_answering = False
+    emulator.link_frames_sent = 4321
+    emulator.link_crc_errors = 4321
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    snapshot = DiagnosticSnapshot.from_service(service)
+
+    assert snapshot.endpoint_answering == "no"
+    assert snapshot.spi_frames_sent == 4321
+    assert snapshot.spi_crc_errors == 4321
+
+
+def test_a_healthy_link_reads_as_healthy(qtbot, emulator):
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    snapshot = DiagnosticSnapshot.from_service(service)
+
+    assert snapshot.endpoint_answering == "yes"
+    assert snapshot.spi_crc_errors == 0

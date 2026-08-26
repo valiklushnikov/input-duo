@@ -31,6 +31,7 @@ _DEVICE_INFO = struct.Struct("<BBBIIB32s")
 _STATUS = struct.Struct("<BBBBI")
 _CONFIG_INFO = struct.Struct("<BII32s")
 _DIAGNOSTICS = struct.Struct("<BIIIII")
+_LINK_STATE = struct.Struct("<BBIII")
 _CHUNK_ACK = struct.Struct("<BI")
 _CAPTURE_EVENT = struct.Struct("<BBB")
 
@@ -112,6 +113,19 @@ class DeviceDiagnostics:
     timeout: int
     bad_sequence: int
     aborted_staging: int
+
+    # What the link to the second board is doing. ``None`` when the firmware
+    # predates these fields.
+    #
+    # Everything above counts failures, and a link that never started produces
+    # none of them - so a device whose second board is absent reports the same
+    # five zeros as one that is working perfectly. These say what is happening
+    # instead of what went wrong.
+    endpoint_answering: bool | None = None
+    endpoint_mounted: bool | None = None
+    link_frames_sent: int | None = None
+    link_crc_errors: int | None = None
+    link_echoed_frames: int | None = None
 
 
 @dataclass(frozen=True)
@@ -225,10 +239,37 @@ def parse_config_info(payload: bytes) -> ActiveConfigInfo:
 
 
 def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
-    if len(payload) != _DIAGNOSTICS.size:
+    """Read the counters, and the link state when the firmware reports it.
+
+    The link fields were appended after the counters rather than mixed in with
+    them, so a reply that carries only the counters is still a reply this can
+    read. Refusing it would turn an older device into an unreachable one over
+    a field it never claimed to have.
+    """
+    counters = payload[: _DIAGNOSTICS.size]
+    if len(counters) != _DIAGNOSTICS.size:
         raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
-    _, bad_crc, disconnect, timeout, bad_sequence, aborted = _DIAGNOSTICS.unpack(payload)
-    return DeviceDiagnostics(bad_crc, disconnect, timeout, bad_sequence, aborted)
+    _, bad_crc, disconnect, timeout, bad_sequence, aborted = _DIAGNOSTICS.unpack(counters)
+
+    rest = payload[_DIAGNOSTICS.size :]
+    if not rest:
+        return DeviceDiagnostics(bad_crc, disconnect, timeout, bad_sequence, aborted)
+    if len(rest) != _LINK_STATE.size:
+        raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
+
+    answering, mounted, frames_sent, link_crc, echoed = _LINK_STATE.unpack(rest)
+    return DeviceDiagnostics(
+        bad_crc,
+        disconnect,
+        timeout,
+        bad_sequence,
+        aborted,
+        endpoint_answering=bool(answering),
+        endpoint_mounted=bool(mounted),
+        link_frames_sent=frames_sent,
+        link_crc_errors=link_crc,
+        link_echoed_frames=echoed,
+    )
 
 
 def parse_capture_event(payload: bytes) -> Trigger:

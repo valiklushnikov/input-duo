@@ -157,14 +157,6 @@ int main() {
     std::uint8_t self_test_rx[6] = {};
     duo_input::u1::SpiMaster::internal_loopback(kSelfTestTx, self_test_rx, sizeof(kSelfTestTx));
     const std::uint8_t wire_walk = duo_input::u1::SpiMaster::wire_walk();
-    // The same probe at three speeds. U2 answered a hand-clocked master and
-    // ignored the real one, and speed is the only thing that differs between
-    // them, so this is where the difference is worth measuring rather than
-    // reasoned about.
-    std::uint8_t bitbang[3][8] = {};
-    duo_input::u1::SpiMaster::bitbang_probe(bitbang[0], 8, 10);  // ~33 kHz
-    duo_input::u1::SpiMaster::bitbang_probe(bitbang[1], 8, 2);   // ~170 kHz
-    duo_input::u1::SpiMaster::bitbang_probe(bitbang[2], 8, 0);   // as fast as pins go
 #endif
 
     usb.begin();
@@ -221,6 +213,18 @@ int main() {
         // and does not look severed either.
         const std::uint32_t now_ms = to_ms_since_boot(get_absolute_time());
         link.poll(now_ms, g_outputs.take_snapshot(duo_input::hid::Target::Pc2));
+
+        // Published every pass, so the host can see the link rather than infer
+        // it from an absence of errors.
+        {
+            duo_input::u1::LinkState state;
+            state.answered = link.status().answered;
+            state.mounted = link.status().mounted;
+            state.frames_sent = link.frames_sent();
+            state.crc_errors = link.status().crc_errors;
+            state.echoed_frames = link.status().echoed_frames;
+            config.set_link_state(state);
+        }
         show_link(link.status().answered);
 
 #if DUO_SPI_DEBUG
@@ -230,10 +234,7 @@ int main() {
             report[1] = static_cast<std::uint8_t>(link.frames_sent() >> 8);
             report[2] = link.status().answered ? 1 : 0;
             report[3] = wire_walk;
-            std::memcpy(report + 12, kSelfTestTx, sizeof(kSelfTestTx));
-            std::memcpy(report + 18, self_test_rx, sizeof(self_test_rx));
-            std::memcpy(report + 24, bitbang, sizeof(bitbang));
-            std::memcpy(report + 4, link.last_reply(), 8);
+            std::memcpy(report + 4, link.last_reply(), 44);
             config.set_link_debug(report, 48);
         }
 #endif
