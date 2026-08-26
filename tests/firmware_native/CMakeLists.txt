@@ -80,3 +80,29 @@ if(MSVC)
 endif()
 
 add_test(NAME output_runtime COMMAND duo_output_runtime_test)
+
+add_executable(duo_sha256_test
+    test_main.cpp
+    test_sha256.cpp
+)
+
+target_link_libraries(duo_sha256_test PRIVATE duo_common)
+
+if(MSVC)
+    target_compile_options(duo_sha256_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME sha256 COMMAND duo_sha256_test)
+
+add_executable(duo_ab_store_test
+    test_main.cpp
+    test_ab_store.cpp
+)
+
+target_link_libraries(duo_ab_store_test PRIVATE duo_common)
+
+if(MSVC)
+    target_compile_options(duo_ab_store_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME ab_store COMMAND duo_ab_store_test)
