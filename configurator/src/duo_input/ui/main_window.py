@@ -30,8 +30,13 @@ from PySide6.QtWidgets import (
 from duo_input.device.service import DeviceService, DeviceState
 from duo_input.domain.project_store import ProjectError
 from duo_input.domain.text_compiler import compile_project_to_binary
+from duo_input.domain.validation import ValidationIssue
+from duo_input.ui.bindings import BindingsPage
+from duo_input.ui.models.binding_table import MouseCapabilities
 from duo_input.ui.models.project_session import ProjectSession, SetActiveProfile
+from duo_input.ui.mouse import MouseSwitchPage
 from duo_input.ui.overview import OverviewPage
+from duo_input.ui.profiles import ProfilesPage
 
 APPLICATION_NAME = "Duo Input"
 DIRTY_MARKER = "*"
@@ -57,6 +62,10 @@ class MainWindow(QMainWindow):
     """Owns the current :class:`ProjectSession` and the pages that render it."""
 
     session_changed = Signal(object)
+
+    #: Navigation rows, in the order the sections appear.
+    PAGE_OVERVIEW, PAGE_PROFILES, PAGE_BINDINGS, PAGE_MOUSE = range(4)
+    PAGE_ORDER = (PAGE_OVERVIEW, PAGE_PROFILES, PAGE_BINDINGS, PAGE_MOUSE)
 
     def __init__(
         self,
@@ -91,18 +100,38 @@ class MainWindow(QMainWindow):
         self.nav.setAccessibleName(self.tr("Sections"))
         self.nav.setMaximumWidth(240)
         self.nav.setMinimumWidth(160)
-        self.nav.addItem(self.tr("Overview"))
-        self.nav.setCurrentRow(0)
 
         self.pages = QStackedWidget(splitter)
         self.overview = OverviewPage(self.pages)
-        self.pages.addWidget(self.overview)
+        self.profiles = ProfilesPage(self.pages)
+        self.bindings = BindingsPage(self._service, self.pages)
+        self.mouse = MouseSwitchPage(self.pages)
+        for index, title in enumerate(
+            (self.tr("Overview"), self.tr("Profiles"), self.tr("Bindings"), self.tr("Mouse"))
+        ):
+            self.nav.addItem(title)
+            self.pages.addWidget(
+                (self.overview, self.profiles, self.bindings, self.mouse)[index]
+            )
+        for page in (self.profiles, self.bindings, self.mouse):
+            page.command_requested.connect(self.apply_command)
+        self.nav.setCurrentRow(self.PAGE_OVERVIEW)
         self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
 
         splitter.addWidget(self.nav)
         splitter.addWidget(self.pages)
         splitter.setStretchFactor(1, 1)
         outer.addWidget(splitter, 1)
+
+        self.issues_list = QListWidget(central)
+        self.issues_list.setAccessibleName(self.tr("Problems that block a write"))
+        self.issues_list.setMaximumHeight(110)
+        self.issues_list.setVisible(False)
+        self.issues_list.currentRowChanged.connect(self.open_issue)
+        self.issues_list.itemActivated.connect(
+            lambda item: self.open_issue(self.issues_list.row(item))
+        )
+        outer.addWidget(self.issues_list)
 
         self.progress = QProgressBar(central)
         self.progress.setAccessibleName(self.tr("Transfer progress"))
@@ -181,7 +210,73 @@ class MainWindow(QMainWindow):
         self._refresh_title()
         self._refresh_actions()
         self.overview.update_from(session, self._service)
+        for page in (self.profiles, self.bindings, self.mouse):
+            page.set_session(session)
+        self._refresh_issues()
         self.session_changed.emit(session)
+
+    def apply_command(self, command: object) -> bool:
+        """Apply one editing command. A refused command changes nothing.
+
+        The commands validate themselves - a duplicate trigger, a full profile,
+        a slot that does not exist - so the shell reports the refusal instead of
+        letting a page guess whether its request was legal.
+        """
+        try:
+            session = self._session.apply(command)
+        except (TypeError, ValueError) as error:
+            name = _command_name(command)
+            self.overview.append_event(name, type(error).__name__)
+            self.statusBar().showMessage(f"{name}: {error}")
+            return False
+        self.set_session(session)
+        return True
+
+    def show_page(self, page: int) -> None:
+        self.nav.setCurrentRow(page)
+
+    # ------------------------------------------------------------ validation
+
+    def issues(self) -> tuple[ValidationIssue, ...]:
+        return self._session.issues
+
+    def open_issue(self, row: int) -> None:
+        """Reveal the control one validation issue is about."""
+        issues = self._session.issues
+        if not 0 <= row < len(issues):
+            return
+        self._navigate_to(issues[row].path)
+
+    def _navigate_to(self, path: str) -> None:
+        parts = [part for part in path.split("/") if part]
+        if len(parts) < 2 or parts[0] != "profiles" or not parts[1].isdigit():
+            self.show_page(self.PAGE_OVERVIEW)
+            return
+        profile_index = int(parts[1])
+        profiles = self._session.project.profiles
+        if not 0 <= profile_index < len(profiles):
+            self.show_page(self.PAGE_OVERVIEW)
+            return
+        profile = profiles[profile_index]
+        if profile.id != self._session.project.active_profile_id:
+            self.set_session(self._session.apply(SetActiveProfile(profile.id)))
+        if len(parts) >= 4 and parts[2] == "bindings" and parts[3].isdigit():
+            self.show_page(self.PAGE_BINDINGS)
+            self.bindings.select_binding_row(int(parts[3]))
+            return
+        self.profiles.select_profile(profile.id)
+        self.show_page(self.PAGE_PROFILES)
+
+    def _refresh_issues(self) -> None:
+        issues = self._session.issues
+        self.issues_list.blockSignals(True)
+        try:
+            self.issues_list.clear()
+            for issue in issues:
+                self.issues_list.addItem(f"{issue.path}: {issue.message}")
+        finally:
+            self.issues_list.blockSignals(False)
+        self.issues_list.setVisible(bool(issues))
 
     def _refresh_profile_selector(self) -> None:
         self._updating_selector = True
@@ -219,6 +314,13 @@ class MainWindow(QMainWindow):
         connected = self._service.is_connected
         # A stale hash from a device that is no longer attached would be a lie.
         device_hash = self._service.device_hash if connected else b""
+        capabilities = (
+            MouseCapabilities.from_device_info(self._service.device_info)
+            if connected
+            else MouseCapabilities()
+        )
+        self.bindings.set_capabilities(capabilities)
+        self.mouse.set_capabilities(capabilities)
         self.set_session(
             self._session.with_connection(connected).with_device_hash(device_hash)
         )
@@ -353,6 +455,15 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         event.accept()
+
+
+def _command_name(command: object) -> str:
+    """Snake-case name of a command class, for the event log."""
+    name = type(command).__name__
+    return "".join(
+        f"_{letter.lower()}" if letter.isupper() and index else letter.lower()
+        for index, letter in enumerate(name)
+    )
 
 
 __all__ = [

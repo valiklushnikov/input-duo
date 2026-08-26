@@ -25,11 +25,13 @@ state and undo is a matter of keeping old sessions.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol, runtime_checkable
+from uuid import UUID, uuid4
 
-from duo_input.domain.models import DeviceProject, Profile
+from duo_input.domain.models import Binding, DeviceProject, Profile, Trigger
 from duo_input.domain.project_store import (
     PROJECT_SCHEMA_VERSION,
     load_project,
@@ -37,7 +39,13 @@ from duo_input.domain.project_store import (
 )
 from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.domain.validation import ValidationIssue, validate_project
-from duo_input.generated.protocol import PROFILES, KeyboardRoute, MouseRoute, TextLayout
+from duo_input.generated.protocol import (
+    BINDINGS_PER_PROFILE,
+    PROFILES,
+    KeyboardRoute,
+    MouseRoute,
+    TextLayout,
+)
 
 # Default profile accent colours. These are project *data*, not UI strings.
 _DEFAULT_COLORS: tuple[tuple[int, int, int], ...] = (
@@ -95,6 +103,33 @@ class SetActiveProfile:
         return replace(project, active_profile_id=self.profile_id)
 
 
+def _replace_profile(
+    project: DeviceProject, profile_id: int, change: Callable[[Profile], Profile]
+) -> DeviceProject:
+    """Rebuild the project with ``change`` applied to exactly one profile."""
+    for profile in project.profiles:
+        if profile.id == profile_id:
+            break
+    else:
+        raise ValueError(f"no profile with ID {profile_id}")
+    profiles = tuple(
+        change(profile) if profile.id == profile_id else profile for profile in project.profiles
+    )
+    return replace(project, profiles=profiles)
+
+
+def _find_profile(project: DeviceProject, profile_id: int) -> Profile:
+    for profile in project.profiles:
+        if profile.id == profile_id:
+            return profile
+    raise ValueError(f"no profile with ID {profile_id}")
+
+
+def _trigger_key(trigger: Trigger) -> tuple[int, int, int]:
+    """The identity the device matches on; two bindings may not share it."""
+    return (int(trigger.kind), int(trigger.code), int(trigger.modifiers))
+
+
 @dataclass(frozen=True)
 class RenameProfile:
     """Rename exactly one profile, leaving every other profile identical."""
@@ -103,11 +138,135 @@ class RenameProfile:
     name: str
 
     def apply_to(self, project: DeviceProject) -> DeviceProject:
-        profiles = tuple(
-            replace(profile, name=self.name) if profile.id == self.profile_id else profile
-            for profile in project.profiles
+        return _replace_profile(
+            project, self.profile_id, lambda profile: replace(profile, name=self.name)
         )
-        return replace(project, profiles=profiles)
+
+
+@dataclass(frozen=True)
+class SetProfileColor:
+    """Recolour one profile slot."""
+
+    profile_id: int
+    color_rgb: tuple[int, int, int]
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        color = tuple(int(component) for component in self.color_rgb)
+        if len(color) != 3:
+            raise ValueError("a profile colour needs exactly three components")
+        return _replace_profile(
+            project, self.profile_id, lambda profile: replace(profile, color_rgb=color)
+        )
+
+
+@dataclass(frozen=True)
+class CopyProfile:
+    """Duplicate one slot into another, keeping the target's own ID.
+
+    Bindings and macros carry project-wide unique UUIDs, so the copies are
+    given fresh ones; macro *IDs* are per-profile and are copied unchanged, so
+    a run-macro binding keeps pointing at the same macro inside the new slot.
+    """
+
+    source_id: int
+    target_id: int
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        if self.source_id == self.target_id:
+            raise ValueError("a profile cannot be copied onto itself")
+        source = _find_profile(project, self.source_id)
+        return _replace_profile(
+            project,
+            self.target_id,
+            lambda target: replace(
+                source,
+                id=target.id,
+                bindings=tuple(replace(binding, uuid=uuid4()) for binding in source.bindings),
+                macros=tuple(replace(macro, uuid=uuid4()) for macro in source.macros),
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ClearProfile:
+    """Reset one slot to the pristine profile a new project starts with."""
+
+    profile_id: int
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        pristine = _find_profile(default_project(), self.profile_id)
+        return _replace_profile(project, self.profile_id, lambda _: pristine)
+
+
+@dataclass(frozen=True)
+class AddBinding:
+    """Append one binding to a profile, refusing a trigger it already uses."""
+
+    profile_id: int
+    binding: Binding
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        def add(profile: Profile) -> Profile:
+            if len(profile.bindings) >= BINDINGS_PER_PROFILE:
+                raise ValueError(
+                    f"a profile may hold at most {BINDINGS_PER_PROFILE} bindings"
+                )
+            taken = {_trigger_key(existing.trigger) for existing in profile.bindings}
+            if _trigger_key(self.binding.trigger) in taken:
+                raise ValueError("that trigger is already bound in this profile")
+            return replace(profile, bindings=profile.bindings + (self.binding,))
+
+        return _replace_profile(project, self.profile_id, add)
+
+
+@dataclass(frozen=True)
+class UpdateBinding:
+    """Replace the binding carrying ``uuid``, keeping its position and UUID."""
+
+    profile_id: int
+    uuid: UUID
+    binding: Binding
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        def update(profile: Profile) -> Profile:
+            index = _binding_index(profile, self.uuid)
+            taken = {
+                _trigger_key(existing.trigger)
+                for position, existing in enumerate(profile.bindings)
+                if position != index
+            }
+            if _trigger_key(self.binding.trigger) in taken:
+                raise ValueError("that trigger is already bound in this profile")
+            edited = replace(self.binding, uuid=self.uuid)
+            bindings = list(profile.bindings)
+            bindings[index] = edited
+            return replace(profile, bindings=tuple(bindings))
+
+        return _replace_profile(project, self.profile_id, update)
+
+
+@dataclass(frozen=True)
+class RemoveBinding:
+    """Drop the binding carrying ``uuid``."""
+
+    profile_id: int
+    uuid: UUID
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        def remove(profile: Profile) -> Profile:
+            index = _binding_index(profile, self.uuid)
+            bindings = list(profile.bindings)
+            del bindings[index]
+            return replace(profile, bindings=tuple(bindings))
+
+        return _replace_profile(project, self.profile_id, remove)
+
+
+def _binding_index(profile: Profile, uuid: UUID) -> int:
+    for index, binding in enumerate(profile.bindings):
+        if binding.uuid == uuid:
+            return index
+    raise ValueError(f"profile {profile.id} has no binding {uuid}")
 
 
 # ---------------------------------------------------------------------- session
@@ -243,9 +402,15 @@ def _file_hash(path: Path) -> str:
 
 
 __all__ = [
+    "AddBinding",
+    "ClearProfile",
+    "CopyProfile",
     "ProjectCommand",
     "ProjectSession",
+    "RemoveBinding",
     "RenameProfile",
     "SetActiveProfile",
+    "SetProfileColor",
+    "UpdateBinding",
     "default_project",
 ]

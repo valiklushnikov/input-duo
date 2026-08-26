@@ -12,7 +12,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
-from duo_input.generated.protocol import CdcMessageType
+from duo_input.domain.models import Trigger
+from duo_input.generated.protocol import CdcMessageType, TriggerKind
 
 # ErrorCode is defined exactly once, in the reference U1 implementation. It is
 # imported rather than restated so protocol error identifiers are never
@@ -31,6 +32,7 @@ _STATUS = struct.Struct("<BBBBI")
 _CONFIG_INFO = struct.Struct("<BII32s")
 _DIAGNOSTICS = struct.Struct("<BIIIII")
 _CHUNK_ACK = struct.Struct("<BI")
+_CAPTURE_EVENT = struct.Struct("<BBB")
 
 
 class PayloadError(ValueError):
@@ -229,6 +231,27 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
     return DeviceDiagnostics(bad_crc, disconnect, timeout, bad_sequence, aborted)
 
 
+def parse_capture_event(payload: bytes) -> Trigger:
+    """Turn one CAPTURE_EVENT payload into the trigger the operator pressed.
+
+    The payload is the trigger itself - kind, code and HID modifier byte - so
+    the value the device reports and the value the project stores are the same
+    three numbers, with no host-side interpretation in between.
+    """
+    if len(payload) != _CAPTURE_EVENT.size:
+        raise PayloadError("CAPTURE_EVENT payload has the wrong size")
+    kind, code, modifiers = _CAPTURE_EVENT.unpack(payload)
+    try:
+        trigger_kind = TriggerKind(kind)
+    except ValueError as error:
+        raise PayloadError("CAPTURE_EVENT carries an unknown trigger kind") from error
+    if trigger_kind is TriggerKind.MOUSE_BUTTON and (not 1 <= code <= 5 or modifiers):
+        raise PayloadError("CAPTURE_EVENT mouse button is out of range")
+    if not code:
+        raise PayloadError("CAPTURE_EVENT carries no trigger code")
+    return Trigger(trigger_kind, code, modifiers)
+
+
 def parse_chunk_ack(payload: bytes) -> int:
     if len(payload) != _CHUNK_ACK.size:
         raise PayloadError("WRITE_CHUNK acknowledgement has the wrong size")
@@ -278,6 +301,7 @@ __all__ = [
     "PayloadError",
     "SequenceGenerator",
     "Transaction",
+    "parse_capture_event",
     "parse_chunk_ack",
     "parse_config_info",
     "parse_device_info",
