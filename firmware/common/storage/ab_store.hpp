@@ -140,6 +140,14 @@ public:
     /// How much of the package has been accepted so far.
     std::uint32_t staged_bytes() const { return staged_; }
 
+    /// Erase both slots, leaving the device with no configuration at all.
+    ///
+    /// Only the header sector of each is erased: a slot whose header is gone
+    /// describes nothing, so the payload behind it is already unreachable, and
+    /// erasing 768 KiB to make that doubly true would hold interrupts off for
+    /// seconds.
+    StoreError erase_everything();
+
 private:
     StoreError read_header(Slot slot, SlotInfo& info) const;
     StoreError hash_payload(Slot slot, std::uint32_t size,

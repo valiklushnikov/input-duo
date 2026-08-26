@@ -8,6 +8,8 @@ add_executable(duo_u1_main
     test_pattern.cpp
     config_service.cpp
     pico_flash.cpp
+    buttons.cpp
+    diagnostics_service.cpp
 )
 
 # tusb_config.h lives beside the sources, so TinyUSB has to be told to look

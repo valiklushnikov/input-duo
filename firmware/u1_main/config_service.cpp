@@ -168,14 +168,6 @@ void ConfigService::on_disconnect() {
 }
 
 void ConfigService::handle_frame(const std::uint8_t* wire, std::size_t size) {
-    // A byte-identical repeat means the host never saw the reply. Sending the
-    // same reply again is right; re-running the request would erase a slot for
-    // the second time.
-    if (size == last_request_size_ && std::memcmp(wire, last_request_, size) == 0) {
-        sink_.write(last_response_, last_response_size_);
-        return;
-    }
-
     protocol::DecodeResult result;
     std::uint8_t scratch[ProtocolLimits::CDC_MAX_PAYLOAD];
     if (!protocol::decode_cdc_frame(protocol::ByteView{wire, size},
@@ -187,10 +179,25 @@ void ConfigService::handle_frame(const std::uint8_t* wire, std::size_t size) {
         return;
     }
 
+    const CdcFrame& frame = result.cdc;
+
+    // A byte-identical repeat means the host never saw the reply, so it gets
+    // the same reply rather than having the request run twice - re-running a
+    // WRITE_BEGIN would erase a slot for the second time.
+    //
+    // A handshake is exempt. A new session's HELLO is byte-identical to the
+    // previous session's, so treating it as a repeat would serve a cached
+    // reply and skip starting the session over - leaving the sequence count,
+    // the negotiated capabilities and any physical confirmation belonging to
+    // whoever was connected before.
+    if (frame.type != CdcMessageType::HELLO && size == last_request_size_ &&
+        std::memcmp(wire, last_request_, size) == 0) {
+        sink_.write(last_response_, last_response_size_);
+        return;
+    }
+
     std::memcpy(last_request_, wire, size);
     last_request_size_ = size;
-
-    const CdcFrame& frame = result.cdc;
 
     // A handshake starts a session, so it is accepted at whatever sequence it
     // carries and resets the count. A configurator that closed the port and
@@ -199,6 +206,8 @@ void ConfigService::handle_frame(const std::uint8_t* wire, std::size_t size) {
     // very program meant to configure it.
     if (frame.type == CdcMessageType::HELLO) {
         have_sequence_ = false;
+        factory_confirmed_ = false;
+        factory_armed_ = false;
         if (store_.staging()) {
             // Closing a serial port does not unmount USB, so a configurator
             // that quit mid-write leaves the transaction open. A new session
@@ -599,12 +608,41 @@ void ConfigService::dispatch(const CdcFrame& frame) {
             reply(frame.type, frame.sequence, payload, 1);
             return;
         }
-        case CdcMessageType::FACTORY_RESET_ARM:
-        case CdcMessageType::FACTORY_RESET_COMMIT:
+        case CdcMessageType::FACTORY_RESET_ARM: {
             // Erasing the operator's work is not something a program alone may
-            // do. The physical confirmation arrives with the buttons.
-            reply_error(frame, CdcError::PhysicalConfirmationRequired);
+            // do; somebody has to be at the device.
+            if (!factory_confirmed_) {
+                reply_error(frame, CdcError::PhysicalConfirmationRequired);
+                return;
+            }
+            factory_armed_ = true;
+            payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
+            reply(frame.type, frame.sequence, payload, 1);
             return;
+        }
+        case CdcMessageType::FACTORY_RESET_COMMIT: {
+            if (!factory_confirmed_) {
+                reply_error(frame, CdcError::PhysicalConfirmationRequired);
+                return;
+            }
+            if (!factory_armed_) {
+                reply_error(frame, CdcError::BadState);
+                return;
+            }
+            const storage::StoreError error = store_.erase_everything();
+            // Spent either way: a failed erase does not leave a standing
+            // permission to try again unattended.
+            factory_confirmed_ = false;
+            factory_armed_ = false;
+            if (error != storage::StoreError::None) {
+                reply_error(frame, CdcError::BadState);
+                return;
+            }
+            active_profile_ = 1;
+            payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
+            reply(frame.type, frame.sequence, payload, 1);
+            return;
+        }
         default:
             reply_error(frame, CdcError::InvalidRequest);
             return;

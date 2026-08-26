@@ -666,3 +666,76 @@ TEST_CASE(a_write_can_start_immediately_after_a_new_session) {
     CHECK(link.store.staging());
     CHECK_EQ(error_of(send_chunk(link, 0, data.data(), data.size())), CdcError::Ok);
 }
+
+
+// ------------------------------------------------------------ factory reset
+
+TEST_CASE(a_factory_reset_is_refused_until_someone_confirms_at_the_device) {
+    Link link;
+    link.hello();
+
+    CHECK_EQ(error_of(link.send(CdcMessageType::FACTORY_RESET_ARM)),
+             CdcError::PhysicalConfirmationRequired);
+    CHECK_EQ(error_of(link.send(CdcMessageType::FACTORY_RESET_COMMIT)),
+             CdcError::PhysicalConfirmationRequired);
+}
+
+TEST_CASE(a_confirmed_factory_reset_erases_the_configuration) {
+    Link link;
+    link.hello();
+    // Seeded through the store rather than the protocol: a package only has to
+    // be a valid configuration to be committed over CDC, and building one by
+    // hand here would test the config format rather than the reset.
+    const auto data = arbitrary_package(512);
+    std::uint8_t digest[kSha256DigestSize];
+    sha256(data.data(), data.size(), digest);
+    link.store.begin(static_cast<std::uint32_t>(data.size()), digest);
+    link.store.write_chunk(0, data.data(), data.size());
+    link.store.verify();
+    link.store.commit();
+    CHECK(link.store.scan().has_active);
+
+    // Someone held the button for five seconds.
+    link.service.confirm_factory_reset();
+
+    CHECK_EQ(error_of(link.send(CdcMessageType::FACTORY_RESET_ARM)), CdcError::Ok);
+    CHECK_EQ(error_of(link.send(CdcMessageType::FACTORY_RESET_COMMIT)), CdcError::Ok);
+    CHECK_FALSE(link.store.scan().has_active);
+}
+
+TEST_CASE(a_confirmation_is_spent_by_the_reset_it_authorises) {
+    Link link;
+    link.hello();
+    link.service.confirm_factory_reset();
+    link.send(CdcMessageType::FACTORY_RESET_ARM);
+    link.send(CdcMessageType::FACTORY_RESET_COMMIT);
+
+    // A second reset needs someone to walk over and confirm it again. A
+    // standing confirmation would let a program erase the configuration
+    // repeatedly on the strength of one button press.
+    CHECK_EQ(error_of(link.send(CdcMessageType::FACTORY_RESET_COMMIT)),
+             CdcError::PhysicalConfirmationRequired);
+}
+
+TEST_CASE(committing_a_reset_that_was_never_armed_is_refused) {
+    Link link;
+    link.hello();
+    link.service.confirm_factory_reset();
+
+    CHECK_EQ(error_of(link.send(CdcMessageType::FACTORY_RESET_COMMIT)), CdcError::BadState);
+}
+
+TEST_CASE(a_new_session_forgets_a_confirmation_nobody_used) {
+    Link link;
+    link.hello();
+    link.service.confirm_factory_reset();
+
+    link.sequence = 0;
+    std::uint8_t request[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+    link.send(CdcMessageType::HELLO, request, sizeof(request));
+
+    // The person who pressed the button and the program now connected are not
+    // necessarily the same person.
+    CHECK_EQ(error_of(link.send(CdcMessageType::FACTORY_RESET_ARM)),
+             CdcError::PhysicalConfirmationRequired);
+}

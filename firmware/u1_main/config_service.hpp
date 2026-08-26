@@ -88,6 +88,15 @@ public:
 
     const CdcDiagnostics& diagnostics() const { return diagnostics_; }
 
+    /// Record that someone at the device held SW2 for five seconds.
+    ///
+    /// The confirmation authorises exactly one factory reset and is spent by
+    /// it. A standing confirmation would let a program erase the operator's
+    /// work repeatedly on the strength of one button press, and a new session
+    /// forgets it entirely: the person who pressed the button and the program
+    /// now connected are not necessarily the same person.
+    void confirm_factory_reset() { factory_confirmed_ = true; }
+
     /// Set when the host asked for everything to be released.
     ///
     /// Read and cleared by the main loop: this class must not reach into the
@@ -132,6 +141,8 @@ private:
     std::uint8_t active_profile_ = 1;
     bool capture_active_ = false;
     bool release_all_requested_ = false;
+    bool factory_confirmed_ = false;
+    bool factory_armed_ = false;
 
     CdcDiagnostics diagnostics_{};
 };

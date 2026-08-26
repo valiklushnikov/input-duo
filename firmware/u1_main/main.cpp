@@ -11,7 +11,11 @@
 
 #include "tusb.h"
 
+#include "hardware/watchdog.h"
+
+#include "buttons.hpp"
 #include "config_service.hpp"
+#include "diagnostics_service.hpp"
 #include "hid/state_manager.hpp"
 #include "output_runtime.hpp"
 #include "pico_flash.hpp"
@@ -44,8 +48,15 @@ void core1_entry() {
 // Both switches are read as active-low with an internal pull-up, from the
 // first instant, so a board that stops early still has defined input pins
 // rather than floating ones.
-constexpr uint kSw1EmergencyMouseTogglePin = 14;
-constexpr uint kSw2StopReleaseAllPin = 15;
+using duo_input::u1::kPinSw1;
+using duo_input::u1::kPinSw2;
+
+/// How long the loop may stall before the watchdog restarts the board.
+///
+/// Comfortably longer than the slowest thing the loop does - a flash sector
+/// erase, a few tens of milliseconds - and short enough that a device which
+/// has stopped responding recovers before the operator gives up on it.
+constexpr std::uint32_t kWatchdogMs = 2000;
 
 void configure_button(uint pin) {
     gpio_init(pin);
@@ -70,6 +81,23 @@ public:
     }
 };
 
+/// Where SW1 has decided the mouse should go.
+///
+/// A toggle rather than a fixed destination, because the button exists for the
+/// case where the operator cannot see which computer currently has the mouse.
+///
+/// Nothing generates mouse input yet - the CH375B arrives in the next plan -
+/// so this state has nothing to route today. It is kept and shown on the LED
+/// rather than faked into a command that would do nothing: a control that
+/// appears to work and does not is worse than one that plainly does not yet.
+bool g_mouse_on_pc2 = false;
+
+void show_mouse_route() {
+#ifdef PICO_DEFAULT_LED_PIN
+    gpio_put(PICO_DEFAULT_LED_PIN, g_mouse_on_pc2 ? 1 : 0);
+#endif
+}
+
 duo_input::runtime::OutputCommand release_pc1() {
     duo_input::runtime::OutputCommand command;
     command.kind = duo_input::runtime::CommandKind::ReleaseRoute;
@@ -91,8 +119,13 @@ void configure_indicator() {
 
 int main() {
     configure_indicator();
-    configure_button(kSw1EmergencyMouseTogglePin);
-    configure_button(kSw2StopReleaseAllPin);
+    configure_button(kPinSw1);
+    configure_button(kPinSw2);
+
+    // Read before anything else can obscure it: once the hardware flags are
+    // cleared, a watchdog reset is indistinguishable from a power cycle.
+    const duo_input::diagnostics::ResetRecord reset = duo_input::u1::read_reset_record();
+    (void)reset;  // Reported over CDC once protocol v1 carries a field for it.
 
     duo_input::u1::UsbService usb;
     duo_input::u1::SpiMaster link;
@@ -114,11 +147,15 @@ int main() {
     multicore_launch_core1(core1_entry);
 #endif
 
+    duo_input::u1::Buttons buttons;
     bool was_mounted = false;
 
-    // The watchdog is not armed yet. It is fed only once USB, SPI and the
-    // command queue have all been serviced, and the queue does not exist; a
-    // watchdog armed now would reset a board behaving exactly as built.
+    // Armed only now, with every service in place. It is fed at the end of the
+    // loop, after USB, the link and the command queue have all been serviced,
+    // so what it actually guarantees is that those keep happening - not merely
+    // that some instruction somewhere is still executing.
+    watchdog_enable(kWatchdogMs, true);
+
     while (true) {
         usb.task();
 
@@ -157,5 +194,33 @@ int main() {
         // and does not look severed either.
         const std::uint32_t now_ms = to_ms_since_boot(get_absolute_time());
         link.poll(now_ms, g_outputs.take_snapshot(duo_input::hid::Target::Pc2));
+
+        // Active-low against internal pull-ups: a pin pulled to ground is a
+        // press, whether that is a button or a wire.
+        switch (buttons.update(now_ms, !gpio_get(kPinSw1), !gpio_get(kPinSw2))) {
+            case duo_input::u1::ButtonEvent::EmergencyMouseToggle:
+                // The one control that has to work when the configuration is
+                // wrong, so it does not consult the configuration. The LED is
+                // the whole visible effect until there is mouse input to route.
+                g_mouse_on_pc2 = !g_mouse_on_pc2;
+                show_mouse_route();
+                break;
+            case duo_input::u1::ButtonEvent::StopReleaseAll:
+                g_outputs.release_all();
+                link.send_release_all(now_ms);
+                break;
+            case duo_input::u1::ButtonEvent::FactoryResetConfirmed:
+                // Someone is at the device and held the button for five
+                // seconds. Nothing is erased yet - the host still has to ask -
+                // but the confirmation is now on record, and it authorises
+                // exactly one reset.
+                config.confirm_factory_reset();
+                break;
+            case duo_input::u1::ButtonEvent::None:
+                break;
+        }
+
+        // Fed last, and only here: everything above has just been serviced.
+        watchdog_update();
     }
 }

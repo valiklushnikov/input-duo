@@ -320,6 +320,16 @@ void AbStore::abort() {
     page_fill_ = 0;
 }
 
+StoreError AbStore::erase_everything() {
+    abort();
+    for (const Slot slot : {Slot::A, Slot::B}) {
+        if (!flash_.erase(slot_offset(slot), kSectorSize)) {
+            return StoreError::FlashFailed;
+        }
+    }
+    return StoreError::None;
+}
+
 StoreError AbStore::read_active(std::uint32_t offset, std::uint8_t* data, std::size_t size) {
     const ScanResult current = scan();
     if (!current.has_active) {

@@ -123,3 +123,20 @@ if(MSVC)
 endif()
 
 add_test(NAME config_service COMMAND duo_config_service_test)
+
+add_executable(duo_buttons_test
+    test_main.cpp
+    test_buttons.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/buttons.cpp
+)
+
+target_link_libraries(duo_buttons_test PRIVATE duo_common)
+target_include_directories(duo_buttons_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+)
+
+if(MSVC)
+    target_compile_options(duo_buttons_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME buttons COMMAND duo_buttons_test)
