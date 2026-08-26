@@ -32,6 +32,7 @@ from duo_input.domain.project_store import ProjectError
 from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.domain.validation import ValidationIssue
 from duo_input.ui.bindings import BindingsPage
+from duo_input.ui.macros import MacrosPage
 from duo_input.ui.models.binding_table import MouseCapabilities
 from duo_input.ui.models.project_session import ProjectSession, SetActiveProfile
 from duo_input.ui.mouse import MouseSwitchPage
@@ -64,8 +65,8 @@ class MainWindow(QMainWindow):
     session_changed = Signal(object)
 
     #: Navigation rows, in the order the sections appear.
-    PAGE_OVERVIEW, PAGE_PROFILES, PAGE_BINDINGS, PAGE_MOUSE = range(4)
-    PAGE_ORDER = (PAGE_OVERVIEW, PAGE_PROFILES, PAGE_BINDINGS, PAGE_MOUSE)
+    PAGE_OVERVIEW, PAGE_PROFILES, PAGE_BINDINGS, PAGE_MACROS, PAGE_MOUSE = range(5)
+    PAGE_ORDER = (PAGE_OVERVIEW, PAGE_PROFILES, PAGE_BINDINGS, PAGE_MACROS, PAGE_MOUSE)
 
     def __init__(
         self,
@@ -105,15 +106,19 @@ class MainWindow(QMainWindow):
         self.overview = OverviewPage(self.pages)
         self.profiles = ProfilesPage(self.pages)
         self.bindings = BindingsPage(self._service, self.pages)
+        self.macros = MacrosPage(self._service, self.pages)
         self.mouse = MouseSwitchPage(self.pages)
-        for index, title in enumerate(
-            (self.tr("Overview"), self.tr("Profiles"), self.tr("Bindings"), self.tr("Mouse"))
-        ):
+        sections = (
+            (self.tr("Overview"), self.overview),
+            (self.tr("Profiles"), self.profiles),
+            (self.tr("Bindings"), self.bindings),
+            (self.tr("Macros"), self.macros),
+            (self.tr("Mouse"), self.mouse),
+        )
+        for title, page in sections:
             self.nav.addItem(title)
-            self.pages.addWidget(
-                (self.overview, self.profiles, self.bindings, self.mouse)[index]
-            )
-        for page in (self.profiles, self.bindings, self.mouse):
+            self.pages.addWidget(page)
+        for page in self._editor_pages():
             page.command_requested.connect(self.apply_command)
         self.nav.setCurrentRow(self.PAGE_OVERVIEW)
         self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
@@ -210,7 +215,7 @@ class MainWindow(QMainWindow):
         self._refresh_title()
         self._refresh_actions()
         self.overview.update_from(session, self._service)
-        for page in (self.profiles, self.bindings, self.mouse):
+        for page in self._editor_pages():
             page.set_session(session)
         self._refresh_issues()
         self.session_changed.emit(session)
@@ -234,6 +239,9 @@ class MainWindow(QMainWindow):
 
     def show_page(self, page: int) -> None:
         self.nav.setCurrentRow(page)
+
+    def _editor_pages(self) -> tuple[QWidget, ...]:
+        return (self.profiles, self.bindings, self.macros, self.mouse)
 
     # ------------------------------------------------------------ validation
 
@@ -263,6 +271,10 @@ class MainWindow(QMainWindow):
         if len(parts) >= 4 and parts[2] == "bindings" and parts[3].isdigit():
             self.show_page(self.PAGE_BINDINGS)
             self.bindings.select_binding_row(int(parts[3]))
+            return
+        if len(parts) >= 4 and parts[2] == "macros" and parts[3].isdigit():
+            self.show_page(self.PAGE_MACROS)
+            self.macros.select_macro_row(int(parts[3]))
             return
         self.profiles.select_profile(profile.id)
         self.show_page(self.PAGE_PROFILES)

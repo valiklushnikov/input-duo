@@ -187,3 +187,36 @@ def test_disconnecting_takes_the_mouse_buttons_away_again(window, emulator, qtbo
 
     assert window.bindings.capabilities.buttons == ()
     assert window.mouse.capabilities.buttons == ()
+
+
+# ---------------------------------------------------------------------- macros
+
+
+def test_the_shell_offers_the_macros_page(window):
+    window.show_page(window.PAGE_MACROS)
+
+    assert window.pages.currentWidget() is window.macros
+    assert window.macros.session is window.session
+
+
+def test_a_macro_added_on_the_page_reaches_the_session(window):
+    window.show_page(window.PAGE_MACROS)
+
+    window.macros.add_macro_button.click()
+
+    assert len(window.session.active_profile.macros) == 1
+
+
+def test_clicking_a_macro_issue_opens_that_macro(window):
+    from duo_input.ui.models.project_session import AddMacro, RenameMacro
+
+    session = window.session.apply(AddMacro(3, "M"))
+    macro = session.project.profiles[2].macros[0]
+    window.set_session(session.apply(RenameMacro(3, macro.uuid, "bad\0name")))
+    assert window.issues_list.count() == 1
+    assert "/macros/0/name" in window.issues_list.item(0).text()
+
+    window.open_issue(0)
+
+    assert window.pages.currentWidget() is window.macros
+    assert window.session.project.active_profile_id == 3

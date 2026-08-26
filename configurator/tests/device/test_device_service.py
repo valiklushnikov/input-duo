@@ -641,3 +641,36 @@ def test_a_reply_never_rewinds_the_sequence_behind_a_capture_event(
     # Let the in-flight request settle; the emulator never saw the fabricated
     # capture event, so it answers BAD_SEQUENCE and the operation ends there.
     qtbot.waitUntil(lambda: service.state is not DeviceState.BUSY, timeout=5000)
+
+
+# --------------------------------------------------------------------------- test macro
+
+
+def test_test_macro_names_the_profile_and_macro_the_device_holds(qtbot, service, emulator, base_config):
+    package = _package_with_text_steps(base_config, [2])
+    emulator.install_active(package)
+    _connect(qtbot, service, emulator)
+
+    result = _succeed(qtbot, service, lambda: service.test_macro(1, 1))
+
+    assert result.operation == "test_macro"
+
+
+def test_test_macro_reports_a_macro_the_device_does_not_have(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+
+    failure = _fail(qtbot, service, lambda: service.test_macro(1, 200))
+
+    assert failure.operation == "test_macro"
+    assert failure.error_code is ErrorCode.INVALID_REQUEST
+
+
+def test_test_macro_refuses_identifiers_the_protocol_cannot_carry(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+
+    failure = _fail(qtbot, service, lambda: service.test_macro(0, 1))
+
+    assert failure.operation == "test_macro"
+    assert failure.reason is FailureReason.INVALID_PACKAGE

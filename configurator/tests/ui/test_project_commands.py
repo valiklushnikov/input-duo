@@ -240,3 +240,123 @@ def test_a_run_macro_binding_survives_a_profile_copy():
     assert _profile(copied, 2).macros[0].uuid != _profile(copied, 1).macros[0].uuid
     assert _profile(copied, 2).bindings[0].action == Action(ActionKind.RUN_MACRO, 1)
     assert validate_project(copied.project) == ()
+
+
+# -------------------------------------------------------------------- macros
+
+
+def _macro(macro_id: int = 1, name: str = "M") -> Macro:
+    return Macro(id=macro_id, name=name, target=TargetMode.INHERIT, steps=())
+
+
+def test_add_macro_numbers_the_new_macro_itself():
+    from duo_input.ui.models.project_session import AddMacro
+
+    session = ProjectSession.new().apply(AddMacro(1, "Куркума"))
+
+    macro = _profile(session, 1).macros[0]
+    assert macro.id == 1
+    assert macro.name == "Куркума"
+    assert macro.target is TargetMode.INHERIT
+    assert validate_project(session.project) == ()
+
+
+def test_add_macro_reuses_the_lowest_free_identifier():
+    from duo_input.ui.models.project_session import AddMacro, RemoveMacro
+
+    session = (
+        ProjectSession.new()
+        .apply(AddMacro(1, "A"))
+        .apply(AddMacro(1, "B"))
+        .apply(AddMacro(1, "C"))
+    )
+    second = _profile(session, 1).macros[1]
+
+    session = session.apply(RemoveMacro(1, second.uuid)).apply(AddMacro(1, "D"))
+
+    assert [macro.id for macro in _profile(session, 1).macros] == [1, 3, 2]
+    assert validate_project(session.project) == ()
+
+
+def test_the_macro_limit_is_enforced_by_the_command():
+    from duo_input.ui.models.project_session import AddMacro
+
+    session = ProjectSession.new()
+    for index in range(32):
+        session = session.apply(AddMacro(1, f"M{index}"))
+
+    with pytest.raises(ValueError):
+        session.apply(AddMacro(1, "one too many"))
+
+
+def test_rename_and_retarget_touch_only_that_macro():
+    from duo_input.ui.models.project_session import AddMacro, RenameMacro, SetMacroTarget
+
+    session = ProjectSession.new().apply(AddMacro(1, "A")).apply(AddMacro(1, "B"))
+    first = _profile(session, 1).macros[0]
+
+    session = session.apply(RenameMacro(1, first.uuid, "Куркума")).apply(
+        SetMacroTarget(1, first.uuid, TargetMode.BOTH)
+    )
+
+    assert _profile(session, 1).macros[0].name == "Куркума"
+    assert _profile(session, 1).macros[0].target is TargetMode.BOTH
+    assert _profile(session, 1).macros[1].name == "B"
+    assert validate_project(session.project) == ()
+
+
+def test_setting_the_steps_replaces_them_wholesale():
+    from duo_input.ui.models.macro_steps import delay_step
+    from duo_input.ui.models.project_session import AddMacro, SetMacroSteps
+
+    session = ProjectSession.new().apply(AddMacro(1, "A"))
+    macro = _profile(session, 1).macros[0]
+
+    session = session.apply(SetMacroSteps(1, macro.uuid, (delay_step(5, 5),)))
+
+    assert len(_profile(session, 1).macros[0].steps) == 1
+    assert _profile(session, 1).macros[0].uuid == macro.uuid
+    assert validate_project(session.project) == ()
+
+
+def test_more_steps_than_the_protocol_allows_are_refused():
+    from duo_input.ui.models.macro_steps import delay_step
+    from duo_input.ui.models.project_session import AddMacro, SetMacroSteps
+
+    session = ProjectSession.new().apply(AddMacro(1, "A"))
+    macro = _profile(session, 1).macros[0]
+
+    with pytest.raises(ValueError):
+        session.apply(SetMacroSteps(1, macro.uuid, (delay_step(1, 1),) * 65))
+
+
+def test_removing_a_macro_a_binding_runs_is_refused():
+    from duo_input.ui.models.project_session import AddMacro, RemoveMacro
+
+    session = ProjectSession.new().apply(AddMacro(1, "A"))
+    macro = _profile(session, 1).macros[0]
+    session = session.apply(
+        AddBinding(
+            1,
+            Binding(
+                trigger=Trigger(TriggerKind.KEYBOARD_USAGE, 0x04, 0),
+                mode=BindingMode.REPLACE,
+                action=Action(ActionKind.RUN_MACRO, macro.id),
+            ),
+        )
+    )
+
+    with pytest.raises(ValueError):
+        session.apply(RemoveMacro(1, macro.uuid))
+
+
+def test_removing_an_unused_macro_is_allowed():
+    from duo_input.ui.models.project_session import AddMacro, RemoveMacro
+
+    session = ProjectSession.new().apply(AddMacro(1, "A"))
+    macro = _profile(session, 1).macros[0]
+
+    session = session.apply(RemoveMacro(1, macro.uuid))
+
+    assert _profile(session, 1).macros == ()
+    assert validate_project(session.project) == ()

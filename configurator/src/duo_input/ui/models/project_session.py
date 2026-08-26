@@ -31,7 +31,14 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 from uuid import UUID, uuid4
 
-from duo_input.domain.models import Binding, DeviceProject, Profile, Trigger
+from duo_input.domain.models import (
+    Binding,
+    DeviceProject,
+    Macro,
+    MacroStep,
+    Profile,
+    Trigger,
+)
 from duo_input.domain.project_store import (
     PROJECT_SCHEMA_VERSION,
     load_project,
@@ -41,9 +48,13 @@ from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.domain.validation import ValidationIssue, validate_project
 from duo_input.generated.protocol import (
     BINDINGS_PER_PROFILE,
+    MACRO_STEPS_PER_MACRO,
+    MACROS_PER_PROFILE,
     PROFILES,
+    ActionKind,
     KeyboardRoute,
     MouseRoute,
+    TargetMode,
     TextLayout,
 )
 
@@ -262,6 +273,126 @@ class RemoveBinding:
         return _replace_profile(project, self.profile_id, remove)
 
 
+@dataclass(frozen=True)
+class AddMacro:
+    """Append an empty macro; the command chooses its per-profile ID."""
+
+    profile_id: int
+    name: str
+    target: TargetMode = TargetMode.INHERIT
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        def add(profile: Profile) -> Profile:
+            if len(profile.macros) >= MACROS_PER_PROFILE:
+                raise ValueError(f"a profile may hold at most {MACROS_PER_PROFILE} macros")
+            macro = Macro(
+                id=_free_macro_id(profile),
+                name=self.name,
+                target=TargetMode(self.target),
+                steps=(),
+            )
+            return replace(profile, macros=profile.macros + (macro,))
+
+        return _replace_profile(project, self.profile_id, add)
+
+
+@dataclass(frozen=True)
+class RemoveMacro:
+    """Drop one macro, unless a binding in the same profile still runs it."""
+
+    profile_id: int
+    uuid: UUID
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        def remove(profile: Profile) -> Profile:
+            index = _macro_index(profile, self.uuid)
+            macro = profile.macros[index]
+            for binding in profile.bindings:
+                if (
+                    ActionKind(binding.action.kind) is ActionKind.RUN_MACRO
+                    and binding.action.argument == macro.id
+                ):
+                    raise ValueError(
+                        f"macro {macro.id} is still run by a binding in this profile"
+                    )
+            macros = list(profile.macros)
+            del macros[index]
+            return replace(profile, macros=tuple(macros))
+
+        return _replace_profile(project, self.profile_id, remove)
+
+
+@dataclass(frozen=True)
+class RenameMacro:
+    """Rename one macro; its ID and UUID stay as they are."""
+
+    profile_id: int
+    uuid: UUID
+    name: str
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        return _replace_macro(project, self.profile_id, self.uuid, name=self.name)
+
+
+@dataclass(frozen=True)
+class SetMacroTarget:
+    """Choose which computer the macro types on: inherit, PC1, PC2 or both."""
+
+    profile_id: int
+    uuid: UUID
+    target: TargetMode
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        return _replace_macro(
+            project, self.profile_id, self.uuid, target=TargetMode(self.target)
+        )
+
+
+@dataclass(frozen=True)
+class SetMacroSteps:
+    """Replace the whole step list of one macro."""
+
+    profile_id: int
+    uuid: UUID
+    steps: tuple[MacroStep, ...]
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        steps = tuple(self.steps)
+        if len(steps) > MACRO_STEPS_PER_MACRO:
+            raise ValueError(f"a macro may hold at most {MACRO_STEPS_PER_MACRO} steps")
+        if any(not isinstance(step, MacroStep) for step in steps):
+            raise ValueError("every macro step must be a MacroStep")
+        return _replace_macro(project, self.profile_id, self.uuid, steps=steps)
+
+
+def _free_macro_id(profile: Profile) -> int:
+    """The lowest ID this profile is not already using."""
+    taken = {macro.id for macro in profile.macros}
+    for candidate in range(1, MACROS_PER_PROFILE + 1):
+        if candidate not in taken:
+            return candidate
+    raise ValueError("this profile has no free macro ID left")
+
+
+def _macro_index(profile: Profile, uuid: UUID) -> int:
+    for index, macro in enumerate(profile.macros):
+        if macro.uuid == uuid:
+            return index
+    raise ValueError(f"profile {profile.id} has no macro {uuid}")
+
+
+def _replace_macro(
+    project: DeviceProject, profile_id: int, uuid: UUID, **changes: object
+) -> DeviceProject:
+    def change(profile: Profile) -> Profile:
+        index = _macro_index(profile, uuid)
+        macros = list(profile.macros)
+        macros[index] = replace(macros[index], **changes)
+        return replace(profile, macros=tuple(macros))
+
+    return _replace_profile(project, profile_id, change)
+
+
 def _binding_index(profile: Profile, uuid: UUID) -> int:
     for index, binding in enumerate(profile.bindings):
         if binding.uuid == uuid:
@@ -403,13 +534,18 @@ def _file_hash(path: Path) -> str:
 
 __all__ = [
     "AddBinding",
+    "AddMacro",
     "ClearProfile",
     "CopyProfile",
     "ProjectCommand",
     "ProjectSession",
     "RemoveBinding",
+    "RemoveMacro",
+    "RenameMacro",
     "RenameProfile",
     "SetActiveProfile",
+    "SetMacroSteps",
+    "SetMacroTarget",
     "SetProfileColor",
     "UpdateBinding",
     "default_project",

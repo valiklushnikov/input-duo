@@ -59,6 +59,7 @@ _CONNECT = "connect_device"
 _READ_CONFIG = "read_config"
 _WRITE_CONFIG = "write_config"
 _BEGIN_CAPTURE = "begin_capture"
+_TEST_MACRO = "test_macro"
 _STOP_AND_RELEASE_ALL = "stop_and_release_all"
 _GET_DIAGNOSTICS = "get_diagnostics"
 
@@ -228,6 +229,28 @@ class DeviceService(QObject):
             return
         self._request(
             CdcMessageType.CAPTURE_BEGIN, CdcMessageType.CAPTURE_BEGIN, b"", self._on_acknowledged
+        )
+
+    def test_macro(self, profile_id: int, macro_id: int) -> None:
+        """Run one macro that is already committed on the device.
+
+        Nothing is uploaded: the device runs the macro from its active
+        configuration, so what runs is what was written, not what is being
+        edited.
+        """
+        if not self._begin_operation(_TEST_MACRO):
+            return
+        if not (1 <= profile_id <= 0xFF and 1 <= macro_id <= 0xFF):
+            self._fail(
+                FailureReason.INVALID_PACKAGE,
+                detail="profile and macro identifiers are 1..255",
+            )
+            return
+        self._request(
+            CdcMessageType.TEST_MACRO,
+            CdcMessageType.TEST_MACRO,
+            bytes((profile_id, macro_id)),
+            self._on_acknowledged,
         )
 
     def stop_and_release_all(self) -> None:
