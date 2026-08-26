@@ -1,0 +1,31 @@
+{
+  "name": "profile_power_cycle",
+  "description": "All eight profiles survive a power cycle: the device starts in the profile it was told to, with the bindings, macros and routes that profile carries.",
+  "requires": [
+    "U1 on a switchable supply",
+    "A keyboard and a mouse attached",
+    "PC1 and PC2 observing"
+  ],
+  "steps": [
+    {"action": "connect"},
+    {"action": "write_config", "note": "eight distinct profiles: different routes, bindings and macros"},
+    {
+      "action": "for_each_profile",
+      "ids": [1, 2, 3, 4, 5, 6, 7, 8],
+      "steps": [
+        {"action": "set_active_profile"},
+        {"action": "cut_power", "settle_ms": 2000},
+        {"action": "restore_power", "settle_ms": 3000},
+        {"action": "connect"},
+        {"action": "assert_active_profile_matches"},
+        {"action": "inject_and_observe", "count": 20, "note": "one event per binding in this profile"},
+        {"action": "assert_routes_match_profile"}
+      ]
+    }
+  ],
+  "checks": {
+    "active_profile_survives_power_cycle": "each of the eight profiles came back active",
+    "bindings_match_profile": "every binding behaved as that profile defines it",
+    "routes_match_profile": "keyboard and mouse routes matched the profile after every restart"
+  }
+}

@@ -21,12 +21,14 @@ an undeclared dependency gets noticed.
 ## Build
 
 ```powershell
-pwsh -File configurator/packaging/nuitka-build.ps1
+powershell -ExecutionPolicy Bypass -File configurator/packaging/nuitka-build.ps1
 ISCC.exe configurator\packaging\duo-input.iss
 ```
 
 The first command produces `configurator/dist/DuoInput/DuoInput.exe`; the
 second produces `configurator/dist/DuoInput-Setup-<version>-x64.exe`.
+
+PowerShell 7 is not required; stock Windows PowerShell 5.1 runs both scripts.
 
 Pass `-Clean` to discard the build environment and previous output, and
 `-SkipTests` only while iterating on packaging itself - never for a build

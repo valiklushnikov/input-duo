@@ -1,0 +1,40 @@
+{
+  "name": "config_power_cut",
+  "description": "One hundred configuration writes, then twenty writes interrupted by pulling power mid-transfer. After every cut the device must come back holding either the old configuration or the new one - never a mixture, and never nothing.",
+  "requires": [
+    "U1 on a switchable supply",
+    "A host running the configurator or its CDC client"
+  ],
+  "steps": [
+    {"action": "connect"},
+    {
+      "action": "repeat",
+      "count": 100,
+      "steps": [
+        {"action": "write_config", "vary": "profile_count"},
+        {"action": "assert_hash_matches", "note": "readback equals what was sent"},
+        {"action": "assert_generation_incremented"}
+      ]
+    },
+    {
+      "action": "repeat",
+      "count": 20,
+      "steps": [
+        {"action": "record_active_hash", "as": "before"},
+        {"action": "begin_write", "size_bytes": 360000},
+        {"action": "cut_power", "at_percent": [10, 30, 50, 70, 90], "note": "one per cycle, cycling through the list"},
+        {"action": "restore_power", "settle_ms": 3000},
+        {"action": "connect"},
+        {"action": "record_active_hash", "as": "after"},
+        {"action": "assert_hash_is_one_of", "values": ["before", "the package that was being written"]},
+        {"action": "assert_config_valid", "note": "the device booted into a configuration it could parse"}
+      ]
+    }
+  ],
+  "checks": {
+    "all_writes_verified": "100 of 100 writes read back byte-identical",
+    "no_torn_configuration": "every power cut left a complete old or complete new configuration",
+    "never_unconfigured": "the device never came back with no usable configuration",
+    "generation_monotonic": "the generation counter never went backwards"
+  }
+}

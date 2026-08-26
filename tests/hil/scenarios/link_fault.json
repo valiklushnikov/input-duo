@@ -1,0 +1,37 @@
+{
+  "name": "link_fault",
+  "description": "The SPI link between U1 and U2 is cut, corrupted and restored while input is flowing. U2 must release everything it is holding within 100 ms of losing the link, and a damaged frame must produce no HID report at all - a wrong keystroke on someone's computer is worse than a missing one.",
+  "requires": [
+    "U1 and U2 with the SPI1 link on a header that can be interrupted",
+    "A way to corrupt one frame in flight, such as grounding MOSI for one transfer",
+    "PC2 observing what U2 emits"
+  ],
+  "steps": [
+    {"action": "connect"},
+    {"action": "inject", "kind": "keyboard", "event": "key_a_down", "note": "leave it held"},
+    {"action": "cut_link", "note": "physically interrupt SPI1"},
+    {"action": "observe_release_all", "timeout_ms": 100, "records": "u2_release_ms"},
+    {"action": "restore_link", "settle_ms": 1000},
+    {"action": "assert_recovered", "note": "handshake completes and input flows again"},
+    {
+      "action": "repeat",
+      "count": 50,
+      "steps": [
+        {"action": "corrupt_next_frame"},
+        {"action": "assert_no_hid_report", "note": "a bad CRC must produce nothing, not a guess"},
+        {"action": "assert_counter_incremented", "counter": "spi_crc_errors"}
+      ]
+    },
+    {"action": "reset", "target": "u1"},
+    {"action": "assert_independent", "note": "U2 keeps serving PC2 while U1 restarts"},
+    {"action": "reset", "target": "u2"},
+    {"action": "assert_independent", "note": "U1 keeps serving PC1 while U2 restarts"}
+  ],
+  "checks": {
+    "u2_released_within_budget": "U2 released every held key within 100 ms of the cut",
+    "no_report_from_damaged_frame": "no HID report followed any corrupted frame",
+    "crc_counter_incremented": "every corrupted frame was counted",
+    "link_recovered": "input flowed again after the link was restored",
+    "resets_are_independent": "neither reset took the other board down"
+  }
+}

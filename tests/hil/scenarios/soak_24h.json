@@ -1,0 +1,54 @@
+{
+  "name": "soak_24h",
+  "description": "Twenty-four hours of continuous input with periodic route switches and macro runs. This is the scenario that finds the leak, the counter that wraps and the queue that slowly fills - none of which a short run can see.",
+  "requires": [
+    "The full two-board rig",
+    "A keyboard and a mouse attached",
+    "PC1 and PC2 both able to log for 24 hours",
+    "An uninterrupted supply"
+  ],
+  "steps": [
+    {"action": "connect"},
+    {"action": "write_config", "note": "two profiles, a toggle binding, and one macro long enough to be stopped mid-run"},
+    {
+      "action": "run_for",
+      "hours": 24,
+      "steps": [
+        {"action": "inject_and_observe", "kind": "keyboard", "rate_hz": 10},
+        {"action": "inject_and_observe", "kind": "mouse", "rate_hz": 50},
+        {
+          "action": "every_minutes",
+          "value": 5,
+          "steps": [
+            {"action": "inject", "kind": "mouse", "event": "button_3_tap"},
+            {"action": "observe_route_change", "timeout_ms": 100}
+          ]
+        },
+        {
+          "action": "every_minutes",
+          "value": 15,
+          "steps": [
+            {"action": "run_macro", "id": 1},
+            {"action": "stop_and_release_all", "after_ms": 500},
+            {"action": "assert_all_released"}
+          ]
+        },
+        {
+          "action": "every_minutes",
+          "value": 60,
+          "steps": [
+            {"action": "get_diagnostics", "records": ["spi_crc_errors", "spi_timeouts", "watchdog_count"]}
+          ]
+        }
+      ]
+    }
+  ],
+  "checks": {
+    "no_watchdog_reset": "the watchdog count did not change over 24 hours",
+    "keyboard_p95_within_budget": "keyboard latency p95 <= 20 ms across the whole run",
+    "mouse_p95_within_budget": "mouse latency p95 <= 20 ms across the whole run",
+    "no_gap_over_50ms": "no observed pause longer than 50 ms",
+    "no_stuck_keys": "every macro stop released everything",
+    "error_counters_stable": "SPI CRC errors and timeouts did not grow"
+  }
+}

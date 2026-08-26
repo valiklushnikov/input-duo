@@ -20,7 +20,7 @@
     Remove the build virtual environment and the output directory first.
 
 .EXAMPLE
-    pwsh -File configurator/packaging/nuitka-build.ps1
+    powershell -ExecutionPolicy Bypass -File configurator/packaging/nuitka-build.ps1
 #>
 
 [CmdletBinding()]

@@ -1,0 +1,33 @@
+{
+  "name": "route_toggle",
+  "description": "One thousand route toggles between PC1 and PC2 with no lost, duplicated or misrouted event, and no key left held across a switch. This is the product's whole purpose, so it gets the largest sample count.",
+  "requires": [
+    "U1 with a keyboard and a mouse attached",
+    "U2 on SPI1",
+    "PC1 and PC2 both logged in and observing"
+  ],
+  "steps": [
+    {"action": "connect"},
+    {"action": "write_config", "note": "one profile, Button 3 bound to TOGGLE_MOUSE_ROUTE"},
+    {
+      "action": "repeat",
+      "count": 1000,
+      "steps": [
+        {"action": "inject", "kind": "mouse", "event": "button_3_tap"},
+        {"action": "observe_route_change", "timeout_ms": 100},
+        {"action": "inject_and_observe", "kind": "mouse", "event": "move", "expect_on": "current_route"},
+        {"action": "inject_and_observe", "kind": "keyboard", "event": "key_a", "expect_on": "keyboard_route"},
+        {"action": "assert_no_event_on_other_computer"}
+      ]
+    },
+    {"action": "assert_all_released"}
+  ],
+  "checks": {
+    "all_toggles_took_effect": "1000 of 1000 toggles changed the route",
+    "no_misrouted_event": "no injected event arrived on the computer it was not routed to",
+    "no_stuck_keys": "no key remained held across any switch",
+    "keyboard_p95_within_budget": "keyboard latency p95 <= 20 ms",
+    "mouse_p95_within_budget": "mouse latency p95 <= 20 ms",
+    "no_gap_over_50ms": "no observed pause longer than 50 ms"
+  }
+}
