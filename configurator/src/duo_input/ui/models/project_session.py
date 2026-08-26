@@ -1,0 +1,251 @@
+"""The editing session: one immutable project plus the three hashes around it.
+
+Three hashes describe three different things and are never conflated:
+
+``file_hash``
+    SHA-256 of the ``.duoinput.json`` bytes that are currently on disk. Empty
+    while the session has never been saved or loaded.
+``compiled_hash``
+    SHA-256 of ``compile_project_to_binary`` applied to the project **as it is
+    in memory right now**. This is the package a write would send.
+``device_hash``
+    What :class:`~duo_input.device.service.DeviceService` reports the device is
+    holding. The session never derives it, it only carries it.
+
+``dirty`` compares the in-memory project against the baseline - the state that
+was last persisted, or the pristine project of a brand-new session. Saving
+therefore clears ``dirty`` and sets ``file_hash``; it can never change
+``device_hash`` and so can never make a device mismatch disappear.
+
+Every mutation returns a *new* session: :meth:`ProjectSession.apply` takes a
+command object and hands back a fresh session, so editors never mutate shared
+state and undo is a matter of keeping old sessions.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Protocol, runtime_checkable
+
+from duo_input.domain.models import DeviceProject, Profile
+from duo_input.domain.project_store import (
+    PROJECT_SCHEMA_VERSION,
+    load_project,
+    save_project_atomic,
+)
+from duo_input.domain.text_compiler import compile_project_to_binary
+from duo_input.domain.validation import ValidationIssue, validate_project
+from duo_input.generated.protocol import PROFILES, KeyboardRoute, MouseRoute, TextLayout
+
+# Default profile accent colours. These are project *data*, not UI strings.
+_DEFAULT_COLORS: tuple[tuple[int, int, int], ...] = (
+    (0xE6, 0x39, 0x46),
+    (0xF7, 0x7F, 0x00),
+    (0xFC, 0xBF, 0x49),
+    (0x43, 0xAA, 0x8B),
+    (0x27, 0x7D, 0xA1),
+    (0x57, 0x75, 0x90),
+    (0x9D, 0x4E, 0xDD),
+    (0x8D, 0x99, 0xAE),
+)
+
+
+def default_project() -> DeviceProject:
+    """A pristine, valid eight-profile project for a brand-new session."""
+
+    profiles = tuple(
+        Profile(
+            id=index + 1,
+            name=f"Profile {index + 1}",
+            color_rgb=_DEFAULT_COLORS[index % len(_DEFAULT_COLORS)],
+            keyboard_route=KeyboardRoute.PC1,
+            mouse_route=MouseRoute.PC1,
+            text_layout=TextLayout.US,
+            bindings=(),
+            macros=(),
+        )
+        for index in range(PROFILES)
+    )
+    return DeviceProject(
+        schema_version=PROJECT_SCHEMA_VERSION,
+        active_profile_id=1,
+        profiles=profiles,
+    )
+
+
+# --------------------------------------------------------------------- commands
+
+
+@runtime_checkable
+class ProjectCommand(Protocol):
+    """One editing step. Pure: it maps a project onto a new project."""
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject: ...
+
+
+@dataclass(frozen=True)
+class SetActiveProfile:
+    """Select which profile the device starts in."""
+
+    profile_id: int
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        return replace(project, active_profile_id=self.profile_id)
+
+
+@dataclass(frozen=True)
+class RenameProfile:
+    """Rename exactly one profile, leaving every other profile identical."""
+
+    profile_id: int
+    name: str
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        profiles = tuple(
+            replace(profile, name=self.name) if profile.id == self.profile_id else profile
+            for profile in project.profiles
+        )
+        return replace(project, profiles=profiles)
+
+
+# ---------------------------------------------------------------------- session
+
+
+def _as_hex(value: bytes | str) -> str:
+    if isinstance(value, str):
+        return value
+    return bytes(value).hex()
+
+
+@dataclass(frozen=True)
+class ProjectSession:
+    """An immutable snapshot of everything the shell needs to know."""
+
+    project: DeviceProject = field(default_factory=default_project)
+    path: Path | None = None
+    file_hash: str = ""
+    device_hash: str = ""
+    connected: bool = False
+    baseline: DeviceProject | None = None
+
+    def __post_init__(self) -> None:
+        if self.baseline is None:
+            object.__setattr__(self, "baseline", self.project)
+        object.__setattr__(self, "_compiled", None)
+
+    # -------------------------------------------------------------- factories
+
+    @classmethod
+    def new(cls) -> ProjectSession:
+        """A clean session on a pristine project that has never been saved."""
+        return cls(project=default_project())
+
+    @classmethod
+    def load(cls, path: str | Path) -> ProjectSession:
+        """Read ``path`` and return a clean session anchored to that file."""
+        location = Path(path)
+        project = load_project(location)
+        return cls(
+            project=project,
+            path=location,
+            file_hash=_file_hash(location),
+        )
+
+    # ---------------------------------------------------------- derived state
+
+    @property
+    def active_profile(self) -> Profile:
+        for profile in self.project.profiles:
+            if profile.id == self.project.active_profile_id:
+                return profile
+        return self.project.profiles[0]
+
+    @property
+    def dirty(self) -> bool:
+        """Does the in-memory project differ from what was last persisted?"""
+        return self.project != self.baseline
+
+    @property
+    def issues(self) -> tuple[ValidationIssue, ...]:
+        return validate_project(self.project)
+
+    @property
+    def is_valid(self) -> bool:
+        return not self.issues
+
+    @property
+    def compiled_hash(self) -> str:
+        """SHA-256 of the package this project compiles to; empty if it cannot."""
+        return self._compiled_package()[0]
+
+    @property
+    def compiled_size(self) -> int | None:
+        """Length of that package in bytes, or ``None`` if it cannot compile."""
+        return self._compiled_package()[1]
+
+    @property
+    def device_matches(self) -> bool:
+        """Is the device holding exactly the package this project compiles to?"""
+        return bool(self.device_hash) and self.device_hash == self.compiled_hash
+
+    @property
+    def can_write(self) -> bool:
+        """A write is offered only for a valid project on a connected device."""
+        return self.connected and self.is_valid and bool(self.compiled_hash)
+
+    def _compiled_package(self) -> tuple[str, int | None]:
+        cached = getattr(self, "_compiled", None)
+        if cached is None:
+            try:
+                package = compile_project_to_binary(self.project)
+            except ValueError:
+                # An invalid project has no package; can_write already blocks it.
+                cached = ("", None)
+            else:
+                cached = (hashlib.sha256(package).hexdigest(), len(package))
+            object.__setattr__(self, "_compiled", cached)
+        return cached
+
+    # ------------------------------------------------------------ transitions
+
+    def apply(self, command: ProjectCommand) -> ProjectSession:
+        """Return a new session with ``command`` applied to the project."""
+        project = command.apply_to(self.project)
+        if not isinstance(project, DeviceProject):
+            raise TypeError("a project command must return a DeviceProject")
+        return replace(self, project=project)
+
+    def with_device_hash(self, value: bytes | str) -> ProjectSession:
+        """Record what the device reports it is holding; nothing else changes."""
+        return replace(self, device_hash=_as_hex(value))
+
+    def with_connection(self, connected: bool) -> ProjectSession:
+        return replace(self, connected=bool(connected))
+
+    def save(self, path: str | Path | None = None) -> ProjectSession:
+        """Write the project and return a clean session; device state is kept."""
+        location = Path(path) if path is not None else self.path
+        if location is None:
+            raise ValueError("the session has no file to save to")
+        save_project_atomic(self.project, location)
+        return replace(
+            self,
+            path=location,
+            file_hash=_file_hash(location),
+            baseline=self.project,
+        )
+
+
+def _file_hash(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+__all__ = [
+    "ProjectCommand",
+    "ProjectSession",
+    "RenameProfile",
+    "SetActiveProfile",
+    "default_project",
+]

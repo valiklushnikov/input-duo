@@ -1,0 +1,39 @@
+"""The application entry point and the window factory behind it."""
+
+from __future__ import annotations
+
+import tomllib
+from pathlib import Path
+
+from duo_input.app import ENTRY_POINT, build_main_window, main
+from duo_input.device.service import DeviceService
+from duo_input.ui.main_window import MainWindow
+
+PYPROJECT = Path(__file__).resolve().parents[2] / "pyproject.toml"
+
+
+def test_pyproject_declares_the_console_entry_point():
+    document = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+
+    scripts = document["project"]["scripts"]
+
+    assert scripts["duo-input-configurator"] == ENTRY_POINT
+
+
+def test_entry_point_target_is_the_main_callable():
+    module_name, _, attribute = ENTRY_POINT.partition(":")
+
+    assert module_name == "duo_input.app"
+    assert attribute == "main"
+    assert callable(main)
+
+
+def test_build_main_window_produces_a_wired_shell(qtbot):
+    service = DeviceService(timeout_ms=5000)
+
+    window = build_main_window(service)
+    qtbot.addWidget(window)
+
+    assert isinstance(window, MainWindow)
+    assert window.service is service
+    assert window.session.dirty is False
