@@ -64,6 +64,23 @@ endif()
 
 add_test(NAME link_watchdog COMMAND duo_link_watchdog_test)
 
+add_executable(duo_frame_resync_test
+    test_main.cpp
+    test_frame_resync.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u2_endpoint/frame_resync.cpp
+)
+
+target_link_libraries(duo_frame_resync_test PRIVATE duo_common)
+target_include_directories(duo_frame_resync_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u2_endpoint
+)
+
+if(MSVC)
+    target_compile_options(duo_frame_resync_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME frame_resync COMMAND duo_frame_resync_test)
+
 add_executable(duo_output_runtime_test
     test_main.cpp
     test_output_runtime.cpp

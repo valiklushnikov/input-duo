@@ -5,6 +5,7 @@ add_executable(duo_u2_endpoint
     usb_descriptors.cpp
     usb_service.cpp
     spi_slave.cpp
+    frame_resync.cpp
     link_watchdog.cpp
 )
 
@@ -27,8 +28,10 @@ pico_enable_stdio_uart(duo_u2_endpoint 0)
 
 # Bring-up only; see firmware/u2_endpoint/spi_slave.cpp.
 option(DUO_SPI_DEBUG "Send a counting pattern instead of frames" OFF)
+option(DUO_WIRE_WALK "Mirror the parity of the incoming lines, nothing else" OFF)
 target_compile_definitions(duo_u2_endpoint PRIVATE
     DUO_SPI_DEBUG=$<BOOL:${DUO_SPI_DEBUG}>
+    DUO_WIRE_WALK=$<BOOL:${DUO_WIRE_WALK}>
 )
 
 pico_add_extra_outputs(duo_u2_endpoint)

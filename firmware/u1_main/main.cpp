@@ -146,7 +146,25 @@ int main() {
     }
 
 #if DUO_SPI_DEBUG
-    const std::uint8_t incoming_line = duo_input::u1::SpiMaster::probe_incoming_line();
+    // Two independent answers, taken before the SPI block claims the pins.
+    //
+    // The first uses the peripheral's internal loop back and touches no pin at
+    // all, so it speaks only about U1. The second drives every combination of
+    // the outgoing lines and watches the incoming one, so it speaks only about
+    // the wires and U2. Asked together they say which half is at fault; asked
+    // as one number they say nothing, which is where the last two days went.
+    static const std::uint8_t kSelfTestTx[6] = {0x00, 0x55, 0xAA, 0xFF, 0xA5, 0x5A};
+    std::uint8_t self_test_rx[6] = {};
+    duo_input::u1::SpiMaster::internal_loopback(kSelfTestTx, self_test_rx, sizeof(kSelfTestTx));
+    const std::uint8_t wire_walk = duo_input::u1::SpiMaster::wire_walk();
+    // The same probe at three speeds. U2 answered a hand-clocked master and
+    // ignored the real one, and speed is the only thing that differs between
+    // them, so this is where the difference is worth measuring rather than
+    // reasoned about.
+    std::uint8_t bitbang[3][8] = {};
+    duo_input::u1::SpiMaster::bitbang_probe(bitbang[0], 8, 10);  // ~33 kHz
+    duo_input::u1::SpiMaster::bitbang_probe(bitbang[1], 8, 2);   // ~170 kHz
+    duo_input::u1::SpiMaster::bitbang_probe(bitbang[2], 8, 0);   // as fast as pins go
 #endif
 
     usb.begin();
@@ -211,9 +229,12 @@ int main() {
             report[0] = static_cast<std::uint8_t>(link.frames_sent());
             report[1] = static_cast<std::uint8_t>(link.frames_sent() >> 8);
             report[2] = link.status().answered ? 1 : 0;
-            report[3] = incoming_line;
-            std::memcpy(report + 4, link.last_reply(), 32);
-            config.set_link_debug(report, 36);
+            report[3] = wire_walk;
+            std::memcpy(report + 12, kSelfTestTx, sizeof(kSelfTestTx));
+            std::memcpy(report + 18, self_test_rx, sizeof(self_test_rx));
+            std::memcpy(report + 24, bitbang, sizeof(bitbang));
+            std::memcpy(report + 4, link.last_reply(), 8);
+            config.set_link_debug(report, 48);
         }
 #endif
 

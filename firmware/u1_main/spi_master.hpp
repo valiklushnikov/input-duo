@@ -71,6 +71,17 @@ public:
     ///
     /// Call before begin(), which hands the pins to the SPI block.
     static std::uint8_t wire_walk();
+
+    /// Bring-up only: be the master by hand, one bit at a time.
+    ///
+    /// Drives chip select, clock and the outgoing line as ordinary pins and
+    /// samples the incoming one, at microsecond speed rather than a megahertz.
+    /// It depends on nothing in this chip's SPI block, so what comes back is
+    /// U2's slave answering or U2's slave not answering, with no third
+    /// explanation left.
+    ///
+    /// Call before begin(), which hands the pins back to the SPI block.
+    static void bitbang_probe(std::uint8_t* rx, std::size_t count, unsigned half_period_us);
 #endif
 
     /// Claim SPI1 and the four pins. Call once.

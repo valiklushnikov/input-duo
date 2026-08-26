@@ -8,6 +8,8 @@
 
 #include "pico/stdlib.h"
 
+#include "hardware/gpio.h"
+
 #include "hid/state_manager.hpp"
 #include "link/spi_protocol.hpp"
 #include "link_watchdog.hpp"
@@ -81,6 +83,32 @@ void apply(const duo_input::u2::ValidFrame& frame,
 }  // namespace
 
 int main() {
+#if DUO_WIRE_WALK
+    // Bring-up only: U2 becomes a mirror and nothing else. No SPI, no USB.
+    //
+    // It drives its outgoing line with the parity of the three lines U1 drives
+    // it with. U1 can then walk all eight combinations and read back a single
+    // byte whose value names which wire is broken - a dead clock and a dead
+    // chip select produce different bytes, where a link counter produces the
+    // same zero for both. Inputs are pulled down so a wire nobody drives reads
+    // as a definite zero instead of as noise.
+    {
+        const unsigned inputs[3] = {duo_input::u2::kPinSpiCs, duo_input::u2::kPinSpiSck,
+                                    duo_input::u2::kPinSpiRx};
+        for (unsigned pin : inputs) {
+            gpio_init(pin);
+            gpio_set_dir(pin, GPIO_IN);
+            gpio_pull_down(pin);
+        }
+        gpio_init(duo_input::u2::kPinSpiTx);
+        gpio_set_dir(duo_input::u2::kPinSpiTx, GPIO_OUT);
+        while (true) {
+            const bool parity = gpio_get(inputs[0]) ^ gpio_get(inputs[1]) ^ gpio_get(inputs[2]);
+            gpio_put(duo_input::u2::kPinSpiTx, parity);
+        }
+    }
+#endif
+
     configure_indicator();
 
     duo_input::hid::HidStateManager outputs;
@@ -114,7 +142,7 @@ int main() {
 
         const std::uint32_t now_ms = to_ms_since_boot(get_absolute_time());
         duo_input::u2::ValidFrame frame;
-        while (link.take_valid_frame(frame)) {
+        while (link.take_valid_frame(now_ms, frame)) {
             watchdog.observe_valid(now_ms);
             released_for_silence = false;
             apply(frame, outputs);

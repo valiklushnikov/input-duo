@@ -86,22 +86,34 @@ void SpiSlave::rearm() {
     dma_channel_abort(rx_channel_);
     dma_channel_abort(tx_channel_);
 
-    // Whatever the FIFOs still hold belongs to the frame that just ended.
+    // Whatever the queues still hold belongs to the frame that just ended.
+    //
+    // Draining the receive side is not enough. Bytes the aborted transfer had
+    // already pushed towards the master are still queued to go out, and they
+    // would be sent ahead of the next frame - shifting it by however many were
+    // left and making every frame after it wrong, which is the desynchronised
+    // link this is supposed to recover from. There is no flush for that queue,
+    // so the block is switched off and on, which empties both.
+    hw_clear_bits(&spi_get_hw(kSpi)->cr1, SPI_SSPCR1_SSE_BITS);
     while (spi_is_readable(kSpi)) {
         (void)spi_get_hw(kSpi)->dr;
     }
+    hw_set_bits(&spi_get_hw(kSpi)->cr1, SPI_SSPCR1_SSE_BITS);
+
     arm();
 }
 
-bool SpiSlave::take_valid_frame(ValidFrame& frame) {
-    const bool cs_idle = gpio_get(kPinSpiCs) != 0;
+bool SpiSlave::take_valid_frame(std::uint32_t now_ms, ValidFrame& frame) {
     const std::uint32_t remaining = dma_channel_hw_addr(rx_channel_)->transfer_count;
 
     if (remaining != 0) {
-        // The frame is still arriving - or it stopped part way through, which
-        // the master's chip select tells us. Resynchronising on the boundary
-        // means one damaged frame costs one frame, not every frame after it.
-        if (cs_idle && remaining != kFrameSize) {
+        // Still arriving - or stopped part way, which only time can tell us.
+        //
+        // Not the chip select line: the SPI block raises that between every
+        // byte of a transfer, so reading it as a frame boundary abandons every
+        // frame after its first byte. That is what this did, and it received
+        // nothing at all until the bench said so.
+        if (resync_.update(now_ms, remaining, kFrameSize)) {
             ++partial_frames_;
             prime();
             rearm();

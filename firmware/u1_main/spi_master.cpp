@@ -55,6 +55,44 @@ void SpiMaster::internal_loopback(const std::uint8_t* tx, std::uint8_t* rx, std:
     hw_set_bits(&spi_get_hw(kSpi)->cr1, SPI_SSPCR1_SSE_BITS);
 }
 
+void SpiMaster::bitbang_probe(std::uint8_t* rx, std::size_t count, unsigned half_period_us) {
+    gpio_init(kPinSpiCs);
+    gpio_set_dir(kPinSpiCs, GPIO_OUT);
+    gpio_put(kPinSpiCs, 1);
+    gpio_init(kPinSpiSck);
+    gpio_set_dir(kPinSpiSck, GPIO_OUT);
+    gpio_put(kPinSpiSck, 0);
+    gpio_init(kPinSpiTx);
+    gpio_set_dir(kPinSpiTx, GPIO_OUT);
+    gpio_put(kPinSpiTx, 0);
+    gpio_init(kPinSpiRx);
+    gpio_set_dir(kPinSpiRx, GPIO_IN);
+    sleep_ms(2);
+
+    for (std::size_t index = 0; index < count; ++index) {
+        // Chip select is raised between bytes because that is what the SPI
+        // block does, and a slave in this mode expects each byte framed.
+        const std::uint8_t outgoing = static_cast<std::uint8_t>(0xA0 | index);
+        std::uint8_t incoming = 0;
+
+        gpio_put(kPinSpiCs, 0);
+        sleep_us(half_period_us + 1);
+        for (int bit = 7; bit >= 0; --bit) {
+            gpio_put(kPinSpiTx, (outgoing >> bit) & 1u);
+            sleep_us(half_period_us);
+            gpio_put(kPinSpiSck, 1);
+            sleep_us(half_period_us);
+            incoming = static_cast<std::uint8_t>((incoming << 1) | (gpio_get(kPinSpiRx) ? 1u : 0u));
+            gpio_put(kPinSpiSck, 0);
+            sleep_us(half_period_us);
+        }
+        gpio_put(kPinSpiCs, 1);
+        sleep_us(half_period_us * 4 + 1);
+
+        rx[index] = incoming;
+    }
+}
+
 std::uint8_t SpiMaster::wire_walk() {
     // Every wire in one measurement, without touching any of them.
     //
@@ -105,12 +143,21 @@ void SpiMaster::begin() {
     gpio_set_function(kPinSpiSck, GPIO_FUNC_SPI);
     gpio_set_function(kPinSpiTx, GPIO_FUNC_SPI);
 
-    // CS is driven by hand rather than by the SPI block, so one assertion
-    // frames exactly one 64-byte transfer. The hardware would otherwise
-    // toggle it per byte, and the slave could not tell where a frame began.
-    gpio_init(kPinSpiCs);
-    gpio_set_dir(kPinSpiCs, GPIO_OUT);
-    gpio_put(kPinSpiCs, 1);
+    // Chip select belongs to the SPI block, not to this code.
+    //
+    // Holding it down for a whole 64-byte transfer looks tidier - one
+    // assertion, one frame - and it does not work. In this frame format the
+    // slave takes that signal as the boundary of a single byte, so a select
+    // that never rises means a slave that shifts one byte and then waits
+    // forever for the next frame that never begins. Driven by hand this way,
+    // the link was silent in both directions while every part of it was
+    // working: U1's SPI block, U2's slave and all four wires each tested good
+    // on their own.
+    //
+    // The frame boundary comes from elsewhere instead. U1 sends 64 bytes and
+    // then idles for milliseconds, which is a gap U2 can see, and U2's resync
+    // is written against exactly that.
+    gpio_set_function(kPinSpiCs, GPIO_FUNC_SPI);
 }
 
 bool SpiMaster::send(protocol::SpiMessageType type, protocol::ByteView payload,
@@ -129,9 +176,7 @@ bool SpiMaster::send(protocol::SpiMessageType type, protocol::ByteView payload,
         return false;
     }
 
-    gpio_put(kPinSpiCs, 0);
     spi_write_read_blocking(kSpi, tx_, rx_, kFrameSize);
-    gpio_put(kPinSpiCs, 1);
 
     ++sequence_;
     ++frames_sent_;

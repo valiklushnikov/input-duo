@@ -21,6 +21,8 @@
 
 #include <cstdint>
 
+#include "frame_resync.hpp"
+
 #include "hid/types.hpp"
 #include "link/spi_protocol.hpp"
 #include "protocol/frame.hpp"
@@ -54,7 +56,7 @@ public:
     ///
     /// Consumes it: calling twice without a new transfer returns false the
     /// second time.
-    bool take_valid_frame(ValidFrame& frame);
+    bool take_valid_frame(std::uint32_t now_ms, ValidFrame& frame);
 
     /// Publish what U2 will say in the next transfer.
     void set_status(bool mounted);
@@ -79,6 +81,7 @@ private:
     std::uint32_t crc_errors_ = 0;
     std::uint32_t frames_ = 0;
     std::uint32_t partial_frames_ = 0;
+    FrameResync resync_;
     int rx_channel_ = -1;
     int tx_channel_ = -1;
     bool mounted_ = false;
