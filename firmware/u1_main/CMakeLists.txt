@@ -36,8 +36,12 @@ pico_enable_stdio_uart(duo_u1_main 0)
 # The generated-input pattern is opt-in and off by default. A device that can
 # type on its own must not ship because someone forgot a flag.
 option(DUO_TEST_PATTERN "Generate synthetic input on Core 1" OFF)
+# Bring-up only: replaces the diagnostics reply with raw link bytes, which the
+# configurator cannot parse. Never enabled in a release build.
+option(DUO_SPI_DEBUG "Report raw SPI link bytes over CDC" OFF)
 target_compile_definitions(duo_u1_main PRIVATE
     DUO_TEST_PATTERN=$<BOOL:${DUO_TEST_PATTERN}>
+    DUO_SPI_DEBUG=$<BOOL:${DUO_SPI_DEBUG}>
 )
 
 pico_add_extra_outputs(duo_u1_main)

@@ -11,6 +11,8 @@
 
 #include "tusb.h"
 
+#include <cstring>
+
 #include "hardware/watchdog.h"
 
 #include "buttons.hpp"
@@ -85,16 +87,19 @@ public:
 ///
 /// A toggle rather than a fixed destination, because the button exists for the
 /// case where the operator cannot see which computer currently has the mouse.
-///
 /// Nothing generates mouse input yet - the CH375B arrives in the next plan -
-/// so this state has nothing to route today. It is kept and shown on the LED
-/// rather than faked into a command that would do nothing: a control that
-/// appears to work and does not is worse than one that plainly does not yet.
+/// so this state has nothing to route today, and it is kept rather than faked
+/// into a command that would do nothing.
 bool g_mouse_on_pc2 = false;
 
-void show_mouse_route() {
+/// The LED reports whether U2 is answering.
+///
+/// That is the most useful thing this one lamp can say right now: it is the
+/// only outward sign of a four-wire link that someone can knock loose, and it
+/// goes dark within the same 100 ms in which U2 releases everything it holds.
+void show_link(bool healthy) {
 #ifdef PICO_DEFAULT_LED_PIN
-    gpio_put(PICO_DEFAULT_LED_PIN, g_mouse_on_pc2 ? 1 : 0);
+    gpio_put(PICO_DEFAULT_LED_PIN, healthy ? 1 : 0);
 #endif
 }
 
@@ -139,6 +144,10 @@ int main() {
     if (stored.has_active) {
         config.set_active_profile(1);
     }
+
+#if DUO_SPI_DEBUG
+    const std::uint8_t incoming_line = duo_input::u1::SpiMaster::probe_incoming_line();
+#endif
 
     usb.begin();
     link.begin();
@@ -194,6 +203,19 @@ int main() {
         // and does not look severed either.
         const std::uint32_t now_ms = to_ms_since_boot(get_absolute_time());
         link.poll(now_ms, g_outputs.take_snapshot(duo_input::hid::Target::Pc2));
+        show_link(link.status().answered);
+
+#if DUO_SPI_DEBUG
+        {
+            std::uint8_t report[48];
+            report[0] = static_cast<std::uint8_t>(link.frames_sent());
+            report[1] = static_cast<std::uint8_t>(link.frames_sent() >> 8);
+            report[2] = link.status().answered ? 1 : 0;
+            report[3] = incoming_line;
+            std::memcpy(report + 4, link.last_reply(), 32);
+            config.set_link_debug(report, 36);
+        }
+#endif
 
         // Active-low against internal pull-ups: a pin pulled to ground is a
         // press, whether that is a button or a wire.
@@ -203,7 +225,6 @@ int main() {
                 // wrong, so it does not consult the configuration. The LED is
                 // the whole visible effect until there is mouse input to route.
                 g_mouse_on_pc2 = !g_mouse_on_pc2;
-                show_mouse_route();
                 break;
             case duo_input::u1::ButtonEvent::StopReleaseAll:
                 g_outputs.release_all();

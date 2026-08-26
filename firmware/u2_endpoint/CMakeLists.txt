@@ -18,10 +18,17 @@ target_link_libraries(duo_u2_endpoint PRIVATE
     tinyusb_device
     pico_unique_id
     hardware_spi
+    hardware_dma
     hardware_watchdog
 )
 
 pico_enable_stdio_usb(duo_u2_endpoint 0)
 pico_enable_stdio_uart(duo_u2_endpoint 0)
+
+# Bring-up only; see firmware/u2_endpoint/spi_slave.cpp.
+option(DUO_SPI_DEBUG "Send a counting pattern instead of frames" OFF)
+target_compile_definitions(duo_u2_endpoint PRIVATE
+    DUO_SPI_DEBUG=$<BOOL:${DUO_SPI_DEBUG}>
+)
 
 pico_add_extra_outputs(duo_u2_endpoint)

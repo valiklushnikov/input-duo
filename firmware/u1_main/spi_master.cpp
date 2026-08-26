@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "hardware/gpio.h"
+#include "pico/stdlib.h"
 #include "hardware/spi.h"
 
 #include "protocol/frame.hpp"
@@ -29,6 +30,32 @@ bool moved(const hid::MouseSnapshot& mouse) {
 }
 
 }  // namespace
+
+#if DUO_SPI_DEBUG
+std::uint8_t SpiMaster::probe_incoming_line() {
+    // Is anything actually driving the wire from U2, or is it floating?
+    //
+    // A floating input follows whichever way it is pulled; a driven one does
+    // not. That distinguishes "the wire is not connected" from "the wire is
+    // fine and the far end is silent", which no counter can, and it costs one
+    // GPIO configuration before SPI claims the pin.
+    gpio_init(kPinSpiRx);
+    gpio_set_dir(kPinSpiRx, GPIO_IN);
+
+    gpio_pull_up(kPinSpiRx);
+    sleep_ms(2);
+    const bool high_when_pulled_up = gpio_get(kPinSpiRx);
+
+    gpio_pull_down(kPinSpiRx);
+    sleep_ms(2);
+    const bool low_when_pulled_down = !gpio_get(kPinSpiRx);
+
+    gpio_disable_pulls(kPinSpiRx);
+    // 0b11 means the level followed both pulls: nothing is driving it.
+    return static_cast<std::uint8_t>((high_when_pulled_up ? 1 : 0) |
+                                     (low_when_pulled_down ? 2 : 0));
+}
+#endif
 
 void SpiMaster::begin() {
     spi_init(kSpi, kSpiBaudRate);
@@ -67,6 +94,7 @@ bool SpiMaster::send(protocol::SpiMessageType type, protocol::ByteView payload,
     gpio_put(kPinSpiCs, 1);
 
     ++sequence_;
+    ++frames_sent_;
     last_sent_ms_ = now_ms;
     ever_sent_ = true;
     consume_reply(rx_);

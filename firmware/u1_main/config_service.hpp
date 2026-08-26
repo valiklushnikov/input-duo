@@ -88,6 +88,16 @@ public:
 
     const CdcDiagnostics& diagnostics() const { return diagnostics_; }
 
+#if DUO_SPI_DEBUG
+    /// Bytes reported in place of the ordinary diagnostics, for bring-up only.
+    ///
+    /// This replaces a frozen protocol reply with something the configurator
+    /// cannot parse, which is why it exists only behind a build flag and never
+    /// ships. It is here because the alternative was guessing at a silent
+    /// four-wire link.
+    void set_link_debug(const std::uint8_t* bytes, std::size_t size);
+#endif
+
     /// Record that someone at the device held SW2 for five seconds.
     ///
     /// The confirmation authorises exactly one factory reset and is spent by
@@ -145,6 +155,11 @@ private:
     bool factory_armed_ = false;
 
     CdcDiagnostics diagnostics_{};
+
+#if DUO_SPI_DEBUG
+    std::uint8_t link_debug_[48] = {};
+    std::size_t link_debug_size_ = 0;
+#endif
 };
 
 }  // namespace duo_input::u1

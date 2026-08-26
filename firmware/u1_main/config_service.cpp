@@ -296,7 +296,19 @@ std::size_t ConfigService::config_info_payload(CdcError error, std::uint8_t* out
     return 9 + crypto::kSha256DigestSize;
 }
 
+#if DUO_SPI_DEBUG
+void ConfigService::set_link_debug(const std::uint8_t* bytes, std::size_t size) {
+    link_debug_size_ = size < sizeof(link_debug_) ? size : sizeof(link_debug_);
+    std::memcpy(link_debug_, bytes, link_debug_size_);
+}
+#endif
+
 std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out) const {
+#if DUO_SPI_DEBUG
+    out[0] = static_cast<std::uint8_t>(error);
+    std::memcpy(out + 1, link_debug_, link_debug_size_);
+    return 1 + link_debug_size_;
+#else
     out[0] = static_cast<std::uint8_t>(error);
     put_u32(out + 1, diagnostics_.bad_crc);
     put_u32(out + 5, diagnostics_.disconnect);
@@ -304,6 +316,7 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
     put_u32(out + 13, diagnostics_.bad_sequence);
     put_u32(out + 17, diagnostics_.aborted_staging);
     return 21;
+#endif
 }
 
 void ConfigService::reply_error(const CdcFrame& frame, CdcError error) {

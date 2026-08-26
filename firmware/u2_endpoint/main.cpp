@@ -16,6 +16,17 @@
 
 namespace {
 
+/// The LED reports whether the link is alive.
+///
+/// It goes out at the same moment U2 releases everything, which makes the
+/// 100 ms fail-safe something an operator can see rather than something they
+/// have to take on trust.
+void show_link(bool healthy) {
+#ifdef PICO_DEFAULT_LED_PIN
+    gpio_put(PICO_DEFAULT_LED_PIN, healthy ? 1 : 0);
+#endif
+}
+
 void configure_indicator() {
 #ifdef PICO_DEFAULT_LED_PIN
     gpio_init(PICO_DEFAULT_LED_PIN);
@@ -113,10 +124,12 @@ int main() {
         // thing that would tell us is what went away - so let go here. A stuck
         // modifier changes what every later key means, and the operator cannot
         // fix it from the computer receiving it.
-        if (watchdog.expired(now_ms) && !released_for_silence) {
+        const bool link_alive = !watchdog.expired(now_ms);
+        if (!link_alive && !released_for_silence) {
             outputs.release_target(duo_input::hid::Target::Pc2);
             released_for_silence = true;
         }
+        show_link(link_alive);
 
         usb.publish(outputs);
     }

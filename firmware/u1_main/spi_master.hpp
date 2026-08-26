@@ -46,6 +46,13 @@ struct EndpointStatus {
 
 class SpiMaster {
 public:
+#if DUO_SPI_DEBUG
+    /// Bring-up only: report whether the incoming wire is driven or floating.
+    ///
+    /// Call before begin(), which hands the pin to the SPI block.
+    static std::uint8_t probe_incoming_line();
+#endif
+
     /// Claim SPI1 and the four pins. Call once.
     void begin();
 
@@ -64,11 +71,21 @@ public:
 
     const EndpointStatus& status() const { return status_; }
 
+    /// How many frames have gone out. Diagnostic only.
+    std::uint32_t frames_sent() const { return frames_sent_; }
+
+    /// The raw bytes of the last reply, whatever they were. Diagnostic only:
+    /// the difference between "nothing came back" and "something came back
+    /// that did not decode" is the difference between a dead wire and a
+    /// framing fault, and no counter distinguishes them.
+    const std::uint8_t* last_reply() const { return rx_; }
+
 private:
     bool send(protocol::SpiMessageType type, protocol::ByteView payload,
               std::uint32_t now_ms);
     void consume_reply(const std::uint8_t* reply);
 
+    std::uint32_t frames_sent_ = 0;
     std::uint16_t sequence_ = 0;
     std::uint32_t last_sent_ms_ = 0;
     bool ever_sent_ = false;
