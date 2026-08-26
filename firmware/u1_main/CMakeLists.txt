@@ -1,9 +1,18 @@
 # U1: the board the operator's keyboard, mouse and configurator all talk to.
-add_executable(duo_u1_main main.cpp)
+add_executable(duo_u1_main
+    main.cpp
+    usb_descriptors.cpp
+    usb_service.cpp
+)
+
+# tusb_config.h lives beside the sources, so TinyUSB has to be told to look
+# here for it.
+target_include_directories(duo_u1_main PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(duo_u1_main PRIVATE
     duo_common
     pico_stdlib
+    tinyusb_device
     pico_multicore
     pico_unique_id
     hardware_spi
