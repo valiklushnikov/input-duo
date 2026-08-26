@@ -28,10 +28,45 @@ public:
 
     /// Send whatever changed for PC1 since the last call.
     ///
-    /// Returns whether anything was sent. Movement is consumed from
-    /// ``manager`` only when it is actually handed to an endpoint, so a busy
-    /// endpoint delays the pointer rather than losing it.
-    bool publish(hid::HidStateManager& manager);
+    /// Returns whether anything was sent. Movement is consumed only when it
+    /// is actually handed to an endpoint, so a busy endpoint delays the
+    /// pointer rather than losing it.
+    /// ``source`` is anything that answers ``snapshot`` and ``take_snapshot``:
+    /// a bare state manager, or the command runtime that owns one. Templated
+    /// rather than fixed so neither board has to know the other's internals.
+    template <typename StateSource>
+    bool publish(StateSource& source) {
+        if (!mounted()) {
+            return false;
+        }
+
+        bool sent = false;
+        const hid::TargetSnapshot current = source.snapshot(hid::Target::Pc1);
+
+        // Keys are an absolute state: resend only when it differs from what
+        // the host was last told, so a held key does not flood the bus.
+        if (!keyboard_valid_ || !same_as_last_keyboard(current.keyboard)) {
+            if (send_keyboard(current.keyboard)) {
+                last_keyboard_ = current.keyboard;
+                keyboard_valid_ = true;
+                sent = true;
+            }
+        }
+
+        // Movement is a delta, so "unchanged" is not a reason to stay quiet.
+        // Buttons are absolute and travel in the same report.
+        if (has_movement(current.mouse) || current.mouse.buttons != last_buttons_) {
+            if (send_mouse(current.mouse)) {
+                last_buttons_ = current.mouse.buttons;
+                // Consume only now: an endpoint that was busy has cost the
+                // pointer a millisecond, not a movement.
+                source.take_snapshot(hid::Target::Pc1);
+                sent = true;
+            }
+        }
+
+        return sent;
+    }
 
     /// Has the host configured us?
     bool mounted() const;
@@ -49,6 +84,8 @@ public:
 private:
     bool send_keyboard(const hid::KeyboardSnapshot& keyboard);
     bool send_mouse(const hid::MouseSnapshot& mouse);
+    bool same_as_last_keyboard(const hid::KeyboardSnapshot& keyboard) const;
+    static bool has_movement(const hid::MouseSnapshot& mouse);
 
     hid::KeyboardSnapshot last_keyboard_{};
     std::uint8_t last_buttons_ = 0;

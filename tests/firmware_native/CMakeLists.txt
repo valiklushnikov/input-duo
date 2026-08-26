@@ -63,3 +63,20 @@ if(MSVC)
 endif()
 
 add_test(NAME link_watchdog COMMAND duo_link_watchdog_test)
+
+add_executable(duo_output_runtime_test
+    test_main.cpp
+    test_output_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/output_runtime.cpp
+)
+
+target_link_libraries(duo_output_runtime_test PRIVATE duo_common)
+target_include_directories(duo_output_runtime_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+)
+
+if(MSVC)
+    target_compile_options(duo_output_runtime_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME output_runtime COMMAND duo_output_runtime_test)

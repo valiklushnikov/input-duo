@@ -12,22 +12,6 @@ namespace {
 constexpr std::uint8_t kKeyboard = static_cast<std::uint8_t>(hid::U2Interface::Keyboard);
 constexpr std::uint8_t kMouse = static_cast<std::uint8_t>(hid::U2Interface::Mouse);
 
-bool same_keyboard(const hid::KeyboardSnapshot& left, const hid::KeyboardSnapshot& right) {
-    if (left.modifiers != right.modifiers || left.key_count != right.key_count) {
-        return false;
-    }
-    for (std::uint8_t index = 0; index < left.key_count; ++index) {
-        if (left.keys[index] != right.keys[index]) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool moved(const hid::MouseSnapshot& mouse) {
-    return mouse.delta_x != 0 || mouse.delta_y != 0 || mouse.wheel != 0 || mouse.pan != 0;
-}
-
 }  // namespace
 
 void UsbService::begin() {
@@ -84,37 +68,21 @@ bool UsbService::send_mouse(const hid::MouseSnapshot& mouse) {
                                   mouse.pan);
 }
 
-bool UsbService::publish(hid::HidStateManager& manager) {
-    if (!mounted()) {
+bool UsbService::same_as_last_keyboard(const hid::KeyboardSnapshot& keyboard) const {
+    if (keyboard.modifiers != last_keyboard_.modifiers ||
+        keyboard.key_count != last_keyboard_.key_count) {
         return false;
     }
-
-    bool sent = false;
-    const hid::TargetSnapshot current = manager.snapshot(hid::Target::Pc2);
-
-    // Keys are an absolute state: resend only when it differs from what the
-    // host was last told, so a held key does not flood the bus.
-    if (!keyboard_valid_ || !same_keyboard(current.keyboard, last_keyboard_)) {
-        if (send_keyboard(current.keyboard)) {
-            last_keyboard_ = current.keyboard;
-            keyboard_valid_ = true;
-            sent = true;
+    for (std::uint8_t index = 0; index < keyboard.key_count; ++index) {
+        if (keyboard.keys[index] != last_keyboard_.keys[index]) {
+            return false;
         }
     }
+    return true;
+}
 
-    // Movement is a delta, so "unchanged" is not a reason to stay quiet.
-    // Buttons are absolute and travel in the same report.
-    if (moved(current.mouse) || current.mouse.buttons != last_buttons_) {
-        if (send_mouse(current.mouse)) {
-            last_buttons_ = current.mouse.buttons;
-            // Consume only now: an endpoint that was busy has cost the pointer
-            // a millisecond, not a movement.
-            manager.take_snapshot(hid::Target::Pc2);
-            sent = true;
-        }
-    }
-
-    return sent;
+bool UsbService::has_movement(const hid::MouseSnapshot& mouse) {
+    return mouse.delta_x != 0 || mouse.delta_y != 0 || mouse.wheel != 0 || mouse.pan != 0;
 }
 
 }  // namespace duo_input::u2

@@ -123,3 +123,30 @@ def test_the_two_images_are_different(artifacts):
     first, second = (artifacts[name].read_bytes() for name in EXPECTED_ARTIFACTS)
 
     assert first != second
+
+
+# ----------------------------------------------- what a release must not do
+
+
+def _u1_elf() -> Path:
+    return _build_dir() / "firmware" / "u1_main" / "duo_u1_main.elf"
+
+
+@pytest.mark.skipif(not _u1_elf().is_file(), reason="no U1 ELF in this build")
+def test_a_release_image_cannot_generate_its_own_input():
+    """The synthetic input generator must be compiled out, not merely idle.
+
+    A device that can type on its own is exactly the thing that must not ship
+    because someone forgot a flag. DUO_TEST_PATTERN defaults to OFF, and this
+    checks the default actually took effect in the linked image rather than
+    trusting that it did.
+    """
+    import sys
+
+    sys.path.insert(0, str(REPOSITORY_ROOT / "tools"))
+    from dump_usb_descriptors import Elf32
+
+    symbols = Elf32(_u1_elf().read_bytes()).symbols()
+    generated = [name for name in symbols if "test_pattern" in name]
+
+    assert generated == []
