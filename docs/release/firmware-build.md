@@ -67,8 +67,20 @@ someone's hands.
 | Preset | What it builds |
 |---|---|
 | `native` | firmware logic compiled for this machine, with CTest |
-| `pico-release` | both UF2 images, MinSizeRel |
+| `pico-release` | both UF2 images, MinSizeRel, for Waveshare RP2040-Zero |
 | `pico-debug` | the same images with symbols, for a debug probe |
+
+## The target board
+
+`PICO_BOARD` is `waveshare_rp2040_zero`. It is an RP2040 with 2 MB of flash,
+like a Pico, so the flash layout is identical - but the pin header is not, and
+it has no plain LED. What a Pico exposes on GP25, this board does not route at
+all; its only indicator is an addressable WS2812 on GP16.
+
+That matters more than it sounds. Built for the wrong board, indicator code
+compiles happily and drives a pad connected to nothing, which is worse than
+having no indicator: a dark LED then looks like a signal rather than an
+absence. Link and device state are read over CDC instead.
 
 ## Flashing
 

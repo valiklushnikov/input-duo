@@ -22,7 +22,12 @@ endif()
 # The SDK must be pulled in before project(), because it installs the ARM
 # toolchain this project is then configured against.
 if(DUO_PICO_FIRMWARE)
-    set(PICO_BOARD pico CACHE STRING "Target board")
+    # Waveshare RP2040-Zero, not a Raspberry Pi Pico. Same RP2040 and the same
+    # 2 MB of flash, so the A/B layout is unaffected - but it has no plain LED
+    # on GP25, only an addressable WS2812 on GP16. Building for the wrong board
+    # compiles indicator code that drives a pad this board does not route
+    # anywhere, which is worse than having no indicator: it looks like a signal.
+    set(PICO_BOARD waveshare_rp2040_zero CACHE STRING "Target board")
     include(cmake/pico_sdk_import.cmake)
 endif()
 
