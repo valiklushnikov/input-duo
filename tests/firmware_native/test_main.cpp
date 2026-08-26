@@ -27,8 +27,10 @@ void record_failure(const char* expression, const char* file, int line) {
 }  // namespace duo::test
 
 int main() {
+    int executed = 0;
     for (duo::test::TestCase* test_case = duo::test::first_test_case();
          test_case != nullptr; test_case = test_case->next) {
+        ++executed;
         try {
             test_case->function();
         } catch (const std::exception& exception) {
@@ -38,5 +40,14 @@ int main() {
         }
     }
 
+    std::cout << executed << " tests, " << duo::test::failure_count()
+              << " failures\n";
+
+    // A binary that registered no tests passes every check it was given, which
+    // is not the same as being correct. Say so instead.
+    if (executed == 0) {
+        std::cerr << "no tests were registered\n";
+        return 2;
+    }
     return duo::test::failure_count() == 0 ? 0 : 1;
 }

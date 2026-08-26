@@ -33,3 +33,16 @@ if(MSVC)
 endif()
 
 add_test(NAME config_validator COMMAND duo_config_validator_test)
+
+add_executable(duo_hid_state_manager_test
+    test_main.cpp
+    test_hid_state_manager.cpp
+)
+
+target_link_libraries(duo_hid_state_manager_test PRIVATE duo_common)
+
+if(MSVC)
+    target_compile_options(duo_hid_state_manager_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME hid_state_manager COMMAND duo_hid_state_manager_test)
