@@ -106,3 +106,20 @@ if(MSVC)
 endif()
 
 add_test(NAME ab_store COMMAND duo_ab_store_test)
+
+add_executable(duo_config_service_test
+    test_main.cpp
+    test_config_service.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/config_service.cpp
+)
+
+target_link_libraries(duo_config_service_test PRIVATE duo_common)
+target_include_directories(duo_config_service_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+)
+
+if(MSVC)
+    target_compile_options(duo_config_service_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME config_service COMMAND duo_config_service_test)

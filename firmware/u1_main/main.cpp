@@ -9,9 +9,14 @@
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 
+#include "tusb.h"
+
+#include "config_service.hpp"
 #include "hid/state_manager.hpp"
 #include "output_runtime.hpp"
+#include "pico_flash.hpp"
 #include "spi_master.hpp"
+#include "storage/ab_store.hpp"
 #include "usb_service.hpp"
 
 #if DUO_TEST_PATTERN
@@ -48,6 +53,23 @@ void configure_button(uint pin) {
     gpio_pull_up(pin);
 }
 
+/// Sends the configurator's replies back down the CDC pipe.
+class CdcWriter : public duo_input::u1::CdcSink {
+public:
+    void write(const std::uint8_t* data, std::size_t size) override {
+        // Written whether or not the host has raised DTR. Gating on it meant a
+        // host that opened the port without setting the line got every request
+        // accepted and no answer at all, which is indistinguishable from a
+        // device that is not there - and QSerialPort does not raise DTR on
+        // open, so that host was the configurator.
+        //
+        // A host that stopped reading cannot wedge this loop either: TinyUSB's
+        // FIFO discards rather than blocks, and the configurator retries.
+        tud_cdc_write(data, static_cast<std::uint32_t>(size));
+        tud_cdc_write_flush();
+    }
+};
+
 duo_input::runtime::OutputCommand release_pc1() {
     duo_input::runtime::OutputCommand command;
     command.kind = duo_input::runtime::CommandKind::ReleaseRoute;
@@ -74,6 +96,17 @@ int main() {
 
     duo_input::u1::UsbService usb;
     duo_input::u1::SpiMaster link;
+    duo_input::u1::PicoFlash flash;
+    duo_input::storage::AbStore store(flash);
+    CdcWriter cdc_writer;
+    duo_input::u1::ConfigService config(store, cdc_writer);
+
+    // Whatever was stored last time is what the device runs now.
+    const duo_input::storage::ScanResult stored = store.scan();
+    if (stored.has_active) {
+        config.set_active_profile(1);
+    }
+
     usb.begin();
     link.begin();
 
@@ -96,7 +129,22 @@ int main() {
             // released as far as it is concerned. Start from nothing.
             g_outputs.process(release_pc1());
             usb.forget_sent_state();
+            if (!mounted) {
+                // The host went away. Anything it had staged is abandoned.
+                config.on_disconnect();
+            }
             was_mounted = mounted;
+        }
+
+        // The configurator's side of the conversation.
+        if (tud_cdc_available()) {
+            std::uint8_t incoming[64];
+            const std::uint32_t read = tud_cdc_read(incoming, sizeof(incoming));
+            config.on_cdc_bytes(incoming, read);
+        }
+        if (config.take_release_all_request()) {
+            g_outputs.release_all();
+            link.send_release_all(to_ms_since_boot(get_absolute_time()));
         }
 
         // Bounded, so a burst of input cannot starve the USB it is for.

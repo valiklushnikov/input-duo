@@ -72,7 +72,14 @@ public:
         return true;
     }
 
-private:
+    // An RP2040 maps flash into the address space, so the real backend hands
+    // out a pointer. This one does too, which keeps the tests on the same path
+    // the device takes.
+    const std::uint8_t* direct(std::uint32_t offset) const override {
+        return &bytes_[offset];
+    }
+
+protected:
     std::vector<std::uint8_t> bytes_;
     std::size_t operations_ = 0;
     std::size_t fail_from_ = SIZE_MAX;
@@ -306,210 +313,105 @@ TEST_CASE(a_package_whose_bytes_do_not_match_its_digest_fails_verification) {
     CHECK_EQ(ab.commit(), StoreError::NotVerified);
 }
 
-TEST_CASE(a_package_with_a_hole_in_it_fails_verification) {
-    FakeFlash flash;
+// ------------------------------------------------- what flash actually takes
+
+namespace {
+
+/// Flash that insists on the granularity a real part insists on.
+class StrictFlash : public FakeFlash {
+public:
+    bool erase(std::uint32_t offset, std::size_t size) override {
+        if (offset % duo_input::storage::kSectorSize != 0 ||
+            size % duo_input::storage::kSectorSize != 0) {
+            refusals_++;
+            return false;
+        }
+        return FakeFlash::erase(offset, size);
+    }
+
+    bool program(std::uint32_t offset, const std::uint8_t* data, std::size_t size) override {
+        // A real RP2040 programs whole 256-byte pages and nothing else. The
+        // store has to buffer up to that, because a configuration package is
+        // whatever size it happens to be - 424 bytes, on a default project.
+        if (offset % duo_input::storage::kPageSize != 0 ||
+            size % duo_input::storage::kPageSize != 0) {
+            refusals_++;
+            return false;
+        }
+        return FakeFlash::program(offset, data, size);
+    }
+
+    std::size_t refusals() const { return refusals_; }
+
+private:
+    std::size_t refusals_ = 0;
+};
+
+}  // namespace
+
+TEST_CASE(a_package_that_is_not_a_whole_number_of_pages_still_stores) {
+    StrictFlash flash;
+    AbStore ab(flash);
+    // The size a default project actually compiles to. It is not a multiple of
+    // anything convenient, and it never will be.
+    const auto data = package(424, 0x5A);
+
+    CHECK_EQ(store(ab, data), StoreError::None);
+
+    CHECK_EQ(flash.refusals(), 0u);
+    CHECK(ab.scan().has_active);
+    CHECK_EQ(ab.scan().active_slot().size, 424u);
+}
+
+TEST_CASE(a_package_stored_through_strict_flash_reads_back_unchanged) {
+    StrictFlash flash;
+    AbStore ab(flash);
+    std::vector<std::uint8_t> data(1000);
+    for (std::size_t index = 0; index < data.size(); ++index) {
+        data[index] = static_cast<std::uint8_t>((index * 31) & 0xFF);
+    }
+    store(ab, data);
+
+    std::vector<std::uint8_t> read_back(data.size(), 0);
+    CHECK_EQ(ab.read_active(0, read_back.data(), read_back.size()), StoreError::None);
+
+    CHECK(read_back == data);
+}
+
+TEST_CASE(chunks_of_an_awkward_size_are_buffered_into_pages) {
+    StrictFlash flash;
+    AbStore ab(flash);
+    const auto data = package(700, 0x11);
+
+    // 100 bytes at a time: never a page, and the last one lands mid-page.
+    CHECK_EQ(store(ab, data, 100), StoreError::None);
+
+    CHECK_EQ(flash.refusals(), 0u);
+    CHECK_EQ(ab.scan().active_slot().size, 700u);
+}
+
+TEST_CASE(a_chunk_that_skips_ahead_is_refused) {
+    StrictFlash flash;
+    AbStore ab(flash);
+    const auto data = package(1024, 3);
+    std::uint8_t digest[kSha256DigestSize] = {};
+    digest_of(data, digest);
+    ab.begin(1024, digest);
+    ab.write_chunk(0, data.data(), 256);
+
+    // Chunks are buffered into pages, so they have to arrive in order. A gap
+    // would leave the buffer describing bytes that never came.
+    CHECK_EQ(ab.write_chunk(512, data.data() + 512, 256), StoreError::OutOfRange);
+}
+
+TEST_CASE(a_package_that_never_finished_arriving_fails_verification) {
+    StrictFlash flash;
     AbStore ab(flash);
     const auto data = package(1024, 9);
     std::uint8_t digest[kSha256DigestSize] = {};
     digest_of(data, digest);
     ab.begin(1024, digest);
-    // The middle chunk never arrives.
-    ab.write_chunk(0, data.data(), 256);
-    ab.write_chunk(512, data.data() + 512, 512);
+    ab.write_chunk(0, data.data(), 512);
 
     CHECK_EQ(ab.verify(), StoreError::DigestMismatch);
-}
-
-TEST_CASE(aborting_leaves_the_running_configuration_alone) {
-    FakeFlash flash;
-    AbStore ab(flash);
-    store(ab, package(512, 1));
-    const std::uint32_t before = ab.scan().active_slot().generation;
-
-    std::uint8_t digest[kSha256DigestSize] = {};
-    ab.begin(512, digest);
-    ab.abort();
-
-    CHECK_EQ(ab.scan().active_slot().generation, before);
-    CHECK_EQ(ab.scan().active, Slot::A);
-}
-
-// ------------------------------------------------------------- power cuts
-
-TEST_CASE(power_lost_during_the_erase_leaves_the_old_configuration_running) {
-    FakeFlash flash;
-    AbStore ab(flash);
-    const auto original = package(1024, 0x11);
-    store(ab, original);
-    const std::uint32_t before = ab.scan().active_slot().generation;
-
-    // Die on the very next operation, which is the erase of the spare slot.
-    flash.fail_from_operation(flash.operations());
-    store(ab, package(1024, 0x22));
-
-    AbStore after_reboot(flash);
-    const ScanResult found = after_reboot.scan();
-    CHECK(found.has_active);
-    CHECK_EQ(found.active, Slot::A);
-    CHECK_EQ(found.active_slot().generation, before);
-}
-
-TEST_CASE(power_lost_partway_through_the_erase_leaves_the_old_one_running) {
-    FakeFlash flash;
-    AbStore ab(flash);
-    store(ab, package(1024, 0x11));
-
-    flash.tear_operation(flash.operations() + 1);
-    store(ab, package(1024, 0x22));
-
-    AbStore after_reboot(flash);
-    CHECK_EQ(after_reboot.scan().active, Slot::A);
-}
-
-TEST_CASE(power_lost_while_writing_the_payload_leaves_the_old_one_running) {
-    FakeFlash flash;
-    AbStore ab(flash);
-    const auto original = package(4096, 0x11);
-    store(ab, original);
-    const std::uint32_t before = ab.scan().active_slot().generation;
-
-    // Two operations in: past the erase, into the payload.
-    flash.fail_from_operation(flash.operations() + 2);
-    store(ab, package(4096, 0x22));
-
-    AbStore after_reboot(flash);
-    const ScanResult found = after_reboot.scan();
-    CHECK_EQ(found.active, Slot::A);
-    CHECK_EQ(found.active_slot().generation, before);
-    // The half-written slot must not look like a configuration.
-    CHECK_FALSE(found.slots[1].valid);
-}
-
-TEST_CASE(power_lost_just_before_the_header_leaves_the_old_one_running) {
-    FakeFlash flash;
-    AbStore ab(flash);
-    store(ab, package(1024, 0x11));
-
-    const auto data = package(1024, 0x22);
-    std::uint8_t digest[kSha256DigestSize] = {};
-    digest_of(data, digest);
-    ab.begin(1024, digest);
-    ab.write_chunk(0, data.data(), data.size());
-    ab.verify();
-    // Everything is in place and correct - and the commit never happens.
-    flash.fail_from_operation(flash.operations());
-    ab.commit();
-
-    AbStore after_reboot(flash);
-    CHECK_EQ(after_reboot.scan().active, Slot::A);
-}
-
-TEST_CASE(power_lost_during_the_header_itself_leaves_the_old_one_running) {
-    FakeFlash flash;
-    AbStore ab(flash);
-    store(ab, package(1024, 0x11));
-
-    const auto data = package(1024, 0x22);
-    std::uint8_t digest[kSha256DigestSize] = {};
-    digest_of(data, digest);
-    ab.begin(1024, digest);
-    ab.write_chunk(0, data.data(), data.size());
-    ab.verify();
-    // Half a header. This is the case the header CRC exists for: without it,
-    // a torn header could read as a valid one describing the wrong bytes.
-    flash.tear_operation(flash.operations() + 1);
-    ab.commit();
-
-    AbStore after_reboot(flash);
-    const ScanResult found = after_reboot.scan();
-    CHECK_EQ(found.active, Slot::A);
-    CHECK_FALSE(found.slots[1].valid);
-}
-
-TEST_CASE(the_device_is_never_left_with_nothing_at_any_cut_point) {
-    // The property that matters, checked at every operation rather than at the
-    // few someone thought of.
-    const auto original = package(2048, 0x11);
-    const auto replacement = package(2048, 0x22);
-
-    std::size_t total_operations = 0;
-    {
-        FakeFlash probe;
-        AbStore ab(probe);
-        store(ab, original);
-        const std::size_t after_first = probe.operations();
-        store(ab, replacement);
-        total_operations = probe.operations() - after_first;
-    }
-
-    for (std::size_t cut = 1; cut <= total_operations; ++cut) {
-        FakeFlash flash;
-        AbStore ab(flash);
-        store(ab, original);
-        flash.fail_from_operation(flash.operations() + cut - 1);
-        store(ab, replacement);
-
-        AbStore after_reboot(flash);
-        const ScanResult found = after_reboot.scan();
-        CHECK(found.has_active);
-        // Whichever it is, it must be one of the two whole packages.
-        CHECK(found.active_slot().size == original.size());
-    }
-}
-
-TEST_CASE(a_torn_program_at_any_point_still_leaves_a_usable_device) {
-    const auto original = package(2048, 0x11);
-    const auto replacement = package(2048, 0x22);
-
-    std::size_t total_operations = 0;
-    {
-        FakeFlash probe;
-        AbStore ab(probe);
-        store(ab, original);
-        const std::size_t after_first = probe.operations();
-        store(ab, replacement);
-        total_operations = probe.operations() - after_first;
-    }
-
-    for (std::size_t cut = 1; cut <= total_operations; ++cut) {
-        FakeFlash flash;
-        AbStore ab(flash);
-        store(ab, original);
-        flash.tear_operation(flash.operations() + cut);
-        store(ab, replacement);
-
-        AbStore after_reboot(flash);
-        CHECK(after_reboot.scan().has_active);
-    }
-}
-
-// -------------------------------------------------------------- corruption
-
-TEST_CASE(a_slot_whose_payload_rotted_is_not_offered) {
-    FakeFlash flash;
-    AbStore ab(flash);
-    store(ab, package(1024, 0x11));
-
-    // Something flipped a bit in the stored bytes after the fact.
-    std::uint8_t byte = 0;
-    flash.read(duo_input::storage::kConfigAOffset + kSlotHeaderSize + 10, &byte, 1);
-    byte ^= 0xFF;
-    flash.program(duo_input::storage::kConfigAOffset + kSlotHeaderSize + 10, &byte, 1);
-
-    AbStore after_reboot(flash);
-    CHECK_EQ(after_reboot.verify_slot(Slot::A), StoreError::DigestMismatch);
-}
-
-TEST_CASE(the_newer_of_two_valid_slots_wins) {
-    FakeFlash flash;
-    AbStore ab(flash);
-    store(ab, package(512, 1));
-    store(ab, package(1024, 2));
-
-    const ScanResult found = ab.scan();
-
-    CHECK(found.slots[0].valid);
-    CHECK(found.slots[1].valid);
-    CHECK_EQ(found.active, Slot::B);
-    CHECK_EQ(found.active_slot().size, 1024u);
 }

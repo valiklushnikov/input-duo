@@ -141,12 +141,54 @@ StoreError AbStore::begin(std::uint32_t size,
     staging_size_ = size;
     std::memcpy(staging_digest_, digest, sizeof(staging_digest_));
     verified_ = false;
+    staged_ = 0;
+    page_base_ = 0;
+    page_fill_ = 0;
+    erased_through_ = 0;
 
-    if (!flash_.erase(slot_offset(staging_slot_), kSlotSize)) {
+    // Only the first sector is erased now, because commit() writes the header
+    // into it last and needs it blank. The rest is erased as the bytes arrive:
+    // erasing all 384 KiB here held interrupts off for 1.31 seconds on real
+    // hardware, and a USB device that stops answering for that long is one the
+    // host starts to doubt.
+    if (!flash_.erase(slot_offset(staging_slot_), kSectorSize)) {
         staging_ = false;
         return StoreError::FlashFailed;
     }
+    erased_through_ = kSectorSize;
     staging_ = true;
+    return StoreError::None;
+}
+
+StoreError AbStore::erase_through(std::uint32_t end_offset) {
+    const std::uint32_t needed = kSlotHeaderSize + end_offset;
+    while (erased_through_ < needed) {
+        if (!flash_.erase(slot_offset(staging_slot_) + erased_through_, kSectorSize)) {
+            return StoreError::FlashFailed;
+        }
+        erased_through_ += kSectorSize;
+    }
+    return StoreError::None;
+}
+
+StoreError AbStore::flush_page() {
+    if (page_fill_ == 0) {
+        return StoreError::None;
+    }
+    // Padded with the erased value, so the tail of the last page is
+    // indistinguishable from flash that was never written.
+    std::memset(page_ + page_fill_, 0xFF, kPageSize - page_fill_);
+
+    const StoreError erased = erase_through(page_base_ + kPageSize);
+    if (erased != StoreError::None) {
+        return erased;
+    }
+    const std::uint32_t destination = slot_offset(staging_slot_) + kSlotHeaderSize + page_base_;
+    if (!flash_.program(destination, page_, kPageSize)) {
+        return StoreError::FlashFailed;
+    }
+    page_base_ += kPageSize;
+    page_fill_ = 0;
     return StoreError::None;
 }
 
@@ -158,17 +200,32 @@ StoreError AbStore::write_chunk(std::uint32_t offset, const std::uint8_t* data,
     if (data == nullptr || size == 0) {
         return StoreError::OutOfRange;
     }
-    if (offset > staging_size_ || size > staging_size_ - offset) {
+    if (offset != staged_ || size > staging_size_ - offset) {
         return StoreError::OutOfRange;
     }
 
     // Any change to the bytes invalidates a verification that already ran.
     verified_ = false;
 
-    const std::uint32_t destination = slot_offset(staging_slot_) + kSlotHeaderSize + offset;
-    if (!flash_.program(destination, data, size)) {
-        return StoreError::FlashFailed;
+    // Buffered up to a page: flash programs whole pages and nothing else, and
+    // a configuration package is whatever size it happens to be - 424 bytes,
+    // for a default project.
+    std::size_t taken = 0;
+    while (taken < size) {
+        const std::size_t room = kPageSize - page_fill_;
+        const std::size_t take = size - taken < room ? size - taken : room;
+        std::memcpy(page_ + page_fill_, data + taken, take);
+        page_fill_ += static_cast<std::uint32_t>(take);
+        taken += take;
+
+        if (page_fill_ == kPageSize) {
+            const StoreError flushed = flush_page();
+            if (flushed != StoreError::None) {
+                return flushed;
+            }
+        }
     }
+    staged_ += static_cast<std::uint32_t>(size);
     return StoreError::None;
 }
 
@@ -193,6 +250,13 @@ StoreError AbStore::hash_payload(Slot slot, std::uint32_t size,
 StoreError AbStore::verify() {
     if (!staging_) {
         return StoreError::NotStaging;
+    }
+
+    // Whatever is still sitting in the page buffer has to reach flash before
+    // anything can be hashed from it.
+    const StoreError flushed = flush_page();
+    if (flushed != StoreError::None) {
+        return flushed;
     }
 
     // Hashed from flash, not from what was received: otherwise this would
@@ -251,6 +315,9 @@ void AbStore::abort() {
     // nothing to undo and no reason to spend an erase saying so.
     staging_ = false;
     verified_ = false;
+    staged_ = 0;
+    page_base_ = 0;
+    page_fill_ = 0;
 }
 
 StoreError AbStore::read_active(std::uint32_t offset, std::uint8_t* data, std::size_t size) {
@@ -267,6 +334,14 @@ StoreError AbStore::read_active(std::uint32_t offset, std::uint8_t* data, std::s
         return StoreError::FlashFailed;
     }
     return StoreError::None;
+}
+
+protocol::ByteView AbStore::payload_view(Slot slot, std::uint32_t size) const {
+    const std::uint8_t* data = flash_.direct(slot_offset(slot) + kSlotHeaderSize);
+    if (data == nullptr) {
+        return protocol::ByteView{nullptr, 0};
+    }
+    return protocol::ByteView{data, size};
 }
 
 StoreError AbStore::verify_slot(Slot slot) {

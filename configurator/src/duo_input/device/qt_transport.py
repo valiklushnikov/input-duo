@@ -69,7 +69,17 @@ class QSerialPortTransport(QObject):
     def open(self) -> bool:
         if self._port.isOpen():
             return True
-        return self._port.open(QSerialPort.OpenModeFlag.ReadWrite)
+        if not self._port.open(QSerialPort.OpenModeFlag.ReadWrite):
+            return False
+
+        # DTR tells a CDC device that a program is listening, and QSerialPort
+        # does not raise it on open. The U1 checks it before replying, so
+        # without this the device receives every request and answers none -
+        # which looks exactly like a device that is not there.
+        #
+        # The emulator has no control lines, so only a real port shows this.
+        self._port.setDataTerminalReady(True)
+        return True
 
     def close(self) -> None:
         if self._port.isOpen():

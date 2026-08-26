@@ -1,0 +1,620 @@
+#include "config_service.hpp"
+
+#include <cstring>
+
+#include "config/validator.hpp"
+#include "crypto/sha256.hpp"
+
+namespace duo_input::u1 {
+namespace {
+
+using protocol::CdcFrame;
+using protocol::CdcMessageType;
+using protocol::ProtocolLimits;
+
+constexpr std::uint8_t kFrameDelimiter = 0;
+
+/// Everything this build can actually do.
+///
+/// Sent in DEVICE_INFO and masked with what the host asked for, so both ends
+/// agree on the subset in use. CAPTURE and TEST_MACRO are deliberately absent:
+/// there is no peripheral to capture from and no macro engine yet, and a
+/// device that advertised them would leave the configurator waiting for an
+/// event that is never coming. FACTORY_RESET is present, because the device
+/// can do it - it simply insists on someone being at the device.
+constexpr std::uint32_t device_capabilities() {
+    return static_cast<std::uint32_t>(protocol::Capability::KEYBOARD_HID) |
+           static_cast<std::uint32_t>(protocol::Capability::MOUSE_HID) |
+           static_cast<std::uint32_t>(protocol::Capability::CONSUMER_HID) |
+           static_cast<std::uint32_t>(protocol::Capability::CONFIG_READ) |
+           static_cast<std::uint32_t>(protocol::Capability::CONFIG_WRITE) |
+           static_cast<std::uint32_t>(protocol::Capability::DIAGNOSTICS) |
+           static_cast<std::uint32_t>(protocol::Capability::ROUTE_CONTROL) |
+           static_cast<std::uint32_t>(protocol::Capability::SPI_ENDPOINT) |
+           static_cast<std::uint32_t>(protocol::Capability::FACTORY_RESET);
+}
+
+void put_u32(std::uint8_t* out, std::uint32_t value) {
+    out[0] = static_cast<std::uint8_t>(value);
+    out[1] = static_cast<std::uint8_t>(value >> 8);
+    out[2] = static_cast<std::uint8_t>(value >> 16);
+    out[3] = static_cast<std::uint8_t>(value >> 24);
+}
+
+std::uint32_t take_u32(const std::uint8_t* data) {
+    return static_cast<std::uint32_t>(data[0]) |
+           (static_cast<std::uint32_t>(data[1]) << 8) |
+           (static_cast<std::uint32_t>(data[2]) << 16) |
+           (static_cast<std::uint32_t>(data[3]) << 24);
+}
+
+std::uint16_t take_u16(const std::uint8_t* data) {
+    return static_cast<std::uint16_t>(data[0] | (data[1] << 8));
+}
+
+/// The exact payload length each request must carry, or -1 for variable.
+int expected_request_size(CdcMessageType type) {
+    switch (type) {
+        case CdcMessageType::HELLO:
+            return 4;
+        case CdcMessageType::READ_CONFIG_CHUNK:
+            return 6;
+        case CdcMessageType::WRITE_BEGIN:
+            return 36;
+        case CdcMessageType::SET_ACTIVE_PROFILE:
+            return 1;
+        case CdcMessageType::TEST_MACRO:
+            return 2;
+        case CdcMessageType::WRITE_CHUNK:
+        case CdcMessageType::PING:
+            return -1;
+        case CdcMessageType::GET_STATUS:
+        case CdcMessageType::GET_ACTIVE_CONFIG_INFO:
+        case CdcMessageType::READ_CONFIG_BEGIN:
+        case CdcMessageType::WRITE_VERIFY:
+        case CdcMessageType::WRITE_COMMIT:
+        case CdcMessageType::WRITE_ABORT:
+        case CdcMessageType::CAPTURE_BEGIN:
+        case CdcMessageType::CAPTURE_END:
+        case CdcMessageType::STOP_AND_RELEASE_ALL:
+        case CdcMessageType::GET_DIAGNOSTICS:
+        case CdcMessageType::FACTORY_RESET_ARM:
+        case CdcMessageType::FACTORY_RESET_COMMIT:
+            return 0;
+        default:
+            return -1;
+    }
+}
+
+bool payload_shape_is_valid(const CdcFrame& frame) {
+    if (frame.type == CdcMessageType::WRITE_CHUNK) {
+        return frame.payload.size >= 5 &&
+               frame.payload.size <= 4 + ProtocolLimits::CONFIG_CHUNK_MAX_BYTES;
+    }
+    const int expected = expected_request_size(frame.type);
+    return expected < 0 || frame.payload.size == static_cast<std::size_t>(expected);
+}
+
+/// Which capability a request needs before it may be answered.
+std::uint32_t required_capability(CdcMessageType type) {
+    switch (type) {
+        case CdcMessageType::GET_ACTIVE_CONFIG_INFO:
+        case CdcMessageType::READ_CONFIG_BEGIN:
+        case CdcMessageType::READ_CONFIG_CHUNK:
+            return static_cast<std::uint32_t>(protocol::Capability::CONFIG_READ);
+        case CdcMessageType::WRITE_BEGIN:
+        case CdcMessageType::WRITE_CHUNK:
+        case CdcMessageType::WRITE_VERIFY:
+        case CdcMessageType::WRITE_COMMIT:
+        case CdcMessageType::WRITE_ABORT:
+            return static_cast<std::uint32_t>(protocol::Capability::CONFIG_WRITE);
+        case CdcMessageType::SET_ACTIVE_PROFILE:
+            return static_cast<std::uint32_t>(protocol::Capability::ROUTE_CONTROL);
+        case CdcMessageType::CAPTURE_BEGIN:
+        case CdcMessageType::CAPTURE_END:
+            return static_cast<std::uint32_t>(protocol::Capability::CAPTURE);
+        case CdcMessageType::TEST_MACRO:
+            return static_cast<std::uint32_t>(protocol::Capability::TEST_MACRO);
+        case CdcMessageType::GET_DIAGNOSTICS:
+            return static_cast<std::uint32_t>(protocol::Capability::DIAGNOSTICS);
+        case CdcMessageType::FACTORY_RESET_ARM:
+        case CdcMessageType::FACTORY_RESET_COMMIT:
+            return static_cast<std::uint32_t>(protocol::Capability::FACTORY_RESET);
+        default:
+            return 0;
+    }
+}
+
+}  // namespace
+
+// -------------------------------------------------------------- assembly
+
+void ConfigService::on_cdc_bytes(const std::uint8_t* data, std::size_t size) {
+    for (std::size_t index = 0; index < size; ++index) {
+        const std::uint8_t byte = data[index];
+        if (pending_size_ < sizeof(pending_)) {
+            pending_[pending_size_++] = byte;
+        } else if (byte != kFrameDelimiter) {
+            // Beyond any legal frame. Keep discarding until the delimiter, so
+            // the next real frame starts clean rather than inheriting this.
+            continue;
+        }
+
+        if (byte == kFrameDelimiter) {
+            if (pending_size_ > 1 && pending_size_ <= sizeof(pending_)) {
+                handle_frame(pending_, pending_size_);
+            }
+            pending_size_ = 0;
+        }
+    }
+}
+
+void ConfigService::on_disconnect() {
+    pending_size_ = 0;
+    last_request_size_ = 0;
+    last_response_size_ = 0;
+    have_sequence_ = false;
+    negotiated_ = false;
+    negotiated_capabilities_ = 0;
+    capture_active_ = false;
+    if (store_.staging()) {
+        // The slot has no header, so it is already nothing. The counter is the
+        // part worth keeping: a host that keeps vanishing mid-write is a fact
+        // about the cable, and the operator should be able to see it.
+        store_.abort();
+        ++diagnostics_.aborted_staging;
+    }
+    ++diagnostics_.disconnect;
+}
+
+void ConfigService::handle_frame(const std::uint8_t* wire, std::size_t size) {
+    // A byte-identical repeat means the host never saw the reply. Sending the
+    // same reply again is right; re-running the request would erase a slot for
+    // the second time.
+    if (size == last_request_size_ && std::memcmp(wire, last_request_, size) == 0) {
+        sink_.write(last_response_, last_response_size_);
+        return;
+    }
+
+    protocol::DecodeResult result;
+    std::uint8_t scratch[ProtocolLimits::CDC_MAX_PAYLOAD];
+    if (!protocol::decode_cdc_frame(protocol::ByteView{wire, size},
+                                    protocol::MutableByteView{scratch, sizeof(scratch)},
+                                    result)) {
+        // Damaged on the wire. There is nothing to answer, and answering the
+        // sequence we guessed at would be worse than silence.
+        ++diagnostics_.bad_crc;
+        return;
+    }
+
+    std::memcpy(last_request_, wire, size);
+    last_request_size_ = size;
+
+    const CdcFrame& frame = result.cdc;
+
+    // A handshake starts a session, so it is accepted at whatever sequence it
+    // carries and resets the count. A configurator that closed the port and
+    // opened it again begins at zero, having no memory of the last session
+    // either; refusing that left a real board permanently unreachable to the
+    // very program meant to configure it.
+    if (frame.type == CdcMessageType::HELLO) {
+        have_sequence_ = false;
+        if (store_.staging()) {
+            // Closing a serial port does not unmount USB, so a configurator
+            // that quit mid-write leaves the transaction open. A new session
+            // cannot continue someone else's write, and leaving it running
+            // means answering Busy to every later attempt until the device is
+            // unplugged.
+            store_.abort();
+            ++diagnostics_.aborted_staging;
+        }
+    }
+
+    if (have_sequence_ &&
+        frame.sequence != static_cast<std::uint16_t>(last_sequence_ + 1)) {
+        // A host that lost a reply and a host that is confused look identical
+        // from here. Refusing costs one round trip; guessing could erase a
+        // slot on the strength of a stale request.
+        ++diagnostics_.bad_sequence;
+        reply_error(frame, CdcError::BadSequence);
+        last_sequence_ = frame.sequence;
+        have_sequence_ = true;
+        return;
+    }
+
+    dispatch(frame);
+    last_sequence_ = frame.sequence;
+    have_sequence_ = true;
+}
+
+// --------------------------------------------------------------- replies
+
+void ConfigService::reply(CdcMessageType type, std::uint16_t sequence,
+                          const std::uint8_t* payload, std::size_t size) {
+    CdcFrame frame;
+    frame.type = type;
+    frame.sequence = sequence;
+    frame.payload = protocol::ByteView{payload, size};
+
+    std::uint8_t scratch[ProtocolLimits::CDC_MAX_PAYLOAD + 32];
+    std::size_t written = 0;
+    if (!protocol::encode_cdc_frame(
+            frame, protocol::MutableByteView{last_response_, sizeof(last_response_)},
+            protocol::MutableByteView{scratch, sizeof(scratch)}, written)) {
+        last_response_size_ = 0;
+        return;
+    }
+    last_response_size_ = written;
+    sink_.write(last_response_, written);
+}
+
+std::size_t ConfigService::device_info_payload(CdcError error, std::uint32_t capabilities,
+                                               std::uint8_t* out) const {
+    const storage::ScanResult found = const_cast<storage::AbStore&>(store_).scan();
+    out[0] = static_cast<std::uint8_t>(error);
+    out[1] = protocol::PROTOCOL_VERSION_MAJOR;
+    out[2] = protocol::PROTOCOL_VERSION_MINOR;
+    put_u32(out + 3, capabilities);
+    put_u32(out + 7, found.has_active ? found.active_slot().generation : 0);
+    out[11] = active_profile_;
+    if (found.has_active) {
+        std::memcpy(out + 12, found.active_slot().digest, crypto::kSha256DigestSize);
+    } else {
+        std::memset(out + 12, 0, crypto::kSha256DigestSize);
+    }
+    return 12 + crypto::kSha256DigestSize;
+}
+
+std::size_t ConfigService::status_payload(CdcError error, std::uint8_t* out) const {
+    out[0] = static_cast<std::uint8_t>(error);
+    out[1] = active_profile_;
+    out[2] = capture_active_ ? 1 : 0;
+    out[3] = store_.staging() ? 1 : 0;
+    put_u32(out + 4, diagnostics_.aborted_staging);
+    return 8;
+}
+
+std::size_t ConfigService::config_info_payload(CdcError error, std::uint8_t* out) {
+    const storage::ScanResult found = store_.scan();
+    out[0] = static_cast<std::uint8_t>(error);
+    put_u32(out + 1, found.has_active ? found.active_slot().generation : 0);
+    put_u32(out + 5, found.has_active ? found.active_slot().size : 0);
+    if (found.has_active) {
+        std::memcpy(out + 9, found.active_slot().digest, crypto::kSha256DigestSize);
+    } else {
+        std::memset(out + 9, 0, crypto::kSha256DigestSize);
+    }
+    return 9 + crypto::kSha256DigestSize;
+}
+
+std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out) const {
+    out[0] = static_cast<std::uint8_t>(error);
+    put_u32(out + 1, diagnostics_.bad_crc);
+    put_u32(out + 5, diagnostics_.disconnect);
+    put_u32(out + 9, diagnostics_.timeout);
+    put_u32(out + 13, diagnostics_.bad_sequence);
+    put_u32(out + 17, diagnostics_.aborted_staging);
+    return 21;
+}
+
+void ConfigService::reply_error(const CdcFrame& frame, CdcError error) {
+    std::uint8_t payload[ProtocolLimits::CDC_MAX_PAYLOAD];
+    std::size_t size = 1;
+    payload[0] = static_cast<std::uint8_t>(error);
+    CdcMessageType type = frame.type;
+
+    // Several replies carry their fields whether or not the request succeeded,
+    // so the host can always read them. Only the leading error byte changes.
+    switch (frame.type) {
+        case CdcMessageType::HELLO:
+            type = CdcMessageType::DEVICE_INFO;
+            size = device_info_payload(error, 0, payload);
+            break;
+        case CdcMessageType::GET_STATUS:
+            size = status_payload(error, payload);
+            break;
+        case CdcMessageType::GET_ACTIVE_CONFIG_INFO:
+        case CdcMessageType::READ_CONFIG_BEGIN:
+            size = config_info_payload(error, payload);
+            break;
+        case CdcMessageType::GET_DIAGNOSTICS:
+            size = diagnostics_payload(error, payload);
+            break;
+        case CdcMessageType::WRITE_CHUNK:
+            put_u32(payload + 1, expected_offset_);
+            size = 5;
+            break;
+        case CdcMessageType::READ_CONFIG_CHUNK:
+            if (frame.payload.size >= 4) {
+                std::memcpy(payload + 1, frame.payload.data, 4);
+            } else {
+                std::memset(payload + 1, 0, 4);
+            }
+            size = 5;
+            break;
+        case CdcMessageType::PING:
+            if (frame.payload.size < ProtocolLimits::CDC_MAX_PAYLOAD) {
+                std::memcpy(payload + 1, frame.payload.data, frame.payload.size);
+                size = 1 + frame.payload.size;
+            }
+            break;
+        default:
+            break;
+    }
+    reply(type, frame.sequence, payload, size);
+}
+
+// -------------------------------------------------------------- dispatch
+
+void ConfigService::dispatch(const CdcFrame& frame) {
+    std::uint8_t payload[ProtocolLimits::CDC_MAX_PAYLOAD];
+
+    if (frame.type == CdcMessageType::HELLO) {
+        if (!payload_shape_is_valid(frame)) {
+            reply_error(frame, CdcError::InvalidRequest);
+            return;
+        }
+        negotiated_capabilities_ = take_u32(frame.payload.data) & device_capabilities();
+        negotiated_ = true;
+        const std::size_t size =
+            device_info_payload(CdcError::Ok, negotiated_capabilities_, payload);
+        reply(CdcMessageType::DEVICE_INFO, frame.sequence, payload, size);
+        return;
+    }
+
+    // DEVICE_INFO and CAPTURE_EVENT travel the other way. A host sending one
+    // is confused, and answering as if it were a request would encourage it.
+    if (frame.type == CdcMessageType::DEVICE_INFO ||
+        frame.type == CdcMessageType::CAPTURE_EVENT) {
+        payload[0] = static_cast<std::uint8_t>(CdcError::InvalidRequest);
+        reply(frame.type, frame.sequence, payload, 1);
+        return;
+    }
+
+    if (!payload_shape_is_valid(frame)) {
+        reply_error(frame, CdcError::InvalidRequest);
+        return;
+    }
+
+    // PING and STOP_AND_RELEASE_ALL work before any negotiation. The first is
+    // how a host checks the link is alive at all; the second must never depend
+    // on the link being in a good mood, because it is the way out of a macro
+    // that is holding keys down.
+    const bool always_allowed = frame.type == CdcMessageType::PING ||
+                                frame.type == CdcMessageType::STOP_AND_RELEASE_ALL;
+    if (!always_allowed) {
+        if (!negotiated_) {
+            reply_error(frame, CdcError::BadState);
+            return;
+        }
+        const std::uint32_t needed = required_capability(frame.type);
+        if (needed != 0 && (negotiated_capabilities_ & needed) == 0) {
+            reply_error(frame, CdcError::UnsupportedCapability);
+            return;
+        }
+    }
+
+    switch (frame.type) {
+        case CdcMessageType::PING: {
+            payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
+            std::memcpy(payload + 1, frame.payload.data, frame.payload.size);
+            reply(frame.type, frame.sequence, payload, 1 + frame.payload.size);
+            return;
+        }
+        case CdcMessageType::GET_STATUS: {
+            const std::size_t size = status_payload(CdcError::Ok, payload);
+            reply(frame.type, frame.sequence, payload, size);
+            return;
+        }
+        case CdcMessageType::GET_ACTIVE_CONFIG_INFO:
+        case CdcMessageType::READ_CONFIG_BEGIN: {
+            const std::size_t size = config_info_payload(CdcError::Ok, payload);
+            reply(frame.type, frame.sequence, payload, size);
+            return;
+        }
+        case CdcMessageType::GET_DIAGNOSTICS: {
+            const std::size_t size = diagnostics_payload(CdcError::Ok, payload);
+            reply(frame.type, frame.sequence, payload, size);
+            return;
+        }
+        case CdcMessageType::READ_CONFIG_CHUNK: {
+            const std::uint32_t offset = take_u32(frame.payload.data);
+            const std::uint16_t requested = take_u16(frame.payload.data + 4);
+            if (requested > ProtocolLimits::CONFIG_CHUNK_MAX_BYTES) {
+                reply_error(frame, CdcError::BadSize);
+                return;
+            }
+            const storage::ScanResult found = store_.scan();
+            if (!found.has_active) {
+                reply_error(frame, CdcError::BadState);
+                return;
+            }
+            if (offset > found.active_slot().size) {
+                reply_error(frame, CdcError::BadChunk);
+                return;
+            }
+            const std::uint32_t available = found.active_slot().size - offset;
+            const std::uint32_t take = requested < available ? requested : available;
+            payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
+            put_u32(payload + 1, offset);
+            if (take != 0 &&
+                store_.read_active(offset, payload + 5, take) != storage::StoreError::None) {
+                reply_error(frame, CdcError::BadState);
+                return;
+            }
+            reply(frame.type, frame.sequence, payload, 5 + take);
+            return;
+        }
+        case CdcMessageType::WRITE_BEGIN: {
+            if (store_.staging()) {
+                reply_error(frame, CdcError::Busy);
+                return;
+            }
+            const std::uint32_t size = take_u32(frame.payload.data);
+            // The slot is larger than the protocol's maximum package, which is
+            // not a licence to accept one: a package the configurator cannot
+            // read back is worse than one the device refuses to take.
+            if (size == 0 || size > ProtocolLimits::BINARY_CONFIG_MAX_BYTES) {
+                reply_error(frame, CdcError::BadSize);
+                return;
+            }
+            std::uint8_t digest[crypto::kSha256DigestSize];
+            std::memcpy(digest, frame.payload.data + 4, sizeof(digest));
+            if (store_.begin(size, digest) != storage::StoreError::None) {
+                reply_error(frame, CdcError::BadState);
+                return;
+            }
+            expected_offset_ = 0;
+            payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
+            reply(frame.type, frame.sequence, payload, 1);
+            return;
+        }
+        case CdcMessageType::WRITE_CHUNK: {
+            if (!store_.staging()) {
+                payload[0] = static_cast<std::uint8_t>(CdcError::BadState);
+                put_u32(payload + 1, 0);
+                reply(frame.type, frame.sequence, payload, 5);
+                return;
+            }
+            const std::uint32_t offset = take_u32(frame.payload.data);
+            const std::size_t length = frame.payload.size - 4;
+            // Strictly in order. Out-of-order chunks are legal for the store
+            // but not for this protocol: accepting them would leave the host
+            // and the device disagreeing about what has arrived.
+            const bool in_order = offset == expected_offset_;
+            const storage::StoreError error =
+                in_order ? store_.write_chunk(offset, frame.payload.data + 4, length)
+                         : storage::StoreError::OutOfRange;
+            if (error != storage::StoreError::None) {
+                payload[0] = static_cast<std::uint8_t>(CdcError::BadChunk);
+                put_u32(payload + 1, expected_offset_);
+                reply(frame.type, frame.sequence, payload, 5);
+                return;
+            }
+            expected_offset_ = offset + static_cast<std::uint32_t>(length);
+            payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
+            put_u32(payload + 1, expected_offset_);
+            reply(frame.type, frame.sequence, payload, 5);
+            return;
+        }
+        case CdcMessageType::WRITE_VERIFY: {
+            if (!store_.staging()) {
+                reply_error(frame, CdcError::BadState);
+                return;
+            }
+            if (expected_offset_ != store_.staging_size()) {
+                reply_error(frame, CdcError::BadSize);
+                return;
+            }
+            const storage::StoreError error = store_.verify();
+            if (error == storage::StoreError::DigestMismatch) {
+                store_.abort();
+                ++diagnostics_.aborted_staging;
+                reply_error(frame, CdcError::BadHash);
+                return;
+            }
+            if (error != storage::StoreError::None) {
+                reply_error(frame, CdcError::BadState);
+                return;
+            }
+            // The bytes are intact; whether they are a configuration is a
+            // separate question, and one the device must answer before it
+            // agrees to run them.
+            const protocol::ByteView view =
+                store_.payload_view(store_.staging_slot(), store_.staging_size());
+            if (view.data != nullptr && !config::validate_config(view)) {
+                store_.abort();
+                ++diagnostics_.aborted_staging;
+                reply_error(frame, CdcError::InvalidConfig);
+                return;
+            }
+            payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
+            reply(frame.type, frame.sequence, payload, 1);
+            return;
+        }
+        case CdcMessageType::WRITE_COMMIT: {
+            if (store_.commit() != storage::StoreError::None) {
+                reply_error(frame, CdcError::BadState);
+                return;
+            }
+            const storage::ScanResult found = store_.scan();
+            const protocol::ByteView view =
+                store_.payload_view(found.active, found.active_slot().size);
+            if (view.data != nullptr) {
+                const config::ValidationResult validated = config::validate_config(view);
+                if (validated) {
+                    active_profile_ = validated.view().active_profile_id();
+                }
+            }
+            payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
+            reply(frame.type, frame.sequence, payload, 1);
+            return;
+        }
+        case CdcMessageType::WRITE_ABORT: {
+            if (!store_.staging()) {
+                reply_error(frame, CdcError::BadState);
+                return;
+            }
+            store_.abort();
+            ++diagnostics_.aborted_staging;
+            payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
+            reply(frame.type, frame.sequence, payload, 1);
+            return;
+        }
+        case CdcMessageType::SET_ACTIVE_PROFILE: {
+            const storage::ScanResult found = store_.scan();
+            if (!found.has_active) {
+                reply_error(frame, CdcError::BadState);
+                return;
+            }
+            const protocol::ByteView view =
+                store_.payload_view(found.active, found.active_slot().size);
+            bool known = false;
+            if (view.data != nullptr) {
+                const config::ValidationResult validated = config::validate_config(view);
+                if (validated) {
+                    for (std::size_t index = 0; index < validated.view().profile_count();
+                         ++index) {
+                        config::ProfileView profile;
+                        if (validated.view().profile_at(index, profile) &&
+                            profile.id() == frame.payload.data[0]) {
+                            known = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!known) {
+                reply_error(frame, CdcError::InvalidRequest);
+                return;
+            }
+            active_profile_ = frame.payload.data[0];
+            payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
+            reply(frame.type, frame.sequence, payload, 1);
+            return;
+        }
+        case CdcMessageType::STOP_AND_RELEASE_ALL: {
+            release_all_requested_ = true;
+            payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
+            reply(frame.type, frame.sequence, payload, 1);
+            return;
+        }
+        case CdcMessageType::FACTORY_RESET_ARM:
+        case CdcMessageType::FACTORY_RESET_COMMIT:
+            // Erasing the operator's work is not something a program alone may
+            // do. The physical confirmation arrives with the buttons.
+            reply_error(frame, CdcError::PhysicalConfirmationRequired);
+            return;
+        default:
+            reply_error(frame, CdcError::InvalidRequest);
+            return;
+    }
+}
+
+bool ConfigService::take_release_all_request() {
+    const bool requested = release_all_requested_;
+    release_all_requested_ = false;
+    return requested;
+}
+
+}  // namespace duo_input::u1
