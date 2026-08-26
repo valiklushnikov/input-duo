@@ -1,11 +1,13 @@
 #include "spi_master.hpp"
 
+#include <cstddef>
 #include <cstring>
 
 #include "hardware/gpio.h"
 #include "pico/stdlib.h"
 #include "hardware/spi.h"
 
+#include "link/spi_protocol.hpp"
 #include "protocol/frame.hpp"
 
 namespace duo_input::u1 {
@@ -32,29 +34,67 @@ bool moved(const hid::MouseSnapshot& mouse) {
 }  // namespace
 
 #if DUO_SPI_DEBUG
-std::uint8_t SpiMaster::probe_incoming_line() {
-    // Is anything actually driving the wire from U2, or is it floating?
+void SpiMaster::internal_loopback(const std::uint8_t* tx, std::uint8_t* rx, std::size_t size) {
+    // Loop back mode is a bit in the peripheral's own control register, so
+    // this runs with nothing connected to anything. It answers the question
+    // the wiring keeps getting blamed for: does this SPI block transfer bytes
+    // at all, in the format we asked for?
+    spi_init(kSpi, kSpiBaudRate);
+    spi_set_format(kSpi, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+
+    // The enable bit is cleared around the change: PL022 control bits are not
+    // meant to be rewritten underneath a running peripheral.
+    hw_clear_bits(&spi_get_hw(kSpi)->cr1, SPI_SSPCR1_SSE_BITS);
+    hw_set_bits(&spi_get_hw(kSpi)->cr1, SPI_SSPCR1_LBM_BITS);
+    hw_set_bits(&spi_get_hw(kSpi)->cr1, SPI_SSPCR1_SSE_BITS);
+
+    spi_write_read_blocking(kSpi, tx, rx, size);
+
+    hw_clear_bits(&spi_get_hw(kSpi)->cr1, SPI_SSPCR1_SSE_BITS);
+    hw_clear_bits(&spi_get_hw(kSpi)->cr1, SPI_SSPCR1_LBM_BITS);
+    hw_set_bits(&spi_get_hw(kSpi)->cr1, SPI_SSPCR1_SSE_BITS);
+}
+
+std::uint8_t SpiMaster::wire_walk() {
+    // Every wire in one measurement, without touching any of them.
     //
-    // A floating input follows whichever way it is pulled; a driven one does
-    // not. That distinguishes "the wire is not connected" from "the wire is
-    // fine and the far end is silent", which no counter can, and it costs one
-    // GPIO configuration before SPI claims the pin.
+    // U2 drives its outgoing line with the parity of the three it receives.
+    // So U1 drives all eight combinations of its three outgoing lines and
+    // reads back what should be their parity. A line that is broken stops
+    // contributing, and which bits stop changing says which line it is - a
+    // dead clock line and a dead chip-select line produce different answers,
+    // where a single counter produces the same silence for both.
+    const unsigned outputs[3] = {kPinSpiCs, kPinSpiSck, kPinSpiTx};
+    for (unsigned pin : outputs) {
+        gpio_init(pin);
+        gpio_set_dir(pin, GPIO_OUT);
+    }
     gpio_init(kPinSpiRx);
     gpio_set_dir(kPinSpiRx, GPIO_IN);
-
-    gpio_pull_up(kPinSpiRx);
-    sleep_ms(2);
-    const bool high_when_pulled_up = gpio_get(kPinSpiRx);
-
+    // So that a wire nobody is driving reads zero every time rather than
+    // whatever the air happens to induce. U2 drives push-pull and wins.
     gpio_pull_down(kPinSpiRx);
-    sleep_ms(2);
-    const bool low_when_pulled_down = !gpio_get(kPinSpiRx);
 
+    std::uint8_t observed = 0;
+    for (unsigned combination = 0; combination < 8; ++combination) {
+        for (unsigned bit = 0; bit < 3; ++bit) {
+            gpio_put(outputs[bit], (combination >> bit) & 1u);
+        }
+        // Long enough for U2's mirror loop to come round, which is immediate
+        // by comparison, and for the lines to settle.
+        sleep_us(500);
+        if (gpio_get(kPinSpiRx)) {
+            observed |= static_cast<std::uint8_t>(1u << combination);
+        }
+    }
+
+    for (unsigned pin : outputs) {
+        gpio_put(pin, 0);
+    }
     gpio_disable_pulls(kPinSpiRx);
-    // 0b11 means the level followed both pulls: nothing is driving it.
-    return static_cast<std::uint8_t>((high_when_pulled_up ? 1 : 0) |
-                                     (low_when_pulled_down ? 2 : 0));
+    return observed;
 }
+
 #endif
 
 void SpiMaster::begin() {
@@ -110,6 +150,16 @@ void SpiMaster::consume_reply(const std::uint8_t* reply) {
         ++status_.crc_errors;
         return;
     }
+    if (!link::is_endpoint_reply(result.spi.type)) {
+        // A frame U1 could have sent is one U1 did send, returned by a fault
+        // on the wires. It carries a CRC U1 computed itself, so the CRC cannot
+        // catch it - only the type can. Counting it as an answer would report
+        // a healthy link to a board that is not running.
+        status_.answered = false;
+        ++status_.echoed_frames;
+        return;
+    }
+
     replies_.observe(result.spi.sequence);
     status_.answered = true;
     if (result.spi.type == protocol::SpiMessageType::ENDPOINT_STATUS &&

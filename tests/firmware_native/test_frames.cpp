@@ -4,6 +4,8 @@
 #include "protocol/crc.hpp"
 #include "protocol/frame.hpp"
 
+#include "link/spi_protocol.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -331,4 +333,45 @@ TEST_CASE(frame_codecs_preserve_bit_31_in_capability_compatibility_masks) {
     CHECK_FALSE(duo_input::protocol::decode_spi_frame({spi.data(), spi.size()}, spi_result, high_bit,
                                                       0U));
     CHECK_EQ(spi_result.error, duo_input::protocol::FrameError::INCOMPATIBLE_MINOR);
+}
+
+// ------------------------------------------------- who could have sent this
+//
+// Found on real hardware. A fault that returns U1's outgoing line to its own
+// incoming one hands U1 back its own frame - intact, with a valid CRC, because
+// it is a frame U1 built itself. U1 accepted it as U2's reply and reported the
+// link healthy while U2 was not running at all.
+//
+// That is the worst possible failure for this device. The whole point of the
+// link watchdog is that U2 releases every key when U1 stops talking; a U1 that
+// believes a dead link is alive keeps sending, and whatever U2 was holding
+// when it died stays held on someone's computer.
+
+TEST_CASE(the_endpoint_status_message_is_an_answer) {
+    CHECK(duo_input::link::is_endpoint_reply(duo_input::protocol::SpiMessageType::ENDPOINT_STATUS));
+}
+
+TEST_CASE(a_frame_carrying_one_of_u1s_own_messages_is_not_an_answer) {
+    using duo_input::protocol::SpiMessageType;
+
+    // Everything U1 sends. None of it can arrive from U2, so a frame carrying
+    // any of it is U1's own transmission coming back.
+    const SpiMessageType from_u1[] = {
+        SpiMessageType::HANDSHAKE,   SpiMessageType::KBD_STATE,
+        SpiMessageType::CONSUMER_STATE, SpiMessageType::MOUSE_DELTA,
+        SpiMessageType::CONTROL_RELEASE_ALL, SpiMessageType::HEARTBEAT,
+    };
+
+    for (SpiMessageType type : from_u1) {
+        CHECK(!duo_input::link::is_endpoint_reply(type));
+    }
+}
+
+TEST_CASE(a_message_type_that_does_not_exist_is_not_an_answer) {
+    // Noise on an undriven line decodes into a valid frame vanishingly rarely,
+    // but "vanishingly rarely" over days of uptime is not never.
+    CHECK(!duo_input::link::is_endpoint_reply(
+        static_cast<duo_input::protocol::SpiMessageType>(0x00)));
+    CHECK(!duo_input::link::is_endpoint_reply(
+        static_cast<duo_input::protocol::SpiMessageType>(0xFF)));
 }

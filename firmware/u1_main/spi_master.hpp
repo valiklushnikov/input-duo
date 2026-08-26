@@ -42,15 +42,35 @@ struct EndpointStatus {
     bool answered = false;
     bool mounted = false;
     std::uint32_t crc_errors = 0;
+    /// Frames U1 received that only U1 could have sent.
+    ///
+    /// Non-zero means the outgoing line is reaching the incoming one, which no
+    /// correct wiring does. It is worth counting separately from a CRC error
+    /// because it is a different fault with the same symptom, and because the
+    /// frames arrive perfectly intact - the CRC will never report it.
+    std::uint32_t echoed_frames = 0;
 };
 
 class SpiMaster {
 public:
 #if DUO_SPI_DEBUG
-    /// Bring-up only: report whether the incoming wire is driven or floating.
+    /// Bring-up only: run the SPI block against itself, no pins involved.
     ///
-    /// Call before begin(), which hands the pin to the SPI block.
-    static std::uint8_t probe_incoming_line();
+    /// The PL022 can connect its transmit shifter to its receive shifter
+    /// inside the chip. What comes back proves the peripheral, the clock
+    /// divider and the frame format on their own - and because the pads are
+    /// bypassed, a result here says nothing about the wiring, which is
+    /// exactly what makes it useful: it separates the two.
+    static void internal_loopback(const std::uint8_t* tx, std::uint8_t* rx, std::size_t size);
+
+    /// Bring-up only: drive the three outgoing lines and watch the incoming one.
+    ///
+    /// With U2 mirroring the parity of what it receives, every one of the four
+    /// wires appears in the answer. Eight combinations are driven and the
+    /// observed bits returned, one per bit, lowest first.
+    ///
+    /// Call before begin(), which hands the pins to the SPI block.
+    static std::uint8_t wire_walk();
 #endif
 
     /// Claim SPI1 and the four pins. Call once.

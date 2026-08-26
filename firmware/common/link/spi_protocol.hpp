@@ -84,4 +84,14 @@ bool encode_consumer_state(std::uint16_t usage, protocol::MutableByteView output
 /// Read one consumer usage.
 bool decode_consumer_state(protocol::ByteView payload, std::uint16_t& usage);
 
+/// Could U2 have sent this? A valid CRC alone does not mean it did.
+///
+/// U2 sends exactly one kind of message. Everything else in the enum travels
+/// the other way, so a frame carrying one of those is U1's own transmission
+/// returned to it - which is what a short between the outgoing and incoming
+/// lines produces, complete with the CRC U1 computed itself. Treating that as
+/// an answer would report a healthy link to a board that is not running, and
+/// the keys it was holding would never be released.
+bool is_endpoint_reply(protocol::SpiMessageType type);
+
 }  // namespace duo_input::link

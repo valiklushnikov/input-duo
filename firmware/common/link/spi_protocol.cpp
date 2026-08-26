@@ -155,4 +155,8 @@ bool decode_consumer_state(protocol::ByteView payload, std::uint16_t& usage) {
     return true;
 }
 
+bool is_endpoint_reply(protocol::SpiMessageType type) {
+    return type == protocol::SpiMessageType::ENDPOINT_STATUS;
+}
+
 }  // namespace duo_input::link
