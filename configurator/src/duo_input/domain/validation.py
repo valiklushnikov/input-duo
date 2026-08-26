@@ -49,6 +49,10 @@ def _is_u8(value: object, *, minimum: int = 0) -> bool:
 def _name_is_valid(value: object) -> bool:
     if not isinstance(value, str) or "\0" in value or len(value) > 48:
         return False
+    return _is_utf8_encodable(value)
+
+
+def _is_utf8_encodable(value: str) -> bool:
     try:
         return len(value.encode("utf-8")) <= 0xFFFF
     except UnicodeEncodeError:
@@ -157,10 +161,11 @@ def _validate_steps(macro: Macro, macro_path: str, issues: list[ValidationIssue]
             issues.append(ValidationIssue(f"{path}/type", "unsupported macro step type"))
         if not isinstance(step.payload, bytes):
             issues.append(ValidationIssue(f"{path}/payload", "step payload must be bytes"))
-        if step.source_text is not None and not isinstance(step.source_text, str):
-            issues.append(ValidationIssue(f"{path}/source_text", "source text must be Unicode text"))
-        if step.source_text is not None and step.type != MacroStepType.TEXT:
-            issues.append(ValidationIssue(f"{path}/source_text", "only TEXT steps may contain source text"))
+        if step.source_text is not None:
+            if not isinstance(step.source_text, str) or not _is_utf8_encodable(step.source_text):
+                issues.append(ValidationIssue(f"{path}/source_text", "source text must be valid UTF-8 Unicode"))
+            elif step.type != MacroStepType.TEXT:
+                issues.append(ValidationIssue(f"{path}/source_text", "only TEXT steps may contain source text"))
 
 
 def _validate_bindings(

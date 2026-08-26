@@ -52,7 +52,7 @@ def save_project_atomic(project: DeviceProject, path: str | Path) -> None:
     issues = validate_project(project)
     if issues:
         raise ProjectValidationError(issues)
-    destination = Path(path)
+    destination = _project_path(path)
     document = _project_to_json(project)
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -70,7 +70,7 @@ def save_project_atomic(project: DeviceProject, path: str | Path) -> None:
 
 
 def load_project(path: str | Path) -> DeviceProject:
-    source = Path(path)
+    source = _project_path(path)
     try:
         with source.open("r", encoding="utf-8") as stream:
             document = json.load(stream)
@@ -110,6 +110,13 @@ def _migrate_document(document: dict[str, Any]) -> dict[str, Any]:
         else:  # pragma: no cover - guarded by supported migration table
             raise ProjectVersionError(f"unsupported project schema version {version}")
     return migrated
+
+
+def _project_path(path: str | Path) -> Path:
+    project_path = Path(path)
+    if not project_path.name.endswith(".duoinput.json"):
+        raise ProjectError("project path must end with .duoinput.json")
+    return project_path
 
 
 def _migrate_1_0_to_1_1(document: dict[str, Any]) -> dict[str, Any]:

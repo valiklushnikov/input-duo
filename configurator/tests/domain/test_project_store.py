@@ -25,6 +25,8 @@ from duo_input.domain.models import (
 )
 from duo_input.domain.project_store import (
     PROJECT_SCHEMA_VERSION,
+    ProjectError,
+    ProjectValidationError,
     ProjectVersionError,
     load_project,
     save_project_atomic,
@@ -219,3 +221,28 @@ def test_validation_accepts_all_persisted_limits(project: DeviceProject):
     full_limit_project = replace(project, profiles=(first,) + project.profiles[1:])
 
     assert validate_project(full_limit_project) == ()
+
+
+def test_unencodable_source_text_is_a_positional_validation_error(
+    tmp_path: Path, project: DeviceProject
+):
+    first = project.profiles[0]
+    macro = replace(first.macros[0], steps=(replace(first.macros[0].steps[0], source_text="\ud800"),))
+    invalid = replace(project, profiles=(replace(first, macros=(macro,)),) + project.profiles[1:])
+
+    issues = validate_project(invalid)
+
+    assert [issue.path for issue in issues] == ["/profiles/0/macros/0/steps/0/source_text"]
+    with pytest.raises(ProjectValidationError) as error:
+        save_project_atomic(invalid, tmp_path / "invalid.duoinput.json")
+    assert error.value.issues == issues
+
+
+def test_project_store_rejects_non_project_extensions(tmp_path: Path, project: DeviceProject):
+    wrong_path = tmp_path / "project.json"
+    wrong_path.write_text(VECTOR.read_text("utf-8"), encoding="utf-8")
+
+    with pytest.raises(ProjectError, match=".duoinput.json"):
+        save_project_atomic(project, wrong_path)
+    with pytest.raises(ProjectError, match=".duoinput.json"):
+        load_project(wrong_path)
