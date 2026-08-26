@@ -674,3 +674,23 @@ def test_test_macro_refuses_identifiers_the_protocol_cannot_carry(qtbot, service
 
     assert failure.operation == "test_macro"
     assert failure.reason is FailureReason.INVALID_PACKAGE
+
+
+def test_the_service_remembers_the_counters_the_device_last_reported(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+    assert service.diagnostics is None
+
+    result = _succeed(qtbot, service, service.get_diagnostics)
+
+    assert service.diagnostics == result.value
+
+
+def test_disconnecting_forgets_the_counters(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+    _succeed(qtbot, service, service.get_diagnostics)
+
+    service.disconnect_device()
+
+    assert service.diagnostics is None

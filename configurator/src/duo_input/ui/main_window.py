@@ -31,7 +31,9 @@ from duo_input.device.service import DeviceService, DeviceState
 from duo_input.domain.project_store import ProjectError
 from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.domain.validation import ValidationIssue
+from duo_input.persistence.autosave import AutosaveService, Recovery
 from duo_input.ui.bindings import BindingsPage
+from duo_input.ui.diagnostics import DiagnosticsPage
 from duo_input.ui.macros import MacrosPage
 from duo_input.ui.models.binding_table import MouseCapabilities
 from duo_input.ui.models.project_session import ProjectSession, SetActiveProfile
@@ -65,8 +67,22 @@ class MainWindow(QMainWindow):
     session_changed = Signal(object)
 
     #: Navigation rows, in the order the sections appear.
-    PAGE_OVERVIEW, PAGE_PROFILES, PAGE_BINDINGS, PAGE_MACROS, PAGE_MOUSE = range(5)
-    PAGE_ORDER = (PAGE_OVERVIEW, PAGE_PROFILES, PAGE_BINDINGS, PAGE_MACROS, PAGE_MOUSE)
+    (
+        PAGE_OVERVIEW,
+        PAGE_PROFILES,
+        PAGE_BINDINGS,
+        PAGE_MACROS,
+        PAGE_MOUSE,
+        PAGE_DIAGNOSTICS,
+    ) = range(6)
+    PAGE_ORDER = (
+        PAGE_OVERVIEW,
+        PAGE_PROFILES,
+        PAGE_BINDINGS,
+        PAGE_MACROS,
+        PAGE_MOUSE,
+        PAGE_DIAGNOSTICS,
+    )
 
     def __init__(
         self,
@@ -79,6 +95,9 @@ class MainWindow(QMainWindow):
         self._service = service
         self._session = session if session is not None else ProjectSession.new()
         self.transport_factory = transport_factory or default_transport_factory
+        self.autosave = AutosaveService(parent=self)
+        self.autosave.timer.timeout.connect(self.autosave_now)
+        self.autosave.timer.start()
         self._updating_selector = False
 
         self.setMinimumSize(MINIMUM_WIDTH, MINIMUM_HEIGHT)
@@ -108,12 +127,14 @@ class MainWindow(QMainWindow):
         self.bindings = BindingsPage(self._service, self.pages)
         self.macros = MacrosPage(self._service, self.pages)
         self.mouse = MouseSwitchPage(self.pages)
+        self.diagnostics = DiagnosticsPage(self._service, self.pages)
         sections = (
             (self.tr("Overview"), self.overview),
             (self.tr("Profiles"), self.profiles),
             (self.tr("Bindings"), self.bindings),
             (self.tr("Macros"), self.macros),
             (self.tr("Mouse"), self.mouse),
+            (self.tr("Diagnostics"), self.diagnostics),
         )
         for title, page in sections:
             self.nav.addItem(title)
@@ -217,6 +238,7 @@ class MainWindow(QMainWindow):
         self.overview.update_from(session, self._service)
         for page in self._editor_pages():
             page.set_session(session)
+        self.diagnostics.set_session(session)
         self._refresh_issues()
         self.session_changed.emit(session)
 
@@ -241,7 +263,57 @@ class MainWindow(QMainWindow):
         self.nav.setCurrentRow(page)
 
     def _editor_pages(self) -> tuple[QWidget, ...]:
+        """Pages that both render a session and ask for changes to it."""
         return (self.profiles, self.bindings, self.macros, self.mouse)
+
+    # ------------------------------------------------------------- recovery
+
+    def autosave_now(self) -> bool:
+        """Keep a recovery copy of the current session. Never raises.
+
+        A full disk must not take the editor down mid-sentence, so a failed
+        autosave is reported alongside the device events and the operator
+        keeps typing.
+        """
+        try:
+            return bool(self.autosave.save(self._session))
+        except (ProjectError, OSError) as error:
+            self.overview.append_event("autosave", type(error).__name__)
+            return False
+
+    def offer_recovery(self) -> bool:
+        """Ask about unsaved work from a previous run. Returns whether it was taken.
+
+        A recovery is only ever offered when the autosave is newer than the
+        project file, so accepting it can never move the operator backwards.
+        """
+        try:
+            recovery = self.autosave.recovery()
+        except (ProjectError, OSError) as error:
+            # Startup continues either way: a broken autosave is a thing to
+            # report, not a reason to refuse to open the program.
+            self.overview.append_event("autosave", type(error).__name__)
+            return False
+        if recovery is None:
+            return False
+        if self._ask_recovery(recovery) != QMessageBox.StandardButton.Yes:
+            self.autosave.discard()
+            return False
+        self.set_session(recovery.session)
+        self.overview.append_event("autosave", "recovered")
+        return True
+
+    def _ask_recovery(self, recovery: Recovery) -> QMessageBox.StandardButton:
+        name = recovery.project_path.name if recovery.project_path else self.tr("a new project")
+        return QMessageBox.question(
+            self,
+            self.tr("Unsaved work was found"),
+            self.tr(
+                "Duo Input closed with unsaved changes to {0} on {1}. Recover them?"
+            ).format(name, recovery.saved_at.isoformat(timespec="seconds")),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
 
     # ------------------------------------------------------------ validation
 
@@ -374,6 +446,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, self.tr("Save failed"), str(error))
             return False
         self.set_session(saved)
+        # The file on disk now holds everything the autosave was protecting.
+        self.autosave.discard()
         self.statusBar().showMessage(self.tr("Project saved"))
         return True
 
@@ -424,12 +498,14 @@ class MainWindow(QMainWindow):
 
     def _on_status_changed(self, status: object) -> None:
         self.overview.update_from(self._session, self._service)
+        self.diagnostics.refresh()
 
     def _on_progress_changed(self, percent: int) -> None:
         self.progress.setValue(percent)
 
     def _on_operation_succeeded(self, result: object) -> None:
         self.overview.append_event(result.operation, "ok")
+        self.diagnostics.refresh()
         self.progress.setVisible(False)
         self._sync_device_state()
 

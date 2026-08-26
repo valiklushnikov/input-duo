@@ -37,3 +37,15 @@ def test_build_main_window_produces_a_wired_shell(qtbot):
     assert isinstance(window, MainWindow)
     assert window.service is service
     assert window.session.dirty is False
+
+
+def test_starting_the_application_configures_the_log(tmp_path, monkeypatch):
+    from duo_input.app import configure_application
+    from duo_input.persistence.locations import log_directory
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+
+    path = configure_application()
+
+    assert path.parent == log_directory()
+    assert path.parent.is_dir()

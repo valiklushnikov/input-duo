@@ -101,6 +101,7 @@ class DeviceService(QObject):
 
         self._device_info = None
         self._status = None
+        self._diagnostics = None
         self._device_hash = b""
         self._last_progress: int | None = None
 
@@ -132,6 +133,11 @@ class DeviceService(QObject):
         return self._status
 
     @property
+    def diagnostics(self):
+        """Counters from the last ``get_diagnostics``; ``None`` until asked for."""
+        return self._diagnostics
+
+    @property
     def device_hash(self) -> bytes:
         """Last hash the device reported for its active configuration."""
         return self._device_hash
@@ -159,6 +165,7 @@ class DeviceService(QObject):
         self._sequence = SequenceGenerator()
         self._device_info = None
         self._status = None
+        self._diagnostics = None
         if not link.open():
             self._teardown_link()
             self.operation_failed.emit(
@@ -375,6 +382,8 @@ class DeviceService(QObject):
         self._link = None
         self._pending = None
         self._staging_open = False
+        # Counters belong to the device that reported them, not to the host.
+        self._diagnostics = None
         self._timer.stop()
         self._assembler.clear()
         if link is not None:
@@ -490,7 +499,8 @@ class DeviceService(QObject):
         self._finish_success(None)
 
     def _on_diagnostics(self, payload: bytes) -> None:
-        self._finish_success(parse_diagnostics(payload))
+        self._diagnostics = parse_diagnostics(payload)
+        self._finish_success(self._diagnostics)
 
     # read -------------------------------------------------------------------
 

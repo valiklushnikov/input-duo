@@ -7,11 +7,13 @@ and collects no telemetry.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
 from duo_input import __version__
 from duo_input.device.service import DeviceService
+from duo_input.persistence.locations import configure_logging
 from duo_input.ui.main_window import APPLICATION_NAME, MainWindow
 from duo_input.ui.models.project_session import ProjectSession
 
@@ -19,6 +21,14 @@ from duo_input.ui.models.project_session import ProjectSession
 ENTRY_POINT = "duo_input.app:main"
 
 ORGANISATION_NAME = "Duo Input"
+
+
+def configure_application() -> Path:
+    """Prepare the per-user directories and start the rotating log.
+
+    Returns the log file, which the diagnostic report attaches later.
+    """
+    return configure_logging()
 
 
 def build_main_window(
@@ -40,9 +50,12 @@ def main(argv: list[str] | None = None) -> int:
     application.setApplicationName(APPLICATION_NAME)
     application.setApplicationVersion(__version__)
     application.setOrganizationName(ORGANISATION_NAME)
+    configure_application()
 
     window = build_main_window()
     window.show()
+    # Asked after the window exists, so the prompt has something to sit on.
+    window.offer_recovery()
     return application.exec()
 
 
@@ -50,4 +63,10 @@ if __name__ == "__main__":  # pragma: no cover - manual launch
     raise SystemExit(main())
 
 
-__all__ = ["ENTRY_POINT", "ORGANISATION_NAME", "build_main_window", "main"]
+__all__ = [
+    "ENTRY_POINT",
+    "ORGANISATION_NAME",
+    "build_main_window",
+    "configure_application",
+    "main",
+]
