@@ -1,0 +1,270 @@
+"""Framing, sequencing and payload parsing for the host side of the CDC link.
+
+This module is deliberately free of Qt and of any I/O: it is the pure part of
+the device layer, which keeps :mod:`duo_input.device.service` small enough to
+reason about.
+"""
+
+from __future__ import annotations
+
+import struct
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
+
+from duo_input.generated.protocol import CdcMessageType
+
+# ErrorCode is defined exactly once, in the reference U1 implementation. It is
+# imported rather than restated so protocol error identifiers are never
+# hand-duplicated.
+from .emulator import ErrorCode
+
+_FRAME_DELIMITER = 0
+
+_DEVICE_INFO = struct.Struct("<BBBIIB32s")
+_STATUS = struct.Struct("<BBBBI")
+_CONFIG_INFO = struct.Struct("<BII32s")
+_DIAGNOSTICS = struct.Struct("<BIIIII")
+_CHUNK_ACK = struct.Struct("<BI")
+
+
+class PayloadError(ValueError):
+    """A reply carried a payload that does not match the frozen v1 layout."""
+
+
+class FailureReason(StrEnum):
+    """Stable, never-localised identifiers for a failed device operation."""
+
+    NOT_CONNECTED = "not_connected"
+    BUSY = "busy"
+    INVALID_PACKAGE = "invalid_package"
+    LINK_LOST = "link_lost"
+    TIMEOUT = "timeout"
+    BAD_FRAME = "bad_frame"
+    BAD_PAYLOAD = "bad_payload"
+    SEQUENCE_MISMATCH = "sequence_mismatch"
+    UNEXPECTED_REPLY = "unexpected_reply"
+    PROTOCOL_MISMATCH = "protocol_mismatch"
+    DEVICE_ERROR = "device_error"
+    ACK_MISMATCH = "ack_mismatch"
+    READBACK_MISMATCH = "readback_mismatch"
+    ABORTED = "aborted"
+
+
+@dataclass(frozen=True)
+class OperationFailure:
+    """Why a device operation ended without doing what was asked."""
+
+    operation: str
+    reason: FailureReason
+    error_code: ErrorCode | None = None
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class OperationResult:
+    """The value produced by a device operation that ran to completion."""
+
+    operation: str
+    value: object = None
+
+
+@dataclass(frozen=True)
+class DeviceInfo:
+    protocol_major: int
+    protocol_minor: int
+    capabilities: int
+    active_generation: int
+    active_profile: int
+    active_hash: bytes
+
+
+@dataclass(frozen=True)
+class DeviceStatus:
+    active_profile: int
+    capture_active: bool
+    staging_active: bool
+    release_all_count: int
+
+
+@dataclass(frozen=True)
+class ActiveConfigInfo:
+    generation: int
+    size: int
+    digest: bytes
+
+
+@dataclass(frozen=True)
+class DeviceDiagnostics:
+    bad_crc: int
+    disconnect: int
+    timeout: int
+    bad_sequence: int
+    aborted_staging: int
+
+
+@dataclass(frozen=True)
+class Transaction:
+    """One in-flight request and the continuation that consumes its reply."""
+
+    operation: str
+    request_type: CdcMessageType
+    reply_type: CdcMessageType
+    sequence: int
+    payload: bytes
+    on_reply: Callable[[bytes], None]
+    ignore_device_error: bool = False
+
+
+class SequenceGenerator:
+    """Allocates u16 request sequence numbers and follows the device's counter."""
+
+    def __init__(self, start: int = 1) -> None:
+        if not isinstance(start, int) or not 0 <= start <= 0xFFFF:
+            raise ValueError("sequence start must be a u16")
+        self._next = start
+
+    def next(self) -> int:
+        value = self._next
+        self._next = (value + 1) & 0xFFFF
+        return value
+
+    def align_after(self, sequence: int) -> None:
+        """Continue after a sequence the device chose (e.g. a capture event)."""
+        if not isinstance(sequence, int) or not 0 <= sequence <= 0xFFFF:
+            raise ValueError("sequence must be a u16")
+        self._next = (sequence + 1) & 0xFFFF
+
+
+class FrameAssembler:
+    """Splits a byte stream into COBS frames, retaining partial bytes.
+
+    ``readyRead`` hands over whatever the driver happened to buffer, so a frame
+    may be split across any number of reads and several frames may arrive in
+    one. Everything after the last delimiter is kept for the next read.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = bytearray()
+
+    @property
+    def pending(self) -> int:
+        """Number of retained bytes that do not yet form a complete frame."""
+        return len(self._buffer)
+
+    def clear(self) -> None:
+        self._buffer.clear()
+
+    def push(self, data: bytes) -> list[bytes]:
+        """Append ``data`` and return every complete delimited frame."""
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise TypeError("data must be bytes-like")
+        self._buffer.extend(data)
+        frames: list[bytes] = []
+        while True:
+            try:
+                end = self._buffer.index(_FRAME_DELIMITER)
+            except ValueError:
+                break
+            frames.append(bytes(self._buffer[: end + 1]))
+            del self._buffer[: end + 1]
+        return frames
+
+
+def reply_error(payload: bytes) -> ErrorCode:
+    """Every reply payload starts with the device's error code."""
+    if not payload:
+        raise PayloadError("reply payload is empty")
+    try:
+        return ErrorCode(payload[0])
+    except ValueError as error:
+        raise PayloadError("unknown device error code") from error
+
+
+def parse_device_info(payload: bytes) -> DeviceInfo:
+    if len(payload) != _DEVICE_INFO.size:
+        raise PayloadError("DEVICE_INFO payload has the wrong size")
+    _, major, minor, capabilities, generation, profile, digest = _DEVICE_INFO.unpack(payload)
+    return DeviceInfo(major, minor, capabilities, generation, profile, digest)
+
+
+def parse_status(payload: bytes) -> DeviceStatus:
+    if len(payload) != _STATUS.size:
+        raise PayloadError("GET_STATUS payload has the wrong size")
+    _, profile, capture, staging, release_all = _STATUS.unpack(payload)
+    return DeviceStatus(profile, bool(capture), bool(staging), release_all)
+
+
+def parse_config_info(payload: bytes) -> ActiveConfigInfo:
+    if len(payload) != _CONFIG_INFO.size:
+        raise PayloadError("config info payload has the wrong size")
+    _, generation, size, digest = _CONFIG_INFO.unpack(payload)
+    return ActiveConfigInfo(generation, size, digest)
+
+
+def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
+    if len(payload) != _DIAGNOSTICS.size:
+        raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
+    _, bad_crc, disconnect, timeout, bad_sequence, aborted = _DIAGNOSTICS.unpack(payload)
+    return DeviceDiagnostics(bad_crc, disconnect, timeout, bad_sequence, aborted)
+
+
+def parse_chunk_ack(payload: bytes) -> int:
+    if len(payload) != _CHUNK_ACK.size:
+        raise PayloadError("WRITE_CHUNK acknowledgement has the wrong size")
+    return _CHUNK_ACK.unpack(payload)[1]
+
+
+def parse_read_chunk(payload: bytes) -> tuple[int, bytes]:
+    if len(payload) < _CHUNK_ACK.size:
+        raise PayloadError("READ_CONFIG_CHUNK payload has the wrong size")
+    offset = _CHUNK_ACK.unpack_from(payload)[1]
+    return offset, bytes(payload[_CHUNK_ACK.size :])
+
+
+def write_begin_payload(size: int, digest: bytes) -> bytes:
+    if len(digest) != 32:
+        raise PayloadError("WRITE_BEGIN requires a 32-byte digest")
+    return struct.pack("<I", size) + digest
+
+
+def write_chunk_payload(offset: int, chunk: bytes) -> bytes:
+    return struct.pack("<I", offset) + chunk
+
+
+def read_chunk_payload(offset: int, length: int) -> bytes:
+    return struct.pack("<IH", offset, length)
+
+
+def percentage(done: int, total: int) -> int:
+    """Progress in 0..100 with both endpoints reachable."""
+    if total <= 0:
+        return 100
+    return min(100, done * 100 // total)
+
+
+__all__ = [
+    "ActiveConfigInfo",
+    "DeviceDiagnostics",
+    "DeviceInfo",
+    "DeviceStatus",
+    "ErrorCode",
+    "FailureReason",
+    "FrameAssembler",
+    "OperationFailure",
+    "OperationResult",
+    "PayloadError",
+    "SequenceGenerator",
+    "Transaction",
+    "parse_chunk_ack",
+    "parse_config_info",
+    "parse_device_info",
+    "parse_diagnostics",
+    "parse_read_chunk",
+    "parse_status",
+    "percentage",
+    "read_chunk_payload",
+    "reply_error",
+    "write_begin_payload",
+    "write_chunk_payload",
+]

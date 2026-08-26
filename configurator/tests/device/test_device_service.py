@@ -1,0 +1,509 @@
+"""Asynchronous DeviceService driven against the deterministic U1 emulator."""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+from PySide6.QtCore import QTimer
+
+from duo_input.device.emulator import ErrorCode, U1Emulator
+from duo_input.device.qt_transport import SynchronousTransportLink
+from duo_input.device.service import DeviceService, DeviceState
+from duo_input.device.transactions import FailureReason
+from duo_input.device.transport import AbstractByteTransport
+from duo_input.domain.config_binary import compile_device_config, decode_device_config
+from duo_input.domain.models import Macro, MacroStep, TargetMode
+from duo_input.generated.protocol import (
+    BINARY_CONFIG_MAX_BYTES,
+    PROTOCOL_VERSION_MAJOR,
+    CdcMessageType,
+    MacroStepType,
+)
+from duo_input.protocol.frame import CdcFrame, decode_cdc_frame, encode_cdc_frame
+
+
+# --------------------------------------------------------------------------- helpers
+
+
+def _text_step(size: int) -> MacroStep:
+    """A TEXT step of exactly ``size`` bytes of modifier/usage pairs."""
+    return MacroStep(MacroStepType.TEXT, bytes(bytearray([0, 4] * (size // 2))))
+
+
+def _package_with_text_steps(base, sizes: list[int]) -> bytes:
+    steps = [_text_step(size) for size in sizes]
+    macros: list[Macro] = []
+    macro_id = 1
+    while steps:
+        macros.append(
+            Macro(
+                id=macro_id,
+                name=f"M{macro_id}",
+                target=TargetMode.INHERIT,
+                steps=tuple(steps[:64]),
+            )
+        )
+        steps = steps[64:]
+        macro_id += 1
+    first = replace(base.profiles[0], macros=tuple(macros), bindings=())
+    return compile_device_config(replace(base, profiles=(first,) + base.profiles[1:]))
+
+
+@pytest.fixture
+def base_config():
+    return decode_device_config(
+        Path("tests/vectors/config_vectors/valid_minimal.bin").read_bytes()
+    )
+
+
+@pytest.fixture
+def config_a() -> bytes:
+    return Path("tests/vectors/config_vectors/valid_minimal.bin").read_bytes()
+
+
+@pytest.fixture
+def config_b(config_a: bytes) -> bytes:
+    return compile_device_config(replace(decode_device_config(config_a), active_profile_id=2))
+
+
+@pytest.fixture
+def config_multi_chunk(base_config) -> bytes:
+    package = _package_with_text_steps(base_config, [1024] * 3)
+    assert 1536 < len(package) <= 4096
+    return package
+
+
+@pytest.fixture
+def config_360_kib(base_config) -> bytes:
+    package = _package_with_text_steps(base_config, [2048] * 178 + [1444])
+    assert len(package) == BINARY_CONFIG_MAX_BYTES == 360 * 1024
+    return package
+
+
+@pytest.fixture
+def emulator() -> U1Emulator:
+    return U1Emulator()
+
+
+@pytest.fixture
+def service(qtbot) -> DeviceService:
+    return DeviceService(timeout_ms=5000)
+
+
+class _MutatingTransport(AbstractByteTransport):
+    """Rewrites device replies on the wire without touching the emulator."""
+
+    def __init__(self, emulator: U1Emulator, mutate) -> None:
+        super().__init__()
+        self._emulator = emulator
+        self._mutate = mutate
+
+    @property
+    def is_open(self) -> bool:
+        return self._emulator.is_open
+
+    def open(self) -> None:
+        self._emulator.open()
+
+    def close(self) -> None:
+        self._emulator.close()
+
+    def write(self, data: bytes) -> bytes:
+        raw = self._emulator.write(data)
+        if not raw:
+            return raw
+        out = bytearray()
+        for part in raw[:-1].split(b"\0"):
+            frame = decode_cdc_frame(part + b"\0")
+            out.extend(encode_cdc_frame(self._mutate(frame) or frame))
+        return bytes(out)
+
+
+def _connect(qtbot, service: DeviceService, transport, timeout: int = 5000):
+    with qtbot.waitSignal(service.operation_succeeded, timeout=timeout) as blocker:
+        service.connect_device(transport)
+    result = blocker.args[0]
+    assert result.operation == "connect_device"
+    assert service.state is DeviceState.READY
+    return result
+
+
+def _fail(qtbot, service: DeviceService, call, timeout: int = 5000):
+    with qtbot.waitSignal(service.operation_failed, timeout=timeout) as blocker:
+        call()
+    return blocker.args[0]
+
+
+def _succeed(qtbot, service: DeviceService, call, timeout: int = 60000):
+    with qtbot.waitSignal(service.operation_succeeded, timeout=timeout) as blocker:
+        call()
+    return blocker.args[0]
+
+
+# --------------------------------------------------------------------------- connect
+
+
+def test_connect_negotiates_and_reports_device_state(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    states: list[DeviceState] = []
+    service.state_changed.connect(states.append)
+    statuses = []
+    service.status_changed.connect(statuses.append)
+
+    assert service.state is DeviceState.DISCONNECTED
+    info = _connect(qtbot, service, emulator).value
+
+    assert info.protocol_major == PROTOCOL_VERSION_MAJOR
+    assert info.capabilities > 0
+    assert info.active_hash == emulator.active_hash
+    assert service.device_hash == emulator.active_hash
+    assert states[0] is DeviceState.CONNECTING
+    assert states[-1] is DeviceState.READY
+    assert statuses and statuses[-1].active_profile == emulator.active_profile
+    assert emulator.is_open
+
+
+def test_frame_split_across_reads_is_reassembled(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    link = SynchronousTransportLink(emulator, chunk_size=1)
+
+    info = _connect(qtbot, service, link).value
+
+    assert info.active_hash == emulator.active_hash
+
+
+def test_operations_before_connect_are_rejected(qtbot, service):
+    failure = _fail(qtbot, service, service.read_config)
+
+    assert failure.reason is FailureReason.NOT_CONNECTED
+    assert service.state is DeviceState.DISCONNECTED
+
+
+def test_disconnect_device_returns_to_disconnected(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+
+    service.disconnect_device()
+
+    assert service.state is DeviceState.DISCONNECTED
+    assert not emulator.is_open
+
+
+def test_second_operation_while_busy_is_rejected(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+
+    with qtbot.waitSignal(service.operation_failed, timeout=5000) as blocker:
+        service.read_config()
+        service.read_config()
+
+    assert blocker.args[0].reason is FailureReason.BUSY
+    assert service.state is DeviceState.BUSY
+
+
+# --------------------------------------------------------------------------- read
+
+
+def test_read_config_round_trips_the_active_package_with_full_progress(
+    qtbot, service, emulator, config_a
+):
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+    progress: list[int] = []
+    service.progress_changed.connect(progress.append)
+
+    result = _succeed(qtbot, service, service.read_config)
+
+    assert result.operation == "read_config"
+    assert result.value == config_a
+    assert progress[0] == 0
+    assert progress[-1] == 100
+    assert progress == sorted(progress)
+    assert all(0 <= value <= 100 for value in progress)
+    assert service.state is DeviceState.READY
+
+
+# --------------------------------------------------------------------------- write
+
+
+def test_write_config_transfers_360_kib_and_updates_device_hash(
+    qtbot, service, emulator, config_a, config_360_kib
+):
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+    progress: list[int] = []
+    service.progress_changed.connect(progress.append)
+
+    result = _succeed(qtbot, service, lambda: service.write_config(config_360_kib))
+
+    assert result.operation == "write_config"
+    assert len(config_360_kib) == 360 * 1024
+    assert emulator.active_hash == hashlib.sha256(config_360_kib).digest()
+    assert service.device_hash == emulator.active_hash
+    assert result.value == emulator.active_hash
+    assert progress[0] == 0
+    assert progress[-1] == 100
+    assert progress == sorted(set(progress))
+    assert not emulator.staging_active
+    assert service.state is DeviceState.READY
+
+
+def test_write_progress_reaches_both_endpoints_even_when_no_chunk_lands_on_them(
+    qtbot, service, emulator, config_a, config_multi_chunk
+):
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+    progress: list[int] = []
+    service.progress_changed.connect(progress.append)
+    # The first acknowledged chunk is already past 0%, so 0 can only appear if
+    # the service reports it before any chunk is sent.
+    assert 512 * 100 // len(config_multi_chunk) > 0
+
+    _succeed(qtbot, service, lambda: service.write_config(config_multi_chunk))
+
+    assert progress[0] == 0
+    assert progress[-1] == 100
+    assert progress == sorted(set(progress))
+
+
+def test_write_config_rejects_an_oversized_package(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+
+    failure = _fail(
+        qtbot, service, lambda: service.write_config(b"\0" * (BINARY_CONFIG_MAX_BYTES + 1))
+    )
+
+    assert failure.reason is FailureReason.INVALID_PACKAGE
+    assert emulator.active_hash == hashlib.sha256(config_a).digest()
+
+
+def test_write_config_reports_a_device_rejection_and_leaves_the_old_hash(
+    qtbot, service, emulator, config_a
+):
+    emulator.install_active(config_a)
+    old_hash = emulator.active_hash
+    _connect(qtbot, service, emulator)
+
+    failure = _fail(qtbot, service, lambda: service.write_config(b"not a config package"))
+
+    assert failure.reason is FailureReason.DEVICE_ERROR
+    assert failure.error_code is ErrorCode.INVALID_CONFIG
+    assert emulator.active_hash == old_hash
+    assert service.device_hash == old_hash
+    assert not emulator.staging_active
+
+
+# --------------------------------------------------------------------------- fault matrix
+
+
+def test_disconnect_during_write_keeps_the_old_device_hash(
+    qtbot, service, emulator, config_a, config_multi_chunk
+):
+    emulator.install_active(config_a)
+    old_hash = emulator.active_hash
+    _connect(qtbot, service, emulator)
+    assert service.device_hash == old_hash
+    injected: list[bool] = []
+
+    def on_progress(value: int) -> None:
+        if value > 0 and not injected:
+            injected.append(True)
+            emulator.inject_disconnect()
+
+    service.progress_changed.connect(on_progress)
+
+    failure = _fail(qtbot, service, lambda: service.write_config(config_multi_chunk))
+
+    assert injected, "the disconnect was never triggered mid-transfer"
+    assert failure.operation == "write_config"
+    assert failure.reason is FailureReason.LINK_LOST
+    assert emulator.active_hash == old_hash
+    assert service.device_hash == old_hash
+    assert not emulator.staging_active
+    assert service.state is DeviceState.DISCONNECTED
+
+
+def test_abort_during_write_keeps_the_old_device_hash(
+    qtbot, service, emulator, config_a, config_multi_chunk
+):
+    emulator.install_active(config_a)
+    old_hash = emulator.active_hash
+    _connect(qtbot, service, emulator)
+    aborted: list[bool] = []
+
+    def on_progress(value: int) -> None:
+        if value > 0 and not aborted:
+            aborted.append(True)
+            service.abort_write()
+
+    service.progress_changed.connect(on_progress)
+
+    failure = _fail(qtbot, service, lambda: service.write_config(config_multi_chunk))
+
+    assert aborted, "abort_write was never reached"
+    assert failure.reason is FailureReason.ABORTED
+    assert emulator.active_hash == old_hash
+    assert service.device_hash == old_hash
+    assert not emulator.staging_active
+    assert service.state is DeviceState.READY
+
+
+def test_bad_crc_response_fails_the_operation(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+    emulator.inject_bad_crc_response()
+
+    failure = _fail(qtbot, service, service.get_diagnostics)
+
+    assert failure.operation == "get_diagnostics"
+    assert failure.reason is FailureReason.BAD_FRAME
+
+
+def test_device_reported_bad_sequence_fails_the_connection(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    emulator.open()
+    # Skew the sequence the device expects before the host ever speaks.
+    emulator.exchange(CdcFrame(CdcMessageType.PING, 500, b""))
+
+    failure = _fail(qtbot, service, lambda: service.connect_device(emulator))
+
+    assert failure.operation == "connect_device"
+    assert failure.reason is FailureReason.DEVICE_ERROR
+    assert failure.error_code is ErrorCode.BAD_SEQUENCE
+    assert service.state is DeviceState.DISCONNECTED
+
+
+def test_reply_with_a_mismatched_sequence_is_rejected(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    skew: list[bool] = []
+
+    def mutate(frame: CdcFrame):
+        if skew:
+            return replace(frame, sequence=(frame.sequence + 1) & 0xFFFF)
+        return None
+
+    transport = _MutatingTransport(emulator, mutate)
+    _connect(qtbot, service, transport)
+    skew.append(True)
+
+    failure = _fail(qtbot, service, service.get_diagnostics)
+
+    assert failure.reason is FailureReason.SEQUENCE_MISMATCH
+
+
+def test_incompatible_device_major_refuses_the_connection(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+
+    def mutate(frame: CdcFrame):
+        if frame.type is not CdcMessageType.DEVICE_INFO:
+            return None
+        payload = bytearray(frame.payload)
+        payload[1] = PROTOCOL_VERSION_MAJOR + 1
+        return replace(frame, payload=bytes(payload))
+
+    transport = _MutatingTransport(emulator, mutate)
+
+    failure = _fail(qtbot, service, lambda: service.connect_device(transport))
+
+    assert failure.operation == "connect_device"
+    assert failure.reason is FailureReason.PROTOCOL_MISMATCH
+    assert service.state is DeviceState.DISCONNECTED
+    assert not emulator.is_open
+
+
+def test_timeout_fails_the_operation_without_blocking_the_event_loop(qtbot, emulator, config_a):
+    service = DeviceService(timeout_ms=40)
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+    emulator.inject_timeout()
+    ticked: list[bool] = []
+    QTimer.singleShot(0, lambda: ticked.append(True))
+
+    failure = _fail(qtbot, service, service.get_diagnostics)
+
+    assert failure.operation == "get_diagnostics"
+    assert failure.reason is FailureReason.TIMEOUT
+    assert ticked, "the Qt event loop never ran while the request was in flight"
+    assert service.state is DeviceState.READY
+
+
+def test_readback_mismatch_after_commit_is_reported(qtbot, service, emulator, config_a, config_b):
+    emulator.install_active(config_a)
+
+    def mutate(frame: CdcFrame):
+        if frame.type is not CdcMessageType.GET_ACTIVE_CONFIG_INFO:
+            return None
+        return replace(frame, payload=bytes(frame.payload[:9]) + bytes(32))
+
+    transport = _MutatingTransport(emulator, mutate)
+    _connect(qtbot, service, transport)
+    old_hash = service.device_hash
+
+    failure = _fail(qtbot, service, lambda: service.write_config(config_b))
+
+    assert failure.operation == "write_config"
+    assert failure.reason is FailureReason.READBACK_MISMATCH
+    assert service.device_hash == old_hash
+
+
+# --------------------------------------------------------------------------- capture & misc
+
+
+def test_capture_event_is_delivered_and_sequence_resynchronises(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    link = SynchronousTransportLink(emulator)
+    _connect(qtbot, service, link)
+
+    _succeed(qtbot, service, service.begin_capture)
+    assert emulator.capture_active
+    assert emulator.queue_capture_event(b"\x01\x02\x03")
+
+    with qtbot.waitSignal(service.capture_received, timeout=5000) as blocker:
+        link.poll()
+
+    assert bytes(blocker.args[0]) == b"\x01\x02\x03"
+
+    # The device advanced its own sequence counter; the host must resynchronise.
+    result = _succeed(qtbot, service, service.stop_and_release_all)
+    assert result.operation == "stop_and_release_all"
+    assert emulator.release_all_count == 1
+
+
+def test_stop_and_release_all_reaches_the_device(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+
+    _succeed(qtbot, service, service.stop_and_release_all)
+
+    assert emulator.release_all_count == 1
+
+
+def test_get_diagnostics_reports_device_counters(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+
+    result = _succeed(qtbot, service, service.get_diagnostics)
+
+    diagnostics = result.value
+    assert result.operation == "get_diagnostics"
+    assert diagnostics.bad_crc == 0
+    assert diagnostics.disconnect == 0
+    assert diagnostics.timeout == 0
+    assert diagnostics.bad_sequence == 0
+    assert diagnostics.aborted_staging == 0
+
+
+def test_diagnostics_report_the_device_timeout_counter(qtbot, emulator, config_a):
+    service = DeviceService(timeout_ms=40)
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+    emulator.inject_timeout()
+    _fail(qtbot, service, service.get_diagnostics)
+
+    result = _succeed(qtbot, service, service.get_diagnostics)
+
+    assert result.value.timeout == 1
