@@ -1,0 +1,118 @@
+{
+  "active_profile_id": 1,
+  "profiles": [
+    {
+      "bindings": [
+        {
+          "action": {
+            "argument": 1,
+            "kind": "RUN_MACRO"
+          },
+          "mode": "REPLACE",
+          "trigger": {
+            "code": 4,
+            "kind": "KEYBOARD_USAGE",
+            "modifiers": 0
+          },
+          "uuid": "22222222-2222-4222-8222-222222222222"
+        }
+      ],
+      "color_rgb": [1, 2, 3],
+      "id": 1,
+      "keyboard_route": "PC1",
+      "macros": [
+        {
+          "id": 1,
+          "name": "КУРКУМА",
+          "steps": [
+            {
+              "payload": "",
+              "source_text": "КУРКУМА",
+              "type": "TEXT"
+            },
+            {
+              "payload": "CgAUAA==",
+              "type": "DELAY"
+            }
+          ],
+          "target": "INHERIT",
+          "uuid": "11111111-1111-4111-8111-111111111111"
+        }
+      ],
+      "mouse_route": "PC1",
+      "name": "Профіль 1",
+      "text_layout": "US"
+    },
+    {
+      "bindings": [],
+      "color_rgb": [2, 3, 4],
+      "id": 2,
+      "keyboard_route": "PC1",
+      "macros": [],
+      "mouse_route": "PC1",
+      "name": "Profile 2",
+      "text_layout": "US"
+    },
+    {
+      "bindings": [],
+      "color_rgb": [3, 4, 5],
+      "id": 3,
+      "keyboard_route": "PC1",
+      "macros": [],
+      "mouse_route": "PC1",
+      "name": "Profile 3",
+      "text_layout": "US"
+    },
+    {
+      "bindings": [],
+      "color_rgb": [4, 5, 6],
+      "id": 4,
+      "keyboard_route": "PC1",
+      "macros": [],
+      "mouse_route": "PC1",
+      "name": "Profile 4",
+      "text_layout": "US"
+    },
+    {
+      "bindings": [],
+      "color_rgb": [5, 6, 7],
+      "id": 5,
+      "keyboard_route": "PC1",
+      "macros": [],
+      "mouse_route": "PC1",
+      "name": "Profile 5",
+      "text_layout": "US"
+    },
+    {
+      "bindings": [],
+      "color_rgb": [6, 7, 8],
+      "id": 6,
+      "keyboard_route": "PC1",
+      "macros": [],
+      "mouse_route": "PC1",
+      "name": "Profile 6",
+      "text_layout": "US"
+    },
+    {
+      "bindings": [],
+      "color_rgb": [7, 8, 9],
+      "id": 7,
+      "keyboard_route": "PC1",
+      "macros": [],
+      "mouse_route": "PC1",
+      "name": "Profile 7",
+      "text_layout": "US"
+    },
+    {
+      "bindings": [],
+      "color_rgb": [8, 9, 10],
+      "id": 8,
+      "keyboard_route": "PC1",
+      "macros": [],
+      "mouse_route": "PC1",
+      "name": "Profile 8",
+      "text_layout": "US"
+    }
+  ],
+  "schema_version": "1.1"
+}

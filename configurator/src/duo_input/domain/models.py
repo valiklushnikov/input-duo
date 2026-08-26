@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from uuid import UUID, uuid4
 
 from duo_input.generated.protocol import (
     ActionKind,
@@ -33,12 +34,14 @@ class Binding:
     trigger: Trigger
     mode: BindingMode
     action: Action
+    uuid: UUID = field(default_factory=uuid4, compare=False)
 
 
 @dataclass(frozen=True)
 class MacroStep:
     type: MacroStepType
     payload: bytes
+    source_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,7 @@ class Macro:
     name: str
     target: TargetMode
     steps: tuple[MacroStep, ...]
+    uuid: UUID = field(default_factory=uuid4, compare=False)
 
 
 @dataclass(frozen=True)
@@ -63,5 +67,14 @@ class Profile:
 
 @dataclass(frozen=True)
 class DeviceConfig:
+    active_profile_id: int
+    profiles: tuple[Profile, ...]
+
+
+@dataclass(frozen=True)
+class DeviceProject:
+    """The editable, versioned source project kept on the host computer."""
+
+    schema_version: str
     active_profile_id: int
     profiles: tuple[Profile, ...]
