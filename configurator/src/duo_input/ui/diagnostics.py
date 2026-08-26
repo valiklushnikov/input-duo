@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QT_TRANSLATE_NOOP, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -35,6 +35,10 @@ from duo_input.ui.models.project_session import ProjectSession
 
 ARCHIVE_FILTER = "Diagnostic report (*.zip)"
 
+# The field table below spells out QT_TRANSLATE_NOOP("DiagnosticsPage", ...)
+# for every label. lupdate reads those literals, and the widget calls tr() on
+# them at runtime, so a language change retranslates the whole page.
+
 
 class DiagnosticsPage(QWidget):
     """Device counters and versions, plus the privacy-safe export."""
@@ -42,42 +46,42 @@ class DiagnosticsPage(QWidget):
     #: Field key to the label beside it. Keys are stable identifiers.
     _FIELDS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         (
-            "Versions",
+            QT_TRANSLATE_NOOP("DiagnosticsPage", "Versions"),
             (
-                ("application_version", "Configurator"),
-                ("protocol_version", "CDC protocol"),
-                ("u1_firmware_version", "U1 firmware"),
-                ("u2_firmware_version", "U2 firmware"),
-                ("chip_id", "Chip ID"),
+                ("application_version", QT_TRANSLATE_NOOP("DiagnosticsPage", "Configurator")),
+                ("protocol_version", QT_TRANSLATE_NOOP("DiagnosticsPage", "CDC protocol")),
+                ("u1_firmware_version", QT_TRANSLATE_NOOP("DiagnosticsPage", "U1 firmware")),
+                ("u2_firmware_version", QT_TRANSLATE_NOOP("DiagnosticsPage", "U2 firmware")),
+                ("chip_id", QT_TRANSLATE_NOOP("DiagnosticsPage", "Chip ID")),
             ),
         ),
         (
-            "Health",
+            QT_TRANSLATE_NOOP("DiagnosticsPage", "Health"),
             (
-                ("reset_reason", "Reset reason"),
-                ("watchdog_count", "Watchdog resets"),
-                ("ch375_state", "CH375 state"),
-                ("spi_crc_errors", "SPI CRC errors"),
-                ("spi_timeouts", "SPI timeouts"),
+                ("reset_reason", QT_TRANSLATE_NOOP("DiagnosticsPage", "Reset reason")),
+                ("watchdog_count", QT_TRANSLATE_NOOP("DiagnosticsPage", "Watchdog resets")),
+                ("ch375_state", QT_TRANSLATE_NOOP("DiagnosticsPage", "CH375 state")),
+                ("spi_crc_errors", QT_TRANSLATE_NOOP("DiagnosticsPage", "SPI CRC errors")),
+                ("spi_timeouts", QT_TRANSLATE_NOOP("DiagnosticsPage", "SPI timeouts")),
             ),
         ),
         (
-            "CDC counters",
+            QT_TRANSLATE_NOOP("DiagnosticsPage", "CDC counters"),
             (
-                ("cdc_bad_crc", "Bad CRC"),
-                ("cdc_bad_sequence", "Bad sequence"),
-                ("cdc_timeout", "Timeouts"),
-                ("cdc_disconnect", "Disconnects"),
-                ("cdc_aborted_staging", "Aborted writes"),
+                ("cdc_bad_crc", QT_TRANSLATE_NOOP("DiagnosticsPage", "Bad CRC")),
+                ("cdc_bad_sequence", QT_TRANSLATE_NOOP("DiagnosticsPage", "Bad sequence")),
+                ("cdc_timeout", QT_TRANSLATE_NOOP("DiagnosticsPage", "Timeouts")),
+                ("cdc_disconnect", QT_TRANSLATE_NOOP("DiagnosticsPage", "Disconnects")),
+                ("cdc_aborted_staging", QT_TRANSLATE_NOOP("DiagnosticsPage", "Aborted writes")),
             ),
         ),
         (
-            "Configuration",
+            QT_TRANSLATE_NOOP("DiagnosticsPage", "Configuration"),
             (
-                ("device_generation", "Generation on device"),
-                ("device_hash", "Hash on device"),
-                ("advertised_capabilities", "Advertised capabilities"),
-                ("peripherals", "Peripherals"),
+                ("device_generation", QT_TRANSLATE_NOOP("DiagnosticsPage", "Generation on device")),
+                ("device_hash", QT_TRANSLATE_NOOP("DiagnosticsPage", "Hash on device")),
+                ("advertised_capabilities", QT_TRANSLATE_NOOP("DiagnosticsPage", "Advertised capabilities")),
+                ("peripherals", QT_TRANSLATE_NOOP("DiagnosticsPage", "Peripherals")),
             ),
         ),
     )

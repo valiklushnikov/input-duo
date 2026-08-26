@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 
 from duo_input import __version__
 from duo_input.device.service import DeviceService
+from duo_input.i18n import TranslationManager
 from duo_input.persistence.locations import configure_logging
 from duo_input.ui.main_window import APPLICATION_NAME, MainWindow
 from duo_input.ui.models.project_session import ProjectSession
@@ -34,11 +35,13 @@ def configure_application() -> Path:
 def build_main_window(
     service: DeviceService | None = None,
     session: ProjectSession | None = None,
+    translations: TranslationManager | None = None,
 ) -> MainWindow:
     """Create the shell with its device service and a clean project session."""
     return MainWindow(
         service if service is not None else DeviceService(),
         session if session is not None else ProjectSession.new(),
+        translations=translations,
     )
 
 
@@ -52,7 +55,12 @@ def main(argv: list[str] | None = None) -> int:
     application.setOrganizationName(ORGANISATION_NAME)
     configure_application()
 
-    window = build_main_window()
+    # The language is installed before any widget exists, so every label is
+    # built in the language the operator chose last time.
+    translations = TranslationManager(application)
+    translations.load_saved()
+
+    window = build_main_window(translations=translations)
     window.show()
     # Asked after the window exists, so the prompt has something to sit on.
     window.offer_recovery()

@@ -31,6 +31,7 @@ from duo_input.device.service import DeviceService, DeviceState
 from duo_input.domain.project_store import ProjectError
 from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.domain.validation import ValidationIssue
+from duo_input.i18n import TranslationManager
 from duo_input.persistence.autosave import AutosaveService, Recovery
 from duo_input.ui.bindings import BindingsPage
 from duo_input.ui.diagnostics import DiagnosticsPage
@@ -40,6 +41,7 @@ from duo_input.ui.models.project_session import ProjectSession, SetActiveProfile
 from duo_input.ui.mouse import MouseSwitchPage
 from duo_input.ui.overview import OverviewPage
 from duo_input.ui.profiles import ProfilesPage
+from duo_input.ui.settings import SettingsPage
 
 APPLICATION_NAME = "Duo Input"
 DIRTY_MARKER = "*"
@@ -74,7 +76,8 @@ class MainWindow(QMainWindow):
         PAGE_MACROS,
         PAGE_MOUSE,
         PAGE_DIAGNOSTICS,
-    ) = range(6)
+        PAGE_SETTINGS,
+    ) = range(7)
     PAGE_ORDER = (
         PAGE_OVERVIEW,
         PAGE_PROFILES,
@@ -82,6 +85,7 @@ class MainWindow(QMainWindow):
         PAGE_MACROS,
         PAGE_MOUSE,
         PAGE_DIAGNOSTICS,
+        PAGE_SETTINGS,
     )
 
     def __init__(
@@ -89,10 +93,12 @@ class MainWindow(QMainWindow):
         service: DeviceService,
         session: ProjectSession | None = None,
         transport_factory: TransportFactory | None = None,
+        translations: TranslationManager | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = service
+        self.translations = translations or TranslationManager()
         self._session = session if session is not None else ProjectSession.new()
         self.transport_factory = transport_factory or default_transport_factory
         self.autosave = AutosaveService(parent=self)
@@ -128,6 +134,7 @@ class MainWindow(QMainWindow):
         self.macros = MacrosPage(self._service, self.pages)
         self.mouse = MouseSwitchPage(self.pages)
         self.diagnostics = DiagnosticsPage(self._service, self.pages)
+        self.settings = SettingsPage(self.translations, parent=self.pages)
         sections = (
             (self.tr("Overview"), self.overview),
             (self.tr("Profiles"), self.profiles),
@@ -135,6 +142,7 @@ class MainWindow(QMainWindow):
             (self.tr("Macros"), self.macros),
             (self.tr("Mouse"), self.mouse),
             (self.tr("Diagnostics"), self.diagnostics),
+            (self.tr("Settings"), self.settings),
         )
         for title, page in sections:
             self.nav.addItem(title)

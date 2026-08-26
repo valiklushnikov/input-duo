@@ -1,0 +1,11 @@
+<!--
+  What ships alongside the code. The application loads the compiled catalogues
+  from this directory on disk; this manifest names the same files so a Qt
+  resource bundle can be built from them without a second list going stale.
+-->
+<RCC>
+  <qresource prefix="/translations">
+    <file>translations/duo_input_ru.qm</file>
+    <file>translations/duo_input_en.qm</file>
+  </qresource>
+</RCC>
