@@ -3,6 +3,7 @@ add_executable(duo_u1_main
     main.cpp
     usb_descriptors.cpp
     usb_service.cpp
+    spi_master.cpp
 )
 
 # tusb_config.h lives beside the sources, so TinyUSB has to be told to look

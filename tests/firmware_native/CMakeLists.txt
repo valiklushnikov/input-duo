@@ -46,3 +46,20 @@ if(MSVC)
 endif()
 
 add_test(NAME hid_state_manager COMMAND duo_hid_state_manager_test)
+
+add_executable(duo_link_watchdog_test
+    test_main.cpp
+    test_link_watchdog.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u2_endpoint/link_watchdog.cpp
+)
+
+target_link_libraries(duo_link_watchdog_test PRIVATE duo_common)
+target_include_directories(duo_link_watchdog_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u2_endpoint
+)
+
+if(MSVC)
+    target_compile_options(duo_link_watchdog_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME link_watchdog COMMAND duo_link_watchdog_test)

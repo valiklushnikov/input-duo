@@ -4,6 +4,8 @@ add_executable(duo_u2_endpoint
     main.cpp
     usb_descriptors.cpp
     usb_service.cpp
+    spi_slave.cpp
+    link_watchdog.cpp
 )
 
 # tusb_config.h lives beside the sources, so TinyUSB has to be told to look
