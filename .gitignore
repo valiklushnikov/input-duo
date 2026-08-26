@@ -1,5 +1,5 @@
 .superpowers/
-build/
+/build/
 .python312/
 .venv/
 __pycache__/

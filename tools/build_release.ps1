@@ -129,10 +129,16 @@ finally {
 Write-Step 'Building the Pico firmware'
 Push-Location $RepositoryRoot
 try {
-    & cmake --build --preset pico-release --parallel
+    & cmake --preset pico-release
     if ($LASTEXITCODE -ne 0) {
-        throw 'the Pico firmware build failed; PICO_SDK_PATH and the arm-none-eabi toolchain are required'
+        throw 'configuring the Pico build failed; see docs/release/firmware-build.md'
     }
+    & cmake --build --preset pico-release --parallel
+    if ($LASTEXITCODE -ne 0) { throw 'the Pico firmware build failed' }
+
+    Write-Step 'Checking the firmware fits below the configuration slots'
+    & $Python -m pytest tests/build/test_firmware_artifacts.py -q
+    if ($LASTEXITCODE -ne 0) { throw 'the firmware images do not meet the build contract' }
 }
 finally {
     Pop-Location
@@ -156,8 +162,8 @@ if (Test-Path $OutputDir) { Remove-Item -Recurse -Force $OutputDir }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
 $artefacts = @(
-    @{ Source = "build/pico-release/firmware/u1/duo_input_u1.uf2"; Name = "duo-input-u1-$Version.uf2" }
-    @{ Source = "build/pico-release/firmware/u2/duo_input_u2.uf2"; Name = "duo-input-u2-$Version.uf2" }
+    @{ Source = "build/pico-release/firmware/u1_main/duo_u1_main.uf2"; Name = "duo-input-u1-$Version.uf2" }
+    @{ Source = "build/pico-release/firmware/u2_endpoint/duo_u2_endpoint.uf2"; Name = "duo-input-u2-$Version.uf2" }
     @{ Source = "configurator/dist/DuoInput-Setup-$Version-x64.exe"; Name = "DuoInput-Setup-$Version-x64.exe" }
 )
 

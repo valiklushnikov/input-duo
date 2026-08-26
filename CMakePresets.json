@@ -1,0 +1,66 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "native",
+      "displayName": "Host tests",
+      "description": "Firmware logic compiled for this machine, with CTest.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/native",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DUO_NATIVE_TESTS": "ON"
+      }
+    },
+    {
+      "name": "pico-release",
+      "displayName": "RP2040 firmware (release)",
+      "description": "The two UF2 images. Needs PICO_SDK_PATH and arm-none-eabi.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/pico-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel",
+        "DUO_PICO_FIRMWARE": "ON",
+        "PICO_BOARD": "pico"
+      }
+    },
+    {
+      "name": "pico-debug",
+      "inherits": "pico-release",
+      "displayName": "RP2040 firmware (debug)",
+      "description": "Same images with symbols, for a debug probe.",
+      "binaryDir": "${sourceDir}/build/pico-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "native",
+      "configurePreset": "native"
+    },
+    {
+      "name": "pico-release",
+      "configurePreset": "pico-release"
+    },
+    {
+      "name": "pico-debug",
+      "configurePreset": "pico-debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "native",
+      "configurePreset": "native",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
