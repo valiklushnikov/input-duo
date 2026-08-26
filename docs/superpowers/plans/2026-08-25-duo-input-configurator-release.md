@@ -55,7 +55,7 @@ docs/user/
 - Produces: frozen dataclasses `DeviceProject`, `Profile`, `Binding`, `Macro`, `MacroStep`.
 - Produces: `load_project(path)`, `save_project_atomic(project,path)`, `validate_project(project) -> tuple[ValidationIssue,...]`.
 
-- [ ] **Step 1: Write JSON round-trip/migration tests**
+- [x] **Step 1: Write JSON round-trip/migration tests**
 
 ```python
 def test_atomic_round_trip_preserves_unicode(tmp_path, project):
@@ -69,19 +69,19 @@ def test_unknown_major_is_read_only(tmp_path):
         load_project(write_schema(tmp_path, "99.0"))
 ```
 
-- [ ] **Step 2: Verify red state**
+- [x] **Step 2: Verify red state**
 
 Run `python -m pytest configurator/tests/domain/test_project_store.py -q`.
 
-- [ ] **Step 3: Implement explicit JSON conversion**
+- [x] **Step 3: Implement explicit JSON conversion**
 
 Do not serialize `__dict__`. Encode enums by stable generated names, UUIDs as canonical strings, UTF-8 with indent 2 and sorted keys. Save to sibling `.tmp`, fsync, then `os.replace`. Validation returns exact profile/binding/macro/step paths.
 
-- [ ] **Step 4: Run domain suite**
+- [x] **Step 4: Run domain suite**
 
 Include 8-profile/full-limit project, duplicate trigger, 129th binding, 33rd macro, 65th step and unsupported enum tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add configurator/pyproject.toml configurator/src/duo_input/domain configurator/tests/domain configurator/tests/vectors
@@ -99,23 +99,23 @@ git commit -m "feat: persist versioned Duo Input projects"
 **Interfaces:**
 - Produces: `compile_text(text: str, layout: LayoutId) -> tuple[HidChord,...]` and `UnsupportedCharacter(index,char,layout)`.
 
-- [ ] **Step 1: Add golden strings**
+- [x] **Step 1: Add golden strings**
 
 Vectors must include ASCII punctuation, `/target KYPKYMA`, Russian uppercase/lowercase/`ё`, Ukrainian `і/ї/є/ґ`, newline/tab and one emoji rejection with exact index.
 
-- [ ] **Step 2: Verify missing compiler failure**
+- [x] **Step 2: Verify missing compiler failure**
 
 Run text compiler tests.
 
-- [ ] **Step 3: Implement explicit physical-key tables**
+- [x] **Step 3: Implement explicit physical-key tables**
 
 Map characters to HID usage plus Shift/AltGr modifiers for US/RU/UA layouts. No Windows keyboard APIs or current OS layout may affect compilation. Newline maps Enter, tab maps Tab; control characters other than `\n`/`\t` reject.
 
-- [ ] **Step 4: Compile project to binary**
+- [x] **Step 4: Compile project to binary**
 
 Integrate with existing `compile_device_config`; assert source JSON retains Unicode while binary contains HID chords only.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add configurator/src/duo_input/domain configurator/tests/domain configurator/tests/vectors
@@ -135,7 +135,7 @@ git commit -m "feat: compile US Russian and Ukrainian macro text"
 - Produces QObject `DeviceService` signals: `state_changed`, `status_changed`, `capture_received`, `progress_changed`, `operation_failed`.
 - Methods: `connect_device`, `disconnect_device`, `read_config`, `write_config`, `begin_capture`, `stop_and_release_all`, `get_diagnostics`.
 
-- [ ] **Step 1: Write qtbot state-machine tests**
+- [x] **Step 1: Write qtbot state-machine tests**
 
 ```python
 def test_disconnect_during_write_returns_ready_with_old_hash(qtbot, service, emulator):
@@ -146,19 +146,19 @@ def test_disconnect_during_write_returns_ready_with_old_hash(qtbot, service, emu
     assert service.device_hash == emulator.active_hash
 ```
 
-- [ ] **Step 2: Verify red state**
+- [x] **Step 2: Verify red state**
 
 Run `python -m pytest configurator/tests/device/test_device_service.py -q`.
 
-- [ ] **Step 3: Implement discovery/framing/transactions**
+- [x] **Step 3: Implement discovery/framing/transactions**
 
 Use `QSerialPortInfo.availablePorts`, whitelist identity, retain partial COBS bytes across `readyRead`, one in-flight request, per-command timeout and sequence matching. Never block Qt event loop; chunk progress emits 0…100.
 
-- [ ] **Step 4: Run emulator fault matrix**
+- [x] **Step 4: Run emulator fault matrix**
 
 Test bad CRC, wrong sequence, major mismatch, disconnect, timeout, abort, readback mismatch and successful 360-KiB transfer.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add configurator/src/duo_input/device configurator/tests/device
@@ -178,23 +178,23 @@ git commit -m "feat: communicate with U1 over Qt serial port"
 - Produces: `ProjectSession` properties `dirty`, `file_hash`, `compiled_hash`, `device_hash`, `can_write`.
 - Produces application entry point `duo-input-configurator`.
 
-- [ ] **Step 1: Write three-state UX tests**
+- [x] **Step 1: Write three-state UX tests**
 
 Assert title marker for dirty, Save clears dirty but not device mismatch, successful write aligns device hash, failed write leaves mismatch, close dirty asks Save/Discard/Cancel.
 
-- [ ] **Step 2: Verify red state**
+- [x] **Step 2: Verify red state**
 
 Run UI test offscreen: `$env:QT_QPA_PLATFORM='offscreen'; python -m pytest configurator/tests/ui/test_main_window.py -q`.
 
-- [ ] **Step 3: Build shell and Overview cards**
+- [x] **Step 3: Build shell and Overview cards**
 
 Create left navigation, 8-profile selector, connection indicator, Save and Write buttons. Overview shows U1/U2 versions, peripherals, routes, memory usage and recent events from DeviceService.
 
-- [ ] **Step 4: Run keyboard navigation/accessibility smoke**
+- [x] **Step 4: Run keyboard navigation/accessibility smoke**
 
 Verify tab order, translated accessible names and minimum 1024×700 layout without clipped controls.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add configurator/src/duo_input/app.py configurator/src/duo_input/ui configurator/tests/ui
@@ -214,23 +214,23 @@ git commit -m "feat: add configurator shell and project state"
 **Interfaces:**
 - Produces editors operating only through immutable `ProjectSession.apply(command)` operations for undoable changes.
 
-- [ ] **Step 1: Write interaction tests**
+- [x] **Step 1: Write interaction tests**
 
 Test 8 profile slots, copy/clear, Replace/Add, keyboard modifier trigger, mouse buttons limited by capabilities, Capture selection, duplicate conflict and Button4 unavailable warning after mouse change.
 
-- [ ] **Step 2: Verify failures**
+- [x] **Step 2: Verify failures**
 
 Run binding/mouse UI tests.
 
-- [ ] **Step 3: Implement editors**
+- [x] **Step 3: Implement editors**
 
 Mouse page must first choose `Keyboard key` or `Mouse button`, then action Toggle/PC1/PC2 and Replace/Add. Capture dialog has 10-second countdown/cancel; only detected buttons are enabled.
 
-- [ ] **Step 4: Validate full project before Write**
+- [x] **Step 4: Validate full project before Write**
 
 Inject conflicts and limit errors; assert Write disabled and clicking issue navigates to exact profile/binding control.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add configurator/src/duo_input/ui configurator/tests/ui
@@ -247,23 +247,23 @@ git commit -m "feat: edit profiles bindings and mouse switching"
 **Interfaces:**
 - Produces drag/drop `MacroStepListModel`, step-specific editors and `TestMacroDialog`.
 
-- [ ] **Step 1: Write editor tests**
+- [x] **Step 1: Write editor tests**
 
 Test add/delete/reorder all step types, fixed/random delay ranges, 64-step limit, 1024-char limit, target Inherit/PC1/PC2/Both, unsupported char navigation and exact `/target KYPKYMA` compilation.
 
-- [ ] **Step 2: Verify red state**
+- [x] **Step 2: Verify red state**
 
 Run macro editor tests.
 
-- [ ] **Step 3: Implement step model and delegates**
+- [x] **Step 3: Implement step model and delegates**
 
 Store stable step UUIDs; drag/drop uses `beginMoveRows`. Test dialog requires target and confirmation, shows persistent red `STOP AND RELEASE ALL`, and calls DeviceService without modifying ProjectSession.
 
-- [ ] **Step 4: Run emulator test macro flow**
+- [x] **Step 4: Run emulator test macro flow**
 
 Assert confirm→TEST_MACRO, Stop→STOP_AND_RELEASE_ALL, disconnect closes running state with warning, and no test action changes saved/device hashes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add configurator/src/duo_input/ui configurator/tests/ui
@@ -281,23 +281,23 @@ git commit -m "feat: edit and safely test macro sequences"
 **Interfaces:**
 - Produces: `AutosaveService`, `build_diagnostic_zip(destination, snapshot, include_config=False)`.
 
-- [ ] **Step 1: Write privacy tests**
+- [x] **Step 1: Write privacy tests**
 
 Create project containing secret macro text; assert default ZIP byte content excludes it and includes versions, reset reason, CH375 identity/hash, SPI counters and application log. `include_config=True` includes explicitly named project file.
 
-- [ ] **Step 2: Verify failure**
+- [x] **Step 2: Verify failure**
 
 Run integration export test.
 
-- [ ] **Step 3: Implement diagnostics and autosave recovery**
+- [x] **Step 3: Implement diagnostics and autosave recovery**
 
 Use `%LOCALAPPDATA%\DuoInput\autosave` and `logs`; rotate 5×2 MiB logs. On startup offer Recover/Discard only when autosave is newer than project. Never log Text step content.
 
-- [ ] **Step 4: Run recovery/export tests**
+- [x] **Step 4: Run recovery/export tests**
 
 Test corrupted autosave, unwritable destination, missing device fields and opt-in config export.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add configurator/src/duo_input/ui/diagnostics.py configurator/src/duo_input/persistence configurator/tests/integration
@@ -317,23 +317,23 @@ git commit -m "feat: add private diagnostics and autosave recovery"
 **Interfaces:**
 - Produces: `TranslationManager.set_language("ru"|"en")`, compiled `.qm` resources.
 
-- [ ] **Step 1: Write translation coverage test**
+- [x] **Step 1: Write translation coverage test**
 
 Extract all `tr()` source strings and assert both catalogs contain finished entries; protocol enum names/error numeric IDs are excluded.
 
-- [ ] **Step 2: Verify missing catalogs failure**
+- [x] **Step 2: Verify missing catalogs failure**
 
 Run localization test.
 
-- [ ] **Step 3: Add resources and runtime switch**
+- [x] **Step 3: Add resources and runtime switch**
 
 Russian loads by default on first run. Settings page controls RU/EN, default project directory and log level. Changing language persists in QSettings and retranslates open top-level widgets or requests application restart with explicit message.
 
-- [ ] **Step 4: Screenshot smoke at 100%/150% DPI**
+- [x] **Step 4: Screenshot smoke at 100%/150% DPI**
 
 Capture all pages in RU/EN at 1280×800; assert no clipped button text and no untranslated source markers.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add configurator/src/duo_input/resources configurator/src/duo_input/i18n.py configurator/tests/ui
@@ -353,15 +353,15 @@ git commit -m "feat: localize configurator in Russian and English"
 **Interfaces:**
 - Produces: `dist/DuoInput/DuoInput.exe` and `dist/DuoInput-Setup-<version>-x64.exe`.
 
-- [ ] **Step 1: Write dist contract test**
+- [x] **Step 1: Write dist contract test**
 
 Assert EXE, Qt platform plugin, QtSerialPort DLL, translations, license notices and version metadata exist; assert no `.py`, test files or macro projects are bundled.
 
-- [ ] **Step 2: Verify red state**
+- [x] **Step 2: Verify red state**
 
 Run `python -m pytest configurator/tests/packaging/test_dist.py -q`; expected missing dist.
 
-- [ ] **Step 3: Implement reproducible build scripts**
+- [x] **Step 3: Implement reproducible build scripts**
 
 `nuitka-build.ps1` creates clean Python 3.12 venv, installs locked build requirements, runs tests, then:
 
@@ -376,9 +376,11 @@ Inno installer uses per-user install by default, Start Menu shortcut, uninstall 
 
 - [ ] **Step 4: Clean VM smoke**
 
+> **NOT DONE:** clean Windows VM without Python or Qt was not available in this environment.
+
 Install on clean Windows 10/11 x64 without Python/Qt, launch, connect emulator/real U1, save/open project, uninstall and verify user projects remain.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add configurator/requirements-build.txt configurator/packaging configurator/tests/packaging docs/release/windows-build.md docs/release/third-party-licenses.md
@@ -403,11 +405,15 @@ git commit -m "build: package configurator with Nuitka and Inno Setup"
 **Interfaces:**
 - Produces release folder containing two versioned UF2, installer, SHA256SUMS and release notes.
 
-- [ ] **Step 1: Encode acceptance scenarios**
+- [x] **Step 1: Encode acceptance scenarios**
 
 Scenarios cover 5 keyboards/5 mice, 1000 route toggles, U2 link cut, independent resets, 100 config writes, 20 write power cuts, eight-profile power cycle, 24-hour soak and macro Stop.
 
 - [ ] **Step 2: Run automated suites before HIL**
+
+> **PARTIAL:** `generate_protocol.py --check`, the native build, `ctest` (7/7) and
+> `pytest configurator/tests tests` (565 passed) all pass. The Pico firmware build
+> did not run: PICO_SDK_PATH is unset and the arm-none-eabi toolchain is not installed.
 
 ```powershell
 python tools/generate_protocol.py --check
@@ -421,13 +427,19 @@ Expected: all pass before touching hardware.
 
 - [ ] **Step 3: Execute and record HIL metrics**
 
+> **NOT DONE:** the two-board rig does not exist; the runner refuses to produce a report without it.
+
 `hil_runner.py` timestamps injected/observed events, calculates keyboard/mouse p95 ≤20 ms, flags pauses >50 ms and records U2 release ≤100 ms. Each device row records VID/PID/hash, buttons and pass/fail reason.
 
 - [ ] **Step 4: Build signed release directory**
 
+> **NOT DONE:** `build_release.ps1` is written and its version and dirty-tree guards
+> are verified, but no release folder can be assembled without the two UF2 files
+> from Step 2 and the metrics from Step 3.
+
 `build_release.ps1` refuses dirty tree, reads one SemVer, builds/tests artifacts, names them per spec, calculates SHA-256 and writes compatibility versions. Code-signing is optional for prototype; commercial distribution gate requires a trusted Windows signing certificate and legitimate USB VID/PID.
 
-- [ ] **Step 5: Commit release tooling/docs**
+- [x] **Step 5: Commit release tooling/docs**
 
 ```powershell
 git add tests/hil docs/release docs/user tools/build_release.ps1
