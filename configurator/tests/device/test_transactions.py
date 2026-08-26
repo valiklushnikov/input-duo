@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from duo_input.device.transactions import FrameAssembler, SequenceGenerator
-from duo_input.generated.protocol import CdcMessageType
+from duo_input.device.transactions import (
+    MAX_PENDING_FRAME_BYTES,
+    FrameAssembler,
+    FrameOverflowError,
+    SequenceGenerator,
+)
+from duo_input.generated.protocol import CDC_MAX_PAYLOAD, CdcMessageType
 from duo_input.protocol.frame import CdcFrame, decode_cdc_frame, encode_cdc_frame
 
 
@@ -80,3 +85,38 @@ def test_sequence_generator_resynchronises_after_a_device_initiated_frame():
 def test_sequence_generator_rejects_out_of_range_start():
     with pytest.raises(ValueError):
         SequenceGenerator(0x10000)
+
+
+def test_assembler_discards_a_stream_that_never_delimits():
+    """A device emitting endless non-zero noise must not grow the buffer forever."""
+    assembler = FrameAssembler()
+
+    with pytest.raises(FrameOverflowError):
+        assembler.push(b"\x01" * (MAX_PENDING_FRAME_BYTES + 1))
+
+    assert assembler.pending == 0
+
+
+def test_assembler_discards_noise_accumulated_over_many_reads():
+    assembler = FrameAssembler()
+    read = b"\x01" * 256
+
+    with pytest.raises(FrameOverflowError):
+        for _ in range(MAX_PENDING_FRAME_BYTES // len(read) + 1):
+            assembler.push(read)
+
+    assert assembler.pending == 0
+
+
+def test_assembler_still_accepts_a_maximum_length_frame_split_across_reads():
+    assembler = FrameAssembler()
+    wire = _frame(1, bytes(range(256)) * (CDC_MAX_PAYLOAD // 256))
+
+    collected: list[bytes] = []
+    for index in range(len(wire)):
+        collected.extend(assembler.push(wire[index : index + 1]))
+        assert assembler.pending <= MAX_PENDING_FRAME_BYTES
+
+    assert len(wire) <= MAX_PENDING_FRAME_BYTES
+    assert collected == [wire]
+    assert len(decode_cdc_frame(collected[0]).payload) == CDC_MAX_PAYLOAD

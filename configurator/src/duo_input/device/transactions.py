@@ -21,6 +21,11 @@ from .emulator import ErrorCode
 
 _FRAME_DELIMITER = 0
 
+# A legal CDC frame is at most 10 header + 1024 payload + 4 CRC bytes, plus COBS
+# overhead and the delimiter (~1044 bytes). Anything retained beyond this cap can
+# never become a frame, so the buffer is discarded instead of growing without end.
+MAX_PENDING_FRAME_BYTES = 2048
+
 _DEVICE_INFO = struct.Struct("<BBBIIB32s")
 _STATUS = struct.Struct("<BBBBI")
 _CONFIG_INFO = struct.Struct("<BII32s")
@@ -30,6 +35,10 @@ _CHUNK_ACK = struct.Struct("<BI")
 
 class PayloadError(ValueError):
     """A reply carried a payload that does not match the frozen v1 layout."""
+
+
+class FrameOverflowError(ValueError):
+    """The stream grew past any legal frame length without a delimiter."""
 
 
 class FailureReason(StrEnum):
@@ -156,7 +165,11 @@ class FrameAssembler:
         self._buffer.clear()
 
     def push(self, data: bytes) -> list[bytes]:
-        """Append ``data`` and return every complete delimited frame."""
+        """Append ``data`` and return every complete delimited frame.
+
+        Raises :class:`FrameOverflowError`, having discarded the buffer, when
+        the retained bytes can no longer become a legal frame.
+        """
         if not isinstance(data, (bytes, bytearray, memoryview)):
             raise TypeError("data must be bytes-like")
         self._buffer.extend(data)
@@ -168,6 +181,13 @@ class FrameAssembler:
                 break
             frames.append(bytes(self._buffer[: end + 1]))
             del self._buffer[: end + 1]
+        if len(self._buffer) > MAX_PENDING_FRAME_BYTES:
+            retained = len(self._buffer)
+            self._buffer.clear()
+            raise FrameOverflowError(
+                f"discarded {retained} undelimited bytes, "
+                f"cap is {MAX_PENDING_FRAME_BYTES}"
+            )
         return frames
 
 
@@ -244,6 +264,7 @@ def percentage(done: int, total: int) -> int:
 
 
 __all__ = [
+    "MAX_PENDING_FRAME_BYTES",
     "ActiveConfigInfo",
     "DeviceDiagnostics",
     "DeviceInfo",
@@ -251,6 +272,7 @@ __all__ = [
     "ErrorCode",
     "FailureReason",
     "FrameAssembler",
+    "FrameOverflowError",
     "OperationFailure",
     "OperationResult",
     "PayloadError",

@@ -32,6 +32,7 @@ from .transactions import (
     ErrorCode,
     FailureReason,
     FrameAssembler,
+    FrameOverflowError,
     OperationFailure,
     OperationResult,
     PayloadError,
@@ -274,7 +275,12 @@ class DeviceService(QObject):
         self._link.send(wire)
 
     def _on_bytes_received(self, data: bytes) -> None:
-        for wire in self._assembler.push(bytes(data)):
+        try:
+            wires = self._assembler.push(bytes(data))
+        except FrameOverflowError as error:
+            self._fail(FailureReason.BAD_FRAME, detail=str(error))
+            return
+        for wire in wires:
             try:
                 frame = decode_cdc_frame(wire)
             except FrameError as error:
@@ -307,7 +313,9 @@ class DeviceService(QObject):
             return
         self._timer.stop()
         self._pending = None
-        self._sequence.align_after(frame.sequence)
+        # No align_after here: the reply echoes a sequence this host allocated,
+        # so the counter is already past it. Realigning would rewind it behind a
+        # capture event that the device flushed ahead of this reply.
         payload = bytes(frame.payload)
         try:
             error = reply_error(payload)
@@ -395,6 +403,9 @@ class DeviceService(QObject):
     ) -> None:
         self._timer.stop()
         self._pending = None
+        # Any retained bytes belong to the request being abandoned; keeping them
+        # would prefix the next reply and break every later operation.
+        self._assembler.clear()
         if self._deferred_failure is not None:
             # The cleanup issued for an earlier failure itself failed; the
             # original cause is what the caller needs to see.
@@ -461,7 +472,14 @@ class DeviceService(QObject):
     # read -------------------------------------------------------------------
 
     def _on_read_begin(self, payload: bytes) -> None:
-        self._read_info = parse_config_info(payload)
+        info = parse_config_info(payload)
+        if info.size > BINARY_CONFIG_MAX_BYTES:
+            self._fail(
+                FailureReason.BAD_PAYLOAD,
+                detail=f"device reported a {info.size}-byte configuration",
+            )
+            return
+        self._read_info = info
         self._emit_progress(0)
         self._read_next_chunk()
 

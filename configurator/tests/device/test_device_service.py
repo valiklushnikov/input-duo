@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import struct
 from dataclasses import replace
 from pathlib import Path
 
@@ -507,3 +508,136 @@ def test_diagnostics_report_the_device_timeout_counter(qtbot, emulator, config_a
     result = _succeed(qtbot, service, service.get_diagnostics)
 
     assert result.value.timeout == 1
+
+
+# --------------------------------------------------------------------------- fix round 1
+
+
+class _TruncatingTransport(AbstractByteTransport):
+    """Cuts one reply short, leaving a partial frame in the host's assembler."""
+
+    def __init__(self, emulator: U1Emulator) -> None:
+        super().__init__()
+        self._emulator = emulator
+        self.truncate_next = False
+
+    @property
+    def is_open(self) -> bool:
+        return self._emulator.is_open
+
+    def open(self) -> None:
+        self._emulator.open()
+
+    def close(self) -> None:
+        self._emulator.close()
+
+    def write(self, data: bytes) -> bytes:
+        raw = self._emulator.write(data)
+        if self.truncate_next and len(raw) > 4:
+            self.truncate_next = False
+            return raw[:4]
+        return raw
+
+
+class _CaptureRacingTransport(AbstractByteTransport):
+    """Flushes a device-initiated CAPTURE_EVENT ahead of an already-buffered reply."""
+
+    def __init__(self, emulator: U1Emulator) -> None:
+        super().__init__()
+        self._emulator = emulator
+        self.requests: list[CdcFrame] = []
+        self.race_next = False
+        self.capture_sequence: int | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self._emulator.is_open
+
+    def open(self) -> None:
+        self._emulator.open()
+
+    def close(self) -> None:
+        self._emulator.close()
+
+    def write(self, data: bytes) -> bytes:
+        if data:
+            for part in data[:-1].split(b"\0"):
+                self.requests.append(decode_cdc_frame(part + b"\0"))
+        raw = self._emulator.write(data)
+        if not self.race_next or not raw:
+            return raw
+        self.race_next = False
+        reply = decode_cdc_frame(raw[: raw.index(0) + 1])
+        self.capture_sequence = (reply.sequence + 1) & 0xFFFF
+        capture = encode_cdc_frame(
+            CdcFrame(CdcMessageType.CAPTURE_EVENT, self.capture_sequence, b"\x07")
+        )
+        return capture + raw
+
+
+def test_read_config_rejects_a_device_reported_size_beyond_the_protocol_limit(
+    qtbot, service, emulator, config_a
+):
+    emulator.install_active(config_a)
+    seen: list[CdcMessageType] = []
+
+    def mutate(frame: CdcFrame):
+        seen.append(frame.type)
+        if frame.type is not CdcMessageType.READ_CONFIG_BEGIN:
+            return None
+        payload = bytearray(frame.payload)
+        payload[5:9] = struct.pack("<I", BINARY_CONFIG_MAX_BYTES + 1)
+        return replace(frame, payload=bytes(payload))
+
+    transport = _MutatingTransport(emulator, mutate)
+    _connect(qtbot, service, transport)
+
+    failure = _fail(qtbot, service, service.read_config)
+
+    assert failure.operation == "read_config"
+    assert failure.reason is FailureReason.BAD_PAYLOAD
+    assert CdcMessageType.READ_CONFIG_CHUNK not in seen
+    assert service.state is DeviceState.READY
+
+
+def test_a_failed_operation_does_not_poison_the_next_one(qtbot, emulator, config_a):
+    service = DeviceService(timeout_ms=40)
+    emulator.install_active(config_a)
+    transport = _TruncatingTransport(emulator)
+    _connect(qtbot, service, transport)
+    transport.truncate_next = True
+
+    failure = _fail(qtbot, service, service.get_diagnostics)
+    assert failure.reason is FailureReason.TIMEOUT
+
+    result = _succeed(qtbot, service, service.get_diagnostics, timeout=5000)
+
+    assert result.operation == "get_diagnostics"
+    assert result.value.timeout == 0
+
+
+def test_a_reply_never_rewinds_the_sequence_behind_a_capture_event(
+    qtbot, service, emulator, config_a
+):
+    emulator.install_active(config_a)
+    transport = _CaptureRacingTransport(emulator)
+    _connect(qtbot, service, transport)
+    transport.race_next = True
+
+    with qtbot.waitSignal(service.capture_received, timeout=5000):
+        service.get_diagnostics()
+    qtbot.waitUntil(lambda: service.state is DeviceState.READY, timeout=5000)
+
+    already_sent = len(transport.requests)
+    service.stop_and_release_all()
+    qtbot.waitUntil(lambda: len(transport.requests) > already_sent, timeout=5000)
+
+    request = transport.requests[already_sent]
+    assert request.type is CdcMessageType.STOP_AND_RELEASE_ALL
+    assert transport.capture_sequence is not None
+    # The capture event consumed capture_sequence, so the next host request must
+    # be the one after it and must never rewind to a sequence already spent.
+    assert request.sequence == (transport.capture_sequence + 1) & 0xFFFF
+    # Let the in-flight request settle; the emulator never saw the fabricated
+    # capture event, so it answers BAD_SEQUENCE and the operation ends there.
+    qtbot.waitUntil(lambda: service.state is not DeviceState.BUSY, timeout=5000)
