@@ -87,11 +87,18 @@ def test_unrelated_ports_are_rejected():
 def test_missing_or_blank_identity_fields_are_rejected():
     assert not matches_u1(replace(_u1(), vendor=None))
     assert not matches_u1(replace(_u1(), product=None))
-    assert not matches_u1(replace(_u1(), product_string=""))
-    assert not matches_u1(replace(_u1(), product_string="Some Other Device"))
     assert not matches_u1(replace(_u1(), serial=""))
     assert not matches_u1(replace(_u1(), serial="   "))
     assert not matches_u1(replace(_u1(), serial="XX-0001"))
+
+
+def test_the_name_windows_gives_the_port_is_not_part_of_the_identity():
+    # This used to be a rejection, and hardware showed it was the wrong rule:
+    # Windows names a composite CDC function from the driver, so a genuine U1
+    # never presents its own product string here. See
+    # test_a_real_u1_is_found_although_windows_names_the_port_itself.
+    assert matches_u1(replace(_u1(), product_string=""))
+    assert matches_u1(replace(_u1(), product_string="Some Other Device"))
 
 
 def test_matching_u1_is_accepted_for_any_serial_with_the_expected_prefix():
@@ -101,3 +108,52 @@ def test_matching_u1_is_accepted_for_any_serial_with_the_expected_prefix():
 def test_u1_and_u2_identities_are_distinct_products():
     assert U1_IDENTITY.product_id != U2_IDENTITY.product_id
     assert U1_IDENTITY.product_string != U2_IDENTITY.product_string
+
+
+# ------------------------------------------------------- what Windows reports
+
+
+def test_a_real_u1_is_found_although_windows_names_the_port_itself():
+    """The identity a composite CDC function actually presents on Windows.
+
+    Windows names a composite device's serial function from the driver, not
+    from the strings the device supplies: a real U1 shows up as "Устройство с
+    последовательным интерфейсом USB". Requiring our product string in
+    description() meant the configurator never found a device that was sitting
+    right there - confirmed against hardware, VID/PID 1209/D101, serial
+    DIU1-E663B03597570C2C.
+    """
+    windows_port = _FakePortInfo(
+        "COM18",
+        U1_IDENTITY.vendor_id,
+        U1_IDENTITY.product_id,
+        "Устройство с последовательным интерфейсом USB",
+        "DIU1-E663B03597570C2C",
+    )
+
+    assert matches_u1(windows_port) is True
+    assert find_u1_ports([windows_port]) == (PortCandidate("COM18", "DIU1-E663B03597570C2C"),)
+
+
+def test_a_u2_is_still_refused_whatever_the_port_is_called():
+    windows_port = _FakePortInfo(
+        "COM19",
+        U2_IDENTITY.vendor_id,
+        U2_IDENTITY.product_id,
+        "Устройство с последовательным интерфейсом USB",
+        "DIU2-E663B03597570C2C",
+    )
+
+    assert matches_u1(windows_port) is False
+
+
+def test_a_serial_from_the_wrong_model_is_refused_even_on_the_right_ids():
+    # The serial prefix is the model identity that survives Windows renaming
+    # the port, so it has to carry the check that description() no longer can.
+    impostor = replace(_u1(), serial="DIU2-0001")
+
+    assert matches_u1(impostor) is False
+
+
+def test_a_device_with_no_serial_number_is_refused():
+    assert matches_u1(replace(_u1(), serial="")) is False

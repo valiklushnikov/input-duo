@@ -12,7 +12,19 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class DeviceIdentity:
-    """USB identity a port must present before it is considered a Duo Input unit."""
+    """USB identity a port must present before it is considered a Duo Input unit.
+
+    ``product_string`` is what the device *calls itself*. It is deliberately
+    not part of the match: Windows names a composite device's serial function
+    from the driver rather than from the strings the device supplies, so a real
+    U1 appears as a generic "USB serial device" no matter what its descriptors
+    say. Matching on it meant the configurator could not find a board that was
+    sitting right there.
+
+    What survives that is the vendor ID, the product ID, and the serial number
+    prefix - and the prefix is model identity in its own right, because the
+    firmware builds every serial as its own prefix followed by the chip ID.
+    """
 
     vendor_id: int
     product_id: int
@@ -60,8 +72,6 @@ def _identity_matches(port_info, identity: DeviceIdentity) -> bool:
     if port_info.vendorIdentifier() != identity.vendor_id:
         return False
     if port_info.productIdentifier() != identity.product_id:
-        return False
-    if (port_info.description() or "").strip() != identity.product_string:
         return False
     serial_number = (port_info.serialNumber() or "").strip()
     return bool(serial_number) and serial_number.startswith(identity.serial_number_prefix)
