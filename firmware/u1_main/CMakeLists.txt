@@ -13,6 +13,8 @@ add_executable(duo_u1_main
     ch375/pio_transport.cpp
     ch375/device.cpp
     ch375/enumerator.cpp
+    ch375/descriptor_setup.cpp
+    ch375/hid_parser.cpp
     diagnostics_service.cpp
 )
 

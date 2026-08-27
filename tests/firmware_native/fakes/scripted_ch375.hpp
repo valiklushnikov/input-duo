@@ -120,6 +120,30 @@ public:
     /// Was the chip asked to configure the device by itself?
     bool saw_auto_setup() const { return saw_auto_setup_; }
 
+    // --- a device on the far side of the bus -------------------------------
+    //
+    // Enough of one to be enumerated: it answers descriptor requests, takes an
+    // address, and remembers which configuration was chosen. What the tests
+    // are about is the order those happen in and whether the host keeps up
+    // with the address it handed out.
+
+    /// Serve the descriptors of an ordinary boot mouse on endpoint 2.
+    void serve_boot_mouse();
+    /// A composite whose first HID interface is consumer controls.
+    void serve_composite_keyboard();
+    /// A hub, which this firmware does not support.
+    void serve_hub();
+
+    /// Refuse everything after this many control transfers have succeeded.
+    void stall_after(int transfers) { stall_after_ = transfers; }
+
+    std::uint8_t device_address() const { return device_address_; }
+    std::uint8_t host_address() const { return host_address_; }
+    std::uint8_t configuration_value() const { return configuration_value_; }
+
+    /// Was every step taken before the step that depends on it?
+    bool order_was_correct() const { return order_ok_; }
+
     /// Make the attached device answer as a 1.5 Mbps one.
     void set_low_speed(bool low) { low_speed_ = low; }
 
@@ -193,6 +217,18 @@ private:
     bool report_disconnect_on_reset_ = false;
     bool report_disconnect_settling_ = false;
     bool low_speed_ = false;
+    std::vector<std::uint8_t> configuration_;
+    bool read_device_descriptor_ = false;
+    bool read_configuration_ = false;
+    std::uint8_t device_address_ = 0;
+    std::uint8_t host_address_ = 0;
+    std::uint8_t configuration_value_ = 0;
+    bool order_ok_ = true;
+    int stall_after_ = -1;
+    int transfers_done_ = 0;
+    /// What the next RD_USB_DATA0 will hand back.
+    std::vector<std::uint8_t> pending_read_;
+    void finish_transfer(bool stalled);
     UsbSpeed bus_speed_ = UsbSpeed::Full12Mbps;
     bool speed_after_mode_ = false;
     /// AUTO_SETUP is several control transfers, so its answer is not instant.

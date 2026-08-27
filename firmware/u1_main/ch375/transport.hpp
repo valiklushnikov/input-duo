@@ -263,6 +263,30 @@ public:
         io_.write_data(static_cast<std::uint8_t>(speed));
     }
 
+    /// DS2 1.11. Fetch a descriptor. The interrupt that follows says whether
+    /// it worked; the bytes are then collected with read_block.
+    void get_descriptor(DescriptorType type) {
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::GetDescriptor));
+        io_.write_data(static_cast<std::uint8_t>(type));
+    }
+
+    /// DS2 1.10. Ask the *device* to take a new address.
+    ///
+    /// Not the same as set_usb_address, which tells the controller where the
+    /// device now is. Both are needed, in that order; doing only one leaves a
+    /// device that has moved and a host still calling where it used to be.
+    void set_address(std::uint8_t address) {
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::SetAddress));
+        io_.write_data(address);
+    }
+
+    /// DS2 1.12. Choose a configuration, which is what makes the endpoints
+    /// work. An addressed but unconfigured device answers nothing.
+    void set_configuration(std::uint8_t value) {
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::SetConfiguration));
+        io_.write_data(value);
+    }
+
     /// DS2 1.13. Ask the chip to configure the attached device by itself.
     ///
     /// It answers with an interrupt, so there is nothing to read here.

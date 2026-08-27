@@ -24,14 +24,6 @@
 
 namespace duo_input::u1::ch375 {
 
-/// How long to let one attempt at configuring a device run.
-///
-/// The control transfers inside AUTO_SETUP take single-digit milliseconds at
-/// full speed. Long enough not to abandon a slow device, short enough that a
-/// port with nothing on it costs a fraction of a second rather than a pause
-/// somebody notices.
-inline constexpr std::uint32_t kSetupTimeoutUs = 200000;
-
 class AutoSetupEnumerator final : public IDeviceSetup {
 public:
     explicit AutoSetupEnumerator(Ch375Transport& transport) : transport_(transport) {}

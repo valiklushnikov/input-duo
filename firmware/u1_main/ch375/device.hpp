@@ -120,6 +120,16 @@ inline constexpr std::uint32_t kChipResetUs = 60000;
 /// Half again over the specified maximum, and still imperceptible.
 inline constexpr std::uint32_t kBusSettleUs = 15000;
 
+/// How long to let one step of bringing a device up run before giving up.
+///
+/// A control transfer at full speed takes single-digit milliseconds. Long
+/// enough not to abandon a slow device, short enough that a port with nothing
+/// on it costs a fraction of a second rather than a pause somebody notices.
+///
+/// It lives here rather than beside either enumerator, because both of them
+/// wait on the same chip for the same reason.
+inline constexpr std::uint32_t kSetupTimeoutUs = 200000;
+
 /// How long to wait after a failure before trying the whole sequence again.
 ///
 /// Retrying flat out would hammer a controller that is already unhappy and

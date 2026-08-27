@@ -115,9 +115,22 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
             pending_status_ = 0;
             break;
 
+        case Ch375Command::GetDescriptor:
+        case Ch375Command::SetAddress:
+        case Ch375Command::SetConfiguration:
+            expecting_data_ = true;
+            break;
+
         case Ch375Command::ReadUsbData0:
         case Ch375Command::ReadUsbData:
-            if (report_waiting_) {
+            if (!pending_read_.empty()) {
+                // A control transfer's answer, waiting to be collected.
+                queue(static_cast<std::uint8_t>(pending_read_.size()));
+                for (std::uint8_t byte : pending_read_) {
+                    queue(byte);
+                }
+                pending_read_.clear();
+            } else if (report_waiting_) {
                 queue(static_cast<std::uint8_t>(report_.size()));
                 for (std::uint8_t byte : report_) {
                     queue(byte);
@@ -208,6 +221,53 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
             // Two data bytes: the 25H prefix and the policy. DS2 1.3.
             break;
 
+        case Ch375Command::GetDescriptor: {
+            expecting_data_ = false;
+            if (value == 1) {
+                // A device descriptor. Only its shape matters here.
+                pending_read_ = {18,   0x01, 0x10, 0x01, 0, 0, 0, 8,
+                                 0x34, 0x12, 0x78, 0x56, 0, 1, 0, 0, 0, 1};
+                read_device_descriptor_ = true;
+            } else if (value == 2) {
+                if (!read_device_descriptor_) {
+                    // Asked for before the device descriptor, which is out of
+                    // order - a real device is still on address zero here.
+                    order_ok_ = false;
+                }
+                if (host_address_ != device_address_) {
+                    // Read at an address the device no longer answers to.
+                    order_ok_ = false;
+                }
+                pending_read_ = configuration_;
+                read_configuration_ = true;
+            }
+            finish_transfer(false);
+            break;
+        }
+
+        case Ch375Command::SetAddress:
+            expecting_data_ = false;
+            if (!read_device_descriptor_) {
+                order_ok_ = false;
+            }
+            device_address_ = value;
+            finish_transfer(false);
+            break;
+
+        case Ch375Command::SetUsbAddress:
+            expecting_data_ = false;
+            host_address_ = value;
+            break;
+
+        case Ch375Command::SetConfiguration:
+            expecting_data_ = false;
+            if (!read_configuration_) {
+                order_ok_ = false;
+            }
+            configuration_value_ = value;
+            finish_transfer(false);
+            break;
+
         default:
             expecting_data_ = false;
             break;
@@ -285,6 +345,80 @@ SetupProgress FakeDeviceSetup::poll(std::uint32_t now_us, bool interrupted,
     }
     running_ = false;
     return SetupProgress::Done;
+}
+
+}  // namespace duo_input::u1::ch375::testing
+
+// ---------------------------------------------------------------------------
+// A device on the far side of the bus.
+// ---------------------------------------------------------------------------
+
+namespace duo_input::u1::ch375::testing {
+namespace {
+
+/// The descriptor records a real device sends, built the way a real one builds
+/// them: length-prefixed and chained.
+std::vector<std::uint8_t> configuration_header(std::size_t total, std::uint8_t interfaces) {
+    return {9, 0x02, static_cast<std::uint8_t>(total & 0xFF),
+            static_cast<std::uint8_t>(total >> 8), interfaces, 1, 0, 0x80, 50};
+}
+
+std::vector<std::uint8_t> interface_record(std::uint8_t number, std::uint8_t cls,
+                                           std::uint8_t subclass, std::uint8_t protocol,
+                                           std::uint8_t endpoints) {
+    return {9, 0x04, number, 0, endpoints, cls, subclass, protocol, 0};
+}
+
+std::vector<std::uint8_t> endpoint_record(std::uint8_t address, std::uint16_t max_packet) {
+    return {7, 0x05, address, 0x03, static_cast<std::uint8_t>(max_packet & 0xFF),
+            static_cast<std::uint8_t>(max_packet >> 8), 10};
+}
+
+void append(std::vector<std::uint8_t>& into, const std::vector<std::uint8_t>& more) {
+    into.insert(into.end(), more.begin(), more.end());
+}
+
+}  // namespace
+
+void FakeCh375Chip::finish_transfer(bool stalled) {
+    ++transfers_done_;
+    const bool refuse = stalled || (stall_after_ >= 0 && transfers_done_ > stall_after_);
+    if (refuse) {
+        pending_read_.clear();
+        // Bit 5 marks a failure, and 1110 in the low bits is a STALL - DS1
+        // 5.12. A device that refuses a step is not the same as one that has
+        // gone away, and the byte says which.
+        pending_status_ = 0x2E;
+    } else {
+        pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Success);
+    }
+    int_asserted_ = !silent_;
+}
+
+void FakeCh375Chip::serve_boot_mouse() {
+    std::vector<std::uint8_t> body;
+    append(body, interface_record(0, 0x03, 0x01, 0x02, 1));
+    append(body, endpoint_record(0x82, 4));
+    configuration_ = configuration_header(9 + body.size(), 1);
+    append(configuration_, body);
+}
+
+void FakeCh375Chip::serve_composite_keyboard() {
+    std::vector<std::uint8_t> body;
+    append(body, interface_record(0, 0x03, 0x00, 0x00, 1));  // consumer controls
+    append(body, endpoint_record(0x83, 4));
+    append(body, interface_record(1, 0x03, 0x01, 0x01, 1));  // the keyboard
+    append(body, endpoint_record(0x81, 8));
+    configuration_ = configuration_header(9 + body.size(), 2);
+    append(configuration_, body);
+}
+
+void FakeCh375Chip::serve_hub() {
+    std::vector<std::uint8_t> body;
+    append(body, interface_record(0, 0x09, 0x00, 0x00, 1));
+    append(body, endpoint_record(0x81, 1));
+    configuration_ = configuration_header(9 + body.size(), 1);
+    append(configuration_, body);
 }
 
 }  // namespace duo_input::u1::ch375::testing

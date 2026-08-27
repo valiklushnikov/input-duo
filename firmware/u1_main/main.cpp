@@ -17,7 +17,7 @@
 #include "hardware/watchdog.h"
 
 #include "buttons.hpp"
-#include "ch375/enumerator.hpp"
+#include "ch375/descriptor_setup.hpp"
 #include "ch375_probe.hpp"
 #include "diagnostics/ch375_baud_scan.hpp"
 #include "config_service.hpp"
@@ -319,8 +319,11 @@ int main() {
     // The lifecycle itself, on real hardware for the first time: one state
     // machine per controller, sharing nothing, each doing a bounded piece of
     // work per pass.
-    duo_input::u1::ch375::AutoSetupEnumerator keyboard_setup(keyboard_commands);
-    duo_input::u1::ch375::AutoSetupEnumerator mouse_setup(mouse_commands);
+    // Enumerated by hand rather than with AUTO_SETUP, which assigns an
+    // address without saying which and never reports the endpoint - see
+    // descriptor_setup.hpp.
+    duo_input::u1::ch375::DescriptorSetup keyboard_setup(keyboard_commands);
+    duo_input::u1::ch375::DescriptorSetup mouse_setup(mouse_commands);
     duo_input::u1::ch375::Ch375Device keyboard_device(keyboard_commands, keyboard_setup);
     duo_input::u1::ch375::Ch375Device mouse_device(mouse_commands, mouse_setup);
     // The experiment that left the bus reset out changed nothing - the device
@@ -462,8 +465,7 @@ int main() {
             }
             last_pass_us = device_now_us;
             duo_input::u1::ch375::Ch375Device* devices[2] = {&keyboard_device, &mouse_device};
-            duo_input::u1::ch375::AutoSetupEnumerator* setups[2] = {&keyboard_setup,
-                                                                    &mouse_setup};
+            duo_input::u1::ch375::DescriptorSetup* setups[2] = {&keyboard_setup, &mouse_setup};
             DeviceTally* tallies[2] = {&keyboard_tally, &mouse_tally};
             for (int index = 0; index < 2; ++index) {
                 devices[index]->tick(device_now_us);
@@ -523,6 +525,8 @@ int main() {
                     "  connect=%u disconnect=%u success=%u failure=%u impossible=%u\n"
                     "  detach_disconnect=%u detach_lost=%u enum_failed=%u mode_failed=%u\n"
                     "  setup attempts=%u last=0x%02X (%s) polls=%u\n"
+                    "  found=%s endpoint=%u packet=%u boot=%s parse=%u\n"
+                    "  last report (%u bytes): %02X %02X %02X %02X\n"
                     "  slowest pass round the loop=%u us\n",
                     names[index], state < 7 ? kStates[state] : "?",
                     device.device_is_low_speed() ? "low" : "full", tally.attached, tally.detached,
@@ -535,7 +539,17 @@ int main() {
                     device.enumerate_failures(), device.mode_failures(),
                     setups[index]->attempts(), setups[index]->last_status(),
                     describe_setup_status(setups[index]->last_status()),
-                    device.polls_issued(), worst_pass_us);
+                    device.polls_issued(),
+                    setups[index]->kind() == duo_input::u1::ch375::DeviceKind::Keyboard
+                        ? "keyboard"
+                        : (setups[index]->kind() == duo_input::u1::ch375::DeviceKind::Mouse
+                               ? "mouse"
+                               : "nothing"),
+                    setups[index]->interrupt_endpoint(), setups[index]->max_packet(),
+                    setups[index]->boot_protocol() ? "yes" : "no",
+                    static_cast<unsigned>(setups[index]->last_parse_error()),
+                    tally.last_size, tally.last[0], tally.last[1], tally.last[2], tally.last[3],
+                    worst_pass_us);
                 // snprintf answers with how much it *would* have written. Left
                 // unclamped, the next call is handed a negative amount of room
                 // and the total runs past the end of the buffer.

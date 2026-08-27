@@ -173,15 +173,26 @@ GET_DESCR again, SET_CONFIG - answers both, which is why this task exists.
 - Produces: `HidDeviceCapabilities {vid,pid,descriptor_hash,protocol,endpoint,max_packet,button_count}`.
 - Produces: `ParseResult parse_hid_descriptor(ByteView, ExpectedDeviceKind)` using the common C++17 pointer+length view.
 
-- [ ] **Step 1: Add descriptor corpus and failing tests**
+**Reached on hardware, 2026-08-28.** A real mouse is enumerated by hand and its
+reports arrive: `found=mouse endpoint=1 packet=7 boot=yes parse=0`, and two
+reports read from the endpoint when it was moved. Every part of that path is
+this firmware's - the nine-bit PIO port, the command layer, the lifecycle, the
+enumeration and the descriptor parser - and the endpoint it polls came out of
+the device's own descriptor rather than an assumption.
+
+What is not yet right is that it does not stay: the device is lost and brought
+up again repeatedly, and thirty of thirty-three enumeration attempts fail. So
+this is the path working, not the path working reliably.
+
+- [x] **Step 1: Add descriptor corpus and failing tests**
 
 Include standard boot keyboard, boot mouse, 5-button wheel mouse, consumer composite, truncated item, impossible report size, vendor-only device and hub. Assert accepted capabilities or exact rejection code.
 
-- [ ] **Step 2: Verify parser tests fail**
+- [x] **Step 2: Verify parser tests fail**
 
 Run native HID parser target.
 
-- [ ] **Step 3: Implement enumeration and parser limits**
+- [x] **Step 3: Implement enumeration and parser limits**
 
 Read device/config/HID/report descriptors through CH375 control transfers; cap total descriptor bytes at 4096, report fields at 64, report bits at 512. Prefer Boot interface; otherwise accept only keyboard/mouse usages representable by normalizers.
 

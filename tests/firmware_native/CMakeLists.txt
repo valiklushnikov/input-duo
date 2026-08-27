@@ -265,3 +265,25 @@ if(MSVC)
 endif()
 
 add_test(NAME hid_parser COMMAND duo_hid_parser_test)
+
+add_executable(duo_ch375_descriptor_setup_test
+    test_main.cpp
+    test_ch375_descriptor_setup.cpp
+    fakes/scripted_ch375.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/device.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/enumerator.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/descriptor_setup.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/hid_parser.cpp
+)
+
+target_link_libraries(duo_ch375_descriptor_setup_test PRIVATE duo_common)
+target_include_directories(duo_ch375_descriptor_setup_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+if(MSVC)
+    target_compile_options(duo_ch375_descriptor_setup_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME ch375_descriptor_setup COMMAND duo_ch375_descriptor_setup_test)
