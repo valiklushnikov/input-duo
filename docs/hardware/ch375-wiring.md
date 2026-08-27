@@ -65,63 +65,53 @@ Task 2 should drop the OE step rather than pretend to perform it.
 
 ### What the line actually does, measured
 
-On the bench, 2026-08-27, with a PIO port that reads whole nine-bit frames and
-reports framing errors: **before U1 transmits anything at all, 569 and 588
-frames arrive per second** on the two channels. A frame takes 1.15 ms, so the
-most that can be detected is about 870 per second - the line is disturbed
-almost continuously, and none of it is provoked by this firmware.
+The measurement that counts does not involve PIO at all. Both receive pads are
+read as ordinary inputs with the internal pull-up, for one second, before any
+state machine starts:
 
-About two in five of those frames have their stop bit in the wrong place -
-340 bad against 525 good on one channel, 295 against 570 on the other. That
-ratio is what settles what this is: a real transmission is well-framed or it
-is not a transmission, and noise is right about as often as chance allows.
+| | leads unsoldered | leads soldered on |
+|---|---|---|
+| GP1 | high the whole second, zero transitions | low 34% of the time, transitions past the counter's ceiling |
+| GP5 | high the whole second, zero transitions | low 31% of the time, transitions past the counter's ceiling |
 
-Three explanations have been tested and dropped:
+A disconnected pad is perfectly steady. A connected one is in motion the whole
+time. Nothing in this firmware can produce that: it is a loop reading a pin.
 
-- **This firmware's own transmissions.** Ruled out by taking the measurement
-  before U1 sends anything at all, which had never been done before.
-- **USB frame packets coupling in.** Both chips had been left generating SOF,
-  one packet per millisecond, which was close enough to the observed rate to
-  be worth taking seriously. Power-cycling them back into the mode they reset
-  into, which generates nothing, changed the count by less than five percent.
-- **Something actually sending.** The bad-frame ratio says otherwise.
+**So the disturbance arrives through the leads, from outside U1.** The board,
+the PIO port and the firmware are all cleared by it, and so is the earlier
+suspicion of USB traffic - the mouse was unplugged for this and both channels
+look the same.
 
-What is left, and untested:
+Two things this does *not* say, and it took a while to learn to keep them
+apart. It does not say the level shifter is at fault: a lead soldered to a
+chip pin and run across a bench is an antenna whether or not the part at the
+far end behaves. And it does not say anything about the CH375s, which were
+powered and idle throughout.
 
-1. **The level shifter.** TXS0108E senses direction automatically and is
-   sensitive to capacitance and wire length; TI's own documentation warns
-   about its one-shot retriggering and oscillating, and short traces are a
-   stated requirement. It is *not* an open-drain-only part - push-pull, UART
-   and SPI are all supported - so the fault would be the wiring around it
-   rather than the choice of it.
-2. **The wiring itself.** Hand-soldered flying leads to chip pins, unshielded,
-   next to a 12 Mbps bus.
+The next measurement separates those, and it is now a sensible one to ask for
+because both ends are no longer disconnected at once: **unsolder the two leads
+at the shifter's A-side pads, C13 and C16, and leave them hanging from U1.**
+Quiet means the shifter is driving it; still noisy means the wire is picking
+it up.
 
-One measurement separates them, and it needs a hand: take the two receive
-leads off U1's GP1 and GP5 and listen again with the pins bare. Silence means
-U1 and this firmware are clear and the noise arrives from the shifter or the
-leads. Noise on a bare pin means it is nearer than that.
+### What was measured before this, and why none of it counted
 
-Swapping in a TXB0108 is not the first move. It is a different part with its
-own limits - a weak output through roughly 4 kOhm, unhappy with external
-pull-ups and capacitive loads - so it might help and might not, and doing it
-before the source is known is a guess wearing a part number.
+Every earlier reading of "the line is noisy" was taken after reflashing over
+USB, which restarts the processor and leaves every peripheral running. State
+machines from the previous firmware run kept executing while the new program
+was loaded underneath their program counters, and pushed the results into the
+queues this code then read as frames. The port now resets its PIO block on
+startup, and the difference that made is the whole table above.
 
-If the shifter does turn out to be the cause, the alternative is a divider per
-**input** to U1, and there are four of them: keyboard TXD and INT, mouse TXD
-and INT. Two resistors each, so eight. The transmit direction may be able to
-go straight from 3.3 V, but only after checking what the CH375B actually
-accepts as a logic high - not on the strength of "usually".
+Two other faults in the instrument were found in the same stretch, both by
+review rather than by measurement:
 
-Original note, kept because it was written before any measurement and turned
-out to point the right way:
-
-> The TXS0108E senses direction automatically and carries its pull-ups on both
-> sides, which suits open-drain buses. A serial line is driven push-pull, and
-> this part is more sensitive there than its push-pull sibling the TXB0108,
-> particularly as the rate goes up. CH375 starts at 9600 bps and this device
-> has no reason to push it hard, so it should be comfortable - but if bytes
-> start arriving damaged, the shifter is the first thing to test, not the last.
+- The receive program pushed by hand while autopush was also enabled, so every
+  real frame was followed by an empty one. Half the "traffic" was that.
+- The framing-error flag was read from the wrong PIO interrupt. `irq 4 rel`
+  raises flag 4 + n for state machine n; flag n was being read instead, so the
+  count was zero no matter what arrived - and that zero was very nearly used
+  as evidence that the frames were real data.
 
 ## What the serial framing needs
 

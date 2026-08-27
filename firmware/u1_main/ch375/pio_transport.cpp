@@ -2,6 +2,7 @@
 
 #include "ch375_serial.pio.h"
 #include "hardware/clocks.h"
+#include "hardware/resets.h"
 #include "hardware/gpio.h"
 #include "pico/stdlib.h"
 
@@ -36,6 +37,24 @@ bool load_ch375_programs(PIO pio) {
     if (programs.loaded) {
         return true;
     }
+
+    // Start from a block that is definitely idle.
+    //
+    // Reaching this code does not mean the chip just powered on: a firmware
+    // update over USB restarts the processor and leaves every peripheral
+    // exactly as it was. State machines from the previous run keep executing,
+    // and loading this program on top puts new instructions under their
+    // program counters. They then run whatever lands there and push the
+    // results into their queues.
+    //
+    // Read back, that is indistinguishable from a noisy wire - and it was read
+    // that way for an entire evening, against a line that turned out to be
+    // silent. Which is the same lesson the SPI link taught: hardware survives
+    // a soft restart, and anything not explicitly reset is whatever the last
+    // run left behind.
+    const uint32_t block = pio == pio0 ? RESETS_RESET_PIO0_BITS : RESETS_RESET_PIO1_BITS;
+    reset_block(block);
+    unreset_block_wait(block);
     if (!pio_can_add_program(pio, &ch375_tx_program) ||
         !pio_can_add_program(pio, &ch375_rx_program)) {
         return false;

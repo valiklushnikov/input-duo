@@ -10,6 +10,39 @@ using ch375::CommandStatus;
 using ch375::InterruptStatus;
 using ch375::UsbMode;
 
+PinActivity watch_bare_pin(unsigned pin, std::uint32_t for_ms) {
+    PinActivity activity;
+
+    gpio_init(pin);
+    gpio_set_dir(pin, GPIO_IN);
+    gpio_pull_up(pin);
+    sleep_ms(2);
+
+    const std::uint32_t started = to_ms_since_boot(get_absolute_time());
+    std::uint32_t samples = 0;
+    std::uint32_t low = 0;
+    bool level = gpio_get(pin);
+
+    while (to_ms_since_boot(get_absolute_time()) - started < for_ms) {
+        const bool now = gpio_get(pin);
+        ++samples;
+        if (!now) {
+            ++low;
+        }
+        if (now != level) {
+            level = now;
+            if (activity.transitions < 0xFFFF) {
+                ++activity.transitions;
+            }
+        }
+    }
+
+    if (samples != 0) {
+        activity.low_percent = static_cast<std::uint8_t>((low * 100u) / samples);
+    }
+    return activity;
+}
+
 std::uint16_t listen_without_sending(ch375::PioCh375Transport& port, std::uint32_t for_ms,
                                      std::uint16_t& bad_frames) {
     bad_frames = 0;

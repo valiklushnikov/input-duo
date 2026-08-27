@@ -152,6 +152,14 @@ int main() {
     // so a controller powered up later is still found.
     static duo_input::u1::ch375::PioCh375Transport keyboard_port;
     static duo_input::u1::ch375::PioCh375Transport mouse_port;
+    // Before any state machine touches them, read both receive pads as plain
+    // inputs. A pad with nothing on it and a pull-up should sit high and never
+    // move; if one of them does move, the answer is about solder, not software.
+    const duo_input::u1::PinActivity keyboard_pad =
+        duo_input::u1::watch_bare_pin(duo_input::u1::kPinKeyboardRx, 1000);
+    const duo_input::u1::PinActivity mouse_pad =
+        duo_input::u1::watch_bare_pin(duo_input::u1::kPinMouseRx, 1000);
+
     keyboard_port.begin(pio0, duo_input::u1::kPinKeyboardTx, duo_input::u1::kPinKeyboardRx,
                         duo_input::u1::kPinKeyboardInt);
     mouse_port.begin(pio0, duo_input::u1::kPinMouseTx, duo_input::u1::kPinMouseRx,
@@ -268,7 +276,7 @@ int main() {
                 mouse_probe = duo_input::u1::probe_ch375(mouse_port, mouse_commands);
             }
 
-            std::uint8_t report[40];
+            std::uint8_t report[46];
             const duo_input::u1::Ch375ProbeResult* probes[2] = {&keyboard_probe, &mouse_probe};
             for (int index = 0; index < 2; ++index) {
                 const duo_input::u1::Ch375ProbeResult& probe = *probes[index];
@@ -300,6 +308,12 @@ int main() {
             report[37] = static_cast<std::uint8_t>(keyboard_bad_at_boot >> 8);
             report[38] = static_cast<std::uint8_t>(mouse_bad_at_boot & 0xFF);
             report[39] = static_cast<std::uint8_t>(mouse_bad_at_boot >> 8);
+            report[40] = keyboard_pad.low_percent;
+            report[41] = static_cast<std::uint8_t>(keyboard_pad.transitions & 0xFF);
+            report[42] = static_cast<std::uint8_t>(keyboard_pad.transitions >> 8);
+            report[43] = mouse_pad.low_percent;
+            report[44] = static_cast<std::uint8_t>(mouse_pad.transitions & 0xFF);
+            report[45] = static_cast<std::uint8_t>(mouse_pad.transitions >> 8);
             config.set_link_debug(report, sizeof(report));
         }
 #endif

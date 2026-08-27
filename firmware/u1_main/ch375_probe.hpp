@@ -67,6 +67,21 @@ struct Ch375ProbeResult {
     std::uint16_t quiet_first = 0;
 };
 
+/// What a bare pin does, read as an ordinary input rather than through PIO.
+///
+/// Counts how much of a second the pin spends low and how often it changes.
+/// A disconnected pin with a pull-up should be high the whole time and never
+/// move; anything else is about the pin, the pad or the solder on it, and not
+/// about any state machine.
+struct PinActivity {
+    /// Percentage of samples that read low.
+    std::uint8_t low_percent = 0;
+    /// How often the level changed, capped.
+    std::uint16_t transitions = 0;
+};
+
+PinActivity watch_bare_pin(unsigned pin, std::uint32_t for_ms);
+
 /// Listen on a port for a second without ever transmitting.
 ///
 /// Separates a line that is noisy on its own from one this firmware disturbs.
