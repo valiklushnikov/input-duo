@@ -21,11 +21,14 @@ PinActivity watch_bare_pin(unsigned pin, std::uint32_t for_ms) {
     const std::uint32_t started = to_ms_since_boot(get_absolute_time());
     std::uint32_t samples = 0;
     std::uint32_t low = 0;
+    std::uint32_t run = 0;
+    std::uint32_t shortest = 0xFFFFFFFF;
     bool level = gpio_get(pin);
 
     while (to_ms_since_boot(get_absolute_time()) - started < for_ms) {
         const bool now = gpio_get(pin);
         ++samples;
+        ++run;
         if (!now) {
             ++low;
         }
@@ -34,12 +37,21 @@ PinActivity watch_bare_pin(unsigned pin, std::uint32_t for_ms) {
             if (activity.transitions < 0xFFFF) {
                 ++activity.transitions;
             }
+            // The first run is however long the loop happened to start into
+            // it, so it says nothing.
+            if (activity.transitions > 1 && run < shortest) {
+                shortest = run;
+            }
+            run = 0;
         }
     }
 
     if (samples != 0) {
         activity.low_percent = static_cast<std::uint8_t>((low * 100u) / samples);
+        activity.samples_per_ms = samples / (for_ms == 0 ? 1 : for_ms);
     }
+    activity.shortest_run_samples =
+        shortest == 0xFFFFFFFF ? 0 : static_cast<std::uint16_t>(shortest > 0xFFFF ? 0xFFFF : shortest);
     return activity;
 }
 

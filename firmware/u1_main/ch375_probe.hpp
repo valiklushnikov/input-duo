@@ -78,6 +78,16 @@ struct PinActivity {
     std::uint8_t low_percent = 0;
     /// How often the level changed, capped.
     std::uint16_t transitions = 0;
+
+    /// The shortest run of samples the level held for, and how many samples
+    /// were taken per millisecond.
+    ///
+    /// Together these give the shortest pulse in real time without depending
+    /// on how fast this loop happens to run - it measures its own rate. What
+    /// that pulse is worth knowing for: a 12 MHz crystal two pins away and a
+    /// chip driving its own output look nothing alike.
+    std::uint16_t shortest_run_samples = 0;
+    std::uint32_t samples_per_ms = 0;
 };
 
 PinActivity watch_bare_pin(unsigned pin, std::uint32_t for_ms);

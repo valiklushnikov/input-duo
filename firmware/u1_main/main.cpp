@@ -276,7 +276,7 @@ int main() {
                 mouse_probe = duo_input::u1::probe_ch375(mouse_port, mouse_commands);
             }
 
-            std::uint8_t report[46];
+            std::uint8_t report[52];
             const duo_input::u1::Ch375ProbeResult* probes[2] = {&keyboard_probe, &mouse_probe};
             for (int index = 0; index < 2; ++index) {
                 const duo_input::u1::Ch375ProbeResult& probe = *probes[index];
@@ -314,6 +314,12 @@ int main() {
             report[43] = mouse_pad.low_percent;
             report[44] = static_cast<std::uint8_t>(mouse_pad.transitions & 0xFF);
             report[45] = static_cast<std::uint8_t>(mouse_pad.transitions >> 8);
+            report[46] = static_cast<std::uint8_t>(keyboard_pad.shortest_run_samples & 0xFF);
+            report[47] = static_cast<std::uint8_t>(keyboard_pad.shortest_run_samples >> 8);
+            report[48] = static_cast<std::uint8_t>(mouse_pad.shortest_run_samples & 0xFF);
+            report[49] = static_cast<std::uint8_t>(mouse_pad.shortest_run_samples >> 8);
+            report[50] = static_cast<std::uint8_t>(keyboard_pad.samples_per_ms & 0xFF);
+            report[51] = static_cast<std::uint8_t>((keyboard_pad.samples_per_ms >> 8) & 0xFF);
             config.set_link_debug(report, sizeof(report));
         }
 #endif
