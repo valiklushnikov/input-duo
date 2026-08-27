@@ -61,10 +61,20 @@ InputEvent motion(std::int16_t x, std::int16_t y) {
     return event;
 }
 
+/// Payload storage for the taps a test builds. Static, because a step points
+/// at its payload rather than copying it - on the device that payload lives in
+/// the stored configuration, which outlives every macro that reads it.
+std::uint8_t g_pairs[64][2];
+std::size_t g_next_pair = 0;
+
 MacroStep tap_step(std::uint16_t usage) {
+    std::uint8_t* slot = g_pairs[g_next_pair++];
+    slot[0] = 0;
+    slot[1] = static_cast<std::uint8_t>(usage);
     MacroStep step;
     step.kind = MacroStepType::KEY_TAP;
-    step.code = usage;
+    step.pairs = slot;
+    step.pair_bytes = 2;
     return step;
 }
 

@@ -26,6 +26,19 @@ struct MacroStep {
     /// How much longer the delay may randomly be. A macro that types at a
     /// perfectly even rhythm is the one thing that looks least like a person.
     std::uint16_t jitter_ms = 0;
+
+    /// Modifier and usage pairs, for the steps that type.
+    ///
+    /// A tap is one pair and text is many, which is the only difference
+    /// between them - so they are the same step to run. The modifier byte is
+    /// what makes a capital letter capital; a tap that dropped it would type
+    /// the wrong character every time somebody wrote one.
+    ///
+    /// This points into the stored configuration, which outlives every macro
+    /// that reads it. Copying a thousand characters per text step is not
+    /// something this chip has the memory to do.
+    const std::uint8_t* pairs = nullptr;
+    std::uint16_t pair_bytes = 0;
 };
 
 struct MacroDefinition {

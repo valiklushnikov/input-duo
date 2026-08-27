@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #include "config/format.hpp"
+#include "protocol/generated.hpp"
 
 namespace duo_input::u1::mapping {
 
@@ -29,8 +30,11 @@ struct Binding {
 
 /// How many bindings one profile may carry.
 ///
-/// Fixed, because this runs on a chip with no allocator, and a configuration
-/// that wants more is rejected by the validator before it ever reaches here.
-inline constexpr std::size_t kMaxBindings = 64;
+/// Fixed, because this runs on a chip with no allocator. The number is the
+/// format's own limit rather than a choice made here: anything smaller
+/// silently drops bindings from a configuration the validator accepted, and
+/// a key that does nothing because the table ran out is indistinguishable
+/// from one that was never bound.
+inline constexpr std::size_t kMaxBindings = protocol::ProtocolLimits::BINDINGS_PER_PROFILE;
 
 }  // namespace duo_input::u1::mapping

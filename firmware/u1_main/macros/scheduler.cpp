@@ -29,7 +29,23 @@ bool MacroScheduler::press(std::uint16_t usage) {
             return true;
         }
     }
-    if (held_count_ >= kMaxMacroKeys) {
+
+    const bool is_modifier = usage >= 0xE0 && usage <= 0xE7;
+    if (!is_modifier) {
+        // Only the usages that need a key slot are counted against the six a
+        // report can carry. Modifiers travel as a mask beside them.
+        std::size_t keys = 0;
+        for (std::size_t index = 0; index < held_count_; ++index) {
+            if (held_[index] < 0xE0 || held_[index] > 0xE7) {
+                ++keys;
+            }
+        }
+        if (keys >= kMaxMacroKeys) {
+            return false;
+        }
+    }
+
+    if (held_count_ >= kMaxMacroHeld) {
         return false;
     }
     held_[held_count_++] = usage;
@@ -97,11 +113,7 @@ bool MacroScheduler::start_next(std::uint32_t now_ms) {
 }
 
 void MacroScheduler::finish(StopReason reason) {
-    if (tap_pending_) {
-        // Its release is already owed and goes out on the next pass. Leaving
-        // it in the held set as well would release the same key twice.
-        (void)release(tap_usage_);
-    }
+    typing_ = false;
     running_ = false;
     waiting_ = false;
     cursor_ = 0;
@@ -138,6 +150,70 @@ void MacroScheduler::stop_all() {
     }
 }
 
+bool MacroScheduler::typing_step(MacroOutput& output) {
+    while (pair_index_ < pair_count_) {
+        const std::uint8_t modifiers = pairs_[pair_index_ * 2u];
+        const std::uint16_t usage = pairs_[pair_index_ * 2u + 1u];
+
+        output.kind = MacroOutputKind::SendInput;
+        output.route = route_;
+        output.owner = current_;
+
+        if (phase_ == 0 || phase_ == 3) {
+            // Modifiers go down before the key and come up after it, one bit
+            // at a time. A capital letter is a shift held across a keystroke,
+            // and a shift that arrives with it or leaves before it is a
+            // lower-case letter on somebody's screen.
+            while (mod_bit_ < 8) {
+                const std::uint8_t bit = static_cast<std::uint8_t>(1u << mod_bit_);
+                const std::uint16_t modifier_usage = static_cast<std::uint16_t>(0xE0 + mod_bit_);
+                ++mod_bit_;
+                if ((modifiers & bit) == 0) {
+                    continue;
+                }
+                const bool pressing = phase_ == 0;
+                if (pressing) {
+                    if (!press(modifier_usage)) {
+                        return false;
+                    }
+                } else if (!release(modifier_usage)) {
+                    continue;
+                }
+                output.event.kind = pressing ? InputEventKind::KeyDown : InputEventKind::KeyUp;
+                output.event.code = modifier_usage;
+                return true;
+            }
+            mod_bit_ = 0;
+            if (phase_ == 0) {
+                phase_ = 1;
+            } else {
+                phase_ = 0;
+                ++pair_index_;
+            }
+            continue;
+        }
+
+        if (phase_ == 1) {
+            if (!press(usage)) {
+                return false;
+            }
+            phase_ = 2;
+            output.event.kind = InputEventKind::KeyDown;
+            output.event.code = usage;
+            return true;
+        }
+
+        (void)release(usage);
+        phase_ = 3;
+        output.event.kind = InputEventKind::KeyUp;
+        output.event.code = usage;
+        return true;
+    }
+
+    typing_ = false;
+    return false;
+}
+
 bool MacroScheduler::tick(std::uint32_t now_ms, MacroOutput& output) {
     output = MacroOutput{};
 
@@ -145,14 +221,17 @@ bool MacroScheduler::tick(std::uint32_t now_ms, MacroOutput& output) {
         return true;
     }
 
-    if (tap_pending_) {
-        tap_pending_ = false;
-        (void)release(tap_usage_);
+    if (consumer_pending_) {
+        consumer_pending_ = false;
         output.kind = MacroOutputKind::SendInput;
         output.route = route_;
-    output.owner = current_;
-        output.event.kind = tap_release_kind_;
-        output.event.code = tap_usage_;
+        output.owner = current_;
+        output.event.kind = InputEventKind::ConsumerUp;
+        output.event.code = consumer_usage_;
+        return true;
+    }
+
+    if (typing_ && typing_step(output)) {
         return true;
     }
 
@@ -225,30 +304,28 @@ bool MacroScheduler::tick(std::uint32_t now_ms, MacroOutput& output) {
             return true;
 
         case config::MacroStepType::KEY_TAP:
-            // The press now, the release on the next pass. A tap is two
-            // events, and squeezing both into one hides the second from
-            // anything counting them - including the far side, which needs a
-            // gap between them to register a keystroke at all.
-            if (!press(step.code)) {
-                finish(StopReason::TooManyKeys);
-                return emit_release(output);
+        case config::MacroStepType::TEXT:
+            // A tap is one modifier-and-usage pair and text is many. That is
+            // the only difference between them, so they are the same thing to
+            // run: pairs, one event at a time.
+            pairs_ = step.pairs;
+            pair_count_ = static_cast<std::uint16_t>(step.pair_bytes / 2u);
+            pair_index_ = 0;
+            phase_ = 0;
+            mod_bit_ = 0;
+            typing_ = pair_count_ > 0;
+            if (typing_ && typing_step(output)) {
+                return true;
             }
-            tap_pending_ = true;
-            tap_usage_ = step.code;
-            tap_release_kind_ = InputEventKind::KeyUp;
-            output.kind = MacroOutputKind::SendInput;
-            output.route = route_;
-    output.owner = current_;
-            output.event.kind = InputEventKind::KeyDown;
-            output.event.code = step.code;
-            return true;
+            typing_ = false;
+            return tick(now_ms, output);
 
         case config::MacroStepType::CONSUMER_TAP:
             // Not counted against the six: a consumer usage travels in its own
-            // report and does not take a keyboard slot.
-            tap_pending_ = true;
-            tap_usage_ = step.code;
-            tap_release_kind_ = InputEventKind::ConsumerUp;
+            // report and does not take a keyboard slot. Held down, the volume
+            // climbs until something releases it, so the release is owed.
+            consumer_pending_ = true;
+            consumer_usage_ = step.code;
             output.kind = MacroOutputKind::SendInput;
             output.route = route_;
     output.owner = current_;
@@ -271,11 +348,6 @@ bool MacroScheduler::tick(std::uint32_t now_ms, MacroOutput& output) {
             output.parameter = static_cast<std::uint8_t>(step.code);
             return true;
 
-        case config::MacroStepType::TEXT:
-            // Text is compiled into key steps by the application before it
-            // ever reaches the device - the firmware executes HID steps and
-            // knows nothing about layouts.
-            return tick(now_ms, output);
     }
 
     return false;

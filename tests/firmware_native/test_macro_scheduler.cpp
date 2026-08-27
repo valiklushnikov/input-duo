@@ -43,10 +43,22 @@ MacroStep key_up(std::uint16_t usage) {
     return step;
 }
 
-MacroStep key_tap(std::uint16_t usage) {
+/// Payload storage for the taps a test builds.
+///
+/// Static because a step points at its payload rather than copying it: on the
+/// device that payload lives in the stored configuration, which outlives every
+/// macro that reads it.
+std::uint8_t g_pairs[256][2];
+std::size_t g_next_pair = 0;
+
+MacroStep key_tap(std::uint16_t usage, std::uint8_t modifiers = 0) {
+    std::uint8_t* slot = g_pairs[g_next_pair++];
+    slot[0] = modifiers;
+    slot[1] = static_cast<std::uint8_t>(usage);
     MacroStep step;
     step.kind = MacroStepType::KEY_TAP;
-    step.code = usage;
+    step.pairs = slot;
+    step.pair_bytes = 2;
     return step;
 }
 
@@ -460,21 +472,112 @@ TEST_CASE(a_consumer_tap_cut_short_is_still_released) {
     CHECK_EQ(recorder.keys(InputEventKind::ConsumerUp, 0x00E9), 1);
 }
 
-TEST_CASE(text_is_compiled_by_the_host_and_skipped_here) {
+TEST_CASE(text_types_the_pairs_the_host_compiled) {
+    // Turning characters into usages needs a keyboard layout, and the device
+    // does not know which one the operator is typing on. The host compiles the
+    // string into modifier-and-usage pairs; running them is all that is left.
+    static const std::uint8_t kHi[] = {0x02, 0x0B, 0x00, 0x0C};  // "Hi"
     MacroStep text;
     text.kind = MacroStepType::TEXT;
-    const MacroStep steps[] = {text, key_tap(0x04)};
+    text.pairs = kHi;
+    text.pair_bytes = sizeof(kHi);
+    const MacroStep steps[] = {text};
     MacroScheduler scheduler;
-    scheduler.define(0, MacroDefinition{steps, 2});
+    scheduler.define(0, MacroDefinition{steps, 1});
     Recorder recorder;
 
     scheduler.enqueue(0, Route::Pc1, 1000);
     recorder.drain(scheduler, 1000);
 
-    // Turning characters into usages needs a keyboard layout, and the device
-    // does not know which one the operator is typing on. The step is inert
-    // rather than fatal: the macro after it still runs.
-    CHECK_EQ(recorder.keys(InputEventKind::KeyDown, 0x04), 1);
+    CHECK_EQ(recorder.keys(InputEventKind::KeyDown, 0x0B), 1);
+    CHECK_EQ(recorder.keys(InputEventKind::KeyDown, 0x0C), 1);
+}
+
+TEST_CASE(a_capital_letter_holds_shift_across_the_keystroke) {
+    static const std::uint8_t kCapitalH[] = {0x02, 0x0B};
+    MacroStep text;
+    text.kind = MacroStepType::TEXT;
+    text.pairs = kCapitalH;
+    text.pair_bytes = sizeof(kCapitalH);
+    const MacroStep steps[] = {text};
+    MacroScheduler scheduler;
+    scheduler.define(0, MacroDefinition{steps, 1});
+    Recorder recorder;
+
+    scheduler.enqueue(0, Route::Pc1, 1000);
+    recorder.drain(scheduler, 1000);
+
+    // A shift that arrives with the key, or leaves before it, is a lower-case
+    // letter on somebody's screen.
+    int shift_down = -1;
+    int key_down = -1;
+    int key_up = -1;
+    int shift_up = -1;
+    for (std::size_t index = 0; index < recorder.outputs.size(); ++index) {
+        const MacroOutput& output = recorder.outputs[index];
+        const int at = static_cast<int>(index);
+        if (output.event.code == 0xE1 && output.event.kind == InputEventKind::KeyDown) {
+            shift_down = at;
+        } else if (output.event.code == 0x0B && output.event.kind == InputEventKind::KeyDown) {
+            key_down = at;
+        } else if (output.event.code == 0x0B && output.event.kind == InputEventKind::KeyUp) {
+            key_up = at;
+        } else if (output.event.code == 0xE1 && output.event.kind == InputEventKind::KeyUp) {
+            shift_up = at;
+        }
+    }
+    CHECK(shift_down >= 0);
+    CHECK(shift_down < key_down);
+    CHECK(key_down < key_up);
+    CHECK(key_up < shift_up);
+}
+
+TEST_CASE(a_macro_stopped_mid_word_does_not_finish_the_word) {
+    static const std::uint8_t kWord[] = {0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07};
+    MacroStep text;
+    text.kind = MacroStepType::TEXT;
+    text.pairs = kWord;
+    text.pair_bytes = sizeof(kWord);
+    const MacroStep steps[] = {text};
+    MacroScheduler scheduler;
+    scheduler.define(0, MacroDefinition{steps, 1});
+    Recorder recorder;
+    scheduler.enqueue(0, Route::Pc1, 1000);
+    MacroOutput first;
+    scheduler.tick(1000, first);  // the first letter goes down
+
+    scheduler.stop_all();
+    recorder.drain(scheduler, 1000);
+
+    // Stop means stop. Letting go of what is held and then carrying on with
+    // the rest of the text is not stopping - it is stopping visibly and
+    // continuing anyway.
+    CHECK_EQ(recorder.keys(InputEventKind::KeyDown, 0x05), 0);
+    CHECK_EQ(recorder.keys(InputEventKind::KeyDown, 0x06), 0);
+    CHECK_EQ(recorder.keys(InputEventKind::KeyDown, 0x07), 0);
+    CHECK(!scheduler.active());
+}
+
+TEST_CASE(a_shift_a_macro_pressed_is_released_when_it_is_stopped) {
+    static const std::uint8_t kCapital[] = {0x02, 0x0B};
+    MacroStep text;
+    text.kind = MacroStepType::TEXT;
+    text.pairs = kCapital;
+    text.pair_bytes = sizeof(kCapital);
+    const MacroStep steps[] = {text};
+    MacroScheduler scheduler;
+    scheduler.define(0, MacroDefinition{steps, 1});
+    Recorder recorder;
+    scheduler.enqueue(0, Route::Pc1, 1000);
+    MacroOutput first;
+    scheduler.tick(1000, first);  // shift down, and no further
+
+    scheduler.stop_all();
+    recorder.drain(scheduler, 1000);
+
+    // A modifier stranded on a computer changes what everything typed there
+    // next means, and it cannot be fixed from the other machine.
+    CHECK_EQ(recorder.keys(InputEventKind::KeyUp, 0xE1), 1);
 }
 
 TEST_CASE(an_undefined_macro_is_refused_rather_than_run_empty) {

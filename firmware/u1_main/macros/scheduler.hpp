@@ -73,7 +73,14 @@ inline constexpr std::size_t kMacroQueueDepth = 4;
 inline constexpr std::size_t kMaxMacros = 16;
 
 /// A boot keyboard report carries six usages, and a macro cannot hold more.
+///
+/// Modifiers do not count against it: they travel as a mask and take no key
+/// slot, so refusing a seventh because shift was held would refuse something
+/// the report has room for.
 inline constexpr std::size_t kMaxMacroKeys = 6;
+
+/// Six keys plus the eight modifiers that can be held alongside them.
+inline constexpr std::size_t kMaxMacroHeld = kMaxMacroKeys + 8;
 
 class MacroScheduler {
 public:
@@ -115,6 +122,8 @@ private:
     bool emit_release(MacroOutput& output);
     bool press(std::uint16_t usage);
     bool release(std::uint16_t usage);
+    /// One event of a tap or a run of text. False when the run is finished.
+    bool typing_step(MacroOutput& output);
 
     IRandom* random_ = nullptr;
     MacroDefinition macros_[kMaxMacros];
@@ -130,15 +139,27 @@ private:
 
     /// What this macro is holding down. Only this - the operator's own keys
     /// are none of its business.
-    std::uint16_t held_[kMaxMacroKeys] = {};
+    std::uint16_t held_[kMaxMacroHeld] = {};
     std::size_t held_count_ = 0;
     /// Releases still to be handed out after the macro ended.
     std::size_t releasing_ = 0;
-    /// A tap is two events. The press goes out on one pass and the release on
-    /// the next, so that anything counting them sees both.
-    bool tap_pending_ = false;
-    std::uint16_t tap_usage_ = 0;
-    input::InputEventKind tap_release_kind_ = input::InputEventKind::KeyUp;
+    /// A run of modifier-and-usage pairs being typed out.
+    ///
+    /// One event per pass: a tap squeezed into a single event hides its own
+    /// release from anything counting, and the far side needs to see the key
+    /// go down and come up as two separate reports to register a keystroke.
+    const std::uint8_t* pairs_ = nullptr;
+    std::uint16_t pair_count_ = 0;
+    std::uint16_t pair_index_ = 0;
+    /// 0 press modifiers, 1 press usage, 2 release usage, 3 release modifiers.
+    std::uint8_t phase_ = 0;
+    /// Which modifier bit the current phase has reached.
+    std::uint8_t mod_bit_ = 0;
+    bool typing_ = false;
+
+    /// A consumer tap owes a release of its own, and holds no key.
+    bool consumer_pending_ = false;
+    std::uint16_t consumer_usage_ = 0;
 
     Pending queue_[kMacroQueueDepth];
     std::size_t queued_ = 0;
