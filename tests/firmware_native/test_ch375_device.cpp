@@ -271,7 +271,10 @@ TEST_CASE(a_controller_that_goes_quiet_with_a_device_up_releases_it) {
     rig.count(Ch375EventKind::Ready);
 
     rig.chip.go_silent(true);
-    rig.run(500000);
+    // Past kDeviceLostUs, which is a second: a polled endpoint answers even
+    // when it has nothing to say, so silence has to be long before it means
+    // the controller rather than the device.
+    rig.run(1500000);
 
     // This is the dangerous one. Nothing can be read from the device any more
     // and its disconnection can never be noticed, so a key held at that moment

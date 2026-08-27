@@ -506,7 +506,7 @@ int main() {
                     "  check_exist=%s int_seen=%u status_read_failed=%u\n"
                     "  connect=%u disconnect=%u success=%u failure=%u impossible=%u\n"
                     "  detach_disconnect=%u detach_lost=%u enum_failed=%u mode_failed=%u\n"
-                    "  setup attempts=%u last=0x%02X (%s)\n",
+                    "  setup attempts=%u last=0x%02X (%s) polls=%u\n",
                     names[index], state < 7 ? kStates[state] : "?",
                     device.device_is_low_speed() ? "low" : "full", tally.attached, tally.detached,
                     tally.ready, tally.reports,

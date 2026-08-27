@@ -205,6 +205,21 @@ public:
     /// processor and leaves the controller exactly as the last run left it,
     /// including states it will not come out of by itself.
     void reset_all() {
+        // Data bytes first, then the command.
+        //
+        // The chip reads commands positionally: a command byte, then however
+        // many data bytes that command takes. Interrupt the sequence - which
+        // is what restarting U1 in the middle of one does - and it is left
+        // waiting for data, so the next *command* byte is swallowed as the
+        // parameter it was waiting for and every byte after that is out of
+        // step. From the outside that is a chip which has stopped answering,
+        // and no amount of resetting helps if the reset command is eaten too.
+        //
+        // Four is more than any command here takes, so whatever it was waiting
+        // for is satisfied before the reset is sent.
+        for (int filler = 0; filler < 4; ++filler) {
+            io_.write_data(0x00);
+        }
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::ResetAll));
     }
 

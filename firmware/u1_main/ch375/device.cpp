@@ -207,6 +207,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
             last_poll_us_ = now_us;
             // Ask the device whether it has anything. The answer arrives as an
             // interrupt, which the next tick picks up - nothing waits here.
+            ++polls_issued_;
             transport_.issue_token(endpoint_, TokenPid::In);
             return;
         }

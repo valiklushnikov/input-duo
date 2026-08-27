@@ -143,7 +143,12 @@ inline constexpr std::uint32_t kReportPollUs = 8000;
 ///
 /// Long enough not to trip on jitter, short enough that nobody finishes a word
 /// in it.
-inline constexpr std::uint32_t kDeviceLostUs = 250000;
+/// One second. A polled endpoint with nothing to say should still answer -
+/// the chip is told to report a NAK rather than retry it forever - so silence
+/// this long means the controller, not the device, has stopped talking. The
+/// first value tried here was 250 ms, and it declared a working mouse gone a
+/// quarter of a second after it finally came up.
+inline constexpr std::uint32_t kDeviceLostUs = 1000000;
 
 /// How often to ask whether something has been plugged in.
 ///
@@ -205,6 +210,10 @@ public:
     std::uint16_t detach_from_lost() const { return detach_from_lost_; }
     std::uint16_t enumerate_failures() const { return enumerate_failures_; }
     std::uint16_t mode_failures() const { return mode_failures_; }
+
+    /// How many times the device's endpoint has been polled, and how many
+    /// reports came back from it.
+    std::uint16_t polls_issued() const { return polls_issued_; }
 
     /// Whether the device that is attached answered as a low-speed one.
     bool device_is_low_speed() const { return device_is_low_speed_; }
@@ -269,6 +278,7 @@ private:
     std::uint16_t detach_from_lost_ = 0;
     std::uint16_t enumerate_failures_ = 0;
     std::uint16_t mode_failures_ = 0;
+    std::uint16_t polls_issued_ = 0;
 
     Ch375Event events_[kEventQueueDepth];
     std::size_t head_ = 0;
