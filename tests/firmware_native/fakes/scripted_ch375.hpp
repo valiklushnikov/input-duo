@@ -120,6 +120,18 @@ public:
     /// Was the chip asked to configure the device by itself?
     bool saw_auto_setup() const { return saw_auto_setup_; }
 
+    /// Make the attached device answer as a 1.5 Mbps one.
+    void set_low_speed(bool low) { low_speed_ = low; }
+
+    /// What the bus was last set to.
+    UsbSpeed bus_speed() const { return bus_speed_; }
+
+    /// Was the speed set after the most recent working mode?
+    ///
+    /// Setting a mode puts the bus back to full speed (DS2 1.1), so a speed
+    /// chosen before it is quietly undone.
+    bool speed_set_after_last_mode() const { return speed_after_mode_; }
+
     /// Report a disconnect the moment the USB bus is held in reset, which is
     /// what the real chip does with a device attached.
     void report_disconnect_on_reset(bool reporting) { report_disconnect_on_reset_ = reporting; }
@@ -173,6 +185,9 @@ private:
     bool saw_auto_setup_ = false;
     bool fail_auto_setup_ = false;
     bool report_disconnect_on_reset_ = false;
+    bool low_speed_ = false;
+    UsbSpeed bus_speed_ = UsbSpeed::Full12Mbps;
+    bool speed_after_mode_ = false;
     /// AUTO_SETUP is several control transfers, so its answer is not instant.
     bool auto_setup_running_ = false;
     std::uint32_t auto_setup_at_us_ = 0;
@@ -195,10 +210,14 @@ public:
 
     void always_fail(bool failing) { failing_ = failing; }
 
+    /// Has anyone asked this to start yet?
+    bool was_begun() const { return begun_; }
+
 private:
     std::uint32_t started_us_ = 0;
     bool running_ = false;
     bool failing_ = false;
+    bool begun_ = false;
 };
 
 }  // namespace duo_input::u1::ch375::testing

@@ -432,3 +432,113 @@ TEST_CASE(a_real_unplug_after_the_reset_is_still_an_unplug) {
     CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Absent));
     CHECK_EQ(rig.count(Ch375EventKind::Detached), 1);
 }
+
+
+// ------------------------------------------- letting the device wake up
+
+TEST_CASE(a_device_is_given_time_to_recover_from_the_bus_reset) {
+    // USB gives a device up to 10 ms after a reset before it has to answer
+    // anything. Addressing it sooner is asking a question of something that is
+    // still coming round, and the answer is silence - which the controller
+    // reports as the device having gone, so the whole sequence starts again.
+    Rig rig;
+    rig.chip.attach_device();
+
+    // Run only as far as the bus reset can have finished.
+    rig.run(duo_input::u1::ch375::kBusResetHoldUs + 2000);
+
+    CHECK(!rig.setup.was_begun());
+}
+
+TEST_CASE(the_recovery_pause_is_long_enough_to_be_one) {
+    CHECK(duo_input::u1::ch375::kBusSettleUs >= 10000u);
+}
+
+TEST_CASE(the_device_still_comes_up_after_the_pause) {
+    Rig rig;
+
+    bring_up(rig);
+
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+}
+
+
+// -------------------------------------------------- how fast the bus runs
+
+TEST_CASE(a_low_speed_device_is_recognised) {
+    // Nearly every wired mouse is a 1.5 Mbps device. Addressing one at the
+    // 12 Mbps the chip defaults to gets no answer at all, and a controller
+    // reports something that does not answer as gone - which on the bench was
+    // a device connecting and disconnecting without end.
+    Rig rig;
+    rig.chip.set_low_speed(true);
+
+    bring_up(rig);
+
+    CHECK(rig.device.device_is_low_speed());
+}
+
+TEST_CASE(the_bus_is_set_to_the_speed_the_device_answered_at) {
+    Rig rig;
+    rig.chip.set_low_speed(true);
+
+    bring_up(rig);
+
+    CHECK_EQ(static_cast<int>(rig.chip.bus_speed()),
+             static_cast<int>(duo_input::u1::ch375::UsbSpeed::Low1_5Mbps));
+}
+
+TEST_CASE(a_full_speed_device_is_left_at_full_speed) {
+    Rig rig;
+    rig.chip.set_low_speed(false);
+
+    bring_up(rig);
+
+    CHECK_EQ(static_cast<int>(rig.chip.bus_speed()),
+             static_cast<int>(duo_input::u1::ch375::UsbSpeed::Full12Mbps));
+}
+
+TEST_CASE(the_speed_is_set_after_the_working_mode_not_before) {
+    // Setting a working mode puts the bus back to 12 Mbps (DS2 1.1), so a
+    // speed chosen before it is silently undone.
+    Rig rig;
+    rig.chip.set_low_speed(true);
+
+    bring_up(rig);
+
+    CHECK(rig.chip.speed_set_after_last_mode());
+}
+
+
+// --------------------------------------------- going back to wait properly
+
+TEST_CASE(losing_a_device_returns_the_chip_to_the_waiting_mode) {
+    // Mode 5 is where DS1 5.9 says to wait, and DS2 1.2 says it is the only
+    // mode in which the chip can be asked how fast an attached device is. Left
+    // in mode 6 after a device goes, that question comes back as nonsense - a
+    // low-speed mouse read as full speed, addressed at eight times its rate,
+    // and reported gone. Which is the loop this device sat in.
+    Rig rig;
+    bring_up(rig);
+
+    rig.chip.detach_device();
+    rig.run(50000);
+
+    CHECK_EQ(static_cast<int>(rig.chip.mode()),
+             static_cast<int>(duo_input::u1::ch375::UsbMode::HostNoSof));
+}
+
+TEST_CASE(a_device_that_comes_back_is_asked_its_speed_again) {
+    Rig rig;
+    rig.chip.set_low_speed(true);
+    bring_up(rig);
+    rig.chip.detach_device();
+    rig.run(50000);
+
+    rig.chip.attach_device();
+    rig.run(300000);
+
+    CHECK(rig.device.device_is_low_speed());
+    CHECK_EQ(static_cast<int>(rig.chip.bus_speed()),
+             static_cast<int>(duo_input::u1::ch375::UsbSpeed::Low1_5Mbps));
+}

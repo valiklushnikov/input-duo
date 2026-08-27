@@ -197,6 +197,33 @@ public:
         return true;
     }
 
+    /// DS2 1.2. Is the attached device a low-speed one?
+    ///
+    /// Takes the byte 07H and answers a rate type; bit 4 set means 1.5 Mbps.
+    /// Only valid in host mode 5, before frames are being generated.
+    bool get_device_rate(bool& low_speed) {
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::GetDeviceRate));
+        io_.write_data(kGetDeviceRatePrefix);
+
+        std::uint8_t answer = 0;
+        if (!read_reply(answer)) {
+            return false;
+        }
+        low_speed = (answer & 0x10) != 0;
+        return true;
+    }
+
+    /// DS2 1.1. Set the bus speed.
+    ///
+    /// It returns to 12 Mbps whenever the working mode is set, so this has to
+    /// come after that, not before. A low-speed device addressed at full speed
+    /// does not answer, and a controller reports something that does not
+    /// answer as gone.
+    void set_usb_speed(UsbSpeed speed) {
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::SetUsbSpeed));
+        io_.write_data(static_cast<std::uint8_t>(speed));
+    }
+
     /// DS2 1.13. Ask the chip to configure the attached device by itself.
     ///
     /// It answers with an interrupt, so there is nothing to read here.

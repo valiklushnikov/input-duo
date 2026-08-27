@@ -162,6 +162,13 @@ inline constexpr std::uint8_t kGetDeviceRatePrefix = 0x07;
 /// link. Report the NAK instead and let the caller decide.
 inline constexpr std::uint8_t kRetryReportNak = 0x0F;
 
+/// DS2 1.1. What the bus runs at. Full speed is the default after any change
+/// of working mode, which is why a low-speed device has to be told again.
+enum class UsbSpeed : std::uint8_t {
+    Full12Mbps = 0x00,
+    Low1_5Mbps = 0x02,
+};
+
 /// DS2 1.11. The only two descriptor types GetDescriptor accepts.
 enum class DescriptorType : std::uint8_t {
     Device = 1,

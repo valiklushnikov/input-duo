@@ -184,7 +184,7 @@ private:
     LinkState link_state_{};
 
 #if DUO_SPI_DEBUG || DUO_CH375_PROBE
-    std::uint8_t link_debug_[128] = {};
+    std::uint8_t link_debug_[512] = {};
     std::size_t link_debug_size_ = 0;
 #endif
 };

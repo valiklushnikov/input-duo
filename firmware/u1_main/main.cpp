@@ -11,6 +11,7 @@
 
 #include "tusb.h"
 
+#include <cstdio>
 #include <cstring>
 
 #include "hardware/watchdog.h"
@@ -276,6 +277,9 @@ int main() {
     duo_input::u1::ch375::AutoSetupEnumerator mouse_setup(mouse_commands);
     duo_input::u1::ch375::Ch375Device keyboard_device(keyboard_commands, keyboard_setup);
     duo_input::u1::ch375::Ch375Device mouse_device(mouse_commands, mouse_setup);
+    // The experiment that left the bus reset out changed nothing - the device
+    // was lost at exactly the same rate without it - so the reset is not what
+    // loses it, and the datasheet's sequence is back.
 
     struct DeviceTally {
         std::uint8_t attached = 0;
@@ -393,7 +397,7 @@ int main() {
 #if DUO_CH375_PROBE
         {
             // Ticked every pass, which is what the state machine is written
-            // against. The probe below runs far less often and only reports.
+            // against. The report below is only a report.
             const std::uint32_t device_now_us = time_us_32();
             duo_input::u1::ch375::Ch375Device* devices[2] = {&keyboard_device, &mouse_device};
             DeviceTally* tallies[2] = {&keyboard_tally, &mouse_tally};
@@ -427,69 +431,61 @@ int main() {
                 }
             }
 
-            std::uint8_t report[128] = {};
-            std::size_t report_size = duo_input::diagnostics::pack_ch375_single_probe(
-                single_probe, report, sizeof(report));
-
-            // Appended after the level readings rather than mixed into them,
-            // so an older reader still finds what it expects at the front.
-            const duo_input::u1::Ch375ProbeResult* asked[2] = {&keyboard_probe, &mouse_probe};
-            if (report_size + 8 <= sizeof(report)) {
-                report[report_size++] = 0xA8;  // marks what follows
-                for (int index = 0; index < 2; ++index) {
-                    report[report_size++] = asked[index]->answered ? 1 : 0;
-                    report[report_size++] = asked[index]->check_exist_ok ? 1 : 0;
-                    report[report_size++] = asked[index]->check_exist_reply;
+            // Written as text rather than packed into a struct.
+            //
+            // Every layout change to the packed version cost a reader that
+            // silently drifted, and three separate wrong conclusions were
+            // drawn from fields that had moved underneath it - including one
+            // line that read "no interrupts were ever seen" beside "seventeen
+            // devices attached". Text cannot come apart that way, and the
+            // whole point of this build is to be believed.
+            static const char* kStates[] = {"Absent",      "Resetting",   "HostMode",
+                                            "Enumerating", "Ready",       "RecoverWait",
+                                            "Fault"};
+            // Zeroed, because what is sent is measured from what was
+            // written - and anything past that in an uninitialised
+            // buffer goes out as part of the message.
+            char text[480] = {};
+            int used = 0;
+            const char* names[2] = {"keyboard", "mouse"};
+            for (int index = 0; index < 2 && used < static_cast<int>(sizeof(text)) - 1; ++index) {
+                const duo_input::u1::ch375::Ch375Device& device = *devices[index];
+                const DeviceTally& tally = *tallies[index];
+                const unsigned state = static_cast<unsigned>(device.state());
+                used += snprintf(
+                    text + used, sizeof(text) - static_cast<std::size_t>(used),
+                    "%s state=%s speed=%s attached=%u gone=%u ready=%u reports=%u\n"
+                    "  check_exist=%s int_seen=%u status_read_failed=%u\n"
+                    "  connect=%u disconnect=%u success=%u failure=%u impossible=%u\n"
+                    "  detach_disconnect=%u detach_lost=%u enum_failed=%u mode_failed=%u\n",
+                    names[index], state < 7 ? kStates[state] : "?",
+                    device.device_is_low_speed() ? "low" : "full", tally.attached, tally.detached,
+                    tally.ready, tally.reports,
+                    (index == 0 ? keyboard_probe : mouse_probe).check_exist_ok ? "0xA8" : "WRONG",
+                    device.interrupts_seen(), device.status_reads_failed(),
+                    device.status_connect(), device.status_disconnect(), device.status_success(),
+                    device.status_failure(), device.status_impossible(),
+                    device.detach_from_disconnect(), device.detach_from_lost(),
+                    device.enumerate_failures(), device.mode_failures());
+                // snprintf answers with how much it *would* have written. Left
+                // unclamped, the next call is handed a negative amount of room
+                // and the total runs past the end of the buffer.
+                if (used < 0 || used > static_cast<int>(sizeof(text)) - 1) {
+                    used = static_cast<int>(sizeof(text)) - 1;
+                    break;
                 }
             }
-            if (report_size + 84 <= sizeof(report)) {
-                report[report_size++] = 0xD5;  // marks the lifecycle record
-                report[report_size++] = keyboard_int.low_percent;
-                report[report_size++] = static_cast<std::uint8_t>(keyboard_int.transitions & 0xFF);
-                report[report_size++] = static_cast<std::uint8_t>(keyboard_int.transitions >> 8);
-                report[report_size++] = mouse_int.low_percent;
-                report[report_size++] = static_cast<std::uint8_t>(mouse_int.transitions & 0xFF);
-                report[report_size++] = static_cast<std::uint8_t>(mouse_int.transitions >> 8);
-                for (int index = 0; index < 2; ++index) {
-                    const DeviceTally& tally = *tallies[index];
-                    report[report_size++] = static_cast<std::uint8_t>(devices[index]->state());
-                    report[report_size++] = tally.attached;
-                    report[report_size++] = tally.detached;
-                    report[report_size++] = tally.ready;
-                    report[report_size++] = tally.reports;
-                    report[report_size++] = tally.last_size;
-                    report[report_size++] =
-                        static_cast<std::uint8_t>(devices[index]->state_at_last_detach());
-                    report[report_size++] = devices[index]->last_status();
-                    const std::uint16_t counts[5] = {
-                        devices[index]->status_connect(), devices[index]->status_disconnect(),
-                        devices[index]->status_success(), devices[index]->status_failure(),
-                        devices[index]->status_impossible()};
-                    report[report_size++] =
-                        static_cast<std::uint8_t>(devices[index]->interrupts_seen() & 0xFF);
-                    report[report_size++] =
-                        static_cast<std::uint8_t>(devices[index]->interrupts_seen() >> 8);
-                    report[report_size++] =
-                        static_cast<std::uint8_t>(devices[index]->status_reads_failed() & 0xFF);
-                    report[report_size++] =
-                        static_cast<std::uint8_t>(devices[index]->status_reads_failed() >> 8);
-                    const std::uint16_t why[4] = {devices[index]->detach_from_disconnect(),
-                                                  devices[index]->detach_from_lost(),
-                                                  devices[index]->enumerate_failures(),
-                                                  devices[index]->mode_failures()};
-                    for (std::uint16_t value : why) {
-                        report[report_size++] = static_cast<std::uint8_t>(value & 0xFF);
-                        report[report_size++] = static_cast<std::uint8_t>(value >> 8);
-                    }
-                    for (std::uint16_t value : counts) {
-                        report[report_size++] = static_cast<std::uint8_t>(value & 0xFF);
-                        report[report_size++] = static_cast<std::uint8_t>(value >> 8);
-                    }
-                    std::memcpy(report + report_size, tally.last, sizeof(tally.last));
-                    report_size += sizeof(tally.last);
-                }
+            // snprintf answers with how much it *would* have written, not
+            // how much it did. Trusting that sends whatever lies past the end
+            // of the buffer, which is how this report arrived unprintable.
+            if (used < 0) {
+                used = 0;
             }
-            config.set_link_debug(report, report_size);
+            if (used > static_cast<int>(sizeof(text))) {
+                used = static_cast<int>(sizeof(text));
+            }
+            config.set_link_debug(reinterpret_cast<const std::uint8_t*>(text),
+                                  static_cast<std::size_t>(used));
         }
 #endif
 

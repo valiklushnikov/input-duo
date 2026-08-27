@@ -129,6 +129,8 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
             }
             break;
 
+        case Ch375Command::GetDeviceRate:
+        case Ch375Command::SetUsbSpeed:
         case Ch375Command::CheckExist:
         case Ch375Command::SetUsbMode:
         case Ch375Command::SetRetry:
@@ -153,10 +155,25 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
             expecting_data_ = false;
             break;
 
+        case Ch375Command::GetDeviceRate:
+            // DS2 1.2: bit 4 set means a 1.5 Mbps device.
+            queue(static_cast<std::uint8_t>(low_speed_ ? 0x10 : 0x00));
+            expecting_data_ = false;
+            break;
+
+        case Ch375Command::SetUsbSpeed:
+            bus_speed_ = static_cast<UsbSpeed>(value);
+            speed_after_mode_ = true;
+            expecting_data_ = false;
+            break;
+
         case Ch375Command::SetUsbMode: {
             const UsbMode mode = static_cast<UsbMode>(value);
             ++mode_set_count_;
             mode_ = mode;
+            // The real chip puts the bus back to full speed here.
+            bus_speed_ = UsbSpeed::Full12Mbps;
+            speed_after_mode_ = false;
             if (mode == UsbMode::HostReset) {
                 saw_bus_reset_ = true;
                 ++reset_count_;
@@ -241,6 +258,7 @@ void FakeCh375Chip::queue_report(const std::uint8_t* data, std::size_t size) {
 void FakeDeviceSetup::begin(std::uint32_t now_us) {
     started_us_ = now_us;
     running_ = true;
+    begun_ = true;
 }
 
 SetupProgress FakeDeviceSetup::poll(std::uint32_t now_us) {

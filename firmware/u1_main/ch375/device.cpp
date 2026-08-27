@@ -84,15 +84,26 @@ void Ch375Device::tick(std::uint32_t now_us) {
             }
             if (connected) {
                 publish(Ch375EventKind::Attached);
+                // Asked here, in mode 5, because DS2 1.2 says that is the only
+                // mode the question is valid in - and the answer decides how
+                // the bus has to run from now on.
+                bool low_speed = false;
+                device_is_low_speed_ = transport_.get_device_rate(low_speed) && low_speed;
                 // DS1 5.9: mode 7 first, then mode 6. Mode 7 holds the bus in
                 // reset and keeps holding it, so it is a step, not a state to
                 // rest in.
-                if (!transport_.set_usb_mode(UsbMode::HostReset)) {
+                const UsbMode next =
+                    skip_bus_reset_ ? UsbMode::HostWithSof : UsbMode::HostReset;
+                if (!transport_.set_usb_mode(next)) {
                     ++mode_failures_;
                     fail(now_us);
                     return;
                 }
-                enter(Ch375State::Resetting, now_us);
+                if (skip_bus_reset_) {
+                    transport_.set_usb_speed(device_is_low_speed_ ? UsbSpeed::Low1_5Mbps
+                                                                  : UsbSpeed::Full12Mbps);
+                }
+                enter(skip_bus_reset_ ? Ch375State::HostMode : Ch375State::Resetting, now_us);
             }
             return;
         }
@@ -107,10 +118,20 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 fail(now_us);
                 return;
             }
+            // After the mode, never before: setting a working mode puts the
+            // bus back to 12 Mbps (DS2 1.1). A low-speed device addressed at
+            // full speed says nothing, and a controller reports something that
+            // says nothing as gone.
+            transport_.set_usb_speed(device_is_low_speed_ ? UsbSpeed::Low1_5Mbps
+                                                          : UsbSpeed::Full12Mbps);
             enter(Ch375State::HostMode, now_us);
             return;
 
         case Ch375State::HostMode:
+            if (now_us - entered_us_ < kBusSettleUs) {
+                // Still coming round from the reset. See kBusSettleUs.
+                return;
+            }
             setup_.begin(now_us);
             enter(Ch375State::Enumerating, now_us);
             return;
@@ -211,6 +232,14 @@ bool Ch375Device::poll_interrupt(InterruptStatus& status) {
 void Ch375Device::handle_detach(std::uint32_t now_us) {
     const bool had_device = state_ != Ch375State::Absent;
     detach_state_ = state_;
+
+    // Back to the mode this waits in. Mode 5 is where DS1 5.9 says to sit with
+    // nothing attached, and DS2 1.2 says it is the only mode in which the chip
+    // can be asked how fast a device is. Left in mode 6, that question returns
+    // nonsense - and a low-speed mouse read as full speed is addressed at
+    // eight times its rate, answers nothing, and is reported gone.
+    transport_.set_usb_mode(UsbMode::HostNoSof);
+    device_is_low_speed_ = false;
     endpoint_ = 0;
     announced_ready_ = false;
     enter(Ch375State::Absent, now_us);

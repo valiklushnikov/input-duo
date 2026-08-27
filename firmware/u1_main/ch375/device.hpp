@@ -97,6 +97,17 @@ public:
 /// comfortably past that and still imperceptible.
 inline constexpr std::uint32_t kBusResetHoldUs = 20000;
 
+/// How long a device is left alone after the bus reset before it is addressed.
+///
+/// USB allows a device up to 10 ms to recover from a reset before it has to
+/// answer anything. Asking sooner is putting a question to something that is
+/// still coming round, and the answer is silence - which the controller
+/// reports as the device having gone, so the whole sequence begins again. That
+/// is a loop the bench spent an evening in.
+///
+/// Half again over the specified maximum, and still imperceptible.
+inline constexpr std::uint32_t kBusSettleUs = 15000;
+
 /// How long to wait after a failure before trying the whole sequence again.
 ///
 /// Retrying flat out would hammer a controller that is already unhappy and
@@ -183,8 +194,20 @@ public:
     std::uint16_t enumerate_failures() const { return enumerate_failures_; }
     std::uint16_t mode_failures() const { return mode_failures_; }
 
+    /// Whether the device that is attached answered as a low-speed one.
+    bool device_is_low_speed() const { return device_is_low_speed_; }
+
     /// Take the oldest event, if there is one.
     bool take_event(Ch375Event& event);
+
+    /// Bring-up only: skip the USB bus reset when bringing a device up.
+    ///
+    /// The datasheet's sequence is mode 7 then mode 6 (DS1 5.9), and that is
+    /// what this does by default. But on the bench a device is reported gone
+    /// exactly once per reset and never comes back, so being able to leave the
+    /// reset out is what separates "the reset is killing it" from "it was
+    /// leaving anyway".
+    void skip_bus_reset(bool skipping) { skip_bus_reset_ = skipping; }
 
     /// Configure the attached device again from scratch.
     ///
@@ -208,6 +231,10 @@ private:
 
     Ch375State state_ = Ch375State::Absent;
     bool chip_ready_ = false;
+    bool skip_bus_reset_ = false;
+    /// What the attached device turned out to be, asked while still in the
+    /// mode where the question is valid.
+    bool device_is_low_speed_ = false;
     bool announced_ready_ = false;
     std::uint32_t entered_us_ = 0;
     std::uint32_t last_poll_us_ = 0;
