@@ -31,10 +31,40 @@ void Ch375Device::tick(std::uint32_t now_us) {
 
     InterruptStatus status = InterruptStatus::Success;
     const bool interrupted = poll_interrupt(status);
+    if (interrupted) {
+        last_status_ = static_cast<std::uint8_t>(status);
+        const std::uint8_t raw = last_status_;
+        if (raw < 0x10) {
+            // DS1 5.12: 00-0F is the device-mode band. A chip in host mode
+            // cannot produce one, so this is the port out of step rather than
+            // the chip saying something.
+            ++status_impossible_;
+        } else if (status == InterruptStatus::Connect) {
+            ++status_connect_;
+        } else if (status == InterruptStatus::Disconnect) {
+            ++status_disconnect_;
+        } else if (status == InterruptStatus::Success) {
+            ++status_success_;
+        } else if (is_failure(status)) {
+            ++status_failure_;
+        }
+    }
 
     // A disconnect outranks whatever was in progress. Anything being held on
     // the far side has to be let go, and no later step can succeed anyway.
-    if (interrupted && status == InterruptStatus::Disconnect) {
+    //
+    // Except while this code is the one holding the bus down. Bringing a
+    // device up means putting the bus into reset (DS1 5.9), and an attached
+    // device looks gone to the chip's own detection for as long as that lasts.
+    // Believing it means announcing a detach, returning to Absent, finding the
+    // device again and resetting the bus again - which on the bench was a
+    // mouse attaching and detaching six times over without ever coming up.
+    //
+    // The exemption is deliberately narrow: one state, the one where this
+    // firmware caused it. Anywhere else it is somebody pulling a cable, and a
+    // missed one there would leave keys held down on the far side.
+    if (interrupted && status == InterruptStatus::Disconnect &&
+        state_ != Ch375State::Resetting) {
         handle_detach(now_us);
         return;
     }
@@ -166,11 +196,17 @@ bool Ch375Device::poll_interrupt(InterruptStatus& status) {
     if (!transport_.interrupt_pending()) {
         return false;
     }
-    return transport_.get_status(status);
+    ++interrupts_seen_;
+    if (transport_.get_status(status)) {
+        return true;
+    }
+    ++status_reads_failed_;
+    return false;
 }
 
 void Ch375Device::handle_detach(std::uint32_t now_us) {
     const bool had_device = state_ != Ch375State::Absent;
+    detach_state_ = state_;
     endpoint_ = 0;
     announced_ready_ = false;
     enter(Ch375State::Absent, now_us);

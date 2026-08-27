@@ -24,15 +24,33 @@ be traced without counting.
 | — | A7 · C18 | B7 · G18 | — | unused |
 | — | A8 · C19 | B8 · G19 | — | unused |
 
-So one full channel reads:
+The level shifter is out; these go direct, and the module regulates itself to
+3.3 V. So one full channel reads:
 
 ```
-U1 GP0 → C12/A1 ↕ G12/B1 → keyboard RXD     (3.3 V ↔ 5 V across the shifter)
-U1 GP1 ← C13/A2 ↕ G13/B2 ← keyboard TXD
-U1 GP2 ← C14/A3 ↕ G14/B3 ← keyboard INT
+U1 GP0 → keyboard RXD
+U1 GP1 ← keyboard TXD
+U1 GP2 ← keyboard INT
 ```
 
 The mouse channel is the same shape on GP4, GP5, GP6.
+
+### Checking an interrupt wire is actually there
+
+The interrupt line is a push-pull output that idles high, so reading it high
+proves nothing: an unconnected pin with a pull-up reads exactly the same. What
+separates them is pulling the pin *down*. A chip driving high beats the
+internal pull-down and the pin stays high; a wire with nothing on the end of
+it follows the pull.
+
+Run on both channels at once, this found a keyboard-channel interrupt lead
+that was not connected while the mouse channel's was live - two identical
+channels, one acting as the control for the other. Everything else about that
+channel worked: commands went out, CHECK_EXIST came back 0xA8. The chip simply
+had no way to say a transaction had finished, so a device attached, could
+never be configured, and the state machine went round again.
+
+Worth reaching for whenever a channel behaves as though nothing ever happens.
 
 ## Power
 

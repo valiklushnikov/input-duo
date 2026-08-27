@@ -197,6 +197,25 @@ public:
         return true;
     }
 
+    /// DS2 1.13. Ask the chip to configure the attached device by itself.
+    ///
+    /// It answers with an interrupt, so there is nothing to read here.
+    void auto_setup() {
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::AutoSetup));
+    }
+
+    /// Read and discard a status the chip is already holding.
+    ///
+    /// Left standing it would be delivered as the answer to the next question
+    /// asked, which is how a device that has already gone gets configured.
+    void drain_pending_status() {
+        if (!io_.int_asserted()) {
+            return;
+        }
+        InterruptStatus discarded = InterruptStatus::Success;
+        (void)get_status(discarded);
+    }
+
     /// Is the chip asking for attention right now?
     ///
     /// Reading the status is what clears the request, so a caller should ask

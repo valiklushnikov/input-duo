@@ -399,3 +399,36 @@ TEST_CASE(one_tick_does_a_bounded_amount_of_work) {
         rig.chip.advance(1000);
     }
 }
+
+
+// ------------------------------------- a disconnect this firmware caused
+
+TEST_CASE(a_disconnect_reported_during_our_own_bus_reset_is_not_an_unplug) {
+    // Holding the bus in reset is how a device is brought up (DS1 5.9), and
+    // an attached device looks gone to the chip while that lasts. Taking that
+    // at face value means announcing a detach, going back to Absent, seeing
+    // the device again, resetting the bus again - which on the bench was a
+    // device attaching and detaching six times over and never coming up.
+    Rig rig;
+    rig.chip.report_disconnect_on_reset(true);
+
+    rig.chip.attach_device();
+    rig.run(300000);
+
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+}
+
+TEST_CASE(a_real_unplug_after_the_reset_is_still_an_unplug) {
+    // The exemption is narrow on purpose: only while this code is the one
+    // holding the bus down. Any later, and it is somebody pulling a cable.
+    Rig rig;
+    rig.chip.report_disconnect_on_reset(true);
+    bring_up(rig);
+    rig.count(Ch375EventKind::Ready);
+
+    rig.chip.detach_device();
+    rig.run(50000);
+
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Absent));
+    CHECK_EQ(rig.count(Ch375EventKind::Detached), 1);
+}

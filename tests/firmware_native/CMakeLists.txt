@@ -224,3 +224,23 @@ if(MSVC)
 endif()
 
 add_test(NAME ch375_baud_scan COMMAND duo_ch375_baud_scan_test)
+
+add_executable(duo_ch375_enumerator_test
+    test_main.cpp
+    test_ch375_enumerator.cpp
+    fakes/scripted_ch375.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/device.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/enumerator.cpp
+)
+
+target_link_libraries(duo_ch375_enumerator_test PRIVATE duo_common)
+target_include_directories(duo_ch375_enumerator_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+if(MSVC)
+    target_compile_options(duo_ch375_enumerator_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME ch375_enumerator COMMAND duo_ch375_enumerator_test)

@@ -16,6 +16,7 @@
 #include "hardware/watchdog.h"
 
 #include "buttons.hpp"
+#include "ch375/enumerator.hpp"
 #include "ch375_probe.hpp"
 #include "diagnostics/ch375_baud_scan.hpp"
 #include "config_service.hpp"
@@ -188,6 +189,13 @@ int main() {
     const duo_input::u1::PinActivity mouse_pad =
         duo_input::u1::watch_bare_pin(duo_input::u1::kPinMouseRx, 1000);
 
+    // Is there a chip on the far end of each interrupt wire at all? Reading it
+    // high says nothing - an unconnected pin with a pull-up reads high too.
+    const bool keyboard_int_driven =
+        duo_input::u1::driven_high_against_a_pull_down(duo_input::u1::kPinKeyboardInt);
+    const bool mouse_int_driven =
+        duo_input::u1::driven_high_against_a_pull_down(duo_input::u1::kPinMouseInt);
+
     // Static-level loopback test, deliberately performed before PIO owns the
     // pins.  With S1 tied to S3 the level driven on GP0 must return on GP1.
     // This separates an electrical oscillator from a malformed UART program:
@@ -244,10 +252,36 @@ int main() {
     // configured first: send a byte, get its inverse back (DS1 5.5).
     duo_input::u1::ch375::Ch375Transport keyboard_commands(keyboard_port);
     duo_input::u1::ch375::Ch375Transport mouse_commands(mouse_port);
-    duo_input::u1::Ch375ProbeResult keyboard_probe;
-    duo_input::u1::Ch375ProbeResult mouse_probe;
-    std::uint32_t last_probe_ms = 0;
-    bool probed_once = false;
+    // Asked once, here, before the state machines below take the chips over.
+    //
+    // Running it periodically alongside them made two owners of one chip: the
+    // probe sets the working mode and reads statuses, and reading a status is
+    // what clears it - so each was consuming the interrupts the other was
+    // waiting for. On the bench that looked like a device attaching and
+    // detaching twenty-three times in a row.
+    const duo_input::u1::Ch375ProbeResult keyboard_probe =
+        duo_input::u1::probe_ch375(keyboard_port, keyboard_commands);
+    const duo_input::u1::Ch375ProbeResult mouse_probe =
+        duo_input::u1::probe_ch375(mouse_port, mouse_commands);
+
+    // The lifecycle itself, on real hardware for the first time: one state
+    // machine per controller, sharing nothing, each doing a bounded piece of
+    // work per pass.
+    duo_input::u1::ch375::AutoSetupEnumerator keyboard_setup(keyboard_commands);
+    duo_input::u1::ch375::AutoSetupEnumerator mouse_setup(mouse_commands);
+    duo_input::u1::ch375::Ch375Device keyboard_device(keyboard_commands, keyboard_setup);
+    duo_input::u1::ch375::Ch375Device mouse_device(mouse_commands, mouse_setup);
+
+    struct DeviceTally {
+        std::uint8_t attached = 0;
+        std::uint8_t detached = 0;
+        std::uint8_t ready = 0;
+        std::uint8_t reports = 0;
+        std::uint8_t last_size = 0;
+        std::uint8_t last[8] = {};
+    };
+    DeviceTally keyboard_tally;
+    DeviceTally mouse_tally;
 
     duo_input::diagnostics::Ch375SingleProbeObservation single_probe;
     single_probe.pad_low_percent = tx_while_high.low_percent;
@@ -353,12 +387,39 @@ int main() {
 
 #if DUO_CH375_PROBE
         {
-            const std::uint32_t probe_now = to_ms_since_boot(get_absolute_time());
-            if (!probed_once || probe_now - last_probe_ms >= 5000) {
-                last_probe_ms = probe_now;
-                probed_once = true;
-                keyboard_probe = duo_input::u1::probe_ch375(keyboard_port, keyboard_commands);
-                mouse_probe = duo_input::u1::probe_ch375(mouse_port, mouse_commands);
+            // Ticked every pass, which is what the state machine is written
+            // against. The probe below runs far less often and only reports.
+            const std::uint32_t device_now_us = time_us_32();
+            duo_input::u1::ch375::Ch375Device* devices[2] = {&keyboard_device, &mouse_device};
+            DeviceTally* tallies[2] = {&keyboard_tally, &mouse_tally};
+            for (int index = 0; index < 2; ++index) {
+                devices[index]->tick(device_now_us);
+                duo_input::u1::ch375::Ch375Event event;
+                while (devices[index]->take_event(event)) {
+                    DeviceTally& tally = *tallies[index];
+                    switch (event.kind) {
+                        case duo_input::u1::ch375::Ch375EventKind::Attached:
+                            ++tally.attached;
+                            break;
+                        case duo_input::u1::ch375::Ch375EventKind::Detached:
+                            ++tally.detached;
+                            break;
+                        case duo_input::u1::ch375::Ch375EventKind::Ready:
+                            ++tally.ready;
+                            break;
+                        case duo_input::u1::ch375::Ch375EventKind::Report: {
+                            ++tally.reports;
+                            const std::size_t keep =
+                                event.report_size > sizeof(tally.last) ? sizeof(tally.last)
+                                                                       : event.report_size;
+                            tally.last_size = static_cast<std::uint8_t>(keep);
+                            std::memcpy(tally.last, event.report, keep);
+                            break;
+                        }
+                        default:
+                            break;
+                    }
+                }
             }
 
             std::uint8_t report[128] = {};
@@ -374,6 +435,41 @@ int main() {
                     report[report_size++] = asked[index]->answered ? 1 : 0;
                     report[report_size++] = asked[index]->check_exist_ok ? 1 : 0;
                     report[report_size++] = asked[index]->check_exist_reply;
+                }
+            }
+            if (report_size + 62 <= sizeof(report)) {
+                report[report_size++] = 0xD5;  // marks the lifecycle record
+                report[report_size++] = static_cast<std::uint8_t>((keyboard_int_driven ? 1 : 0) |
+                                                                  (mouse_int_driven ? 2 : 0));
+                for (int index = 0; index < 2; ++index) {
+                    const DeviceTally& tally = *tallies[index];
+                    report[report_size++] = static_cast<std::uint8_t>(devices[index]->state());
+                    report[report_size++] = tally.attached;
+                    report[report_size++] = tally.detached;
+                    report[report_size++] = tally.ready;
+                    report[report_size++] = tally.reports;
+                    report[report_size++] = tally.last_size;
+                    report[report_size++] =
+                        static_cast<std::uint8_t>(devices[index]->state_at_last_detach());
+                    report[report_size++] = devices[index]->last_status();
+                    const std::uint16_t counts[5] = {
+                        devices[index]->status_connect(), devices[index]->status_disconnect(),
+                        devices[index]->status_success(), devices[index]->status_failure(),
+                        devices[index]->status_impossible()};
+                    report[report_size++] =
+                        static_cast<std::uint8_t>(devices[index]->interrupts_seen() & 0xFF);
+                    report[report_size++] =
+                        static_cast<std::uint8_t>(devices[index]->interrupts_seen() >> 8);
+                    report[report_size++] =
+                        static_cast<std::uint8_t>(devices[index]->status_reads_failed() & 0xFF);
+                    report[report_size++] =
+                        static_cast<std::uint8_t>(devices[index]->status_reads_failed() >> 8);
+                    for (std::uint16_t value : counts) {
+                        report[report_size++] = static_cast<std::uint8_t>(value & 0xFF);
+                        report[report_size++] = static_cast<std::uint8_t>(value >> 8);
+                    }
+                    std::memcpy(report + report_size, tally.last, sizeof(tally.last));
+                    report_size += sizeof(tally.last);
                 }
             }
             config.set_link_debug(report, report_size);

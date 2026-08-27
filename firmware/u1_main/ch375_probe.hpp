@@ -98,6 +98,15 @@ struct PinActivity {
 
 PinActivity watch_bare_pin(unsigned pin, std::uint32_t for_ms);
 
+/// Is a live chip output on the other end of this wire?
+///
+/// The interrupt line is a push-pull output that idles high, so simply reading
+/// it high proves nothing - an unconnected pin with a pull-up reads the same.
+/// Pulling the pin *down* separates them: a chip driving high wins against the
+/// internal pull-down and the pin stays high; a wire with nothing on it
+/// follows the pull and goes low.
+bool driven_high_against_a_pull_down(unsigned pin);
+
 /// Listen on a port for a second without ever transmitting.
 ///
 /// Separates a line that is noisy on its own from one this firmware disturbs.

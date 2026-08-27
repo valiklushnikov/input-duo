@@ -144,6 +144,36 @@ public:
 
     Ch375State state() const { return state_; }
 
+    /// Bring-up: which state the last detach interrupted, and the last status
+    /// byte the chip reported.
+    ///
+    /// Not for the product to act on - it is here so that "the device keeps
+    /// attaching and detaching" can be answered with where and what, instead
+    /// of another guess about which step is at fault.
+    Ch375State state_at_last_detach() const { return detach_state_; }
+    std::uint8_t last_status() const { return last_status_; }
+
+    /// How many times each kind of status has been read, for bring-up.
+    ///
+    /// Counted rather than kept as "the last one", because the last one is
+    /// whatever happened most recently and says nothing about what the chip
+    /// has been doing. The bands come from DS1 5.12.
+    std::uint16_t status_connect() const { return status_connect_; }
+    std::uint16_t status_disconnect() const { return status_disconnect_; }
+    std::uint16_t status_success() const { return status_success_; }
+    std::uint16_t status_failure() const { return status_failure_; }
+    /// Statuses a chip in host mode cannot produce - 00 to 0F is device mode.
+    std::uint16_t status_impossible() const { return status_impossible_; }
+
+    /// How often the interrupt line was found asserted, and how often reading
+    /// the status that goes with it actually produced a byte.
+    ///
+    /// Two numbers rather than one, because "no statuses were read" has two
+    /// completely different causes and the same appearance: a line that never
+    /// asserts, and a read that never completes.
+    std::uint16_t interrupts_seen() const { return interrupts_seen_; }
+    std::uint16_t status_reads_failed() const { return status_reads_failed_; }
+
     /// Take the oldest event, if there is one.
     bool take_event(Ch375Event& event);
 
@@ -175,6 +205,15 @@ private:
     std::uint32_t last_connect_poll_us_ = 0;
     std::uint32_t last_answer_us_ = 0;
     std::uint8_t endpoint_ = 0;
+    Ch375State detach_state_ = Ch375State::Absent;
+    std::uint8_t last_status_ = 0;
+    std::uint16_t status_connect_ = 0;
+    std::uint16_t status_disconnect_ = 0;
+    std::uint16_t status_success_ = 0;
+    std::uint16_t status_failure_ = 0;
+    std::uint16_t status_impossible_ = 0;
+    std::uint16_t interrupts_seen_ = 0;
+    std::uint16_t status_reads_failed_ = 0;
 
     Ch375Event events_[kEventQueueDepth];
     std::size_t head_ = 0;

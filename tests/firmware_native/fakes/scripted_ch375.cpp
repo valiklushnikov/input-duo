@@ -88,6 +88,18 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
     expecting_data_ = false;
 
     switch (static_cast<Ch375Command>(command)) {
+        case Ch375Command::AutoSetup:
+            // Several control transfers, not an instant reply. A caller that
+            // only worked when this finished in one pass would not survive a
+            // real device.
+            saw_auto_setup_ = true;
+            auto_setup_running_ = true;
+            auto_setup_at_us_ = now_us_;
+            pending_status_ = static_cast<std::uint8_t>(
+                fail_auto_setup_ ? InterruptStatus::BufferOver : InterruptStatus::Success);
+            int_asserted_ = !silent_;
+            break;
+
         case Ch375Command::TestConnect:
             // DS1 5.10: answers Connect, Disconnect or USB_READY. Unlike
             // GetStatus this does not consume the pending interrupt.
@@ -96,6 +108,7 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
             break;
 
         case Ch375Command::GetStatus:
+            auto_setup_running_ = false;
             queue(pending_status_);
             // Reading the status is what clears the request - DS1 5.12.
             int_asserted_ = false;
@@ -147,6 +160,14 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
             if (mode == UsbMode::HostReset) {
                 saw_bus_reset_ = true;
                 ++reset_count_;
+                if (attached_ && report_disconnect_on_reset_) {
+                    // Holding the bus in reset makes an attached device look
+                    // gone to the chip's own detection, so it says so. On the
+                    // bench that arrived as a disconnect the instant the reset
+                    // began, over and over.
+                    pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Disconnect);
+                    int_asserted_ = !silent_;
+                }
             }
             queue(static_cast<std::uint8_t>(CommandStatus::Success));
             expecting_data_ = false;
@@ -183,6 +204,17 @@ bool FakeCh375Chip::read_data(std::uint8_t& value) {
     // Nothing to read. Time passes, which is what lets a bounded wait end.
     now_us_ += 10;
     return false;
+}
+
+bool FakeCh375Chip::int_asserted() const {
+    // A real AUTO_SETUP is several control transfers over the USB bus, and a
+    // caller that only worked when it finished within one pass of the loop
+    // would not survive meeting a device.
+    constexpr std::uint32_t kAutoSetupUs = 3000;
+    if (auto_setup_running_ && now_us_ - auto_setup_at_us_ < kAutoSetupUs) {
+        return false;
+    }
+    return int_asserted_;
 }
 
 void FakeCh375Chip::attach_device() {

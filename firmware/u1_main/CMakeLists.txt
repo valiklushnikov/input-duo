@@ -11,6 +11,8 @@ add_executable(duo_u1_main
     buttons.cpp
     ch375_probe.cpp
     ch375/pio_transport.cpp
+    ch375/device.cpp
+    ch375/enumerator.cpp
     diagnostics_service.cpp
 )
 

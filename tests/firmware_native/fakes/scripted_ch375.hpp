@@ -106,7 +106,7 @@ public:
     void write_command(std::uint8_t command) override;
     void write_data(std::uint8_t value) override;
     bool read_data(std::uint8_t& value) override;
-    bool int_asserted() const override { return int_asserted_; }
+    bool int_asserted() const override;
     std::uint32_t now_us() const override { return now_us_; }
 
     // --- the scene ---------------------------------------------------------
@@ -116,6 +116,16 @@ public:
 
     /// Give the device something to say the next time it is polled.
     void queue_report(const std::uint8_t* data, std::size_t size);
+
+    /// Was the chip asked to configure the device by itself?
+    bool saw_auto_setup() const { return saw_auto_setup_; }
+
+    /// Report a disconnect the moment the USB bus is held in reset, which is
+    /// what the real chip does with a device attached.
+    void report_disconnect_on_reset(bool reporting) { report_disconnect_on_reset_ = reporting; }
+
+    /// Refuse to configure, as a device the chip cannot talk to would cause.
+    void fail_auto_setup(bool failing) { fail_auto_setup_ = failing; }
 
     /// Answer every command with a byte that means nothing.
     void answer_garbage(bool broken) { garbage_ = broken; }
@@ -160,6 +170,12 @@ private:
     bool garbage_ = false;
     bool silent_ = false;
     bool saw_bus_reset_ = false;
+    bool saw_auto_setup_ = false;
+    bool fail_auto_setup_ = false;
+    bool report_disconnect_on_reset_ = false;
+    /// AUTO_SETUP is several control transfers, so its answer is not instant.
+    bool auto_setup_running_ = false;
+    std::uint32_t auto_setup_at_us_ = 0;
     std::uint32_t reset_count_ = 0;
     std::uint32_t mode_set_count_ = 0;
     std::uint32_t command_count_ = 0;

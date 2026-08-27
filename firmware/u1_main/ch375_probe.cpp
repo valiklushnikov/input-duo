@@ -10,6 +10,17 @@ using ch375::CommandStatus;
 using ch375::InterruptStatus;
 using ch375::UsbMode;
 
+bool driven_high_against_a_pull_down(unsigned pin) {
+    gpio_init(pin);
+    gpio_set_dir(pin, GPIO_IN);
+    gpio_pull_down(pin);
+    sleep_ms(5);
+    const bool held_high = gpio_get(pin);
+    gpio_disable_pulls(pin);
+    gpio_pull_up(pin);
+    return held_high;
+}
+
 PinActivity watch_bare_pin(unsigned pin, std::uint32_t for_ms) {
     PinActivity activity;
 
