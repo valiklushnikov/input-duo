@@ -174,6 +174,15 @@ public:
     std::uint16_t interrupts_seen() const { return interrupts_seen_; }
     std::uint16_t status_reads_failed() const { return status_reads_failed_; }
 
+    /// Which of the two ways out of a working device was taken.
+    ///
+    /// Both need an interrupt, and none has been seen - so one of these
+    /// numbers disagrees with that, and the disagreement is the bug.
+    std::uint16_t detach_from_disconnect() const { return detach_from_disconnect_; }
+    std::uint16_t detach_from_lost() const { return detach_from_lost_; }
+    std::uint16_t enumerate_failures() const { return enumerate_failures_; }
+    std::uint16_t mode_failures() const { return mode_failures_; }
+
     /// Take the oldest event, if there is one.
     bool take_event(Ch375Event& event);
 
@@ -214,6 +223,10 @@ private:
     std::uint16_t status_impossible_ = 0;
     std::uint16_t interrupts_seen_ = 0;
     std::uint16_t status_reads_failed_ = 0;
+    std::uint16_t detach_from_disconnect_ = 0;
+    std::uint16_t detach_from_lost_ = 0;
+    std::uint16_t enumerate_failures_ = 0;
+    std::uint16_t mode_failures_ = 0;
 
     Ch375Event events_[kEventQueueDepth];
     std::size_t head_ = 0;

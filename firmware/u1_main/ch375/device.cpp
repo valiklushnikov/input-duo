@@ -65,6 +65,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
     // missed one there would leave keys held down on the far side.
     if (interrupted && status == InterruptStatus::Disconnect &&
         state_ != Ch375State::Resetting) {
+        ++detach_from_disconnect_;
         handle_detach(now_us);
         return;
     }
@@ -87,6 +88,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 // reset and keeps holding it, so it is a step, not a state to
                 // rest in.
                 if (!transport_.set_usb_mode(UsbMode::HostReset)) {
+                    ++mode_failures_;
                     fail(now_us);
                     return;
                 }
@@ -119,6 +121,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 return;
             }
             if (progress == SetupProgress::Failed) {
+                ++enumerate_failures_;
                 fail(now_us);
                 return;
             }
@@ -145,6 +148,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 // noticed, so whatever it was holding would be held forever.
                 // Treat it as gone: releasing a key nobody pressed is a
                 // nuisance, and holding one nobody can release is not.
+                ++detach_from_lost_;
                 handle_detach(now_us);
                 fail(now_us);
                 chip_ready_ = false;

@@ -189,12 +189,17 @@ int main() {
     const duo_input::u1::PinActivity mouse_pad =
         duo_input::u1::watch_bare_pin(duo_input::u1::kPinMouseRx, 1000);
 
-    // Is there a chip on the far end of each interrupt wire at all? Reading it
-    // high says nothing - an unconnected pin with a pull-up reads high too.
-    const bool keyboard_int_driven =
-        duo_input::u1::driven_high_against_a_pull_down(duo_input::u1::kPinKeyboardInt);
-    const bool mouse_int_driven =
-        duo_input::u1::driven_high_against_a_pull_down(duo_input::u1::kPinMouseInt);
+    // Watch both interrupt lines for a second rather than sampling them once.
+    //
+    // The single-shot version pulled the pin down and called it live only if
+    // it stayed high - which is true of an idle INT# and false of one that is
+    // asserting, because the signal is active low. So it reported "no wire" for
+    // whichever chip happened to have an interrupt pending, which is exactly
+    // the chip with a device on it. It measured the wrong thing confidently.
+    const duo_input::u1::PinActivity keyboard_int =
+        duo_input::u1::watch_bare_pin(duo_input::u1::kPinKeyboardInt, 1000);
+    const duo_input::u1::PinActivity mouse_int =
+        duo_input::u1::watch_bare_pin(duo_input::u1::kPinMouseInt, 1000);
 
     // Static-level loopback test, deliberately performed before PIO owns the
     // pins.  With S1 tied to S3 the level driven on GP0 must return on GP1.
@@ -437,10 +442,14 @@ int main() {
                     report[report_size++] = asked[index]->check_exist_reply;
                 }
             }
-            if (report_size + 62 <= sizeof(report)) {
+            if (report_size + 84 <= sizeof(report)) {
                 report[report_size++] = 0xD5;  // marks the lifecycle record
-                report[report_size++] = static_cast<std::uint8_t>((keyboard_int_driven ? 1 : 0) |
-                                                                  (mouse_int_driven ? 2 : 0));
+                report[report_size++] = keyboard_int.low_percent;
+                report[report_size++] = static_cast<std::uint8_t>(keyboard_int.transitions & 0xFF);
+                report[report_size++] = static_cast<std::uint8_t>(keyboard_int.transitions >> 8);
+                report[report_size++] = mouse_int.low_percent;
+                report[report_size++] = static_cast<std::uint8_t>(mouse_int.transitions & 0xFF);
+                report[report_size++] = static_cast<std::uint8_t>(mouse_int.transitions >> 8);
                 for (int index = 0; index < 2; ++index) {
                     const DeviceTally& tally = *tallies[index];
                     report[report_size++] = static_cast<std::uint8_t>(devices[index]->state());
@@ -464,6 +473,14 @@ int main() {
                         static_cast<std::uint8_t>(devices[index]->status_reads_failed() & 0xFF);
                     report[report_size++] =
                         static_cast<std::uint8_t>(devices[index]->status_reads_failed() >> 8);
+                    const std::uint16_t why[4] = {devices[index]->detach_from_disconnect(),
+                                                  devices[index]->detach_from_lost(),
+                                                  devices[index]->enumerate_failures(),
+                                                  devices[index]->mode_failures()};
+                    for (std::uint16_t value : why) {
+                        report[report_size++] = static_cast<std::uint8_t>(value & 0xFF);
+                        report[report_size++] = static_cast<std::uint8_t>(value >> 8);
+                    }
                     for (std::uint16_t value : counts) {
                         report[report_size++] = static_cast<std::uint8_t>(value & 0xFF);
                         report[report_size++] = static_cast<std::uint8_t>(value >> 8);
