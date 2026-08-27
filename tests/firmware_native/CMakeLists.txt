@@ -365,3 +365,23 @@ if(MSVC)
 endif()
 
 add_test(NAME core1_runtime COMMAND duo_core1_runtime_test)
+
+add_executable(duo_input_pipeline_test
+    test_main.cpp
+    test_input_pipeline.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/pipeline.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/keyboard_normalizer.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/mouse_normalizer.cpp
+)
+
+target_link_libraries(duo_input_pipeline_test PRIVATE duo_common)
+target_include_directories(duo_input_pipeline_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+if(MSVC)
+    target_compile_options(duo_input_pipeline_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME input_pipeline COMMAND duo_input_pipeline_test)
