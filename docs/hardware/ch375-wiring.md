@@ -198,6 +198,22 @@ review rather than by measurement:
   count was zero no matter what arrived - and that zero was very nearly used
   as evidence that the frames were real data.
 
+## Powering the device, not just the controller
+
+A CH375 module supplies the attached device from its own 5 V input, and on the
+bench that turned out to be the limit rather than anything in the firmware. A
+mouse with lighting holds up while it sits still and browns out when it is
+moved - the sensor and the LEDs draw more, the rail sags, and the device
+restarts. From the firmware side that is a device attaching and departing over
+and over, which looks exactly like a protocol fault and is not one.
+
+The give-away is visible without instruments: the device's own lights dim or
+go out at the moment it is used.
+
+So the 5 V feeding the modules has to be able to supply whatever is plugged
+into them, with margin. A USB device may draw up to 500 mA by specification,
+and a lit-up mouse is not far off it.
+
 ## What the serial framing needs
 
 The CH375's serial format is nine data bits, not eight: the ninth says whether
