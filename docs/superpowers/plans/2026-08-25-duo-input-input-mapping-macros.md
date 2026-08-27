@@ -263,7 +263,7 @@ git commit -m "feat: normalize CH375 HID reports"
 - Produces: `BindingEngine::handle(InputEvent) -> BoundedVector<ActionRequest,4>`.
 - Produces route actions and `Replace`/`Add` semantics from active `ConfigView`.
 
-- [ ] **Step 1: Write binding contract tests**
+- [x] **Step 1: Write binding contract tests**
 
 Test unbound pass-through, Replace suppress trigger key only, Add passes immediately plus action, modifiers as conditions, one trigger per hold, conflict rejected by validator, keyboard Both and mouse Pc1/Pc2.
 
@@ -271,11 +271,11 @@ Test unbound pass-through, Replace suppress trigger key only, Add passes immedia
 
 Run binding tests.
 
-- [ ] **Step 3: Implement indexed lookup and safe route transition**
+- [x] **Step 3: Implement indexed lookup and safe route transition**
 
 Build an active-profile index in SRAM. Route change emits release commands for old target before setting new route; held physical inputs are marked `wait_for_release` and never transferred.
 
-- [ ] **Step 4: Run route stress simulation**
+- [x] **Step 4: Run route stress simulation**
 
 Generate 1000 toggles with random held keys/buttons and assert final snapshots released, no duplicate key downs, mouse never Both.
 

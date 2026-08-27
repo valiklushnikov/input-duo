@@ -306,3 +306,22 @@ if(MSVC)
 endif()
 
 add_test(NAME normalizers COMMAND duo_normalizers_test)
+
+add_executable(duo_binding_engine_test
+    test_main.cpp
+    test_binding_engine.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/engine.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/routes.cpp
+)
+
+target_link_libraries(duo_binding_engine_test PRIVATE duo_common)
+target_include_directories(duo_binding_engine_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+if(MSVC)
+    target_compile_options(duo_binding_engine_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME binding_engine COMMAND duo_binding_engine_test)

@@ -1,0 +1,115 @@
+#pragma once
+
+// What a keystroke turns into once the operator has had their say.
+//
+// Most input passes straight through to wherever the route points. A few keys
+// are bound to something, and a smaller number of those change where input
+// goes at all - which is the part that has to be handled carefully.
+//
+// Whatever is held down when a route changes is held on the computer being
+// left behind, and that computer will never hear about it again. So it is
+// released before the switch, and the physical key still under somebody's
+// finger is marked as belonging to the computer it was pressed on: it does not
+// arrive on the new one as a fresh press, and its release is swallowed there
+// too, because that machine never saw it go down.
+//
+// A modifier stuck on the computer you just left changes what every later
+// keystroke there means, and you cannot fix it from where you are standing.
+
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
+
+#include "config/format.hpp"
+#include "hid/types.hpp"
+#include "input/events.hpp"
+#include "mapping/binding.hpp"
+#include "mapping/routes.hpp"
+
+namespace duo_input::u1::mapping {
+
+enum class ActionRequestKind : std::uint8_t {
+    None,
+    /// Pass this input to whatever the route currently points at.
+    SendInput,
+    /// Let go of everything this computer is holding.
+    ReleaseTarget,
+    /// ``parameter`` is the macro to run.
+    RunMacro,
+    /// ``parameter`` is the profile to switch to.
+    SetProfile,
+};
+
+struct ActionRequest {
+    ActionRequestKind kind = ActionRequestKind::None;
+    input::InputEvent event{};
+    hid::Target target = hid::Target::Pc1;
+    std::uint8_t parameter = 0;
+};
+
+/// The most one input event can ask for: release both computers, and an
+/// action. Nothing produces more, and a fixed size costs nothing here.
+inline constexpr std::size_t kMaxActionsPerEvent = 4;
+
+struct Outcome {
+    ActionRequest actions[kMaxActionsPerEvent];
+    std::size_t count = 0;
+};
+
+/// How many physical inputs can be held at once and remembered.
+///
+/// Six keys is what a boot keyboard reports, plus eight modifiers and five
+/// mouse buttons.
+inline constexpr std::size_t kMaxHeld = 20;
+
+class BindingEngine {
+public:
+    void set_bindings(std::initializer_list<Binding> bindings);
+    void set_bindings(const Binding* bindings, std::size_t count);
+
+    /// Decide what one input event means.
+    Outcome handle(const input::InputEvent& event);
+
+    /// Let go of everything, everywhere. What the emergency control does: the
+    /// operator cannot see which computer is holding what, so it reaches both.
+    Outcome release_everything();
+
+    config::KeyboardRoute keyboard_route() const { return routes_.keyboard(); }
+    config::MouseRoute mouse_route() const { return routes_.mouse(); }
+
+private:
+    struct Held {
+        input::InputEventKind kind = input::InputEventKind::None;
+        std::uint16_t code = 0;
+        /// True once the route moved underneath it. The input stays down
+        /// physically, and is ignored until it is let go.
+        bool orphaned = false;
+        /// True when the press was swallowed by a Replace binding. The far
+        /// side never saw it go down, so it must not see it come up.
+        bool suppressed = false;
+    };
+
+    const Binding* find_binding(const input::InputEvent& event) const;
+    bool remember(const input::InputEvent& event, bool suppressed);
+    bool forget(const input::InputEvent& event);
+    Held* find_held(input::InputEventKind kind, std::uint16_t code);
+    /// Mark held inputs as belonging to where they were pressed. A keyboard
+    /// route change does not orphan mouse buttons, or the other way round.
+    void orphan(bool keys, bool buttons);
+    void add(Outcome& outcome, const ActionRequest& request) const;
+    /// Release every computer the given device currently reaches - called
+    /// before the route moves, while "currently" still means the old one.
+    void release_reached(Outcome& outcome, bool keyboard, bool mouse) const;
+    void release_both(Outcome& outcome) const;
+
+    Routes routes_;
+    Binding bindings_[kMaxBindings];
+    std::size_t binding_count_ = 0;
+
+    Held held_[kMaxHeld];
+    std::size_t held_count_ = 0;
+    /// Which modifiers are down, as the bindings' conditions see them.
+    std::uint8_t modifiers_ = 0;
+};
+
+}  // namespace duo_input::u1::mapping
