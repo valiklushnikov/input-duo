@@ -21,5 +21,6 @@ using TextLayout = protocol::TextLayout;
 using TriggerKind = protocol::TriggerKind;
 using BindingMode = protocol::BindingMode;
 using ActionKind = protocol::ActionKind;
+using MacroStepType = protocol::MacroStepType;
 
 }  // namespace duo_input::config

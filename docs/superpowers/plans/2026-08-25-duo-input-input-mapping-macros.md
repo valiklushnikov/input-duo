@@ -297,23 +297,23 @@ git commit -m "feat: apply profile bindings and independent routes"
 **Interfaces:**
 - Produces: `MacroScheduler::enqueue(macro_id,target,now_ms)`, `tick(now_ms)`, `stop_all()`, `active()`, `queued_count()`.
 
-- [ ] **Step 1: Write timeline tests**
+- [x] **Step 1: Write timeline tests**
 
 Test fixed/random delay boundaries with injected RNG, KeyDown/Up ownership, Text compiled usages, ConsumerTap, SetProfile, route steps, FIFO 4, fifth rejection, physical event progress during delay and runtime 6KRO abort.
 
-- [ ] **Step 2: Verify failures**
+- [x] **Step 2: Verify failures**
 
 Run macro scheduler target.
 
-- [ ] **Step 3: Implement one active job plus four-slot FIFO**
+- [x] **Step 3: Implement one active job plus four-slot FIFO**
 
 Use absolute unsigned deadlines safe across wrap, injected `IRandom`, fixed step cursor and unique macro owner token. On stop/error release only current macro owner, clear FIFO, return structured reason.
 
-- [ ] **Step 4: Run deterministic 10,000-sequence simulation**
+- [x] **Step 4: Run deterministic 10,000-sequence simulation**
 
 Seed RNG, interleave physical events, disconnects, stops and route changes; assert no residual macro ownership and scheduler never blocks.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add firmware/u1_main/macros tests/firmware_native

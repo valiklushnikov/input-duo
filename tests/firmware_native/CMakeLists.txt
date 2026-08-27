@@ -325,3 +325,21 @@ if(MSVC)
 endif()
 
 add_test(NAME binding_engine COMMAND duo_binding_engine_test)
+
+add_executable(duo_macro_scheduler_test
+    test_main.cpp
+    test_macro_scheduler.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/macros/scheduler.cpp
+)
+
+target_link_libraries(duo_macro_scheduler_test PRIVATE duo_common)
+target_include_directories(duo_macro_scheduler_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+if(MSVC)
+    target_compile_options(duo_macro_scheduler_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME macro_scheduler COMMAND duo_macro_scheduler_test)
