@@ -65,6 +65,32 @@ Task 2 should drop the OE step rather than pretend to perform it.
 
 ### The shifter is the one to suspect if the link is flaky
 
+**It was.** Measured on the bench, 2026-08-27: with nothing at all being
+transmitted, eight to nine whole frames per 100 ms arrive on each channel. A
+serial line at rest is silent, so those are not frames - they are the line
+being read as frames. Captured at higher resolution, it rings for ten or more
+microseconds after every edge, with transitions one to two microseconds apart,
+against a bit that lasts a hundred and four.
+
+Everything above the wire is by then known good: the PIO port reads whole
+nine-bit frames with no framing errors, the chips are in serial mode and
+execute what they are sent, and the wiring is continuous. None of that helps
+when the line carries traffic nobody sent.
+
+The fix is a part change, not a firmware change:
+
+- **TXB0108** in place of the TXS0108E. Same package and pinout, meant for
+  push-pull signals; the TXS variant carries pull-ups and one-shots for
+  open-drain buses and is overdriven by design, which is what makes it ring
+  here.
+- Or drop the shifter on the receive direction and use a divider: the CH375's
+  TXD is a 5 V output and two resistors bring it to 3.3 V. The transmit
+  direction can usually go straight, since the chip reads a 3.3 V high as a
+  high.
+
+Original note, kept because it was written before any of this was measured:
+
+
 The TXS0108E senses direction automatically and carries its pull-ups on both
 sides, which suits open-drain buses. A serial line is driven push-pull, and
 this part is more sensitive there than its push-pull sibling the TXB0108,

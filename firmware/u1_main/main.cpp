@@ -147,16 +147,23 @@ int main() {
     }
 
 #if DUO_CH375_PROBE
-    // Bring-up only: before anything else claims these pins, find out whether
-    // the two CH375s can be reached at all. Every later layer assumes they can.
-    // The line is left alone. Once a CH375 is in serial mode its TXD is an
-    // output, and holding that line from this end would be two drivers on one
-    // wire - which is what the mode jumper on the module is for instead.
+    // Both ports come up before anything else touches these pins. The chips
+    // are asked their four questions here and again every few seconds below,
+    // so a controller powered up later is still found.
+    static duo_input::u1::ch375::PioCh375Transport keyboard_port;
+    static duo_input::u1::ch375::PioCh375Transport mouse_port;
+    keyboard_port.begin(pio0, duo_input::u1::kPinKeyboardTx, duo_input::u1::kPinKeyboardRx,
+                        duo_input::u1::kPinKeyboardInt);
+    mouse_port.begin(pio0, duo_input::u1::kPinMouseTx, duo_input::u1::kPinMouseRx,
+                     duo_input::u1::kPinMouseInt);
+    duo_input::u1::ch375::Ch375Transport keyboard_commands(keyboard_port);
+    duo_input::u1::ch375::Ch375Transport mouse_commands(mouse_port);
     duo_input::u1::Ch375ProbeResult keyboard_probe;
     duo_input::u1::Ch375ProbeResult mouse_probe;
     std::uint32_t last_probe_ms = 0;
     bool probed_once = false;
 #endif
+
 
 #if DUO_SPI_DEBUG
     // Two independent answers, taken before the SPI block claims the pins.
@@ -242,58 +249,39 @@ int main() {
         }
         show_link(link.status().answered);
 
+
 #if DUO_CH375_PROBE
         {
             const std::uint32_t probe_now = to_ms_since_boot(get_absolute_time());
-            if (!probed_once || probe_now - last_probe_ms >= 10000) {
+            if (!probed_once || probe_now - last_probe_ms >= 5000) {
                 last_probe_ms = probe_now;
                 probed_once = true;
-                keyboard_probe = duo_input::u1::probe_ch375(duo_input::u1::kPinKeyboardTx,
-                                                            duo_input::u1::kPinKeyboardRx,
-                                                            duo_input::u1::kPinKeyboardInt);
-                mouse_probe = duo_input::u1::probe_ch375(duo_input::u1::kPinMouseTx,
-                                                         duo_input::u1::kPinMouseRx,
-                                                         duo_input::u1::kPinMouseInt);
+                keyboard_probe = duo_input::u1::probe_ch375(keyboard_port, keyboard_commands);
+                mouse_probe = duo_input::u1::probe_ch375(mouse_port, mouse_commands);
             }
 
-            std::uint8_t report[100];
-            report[0] = 0;
+            std::uint8_t report[32];
             const duo_input::u1::Ch375ProbeResult* probes[2] = {&keyboard_probe, &mouse_probe};
             for (int index = 0; index < 2; ++index) {
                 const duo_input::u1::Ch375ProbeResult& probe = *probes[index];
-                std::uint8_t* at = report + 1 + index * 12;
-                at[0] = static_cast<std::uint8_t>((probe.rx_idle_high ? 1 : 0) |
-                                                  (probe.rx_floating ? 2 : 0) |
-                                                  (probe.int_high ? 4 : 0) |
-                                                  (probe.tx_idle_high ? 8 : 0) |
-                                                  (probe.tx_floating ? 16 : 0) |
-                                                  (probe.rx_settles_high ? 32 : 0));
-                at[1] = static_cast<std::uint8_t>((probe.check_exist_answered ? 1 : 0) |
-                                                  (probe.tx_wins_when_pushed ? 2 : 0) |
-                                                  (probe.rx_wins_when_pushed ? 4 : 0));
-                at[2] = probe.check_exist_reply;
-                at[3] = probe.ic_version_answered ? 1 : 0;
-                at[4] = probe.ic_version;
-                at[5] = probe.host_mode_reply;
-                at[6] = probe.connect_answered ? 1 : 0;
-                at[7] = probe.connect_reply;
-                at[8] = static_cast<std::uint8_t>(probe.shortest_pulse_us & 0xFF);
-                at[9] = static_cast<std::uint8_t>(probe.shortest_pulse_us >> 8);
-                at[10] = static_cast<std::uint8_t>(probe.edges_seen & 0xFF);
-                at[11] = static_cast<std::uint8_t>(probe.edges_seen >> 8);
-
-                std::uint8_t* sweep = report + 25 + index * 10;
-                for (std::size_t rate = 0; rate < 5; ++rate) {
-                    sweep[rate * 2] = probe.sweep_reply[rate];
-                    sweep[rate * 2 + 1] = probe.sweep_edges[rate];
-                }
-
-                std::uint8_t* trace = report + 45 + index * 26;
-                trace[0] = probe.edge_count;
-                trace[1] = probe.level_before_first_edge ? 1 : 0;
-                for (std::size_t edge = 0; edge < 12; ++edge) {
-                    trace[2 + edge * 2] = static_cast<std::uint8_t>(probe.edge_us[edge] & 0xFF);
-                    trace[3 + edge * 2] = static_cast<std::uint8_t>(probe.edge_us[edge] >> 8);
+                std::uint8_t* at = report + index * 8;
+                at[0] = static_cast<std::uint8_t>((probe.answered ? 1 : 0) |
+                                                  (probe.check_exist_ok ? 2 : 0) |
+                                                  (probe.ic_version_answered ? 4 : 0) |
+                                                  (probe.host_mode_ok ? 8 : 0) |
+                                                  (probe.connect_answered ? 16 : 0) |
+                                                  (probe.int_asserted ? 32 : 0));
+                at[1] = probe.check_exist_reply;
+                at[2] = probe.ic_version;
+                at[3] = probe.host_mode_reply;
+                at[4] = probe.connect_reply;
+                at[5] = static_cast<std::uint8_t>(probe.framing_errors);
+                at[6] = probe.raw_count;
+                at[7] = probe.quiet_frames;
+                std::uint8_t* raw = report + 16 + index * 8;
+                for (std::size_t word = 0; word < 4; ++word) {
+                    raw[word * 2] = static_cast<std::uint8_t>(probe.raw[word] & 0xFF);
+                    raw[word * 2 + 1] = static_cast<std::uint8_t>(probe.raw[word] >> 8);
                 }
             }
             config.set_link_debug(report, sizeof(report));

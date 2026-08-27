@@ -1,0 +1,52 @@
+; A nine-bit serial port, because the CH375 does not have an eight-bit one.
+;
+; The chip's frame is one start bit, nine data bits and one stop bit. The ninth
+; bit is not data: it says whether the other eight are a command or a data byte
+; (CH375 Datasheet (I), section 6.2.2). An RP2040's hardware UART does five to
+; eight bits and no more, so the port has to be built rather than configured.
+;
+; Both programs run at eight cycles per bit, so the state machine clock is the
+; baud rate times eight.
+;
+; This replaces a hand-timed loop that could send but never reliably receive.
+; Reading a serial line by counting instructions works until something else on
+; the wire is slower than expected - and this line runs through a level shifter
+; that rings for microseconds after every edge. A state machine samples on a
+; clock instead of on hope.
+
+.program ch375_tx
+.side_set 1 opt
+
+; OUT pin 0 and the side-set pin are both the transmit line.
+; Autopull is set to nine bits: the caller writes the byte with the command
+; flag already in bit 8.
+
+    pull       side 1 [7]  ; hold the line idle-high until there is something
+    set x, 8   side 0 [7]  ; start bit, and nine bits to send
+bitloop:
+    out pins, 1            ; one bit, least significant first
+    jmp x-- bitloop   [6]  ; eight cycles per bit
+
+.program ch375_rx
+
+; IN pin 0 and the JMP pin are both the receive line.
+; Autopush is set to nine bits.
+
+start:
+    wait 0 pin 0           ; a start bit
+    set x, 8    [10]       ; nine bits, and wait until the middle of the first
+bitloop:
+    in pins, 1             ; sample, least significant first
+    jmp x-- bitloop [6]    ; eight cycles per bit
+    jmp pin good_stop      ; the stop bit has to be high
+
+    ; It was not. Either the framing is wrong or the line broke mid-frame.
+    ; Nothing is pushed: a frame this port could not read must not reach the
+    ; caller as a byte, because a wrong byte from a USB host controller is
+    ; acted on exactly like a right one.
+    irq 4 rel
+    wait 1 pin 0           ; wait for the line to go idle again
+    jmp start
+
+good_stop:
+    push                   ; no delay here, so a slightly fast sender still fits

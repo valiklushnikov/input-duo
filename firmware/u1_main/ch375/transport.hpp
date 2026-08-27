@@ -47,9 +47,14 @@ public:
 
 /// How long to wait for a byte the chip owes us.
 ///
-/// Every documented command answers within tens of microseconds; a millisecond
-/// is far past "slow" and well short of anything a person would notice.
-inline constexpr std::uint32_t kDefaultReplyTimeoutUs = 1000;
+/// The chip's own processing is documented in microseconds, but the byte still
+/// has to cross the wire: eleven bits at 9600 bps is 1.15 ms, so a timeout of
+/// one millisecond gives up before a perfectly good answer has finished
+/// arriving - and then reads the tail of it as the start of the next one.
+///
+/// That happened. Twenty milliseconds is far past any real answer and still
+/// far below anything a person would notice.
+inline constexpr std::uint32_t kDefaultReplyTimeoutUs = 20000;
 
 class Ch375Transport {
 public:

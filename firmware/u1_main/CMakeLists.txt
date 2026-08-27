@@ -10,6 +10,7 @@ add_executable(duo_u1_main
     pico_flash.cpp
     buttons.cpp
     ch375_probe.cpp
+    ch375/pio_transport.cpp
     diagnostics_service.cpp
 )
 
@@ -23,6 +24,7 @@ target_link_libraries(duo_u1_main PRIVATE
     tinyusb_device
     pico_multicore
     pico_unique_id
+    hardware_pio
     hardware_spi
     hardware_flash
     hardware_sync
@@ -31,6 +33,8 @@ target_link_libraries(duo_u1_main PRIVATE
 
 # No stdio on either interface. USB is owned by TinyUSB, and a stray printf on
 # UART is a pin this board does not have to spare.
+pico_generate_pio_header(duo_u1_main ${CMAKE_CURRENT_LIST_DIR}/ch375/ch375_serial.pio)
+
 pico_enable_stdio_usb(duo_u1_main 0)
 pico_enable_stdio_uart(duo_u1_main 0)
 
