@@ -17,7 +17,7 @@
 #include <vector>
 
 using duo_input::config::MacroStepType;
-using duo_input::hid::Target;
+using duo_input::runtime::Route;
 using duo_input::u1::input::InputEventKind;
 using duo_input::u1::macros::kMacroQueueDepth;
 using duo_input::u1::macros::MacroDefinition;
@@ -129,7 +129,7 @@ TEST_CASE(a_tap_is_a_press_and_a_release) {
     scheduler.define(0, MacroDefinition{steps, 1});
     Recorder recorder;
 
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
     recorder.drain(scheduler, 1000);
 
     CHECK_EQ(recorder.keys(InputEventKind::KeyDown, 0x04), 1);
@@ -141,7 +141,7 @@ TEST_CASE(a_macro_ends_and_stops_being_active) {
     MacroScheduler scheduler;
     scheduler.define(0, MacroDefinition{steps, 1});
     Recorder recorder;
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
 
     recorder.drain(scheduler, 1000);
 
@@ -154,13 +154,14 @@ TEST_CASE(every_step_carries_the_target_it_was_started_for) {
     scheduler.define(0, MacroDefinition{steps, 1});
     Recorder recorder;
 
-    scheduler.enqueue(0, Target::Pc2, 1000);
+    scheduler.enqueue(0, Route::Pc2, 1000);
     recorder.drain(scheduler, 1000);
 
     // A macro typed onto the wrong computer is worse than one that does not
-    // run: the person is looking at the other screen.
+    // run: the person is looking at the other screen. And a macro started
+    // while input goes to both must reach both.
     CHECK(!recorder.outputs.empty());
-    CHECK_EQ(static_cast<int>(recorder.outputs[0].target), static_cast<int>(Target::Pc2));
+    CHECK_EQ(static_cast<int>(recorder.outputs[0].route), static_cast<int>(Route::Pc2));
 }
 
 // ---------------------------------------------------------------- delays
@@ -170,7 +171,7 @@ TEST_CASE(a_delay_stops_the_macro_and_not_the_loop) {
     MacroScheduler scheduler;
     scheduler.define(0, MacroDefinition{steps, 3});
     Recorder recorder;
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
 
     recorder.drain(scheduler, 1000);
 
@@ -186,7 +187,7 @@ TEST_CASE(a_delay_ends_when_it_says_it_will) {
     MacroScheduler scheduler;
     scheduler.define(0, MacroDefinition{steps, 2});
     Recorder recorder;
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
     recorder.drain(scheduler, 1000);
 
     recorder.drain(scheduler, 1049);
@@ -203,7 +204,7 @@ TEST_CASE(a_random_delay_asks_the_source_it_was_given) {
     MacroScheduler scheduler(&random);
     scheduler.define(0, MacroDefinition{steps, 2});
     Recorder recorder;
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
 
     recorder.drain(scheduler, 1000);
     recorder.drain(scheduler, 1039);
@@ -224,7 +225,7 @@ TEST_CASE(a_deadline_that_crosses_the_clock_wrapping_still_ends) {
     // than subtracted, a deadline on the far side of that reads as either no
     // wait at all or a wait of seven weeks.
     const std::uint32_t near_the_end = 0xFFFFFFC0u;
-    scheduler.enqueue(0, Target::Pc1, near_the_end);
+    scheduler.enqueue(0, Route::Pc1, near_the_end);
     recorder.drain(scheduler, near_the_end);
 
     // Half way through, on the near side of the wrap. A plain comparison
@@ -247,8 +248,8 @@ TEST_CASE(a_macro_started_while_one_is_running_waits_its_turn) {
     scheduler.define(1, MacroDefinition{second, 1});
     Recorder recorder;
 
-    scheduler.enqueue(0, Target::Pc1, 1000);
-    scheduler.enqueue(1, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
+    scheduler.enqueue(1, Route::Pc1, 1000);
     recorder.drain(scheduler, 1000);
 
     // Two macros typing at once would interleave their keystrokes into
@@ -264,8 +265,8 @@ TEST_CASE(the_waiting_macro_runs_when_the_first_finishes) {
     scheduler.define(0, MacroDefinition{first, 2});
     scheduler.define(1, MacroDefinition{second, 1});
     Recorder recorder;
-    scheduler.enqueue(0, Target::Pc1, 1000);
-    scheduler.enqueue(1, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
+    scheduler.enqueue(1, Route::Pc1, 1000);
 
     recorder.drain(scheduler, 1000);
     recorder.drain(scheduler, 1050);
@@ -279,17 +280,17 @@ TEST_CASE(four_can_wait_and_the_fifth_is_refused) {
     MacroScheduler scheduler;
     scheduler.define(0, MacroDefinition{steps, 1});
     MacroOutput ignored;
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
     scheduler.tick(1000, ignored);
 
     for (std::size_t index = 0; index < kMacroQueueDepth; ++index) {
-        CHECK(scheduler.enqueue(0, Target::Pc1, 1000));
+        CHECK(scheduler.enqueue(0, Route::Pc1, 1000));
     }
 
     // Refused rather than dropped silently or run late: somebody leaning on a
     // bound key should not queue up a minute of typing that arrives after
     // they have moved on.
-    CHECK(!scheduler.enqueue(0, Target::Pc1, 1000));
+    CHECK(!scheduler.enqueue(0, Route::Pc1, 1000));
     CHECK_EQ(scheduler.queued_count(), kMacroQueueDepth);
 }
 
@@ -304,7 +305,7 @@ TEST_CASE(stopping_releases_what_the_macro_is_holding) {
     MacroScheduler scheduler;
     scheduler.define(0, MacroDefinition{steps, 3});
     Recorder recorder;
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
     recorder.drain(scheduler, 1000);
     recorder.outputs.clear();
 
@@ -322,9 +323,9 @@ TEST_CASE(stopping_clears_the_queue_as_well) {
     MacroScheduler scheduler;
     scheduler.define(0, MacroDefinition{steps, 1});
     MacroOutput ignored;
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
     scheduler.tick(1000, ignored);
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
 
     scheduler.stop_all();
 
@@ -340,7 +341,7 @@ TEST_CASE(a_macro_that_ends_normally_releases_what_it_pressed) {
     scheduler.define(0, MacroDefinition{steps, 1});
     Recorder recorder;
 
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
     recorder.drain(scheduler, 1000);
 
     // A macro that presses without releasing has written a bug into somebody
@@ -354,7 +355,7 @@ TEST_CASE(a_key_the_macro_already_released_is_not_released_twice) {
     scheduler.define(0, MacroDefinition{steps, 2});
     Recorder recorder;
 
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
     recorder.drain(scheduler, 1000);
 
     CHECK_EQ(recorder.keys(InputEventKind::KeyUp, 0x04), 1);
@@ -372,7 +373,7 @@ TEST_CASE(a_macro_holding_more_keys_than_a_keyboard_can_report_is_abandoned) {
     scheduler.define(0, MacroDefinition{steps, 7});
     Recorder recorder;
 
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
     recorder.drain(scheduler, 1000);
 
     CHECK_EQ(static_cast<int>(scheduler.last_stop_reason()),
@@ -387,7 +388,7 @@ TEST_CASE(abandoning_a_macro_still_releases_what_it_had_pressed) {
     scheduler.define(0, MacroDefinition{steps, 7});
     Recorder recorder;
 
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
     recorder.drain(scheduler, 1000);
 
     CHECK_EQ(recorder.keys(InputEventKind::KeyUp, 0x04), 1);
@@ -402,7 +403,7 @@ TEST_CASE(a_profile_step_asks_for_the_profile) {
     scheduler.define(0, MacroDefinition{steps, 1});
     Recorder recorder;
 
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
     recorder.drain(scheduler, 1000);
 
     CHECK_EQ(recorder.count_of(MacroOutputKind::SetProfile), 1);
@@ -417,7 +418,7 @@ TEST_CASE(a_route_step_asks_for_the_route) {
     scheduler.define(0, MacroDefinition{steps, 1});
     Recorder recorder;
 
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
     recorder.drain(scheduler, 1000);
 
     CHECK_EQ(recorder.count_of(MacroOutputKind::SetMouseRoute), 1);
@@ -433,7 +434,7 @@ TEST_CASE(a_consumer_tap_is_pressed_and_released) {
     scheduler.define(0, MacroDefinition{steps, 1});
     Recorder recorder;
 
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
     recorder.drain(scheduler, 1000);
 
     // Held down, the volume climbs until something releases it.
@@ -449,7 +450,7 @@ TEST_CASE(a_consumer_tap_cut_short_is_still_released) {
     MacroScheduler scheduler;
     scheduler.define(0, MacroDefinition{steps, 1});
     Recorder recorder;
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
     MacroOutput first;
     scheduler.tick(1000, first);  // the press, and nothing more
 
@@ -467,7 +468,7 @@ TEST_CASE(text_is_compiled_by_the_host_and_skipped_here) {
     scheduler.define(0, MacroDefinition{steps, 2});
     Recorder recorder;
 
-    scheduler.enqueue(0, Target::Pc1, 1000);
+    scheduler.enqueue(0, Route::Pc1, 1000);
     recorder.drain(scheduler, 1000);
 
     // Turning characters into usages needs a keyboard layout, and the device
@@ -479,7 +480,7 @@ TEST_CASE(text_is_compiled_by_the_host_and_skipped_here) {
 TEST_CASE(an_undefined_macro_is_refused_rather_than_run_empty) {
     MacroScheduler scheduler;
 
-    CHECK(!scheduler.enqueue(7, Target::Pc1, 1000));
+    CHECK(!scheduler.enqueue(7, Route::Pc1, 1000));
     CHECK(!scheduler.active());
 }
 
@@ -504,7 +505,7 @@ TEST_CASE(ten_thousand_starts_and_stops_leave_nothing_held) {
     int up = 0;
     std::uint32_t now = 1000;
     for (int round = 0; round < 10000; ++round) {
-        scheduler.enqueue(0, Target::Pc1, now);
+        scheduler.enqueue(0, Route::Pc1, now);
         for (int step = 0; step < 4; ++step) {
             MacroOutput output;
             while (scheduler.tick(now, output)) {

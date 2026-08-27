@@ -48,7 +48,8 @@ bool MacroScheduler::release(std::uint16_t usage) {
     return false;
 }
 
-bool MacroScheduler::enqueue(std::uint8_t macro_id, hid::Target target, std::uint32_t now_ms) {
+bool MacroScheduler::enqueue(std::uint8_t macro_id, runtime::Route route,
+                             std::uint32_t now_ms) {
     if (macro_id >= kMaxMacros || macros_[macro_id].steps == nullptr ||
         macros_[macro_id].count == 0) {
         // Nothing to run. Saying so beats starting something empty and
@@ -58,7 +59,7 @@ bool MacroScheduler::enqueue(std::uint8_t macro_id, hid::Target target, std::uin
 
     if (!running_ && releasing_ == 0) {
         current_ = macro_id;
-        target_ = target;
+        route_ = route;
         cursor_ = 0;
         waiting_ = false;
         running_ = true;
@@ -71,7 +72,7 @@ bool MacroScheduler::enqueue(std::uint8_t macro_id, hid::Target target, std::uin
         return false;
     }
     queue_[queued_].macro_id = macro_id;
-    queue_[queued_].target = target;
+    queue_[queued_].route = route;
     ++queued_;
     return true;
 }
@@ -81,7 +82,7 @@ bool MacroScheduler::start_next(std::uint32_t now_ms) {
         return false;
     }
     current_ = queue_[0].macro_id;
-    target_ = queue_[0].target;
+    route_ = queue_[0].route;
     for (std::size_t index = 1; index < queued_; ++index) {
         queue_[index - 1] = queue_[index];
     }
@@ -120,7 +121,8 @@ bool MacroScheduler::emit_release(MacroOutput& output) {
     --held_count_;
 
     output.kind = MacroOutputKind::SendInput;
-    output.target = target_;
+    output.route = route_;
+    output.owner = current_;
     output.event = InputEvent{};
     output.event.kind = InputEventKind::KeyUp;
     output.event.code = usage;
@@ -147,7 +149,8 @@ bool MacroScheduler::tick(std::uint32_t now_ms, MacroOutput& output) {
         tap_pending_ = false;
         (void)release(tap_usage_);
         output.kind = MacroOutputKind::SendInput;
-        output.target = target_;
+        output.route = route_;
+    output.owner = current_;
         output.event.kind = tap_release_kind_;
         output.event.code = tap_usage_;
         return true;
@@ -202,7 +205,8 @@ bool MacroScheduler::tick(std::uint32_t now_ms, MacroOutput& output) {
                 return emit_release(output);
             }
             output.kind = MacroOutputKind::SendInput;
-            output.target = target_;
+            output.route = route_;
+    output.owner = current_;
             output.event.kind = InputEventKind::KeyDown;
             output.event.code = step.code;
             return true;
@@ -214,7 +218,8 @@ bool MacroScheduler::tick(std::uint32_t now_ms, MacroOutput& output) {
                 return tick(now_ms, output);
             }
             output.kind = MacroOutputKind::SendInput;
-            output.target = target_;
+            output.route = route_;
+    output.owner = current_;
             output.event.kind = InputEventKind::KeyUp;
             output.event.code = step.code;
             return true;
@@ -232,7 +237,8 @@ bool MacroScheduler::tick(std::uint32_t now_ms, MacroOutput& output) {
             tap_usage_ = step.code;
             tap_release_kind_ = InputEventKind::KeyUp;
             output.kind = MacroOutputKind::SendInput;
-            output.target = target_;
+            output.route = route_;
+    output.owner = current_;
             output.event.kind = InputEventKind::KeyDown;
             output.event.code = step.code;
             return true;
@@ -244,7 +250,8 @@ bool MacroScheduler::tick(std::uint32_t now_ms, MacroOutput& output) {
             tap_usage_ = step.code;
             tap_release_kind_ = InputEventKind::ConsumerUp;
             output.kind = MacroOutputKind::SendInput;
-            output.target = target_;
+            output.route = route_;
+    output.owner = current_;
             output.event.kind = InputEventKind::ConsumerDown;
             output.event.code = step.code;
             return true;

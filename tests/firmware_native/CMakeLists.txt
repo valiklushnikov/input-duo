@@ -343,3 +343,25 @@ if(MSVC)
 endif()
 
 add_test(NAME macro_scheduler COMMAND duo_macro_scheduler_test)
+
+add_executable(duo_core1_runtime_test
+    test_main.cpp
+    test_core1_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/core1_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/macros/scheduler.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/capture.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/engine.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/routes.cpp
+)
+
+target_link_libraries(duo_core1_runtime_test PRIVATE duo_common)
+target_include_directories(duo_core1_runtime_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+if(MSVC)
+    target_compile_options(duo_core1_runtime_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME core1_runtime COMMAND duo_core1_runtime_test)

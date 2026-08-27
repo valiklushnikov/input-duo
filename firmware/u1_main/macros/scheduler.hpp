@@ -21,8 +21,8 @@
 #include <cstdint>
 
 #include "config/format.hpp"
-#include "hid/types.hpp"
 #include "input/events.hpp"
+#include "runtime/output_command.hpp"
 #include "macros/steps.hpp"
 
 namespace duo_input::u1::macros {
@@ -48,7 +48,12 @@ enum class MacroOutputKind : std::uint8_t {
 struct MacroOutput {
     MacroOutputKind kind = MacroOutputKind::None;
     input::InputEvent event{};
-    hid::Target target = hid::Target::Pc1;
+    /// Where this goes - which can be both computers at once, so this is a
+    /// route and not a single target.
+    runtime::Route route = runtime::Route::Pc1;
+    /// Which macro this came from. Core 0 keeps a macro's keys apart from the
+    /// operator's, so letting go of one does not let go of the other.
+    std::uint8_t owner = 0;
     std::uint8_t parameter = 0;
 };
 
@@ -83,7 +88,7 @@ public:
     /// Refused rather than dropped quietly: somebody leaning on a bound key
     /// should not queue up a minute of typing that arrives after they have
     /// moved on.
-    bool enqueue(std::uint8_t macro_id, hid::Target target, std::uint32_t now_ms);
+    bool enqueue(std::uint8_t macro_id, runtime::Route route, std::uint32_t now_ms);
 
     /// Take the next thing to do, if there is one right now.
     ///
@@ -102,7 +107,7 @@ public:
 private:
     struct Pending {
         std::uint8_t macro_id = 0;
-        hid::Target target = hid::Target::Pc1;
+        runtime::Route route = runtime::Route::Pc1;
     };
 
     bool start_next(std::uint32_t now_ms);
@@ -116,7 +121,7 @@ private:
 
     bool running_ = false;
     std::uint8_t current_ = 0;
-    hid::Target target_ = hid::Target::Pc1;
+    runtime::Route route_ = runtime::Route::Pc1;
     std::size_t cursor_ = 0;
     /// When the current delay is over. Compared by subtraction, because the
     /// millisecond counter wraps after 49 days.

@@ -242,40 +242,7 @@ Outcome BindingEngine::handle(const InputEvent& event) {
                                   binding->action == config::ActionKind::TOGGLE_KEYBOARD_ROUTE;
             const bool toggle = binding->action == config::ActionKind::TOGGLE_KEYBOARD_ROUTE ||
                                 binding->action == config::ActionKind::TOGGLE_MOUSE_ROUTE;
-
-            // Whether the move is allowed at all is settled first. A refused
-            // route must release nothing: letting go of a computer's keys
-            // because somebody asked for an impossible route would be a fault
-            // of its own.
-            const bool allowed =
-                toggle ? true
-                       : (keyboard ? Routes::keyboard_route_is_valid(
-                                         static_cast<config::KeyboardRoute>(binding->parameter))
-                                   : Routes::mouse_route_is_valid(
-                                         static_cast<config::MouseRoute>(binding->parameter)));
-            if (!allowed) {
-                break;
-            }
-
-            // Released before the route moves, while "where this reaches"
-            // still means the computer being left behind. That machine will
-            // never hear about these keys again.
-            release_reached(outcome, keyboard, !keyboard);
-            orphan(keyboard, !keyboard);
-
-            if (keyboard) {
-                if (toggle) {
-                    routes_.toggle_keyboard();
-                } else {
-                    routes_.set_keyboard(static_cast<config::KeyboardRoute>(binding->parameter));
-                }
-            } else {
-                if (toggle) {
-                    routes_.toggle_mouse();
-                } else {
-                    routes_.set_mouse(static_cast<config::MouseRoute>(binding->parameter));
-                }
-            }
+            move_route(outcome, keyboard, toggle, binding->parameter);
             break;
         }
 
@@ -293,6 +260,55 @@ Outcome BindingEngine::handle(const InputEvent& event) {
         }
     }
 
+    return outcome;
+}
+
+bool BindingEngine::move_route(Outcome& outcome, bool keyboard, bool toggle,
+                               std::uint8_t parameter) {
+    // Whether the move is allowed at all is settled first. A refused route
+    // must release nothing: letting go of a computer's keys because somebody
+    // asked for an impossible route would be a fault of its own.
+    const bool allowed =
+        toggle ? true
+               : (keyboard
+                      ? Routes::keyboard_route_is_valid(
+                            static_cast<config::KeyboardRoute>(parameter))
+                      : Routes::mouse_route_is_valid(static_cast<config::MouseRoute>(parameter)));
+    if (!allowed) {
+        return false;
+    }
+
+    // Released before the route moves, while "where this reaches" still means
+    // the computer being left behind. That machine will never hear about these
+    // keys again.
+    release_reached(outcome, keyboard, !keyboard);
+    orphan(keyboard, !keyboard);
+
+    if (keyboard) {
+        if (toggle) {
+            routes_.toggle_keyboard();
+        } else {
+            routes_.set_keyboard(static_cast<config::KeyboardRoute>(parameter));
+        }
+    } else {
+        if (toggle) {
+            routes_.toggle_mouse();
+        } else {
+            routes_.set_mouse(static_cast<config::MouseRoute>(parameter));
+        }
+    }
+    return true;
+}
+
+Outcome BindingEngine::set_keyboard_route(config::KeyboardRoute route) {
+    Outcome outcome;
+    move_route(outcome, true, false, static_cast<std::uint8_t>(route));
+    return outcome;
+}
+
+Outcome BindingEngine::set_mouse_route(config::MouseRoute route) {
+    Outcome outcome;
+    move_route(outcome, false, false, static_cast<std::uint8_t>(route));
     return outcome;
 }
 

@@ -74,6 +74,13 @@ public:
     /// operator cannot see which computer is holding what, so it reaches both.
     Outcome release_everything();
 
+    /// Move a route because something other than a binding asked - a macro
+    /// step, or the host. Releases the computer being left behind exactly as
+    /// the binding path does, because the reason for the move does not change
+    /// what happens to the keys that were held for the old one.
+    Outcome set_keyboard_route(config::KeyboardRoute route);
+    Outcome set_mouse_route(config::MouseRoute route);
+
     config::KeyboardRoute keyboard_route() const { return routes_.keyboard(); }
     config::MouseRoute mouse_route() const { return routes_.mouse(); }
 
@@ -101,6 +108,8 @@ private:
     /// before the route moves, while "currently" still means the old one.
     void release_reached(Outcome& outcome, bool keyboard, bool mouse) const;
     void release_both(Outcome& outcome) const;
+    /// The one place a route actually moves. Returns false if it was refused.
+    bool move_route(Outcome& outcome, bool keyboard, bool toggle, std::uint8_t parameter);
 
     Routes routes_;
     Binding bindings_[kMaxBindings];
