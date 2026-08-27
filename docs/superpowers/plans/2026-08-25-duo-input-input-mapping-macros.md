@@ -13,7 +13,15 @@
 ## Global Constraints
 
 - Сначала завершить foundation и core firmware plans.
-- UART0: GP0 TX/GP1 RX/GP2 INT; UART1: GP4 TX/GP5 RX/GP6 INT; TXS OE = GP7.
+- GP0 TX/GP1 RX/GP2 INT for the keyboard; GP4 TX/GP5 RX/GP6 INT for the mouse.
+  See `docs/hardware/ch375-wiring.md` for the board as actually built.
+- **Not the hardware UARTs.** CH375's serial format is nine data bits, the
+  ninth marking command versus data (DS1 6.2.2). An RP2040 UART does five to
+  eight. These ports are PIO, which takes the same pins.
+- **TXS OE is tied to VCCA on this board, not to GP7.** The shifter is enabled
+  whenever it has power and firmware cannot hold it off; GP7 is free. Both
+  ends of every line idle high through pull-ups, so there is nothing for the
+  OE step to have prevented.
 - ISR только выставляет flag; CH375 commands/read/parse выполняются в Core 1 loop.
 - Гарантия MVP: одна стандартная проводная keyboard и одна standard mouse; hubs/vendor-specific не гарантируются.
 - KeyboardRoute = PC1/PC2/BOTH; MouseRoute = PC1/PC2 only.
@@ -53,7 +61,7 @@ docs/hardware/ch375-compatibility.md
 - Produces: `ICh375Transport::write_command`, `write_data`, `read_data`, `int_asserted`, `now_us`.
 - Produces: enum command/status values transcribed once from WCH CH375 host documentation and cross-referenced by table page/section.
 
-- [ ] **Step 1: Write scripted interaction test**
+- [x] **Step 1: Write scripted interaction test**
 
 ```cpp
 TEST_CASE(check_exist_requires_inverted_reply) {
@@ -66,19 +74,19 @@ TEST_CASE(check_exist_requires_inverted_reply) {
 
 Add timeout, wrong inverse, RX overflow and unexpected byte cases.
 
-- [ ] **Step 2: Verify red state**
+- [x] **Step 2: Verify red state**
 
 Run native CH375 transport tests; expected missing interfaces.
 
-- [ ] **Step 3: Transcribe and implement exact command contract**
+- [x] **Step 3: Transcribe and implement exact command contract**
 
 Document and encode at least `CHECK_EXIST`, `SET_USB_MODE`, `GET_STATUS`, `RD_USB_DATA0`, `SET_USB_ADDR`, `SET_USB_SPEED`, endpoint toggle/control-transfer commands and token issue commands used by enumeration/polling. Each constant must cite WCH document section in `ch375-command-table.md`; do not copy constants from random Arduino libraries.
 
-- [ ] **Step 4: Run scripted suite**
+- [x] **Step 4: Run scripted suite**
 
 Expected: every script fully consumed; no production transport waits forever; all waits accept absolute deadline.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add docs/hardware firmware/u1_main/ch375 tests/firmware_native
@@ -108,7 +116,9 @@ Run `test_ch375_device`.
 
 - [ ] **Step 3: Implement two instances**
 
-Configure UART baud from the verified module protocol, 8N1, GP2/GP6 active-low interrupts and GP7 OE low until both UARTs/GPIO are initialized. ISR sets one atomic flag per device. Device failure schedules retry at `now+1000ms`.
+Configure baud from the verified module protocol, **nine data bits** (the ninth is the command flag - DS1 6.2.2, so PIO rather than the hardware UART), GP2/GP6 active-low interrupts. ISR sets one atomic flag per device. Device failure schedules retry at `now+1000ms`.
+
+The OE step from the original plan is dropped: on this board OE is tied to VCCA and no firmware can hold it low. See `docs/hardware/ch375-wiring.md`.
 
 - [ ] **Step 4: Hardware diagnostic build**
 
