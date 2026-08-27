@@ -244,3 +244,24 @@ if(MSVC)
 endif()
 
 add_test(NAME ch375_enumerator COMMAND duo_ch375_enumerator_test)
+
+add_executable(duo_hid_parser_test
+    test_main.cpp
+    test_hid_parser.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/hid_parser.cpp
+)
+
+target_link_libraries(duo_hid_parser_test PRIVATE duo_common)
+target_include_directories(duo_hid_parser_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_compile_definitions(duo_hid_parser_test PRIVATE
+    DUO_HID_DESCRIPTORS_PATH="${CMAKE_SOURCE_DIR}/tests/vectors/hid_descriptors"
+)
+
+if(MSVC)
+    target_compile_options(duo_hid_parser_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME hid_parser COMMAND duo_hid_parser_test)
