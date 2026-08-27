@@ -9,6 +9,7 @@ add_executable(duo_u1_main
     config_service.cpp
     pico_flash.cpp
     buttons.cpp
+    ch375_probe.cpp
     diagnostics_service.cpp
 )
 
@@ -39,9 +40,14 @@ option(DUO_TEST_PATTERN "Generate synthetic input on Core 1" OFF)
 # Bring-up only: replaces the diagnostics reply with raw link bytes, which the
 # configurator cannot parse. Never enabled in a release build.
 option(DUO_SPI_DEBUG "Report raw SPI link bytes over CDC" OFF)
+# Bring-up only: bit-bangs the CH375 serial lines before anything else claims
+# them and reports what answered, so a soldering mistake can be found before a
+# driver exists to blame. Never enabled in a release build.
+option(DUO_CH375_PROBE "Probe both CH375s over CDC at start-up" OFF)
 target_compile_definitions(duo_u1_main PRIVATE
     DUO_TEST_PATTERN=$<BOOL:${DUO_TEST_PATTERN}>
     DUO_SPI_DEBUG=$<BOOL:${DUO_SPI_DEBUG}>
+    DUO_CH375_PROBE=$<BOOL:${DUO_CH375_PROBE}>
 )
 
 pico_add_extra_outputs(duo_u1_main)

@@ -296,7 +296,7 @@ std::size_t ConfigService::config_info_payload(CdcError error, std::uint8_t* out
     return 9 + crypto::kSha256DigestSize;
 }
 
-#if DUO_SPI_DEBUG
+#if DUO_SPI_DEBUG || DUO_CH375_PROBE
 void ConfigService::set_link_debug(const std::uint8_t* bytes, std::size_t size) {
     link_debug_size_ = size < sizeof(link_debug_) ? size : sizeof(link_debug_);
     std::memcpy(link_debug_, bytes, link_debug_size_);
@@ -304,7 +304,7 @@ void ConfigService::set_link_debug(const std::uint8_t* bytes, std::size_t size) 
 #endif
 
 std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out) const {
-#if DUO_SPI_DEBUG
+#if DUO_SPI_DEBUG || DUO_CH375_PROBE
     out[0] = static_cast<std::uint8_t>(error);
     std::memcpy(out + 1, link_debug_, link_debug_size_);
     return 1 + link_debug_size_;

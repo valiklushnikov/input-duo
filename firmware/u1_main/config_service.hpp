@@ -114,7 +114,7 @@ public:
 
     const CdcDiagnostics& diagnostics() const { return diagnostics_; }
 
-#if DUO_SPI_DEBUG
+#if DUO_SPI_DEBUG || DUO_CH375_PROBE
     /// Bytes reported in place of the ordinary diagnostics, for bring-up only.
     ///
     /// This replaces a frozen protocol reply with something the configurator
@@ -183,8 +183,8 @@ private:
     CdcDiagnostics diagnostics_{};
     LinkState link_state_{};
 
-#if DUO_SPI_DEBUG
-    std::uint8_t link_debug_[48] = {};
+#if DUO_SPI_DEBUG || DUO_CH375_PROBE
+    std::uint8_t link_debug_[128] = {};
     std::size_t link_debug_size_ = 0;
 #endif
 };

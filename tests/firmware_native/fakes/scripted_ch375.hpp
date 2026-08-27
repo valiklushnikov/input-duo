@@ -1,17 +1,23 @@
 #pragma once
 
-// A CH375 that exists only as a written-down conversation.
+// Two fake CH375s: one that recites, one that behaves.
 //
-// The transport layer is told what to say and what to expect back, in order.
-// Anything the code under test sends that the script did not expect is
-// recorded rather than ignored, because a port out of step with this chip is
-// the failure that matters: the CH375 answers commands positionally, so one
-// extra or missing byte turns every later reply into plausible nonsense.
+// ScriptedCh375 exists only as a written-down conversation, and is what the
+// transport tests need - they are about the exact bytes of each command, in
+// order. Ch375Device cannot be tested that way: it decides what to ask next
+// from the state it is in, so a fixed script would be asserting the state
+// machine's shape rather than its behaviour. FakeCh375Chip answers the way a
+// chip does, whatever order it is asked in, and can be told to misbehave.
 //
-// The clock only moves when the code under test looks for a byte that has not
-// arrived. That makes a timeout deterministic - it takes exactly as many polls
-// as the deadline allows - and it makes a test that would spin forever finish
-// and fail instead.
+// In both, the clock moves only when the code under test looks for a byte that
+// has not arrived. That makes a timeout deterministic - it takes exactly as
+// many polls as the deadline allows - and it makes a test that would otherwise
+// spin forever finish and fail instead.
+//
+// ScriptedCh375 records anything sent that the script did not expect rather
+// than ignoring it, because a port out of step with this chip is the failure
+// that matters: the CH375 answers commands positionally, so one extra or
+// missing byte turns every later reply into plausible nonsense.
 
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +26,7 @@
 #include <vector>
 
 #include "ch375/commands.hpp"
+#include "ch375/device.hpp"
 #include "ch375/transport.hpp"
 
 namespace duo_input::u1::ch375::testing {
@@ -83,6 +90,99 @@ private:
     bool int_asserted_ = false;
     std::uint32_t start_us_ = 1000;
     std::uint32_t now_us_ = 1000;
+};
+
+/// A CH375 that behaves like one, for testing a state machine against.
+///
+/// It models what the lifecycle depends on and nothing else: the interrupt
+/// line, the pending status byte, the working mode, a device that can be
+/// plugged in and pulled out, and reports waiting to be read. It can also be
+/// told to answer nonsense or to stop answering, because those are the cases
+/// the firmware exists to survive.
+class FakeCh375Chip final : public ICh375Transport {
+public:
+    // --- the port ----------------------------------------------------------
+
+    void write_command(std::uint8_t command) override;
+    void write_data(std::uint8_t value) override;
+    bool read_data(std::uint8_t& value) override;
+    bool int_asserted() const override { return int_asserted_; }
+    std::uint32_t now_us() const override { return now_us_; }
+
+    // --- the scene ---------------------------------------------------------
+
+    void attach_device();
+    void detach_device();
+
+    /// Give the device something to say the next time it is polled.
+    void queue_report(const std::uint8_t* data, std::size_t size);
+
+    /// Answer every command with a byte that means nothing.
+    void answer_garbage(bool broken) { garbage_ = broken; }
+
+    /// Stop answering at all, as a chip with a broken port would.
+    void go_silent(bool silent) { silent_ = silent; }
+
+    void advance(std::uint32_t micros) { now_us_ += micros; }
+
+    UsbMode mode() const { return mode_; }
+    bool saw_bus_reset() const { return saw_bus_reset_; }
+    /// How many times the USB bus has been reset - one per setup attempt.
+    std::uint32_t reset_count() const { return reset_count_; }
+
+    /// How many times a working mode has been asked for.
+    ///
+    /// This is what counts attempts when the chip is misbehaving: a controller
+    /// that refuses host mode never gets as far as resetting the bus, so
+    /// reset_count would sit at zero however many times it was retried.
+    std::uint32_t mode_set_count() const { return mode_set_count_; }
+
+    std::uint32_t command_count() const { return command_count_; }
+    void reset_command_count() { command_count_ = 0; }
+
+private:
+    void queue(std::uint8_t value);
+
+    std::uint8_t pending_command_ = 0;
+    bool expecting_data_ = false;
+
+    std::vector<std::uint8_t> outgoing_;
+    std::size_t outgoing_read_ = 0;
+
+    std::vector<std::uint8_t> report_;
+    bool report_waiting_ = false;
+
+    UsbMode mode_ = UsbMode::DeviceDisabled;
+    bool attached_ = false;
+    bool int_asserted_ = false;
+    std::uint8_t pending_status_ = 0;
+
+    bool garbage_ = false;
+    bool silent_ = false;
+    bool saw_bus_reset_ = false;
+    std::uint32_t reset_count_ = 0;
+    std::uint32_t mode_set_count_ = 0;
+    std::uint32_t command_count_ = 0;
+    std::uint32_t now_us_ = 1000;
+};
+
+/// Configuring the attached device, faked.
+///
+/// Task 3 replaces this with real enumeration and descriptor parsing. What the
+/// lifecycle needs from it now is only that it takes more than one tick, can
+/// fail, and eventually names an endpoint to poll.
+class FakeDeviceSetup final : public IDeviceSetup {
+public:
+    void begin(std::uint32_t now_us) override;
+    SetupProgress poll(std::uint32_t now_us) override;
+    std::uint8_t interrupt_endpoint() const override { return 1; }
+
+    void always_fail(bool failing) { failing_ = failing; }
+
+private:
+    std::uint32_t started_us_ = 0;
+    bool running_ = false;
+    bool failing_ = false;
 };
 
 }  // namespace duo_input::u1::ch375::testing

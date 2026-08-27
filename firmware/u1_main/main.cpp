@@ -16,6 +16,7 @@
 #include "hardware/watchdog.h"
 
 #include "buttons.hpp"
+#include "ch375_probe.hpp"
 #include "config_service.hpp"
 #include "diagnostics_service.hpp"
 #include "hid/state_manager.hpp"
@@ -145,6 +146,18 @@ int main() {
         config.set_active_profile(1);
     }
 
+#if DUO_CH375_PROBE
+    // Bring-up only: before anything else claims these pins, find out whether
+    // the two CH375s can be reached at all. Every later layer assumes they can.
+    // The line is left alone. Once a CH375 is in serial mode its TXD is an
+    // output, and holding that line from this end would be two drivers on one
+    // wire - which is what the mode jumper on the module is for instead.
+    duo_input::u1::Ch375ProbeResult keyboard_probe;
+    duo_input::u1::Ch375ProbeResult mouse_probe;
+    std::uint32_t last_probe_ms = 0;
+    bool probed_once = false;
+#endif
+
 #if DUO_SPI_DEBUG
     // Two independent answers, taken before the SPI block claims the pins.
     //
@@ -228,6 +241,64 @@ int main() {
             config.set_link_state(state);
         }
         show_link(link.status().answered);
+
+#if DUO_CH375_PROBE
+        {
+            const std::uint32_t probe_now = to_ms_since_boot(get_absolute_time());
+            if (!probed_once || probe_now - last_probe_ms >= 10000) {
+                last_probe_ms = probe_now;
+                probed_once = true;
+                keyboard_probe = duo_input::u1::probe_ch375(duo_input::u1::kPinKeyboardTx,
+                                                            duo_input::u1::kPinKeyboardRx,
+                                                            duo_input::u1::kPinKeyboardInt);
+                mouse_probe = duo_input::u1::probe_ch375(duo_input::u1::kPinMouseTx,
+                                                         duo_input::u1::kPinMouseRx,
+                                                         duo_input::u1::kPinMouseInt);
+            }
+
+            std::uint8_t report[100];
+            report[0] = 0;
+            const duo_input::u1::Ch375ProbeResult* probes[2] = {&keyboard_probe, &mouse_probe};
+            for (int index = 0; index < 2; ++index) {
+                const duo_input::u1::Ch375ProbeResult& probe = *probes[index];
+                std::uint8_t* at = report + 1 + index * 12;
+                at[0] = static_cast<std::uint8_t>((probe.rx_idle_high ? 1 : 0) |
+                                                  (probe.rx_floating ? 2 : 0) |
+                                                  (probe.int_high ? 4 : 0) |
+                                                  (probe.tx_idle_high ? 8 : 0) |
+                                                  (probe.tx_floating ? 16 : 0) |
+                                                  (probe.rx_settles_high ? 32 : 0));
+                at[1] = static_cast<std::uint8_t>((probe.check_exist_answered ? 1 : 0) |
+                                                  (probe.tx_wins_when_pushed ? 2 : 0) |
+                                                  (probe.rx_wins_when_pushed ? 4 : 0));
+                at[2] = probe.check_exist_reply;
+                at[3] = probe.ic_version_answered ? 1 : 0;
+                at[4] = probe.ic_version;
+                at[5] = probe.host_mode_reply;
+                at[6] = probe.connect_answered ? 1 : 0;
+                at[7] = probe.connect_reply;
+                at[8] = static_cast<std::uint8_t>(probe.shortest_pulse_us & 0xFF);
+                at[9] = static_cast<std::uint8_t>(probe.shortest_pulse_us >> 8);
+                at[10] = static_cast<std::uint8_t>(probe.edges_seen & 0xFF);
+                at[11] = static_cast<std::uint8_t>(probe.edges_seen >> 8);
+
+                std::uint8_t* sweep = report + 25 + index * 10;
+                for (std::size_t rate = 0; rate < 5; ++rate) {
+                    sweep[rate * 2] = probe.sweep_reply[rate];
+                    sweep[rate * 2 + 1] = probe.sweep_edges[rate];
+                }
+
+                std::uint8_t* trace = report + 45 + index * 26;
+                trace[0] = probe.edge_count;
+                trace[1] = probe.level_before_first_edge ? 1 : 0;
+                for (std::size_t edge = 0; edge < 12; ++edge) {
+                    trace[2 + edge * 2] = static_cast<std::uint8_t>(probe.edge_us[edge] & 0xFF);
+                    trace[3 + edge * 2] = static_cast<std::uint8_t>(probe.edge_us[edge] >> 8);
+                }
+            }
+            config.set_link_debug(report, sizeof(report));
+        }
+#endif
 
 #if DUO_SPI_DEBUG
         {

@@ -165,6 +165,32 @@ public:
         return true;
     }
 
+    /// DS1 5.10. Ask whether a device is attached, rather than waiting to be
+    /// told.
+    ///
+    /// The connect interrupt can be missed - it is cleared by reading it, and
+    /// a chip that was answering nonsense at the time consumes it for nothing.
+    /// It also never arrives for a device that was already plugged in when the
+    /// power came on. Asking covers both.
+    bool test_connect(InterruptStatus& status) {
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::TestConnect));
+
+        std::uint8_t answer = 0;
+        if (!read_reply(answer)) {
+            return false;
+        }
+        status = static_cast<InterruptStatus>(answer);
+        return true;
+    }
+
+    /// Is the chip asking for attention right now?
+    ///
+    /// Reading the status is what clears the request, so a caller should ask
+    /// this first rather than reading a status that belongs to nothing.
+    bool interrupt_pending() const { return io_.int_asserted(); }
+
+    std::uint32_t now_us() const { return io_.now_us(); }
+
     /// Wait for the chip's interrupt line, but not past ``deadline_us``.
     bool wait_for_interrupt(std::uint32_t deadline_us) {
         while (true) {
