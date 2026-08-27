@@ -86,35 +86,43 @@ And the wire is not an antenna. Unsoldered at the shifter's A-side pads but
 still attached to U1 - same wire, same length, same place on the bench - both
 pads go back to high the whole second with zero transitions.
 
-| lead attached to | GP1 | GP5 |
+Nor is the shifter generating it. With the A side still wired to U1 and the B
+side lifted off the CH375's TXD pins, both pads are steady again.
+
+| what the lead is attached to | GP1 | GP5 |
 |---|---|---|
-| U1 and the shifter | low 34%, transitions past the ceiling | low 31%, same |
+| nothing | steady high, zero transitions | steady high, zero |
 | U1 only, hanging free | steady high, zero | steady high, zero |
-| nothing | steady high, zero | steady high, zero |
+| U1 and the shifter, B side lifted | steady high, zero | steady high, zero |
+| the whole chain, through to CH375 TXD | low 34%, past the ceiling | low 31%, same |
 
-**The A side of the TXS0108E is driving it.** Not a suspect any more.
+**The disturbance starts on the B side** - at the CH375's TXD pin or the short
+lead soldered to it. The shifter carries it faithfully; it is in the path, not
+the cause.
 
-That is not the same as the part being faulty or the wrong choice. TI
-documents this: the one-shot accelerator can retrigger and oscillate when
-there is too much capacitance on a pin, and short traces are a stated
-requirement of the part. Flying leads soldered to chip pins and run across a
-bench are the opposite of that. The CH375s were powered and idle throughout,
-so nothing was being translated - the shifter was doing this on its own.
+That distinction cost a wrong conclusion here once already. The measurement
+before this one showed the A side going quiet when the lead was lifted, and it
+was written up as the shifter driving the line - which the same evidence
+supports exactly as well when the shifter is only relaying. One more
+disconnection, one pad further along, and it separates. Do not replace the
+part on the strength of the earlier row.
 
-Cheapest thing to try first, because it costs nothing: **make the leads
-short**. If the oscillation is capacitance-driven, that is the documented fix
-and it settles whether the part can work here at all.
+What is left to look at, in order of what costs nothing:
 
-If that does not do it, then either:
+- **The solder at pin 5 itself.** It is fine-pitch and the leads were soldered
+  to the chip by hand, twice, identically. A bridge to pin 4 (RD#) or pin 6
+  (RXD) would put the chip's own signals on this wire. Both channels behave
+  the same, which argues either for a repeated mistake or for something
+  intrinsic to the module.
+- **The 12 MHz crystal, which is millimetres away.** A lead soldered to pin 5
+  runs past XI and XO on pins 13 and 14. That is the one strong, fast signal in
+  the neighbourhood.
+- **The chip actually transmitting.** After reset in serial mode it should say
+  nothing until asked, but it has never yet answered anything either.
 
-- **TXB0108** in its place, which is now a decision with evidence behind it
-  rather than a guess. It has its own limits - a weak output through roughly
-  4 kOhm, unhappy with external pull-ups and capacitive loads - so it is not
-  guaranteed either.
-- Or no shifter on the receive direction: a divider per input to U1, and there
-  are four of those - keyboard TXD and INT, mouse TXD and INT - so eight
-  resistors. The transmit direction may be able to go straight from 3.3 V, but
-  only after checking what a CH375B accepts as a logic high.
+The way to narrow it is one channel at a time: put the keyboard's B-side lead
+back and leave the mouse's off. If only GP1 goes noisy, the two chips can be
+compared against each other instead of guessed at together.
 
 ### What was measured before this, and why none of it counted
 
