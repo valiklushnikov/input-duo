@@ -82,17 +82,39 @@ the PIO port and the firmware are all cleared by it, and so is the earlier
 suspicion of USB traffic - the mouse was unplugged for this and both channels
 look the same.
 
-Two things this does *not* say, and it took a while to learn to keep them
-apart. It does not say the level shifter is at fault: a lead soldered to a
-chip pin and run across a bench is an antenna whether or not the part at the
-far end behaves. And it does not say anything about the CH375s, which were
-powered and idle throughout.
+And the wire is not an antenna. Unsoldered at the shifter's A-side pads but
+still attached to U1 - same wire, same length, same place on the bench - both
+pads go back to high the whole second with zero transitions.
 
-The next measurement separates those, and it is now a sensible one to ask for
-because both ends are no longer disconnected at once: **unsolder the two leads
-at the shifter's A-side pads, C13 and C16, and leave them hanging from U1.**
-Quiet means the shifter is driving it; still noisy means the wire is picking
-it up.
+| lead attached to | GP1 | GP5 |
+|---|---|---|
+| U1 and the shifter | low 34%, transitions past the ceiling | low 31%, same |
+| U1 only, hanging free | steady high, zero | steady high, zero |
+| nothing | steady high, zero | steady high, zero |
+
+**The A side of the TXS0108E is driving it.** Not a suspect any more.
+
+That is not the same as the part being faulty or the wrong choice. TI
+documents this: the one-shot accelerator can retrigger and oscillate when
+there is too much capacitance on a pin, and short traces are a stated
+requirement of the part. Flying leads soldered to chip pins and run across a
+bench are the opposite of that. The CH375s were powered and idle throughout,
+so nothing was being translated - the shifter was doing this on its own.
+
+Cheapest thing to try first, because it costs nothing: **make the leads
+short**. If the oscillation is capacitance-driven, that is the documented fix
+and it settles whether the part can work here at all.
+
+If that does not do it, then either:
+
+- **TXB0108** in its place, which is now a decision with evidence behind it
+  rather than a guess. It has its own limits - a weak output through roughly
+  4 kOhm, unhappy with external pull-ups and capacitive loads - so it is not
+  guaranteed either.
+- Or no shifter on the receive direction: a divider per input to U1, and there
+  are four of those - keyboard TXD and INT, mouse TXD and INT - so eight
+  resistors. The transmit direction may be able to go straight from 3.3 V, but
+  only after checking what a CH375B accepts as a logic high.
 
 ### What was measured before this, and why none of it counted
 
