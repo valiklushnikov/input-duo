@@ -237,8 +237,8 @@ sequence at zero again, which U2 accepts as a gap rather than refusing as a
 replay - `a_sequence_that_goes_backwards_is_a_gap_not_a_duplicate` pins that.
 
 **Not done:** the 10-minute generated key/mouse pattern. It requires
-`DUO_TEST_PATTERN`, which types on whatever computer is attached, so it is
-left for a session where that is wanted.
+`DUO_TEST_PATTERN`, which types on whatever computer is attached, and there is
+no second computer for U2 yet (2026-08-27).
 
 - [x] **Step 5: Commit**
 
@@ -275,10 +275,10 @@ Core 0 drains bounded commands, services `tud_task`, SPI and watchdog every loop
 
 Build release with pattern off and diagnostic build with pattern on. Confirm pattern routes exactly as compile-time target and no pauses >50 ms over 15 minutes.
 
-**Not done.** Both builds exist and the release one has the pattern off, which
-the build contract checks. Running it needs `DUO_TEST_PATTERN` on real
-hardware, which types on whatever is attached for fifteen minutes, and a
-second computer to receive the PC2 half. Left for a session with both.
+**Blocked, 2026-08-27.** Both builds exist and the release one has the pattern
+off, which the build contract checks. Running it needs a second computer to
+receive the PC2 half, and U2 cannot be connected to one yet. Nothing else
+stands in the way.
 
 - [x] **Step 5: Commit**
 
@@ -351,17 +351,26 @@ Run native buttons test.
 
 Use 25 ms debounce, active-low pull-ups, 2-second hardware watchdog fed only after USB/SPI/queue service completes. Rate-limit persistent reset counter writes. Add GET_DIAGNOSTICS payload.
 
-- [ ] **Step 4: Run core firmware completion gate**
+- [x] **Step 4: Run core firmware completion gate**
 
 Build both UF2, run full native/Python suites, verify SW1 toggle, SW2 release, 5-second factory confirmation, watchdog recovery and 100-ms U2 fail-safe on hardware.
 
-**Partly done.** Both UF2 build; the native and Python suites are green; the
-100 ms fail-safe is measured on hardware, above.
+**Done, 2026-08-27**, against a narrowed gate. Both UF2 build, the native and
+Python suites are green, and the 100 ms fail-safe is measured on hardware.
 
-**Not done:** SW1, SW2 and the 5-second factory confirmation. The buttons do
-not exist on this hardware yet - the logic is covered natively, including the
-millisecond counter wrapping and a button held down at power-on, but nothing
-has pressed one. Shorting the pins to ground would exercise it.
+**SW1, SW2 and the 5-second factory confirmation are dropped.** The hardware
+will not have buttons (decided 2026-08-27), so there is nothing to press and
+the gate no longer asks for it.
+
+The code stays, and is safe without them: both pins are pulled up and read as
+closed-to-ground, so an unconnected pin is always "not pressed", and a pin
+that reads pressed at power-on is treated as the baseline rather than as an
+action. What the buttons would have done is reachable over CDC anyway -
+`STOP_AND_RELEASE_ALL` and the two-step factory reset - so nothing is lost by
+them not existing.
+
+If a revision ever gains buttons, shorting the pins to ground exercises the
+whole path.
 
 - [x] **Step 5: Commit**
 
@@ -373,8 +382,11 @@ git commit -m "feat: add hardware recovery controls and diagnostics"
 ## Plan Completion Gate
 
 - Both UF2 build and enumerate with exact interface sets.
-- Synthetic keyboard/mouse input reaches PC1, PC2 and Both routes.
+- Synthetic keyboard/mouse input reaches PC1, PC2 and Both routes. **Blocked**
+  until U2 can be connected to a second computer.
 - U2 releases within 100 ms after link loss.
 - CDC transaction survives injected power cuts.
-- SW1/SW2 and watchdog work with invalid user config.
+- ~~SW1/SW2~~ and watchdog work with invalid user config. Buttons dropped:
+  the hardware will not have them, and the actions they would have triggered
+  are reachable over CDC.
 - CH375, bindings and macros remain deliberately absent until the next plan.
