@@ -71,23 +71,36 @@ frames arrive per second** on the two channels. A frame takes 1.15 ms, so the
 most that can be detected is about 870 per second - the line is disturbed
 almost continuously, and none of it is provoked by this firmware.
 
-What that does *not* yet prove is where it comes from. Three candidates, none
-eliminated:
+About two in five of those frames have their stop bit in the wrong place -
+340 bad against 525 good on one channel, 295 against 570 on the other. That
+ratio is what settles what this is: a real transmission is well-framed or it
+is not a transmission, and noise is right about as often as chance allows.
 
-1. **USB frame packets coupling into the wires.** Both chips were left in host
-   mode generating SOF, which is one packet every millisecond - 1000 a second
-   against 570 observed, which is close enough to be worth taking seriously.
-   The serial wires are soldered to the chip pins and run beside the USB pair.
-   Cheap to test: power-cycle the controllers so they return to the mode they
-   reset into, which generates nothing, and listen again.
-2. **The level shifter.** TXS0108E senses direction automatically and is
+Three explanations have been tested and dropped:
+
+- **This firmware's own transmissions.** Ruled out by taking the measurement
+  before U1 sends anything at all, which had never been done before.
+- **USB frame packets coupling in.** Both chips had been left generating SOF,
+  one packet per millisecond, which was close enough to the observed rate to
+  be worth taking seriously. Power-cycling them back into the mode they reset
+  into, which generates nothing, changed the count by less than five percent.
+- **Something actually sending.** The bad-frame ratio says otherwise.
+
+What is left, and untested:
+
+1. **The level shifter.** TXS0108E senses direction automatically and is
    sensitive to capacitance and wire length; TI's own documentation warns
    about its one-shot retriggering and oscillating, and short traces are a
    stated requirement. It is *not* an open-drain-only part - push-pull, UART
    and SPI are all supported - so the fault would be the wiring around it
    rather than the choice of it.
-3. **The wiring itself.** Hand-soldered flying leads to chip pins, unshielded,
+2. **The wiring itself.** Hand-soldered flying leads to chip pins, unshielded,
    next to a 12 Mbps bus.
+
+One measurement separates them, and it needs a hand: take the two receive
+leads off U1's GP1 and GP5 and listen again with the pins bare. Silence means
+U1 and this firmware are clear and the noise arrives from the shifter or the
+leads. Noise on a bare pin means it is nearer than that.
 
 Swapping in a TXB0108 is not the first move. It is a different part with its
 own limits - a weak output through roughly 4 kOhm, unhappy with external

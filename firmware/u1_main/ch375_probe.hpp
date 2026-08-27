@@ -74,7 +74,8 @@ struct Ch375ProbeResult {
 /// U1's own switching has never been ruled out as the source.
 ///
 /// A serial line at rest is silent, so the honest expectation is zero.
-std::uint16_t listen_without_sending(ch375::PioCh375Transport& port, std::uint32_t for_ms);
+std::uint16_t listen_without_sending(ch375::PioCh375Transport& port, std::uint32_t for_ms,
+                                     std::uint16_t& bad_frames);
 
 /// Ask one CH375 the four questions.
 Ch375ProbeResult probe_ch375(ch375::PioCh375Transport& port, ch375::Ch375Transport& commands);

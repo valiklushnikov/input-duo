@@ -176,10 +176,12 @@ std::uint32_t PioCh375Transport::framing_errors() const {
     if (!started_) {
         return 0;
     }
-    // The receive program raises a relative interrupt when a stop bit is not
-    // where it belongs. It is sticky, so this reads and clears it - one or
-    // more bad frames since the last look.
-    const unsigned flag = rx_sm_;
+    // The receive program raises the flag with `irq 4 rel`, which for state
+    // machine n is flag 4 + n, not flag n. Reading flag n instead reports no
+    // framing errors no matter how many there are - and "no framing errors"
+    // was being used here as evidence that a stream of frames was real data
+    // rather than noise. It was evidence of nothing.
+    const unsigned flag = 4u + (rx_sm_ & 3u);
     if (!pio_interrupt_get(pio_, flag)) {
         return 0;
     }
