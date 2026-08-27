@@ -220,7 +220,7 @@ git commit -m "feat: enumerate supported keyboard and mouse HID devices"
 **Interfaces:**
 - Produces fixed `InputEvent` variants KeyDown/Up, ConsumerDown/Up, MouseButtonDown/Up, MouseMove, Wheel, DeviceConnected/Disconnected.
 
-- [ ] **Step 1: Write report-diff tests**
+- [x] **Step 1: Write report-diff tests**
 
 Test modifier transitions, six-key reorder without false edges, rollover report, button 4/5, signed X/Y, wheel/pan, repeated identical report and disconnect release synthesis.
 
@@ -228,11 +228,15 @@ Test modifier transitions, six-key reorder without false edges, rollover report,
 
 Run native normalizer tests.
 
-- [ ] **Step 3: Implement previous-state diff**
+- [x] **Step 3: Implement previous-state diff**
 
 Use descriptor-generated field maps and fixed arrays. Mouse motion emits one delta per accepted report; buttons emit edges. On disconnect emit release events for all remembered keys/buttons, then clear state.
 
 - [ ] **Step 4: Replay captured reports**
+
+Needs a trace off the hardware, which needs a device that stays attached long
+enough to record one. The reports themselves are already arriving - 218 in a
+run - so this is waiting on the link settling rather than on anything here.
 
 Capture at least one keyboard and one 5-button mouse report trace from hardware diagnostic, add anonymized binary vectors, and verify deterministic normalized event stream.
 

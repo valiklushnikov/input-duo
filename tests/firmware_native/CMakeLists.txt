@@ -287,3 +287,22 @@ if(MSVC)
 endif()
 
 add_test(NAME ch375_descriptor_setup COMMAND duo_ch375_descriptor_setup_test)
+
+add_executable(duo_normalizers_test
+    test_main.cpp
+    test_normalizers.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/keyboard_normalizer.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/mouse_normalizer.cpp
+)
+
+target_link_libraries(duo_normalizers_test PRIVATE duo_common)
+target_include_directories(duo_normalizers_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+if(MSVC)
+    target_compile_options(duo_normalizers_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME normalizers COMMAND duo_normalizers_test)
