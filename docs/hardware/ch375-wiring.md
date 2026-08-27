@@ -77,19 +77,26 @@ So the shifter was the cause. The proof was taking it out, not the reasoning
 that led there - which had already named it once on evidence that fitted a
 part relaying noise just as well as one making it.
 
-**This leaves an electrical problem that has to be solved before the wiring is
-finished.** A CH375 running at 5 V drives its TXD to 5 V, and an RP2040 pin is
-not 5 V tolerant: the protection diode into the 3.3 V rail conducts, and the
-pin degrades. It works today and that is not the same as being safe. Either:
+**And no level shifter is needed at all.** The module carries an AMS1117-3.3,
+so the 5 V going in is regulated on the board and the CH375 itself runs at
+3.3 V. Its pins drive 3.3 V, U1's pins are 3.3 V, and the direct connection
+that now works is the correct one. No dividers, nothing to translate.
 
-- run the CH375s from 3.3 V - the part supports it, with V3 tied to VCC
-  (DS1 section 6.2.3) - which removes the mismatch entirely; or
-- put a divider on each input to U1. There are four of them: keyboard TXD and
-  INT, mouse TXD and INT. Two resistors each, so eight.
+Which very likely explains the whole thing. The shifter's B side was wired to
+the external 5 V - told that the far side of it was a 5 V world - while the
+chip on that side was actually driving 3.3 V. To an auto-direction translator
+that is a marginal high, and a marginal high is the documented condition for
+its one-shot to retrigger and oscillate. The part was not merely unnecessary
+here; it was being asked to translate between 3.3 V and 3.3 V while being told
+one of them was 5 V.
 
-The transmit direction, U1 to CH375 RXD, is 3.3 V into a 5 V input and is the
-easier half, but check what the chip accepts as a logic high rather than
-assuming.
+That last paragraph is an explanation rather than a measurement. It fits
+everything that was seen, and there is no longer anything to test it against,
+because the part is out and the link works.
+
+An earlier version of this section warned that the CH375 would be driving 5 V
+into a pin that cannot take it, and recommended dividers on four inputs. That
+was wrong: it assumed the chip ran at the voltage fed to the module.
 
 ### What the line looked like with the shifter in place
 
