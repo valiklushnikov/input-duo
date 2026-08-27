@@ -172,6 +172,19 @@ public:
         return true;
     }
 
+    /// DS2 1.6. Tell the receiver which data packet to expect next.
+    ///
+    /// The data toggle is not tracked by the chip - it is set by hand, and it
+    /// has to be set before the first IN transaction of a new device. Without
+    /// it a token is issued and nothing happens at all: no data, no error, and
+    /// no interrupt, so the transaction simply never completes.
+    ///
+    /// kToggleData0 expects DATA0, kToggleData1 expects DATA1.
+    void set_receive_toggle(std::uint8_t mode) {
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::SetEndpoint6));
+        io_.write_data(mode);
+    }
+
     /// DS2 1.15. Issue a token; the interrupt that follows carries the result.
     bool issue_token(std::uint8_t endpoint, TokenPid pid) {
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::IssueToken));

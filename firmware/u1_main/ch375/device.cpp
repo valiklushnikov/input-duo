@@ -166,6 +166,13 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 return;
             }
             endpoint_ = setup_.interrupt_endpoint();
+            // A new device starts its data toggle at DATA0, and the chip has
+            // to be told - it does not track this itself (DS2 1.6). Without
+            // it the first IN transaction never completes: no data, no error,
+            // and no interrupt, which on the bench was 120 polls in a row
+            // producing nothing at all.
+            expect_data1_ = false;
+            transport_.set_receive_toggle(kToggleData0);
             enter(Ch375State::Ready, now_us);
             last_answer_us_ = now_us;
             if (!announced_ready_) {
@@ -200,6 +207,12 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 if (transport_.read_block(buffer, sizeof(buffer), size) && size > 0) {
                     publish_report(buffer, size);
                 }
+                // One transaction succeeded, so the device will send the other
+                // packet type next. Told only after a success: a transaction
+                // that failed did not consume anything, and moving the toggle
+                // anyway would leave the two ends permanently one apart.
+                expect_data1_ = !expect_data1_;
+                transport_.set_receive_toggle(expect_data1_ ? kToggleData1 : kToggleData0);
             }
             if (now_us - last_poll_us_ < kReportPollUs) {
                 return;

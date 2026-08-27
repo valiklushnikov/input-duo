@@ -279,6 +279,9 @@ private:
     std::uint16_t enumerate_failures_ = 0;
     std::uint16_t mode_failures_ = 0;
     std::uint16_t polls_issued_ = 0;
+    /// Which data packet the next IN transaction should expect. Alternates on
+    /// every one that succeeds; the chip does not track it.
+    bool expect_data1_ = false;
 
     Ch375Event events_[kEventQueueDepth];
     std::size_t head_ = 0;

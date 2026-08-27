@@ -133,6 +133,26 @@ git commit -m "feat: run two independent CH375 host state machines"
 
 ### Task 3: Enumeration and bounded HID descriptor parser
 
+**Why this is now blocking, 2026-08-28.** Task 2's lifecycle reaches Ready on
+hardware - AUTO_SETUP answers 0x14 - and then every poll of the device's
+endpoint produces nothing. Not a timeout, not a NAK: no interrupt at all,
+across 120 consecutive tokens, where DS2 1.15 says a token always ends in one.
+
+Two things AUTO_SETUP does not tell the caller, and both are needed to talk to
+the device afterwards:
+
+- **The address it assigned.** It performs the device's SET_ADDRESS, and DS2
+  1.5 requires the host to be given the same address separately, or it goes on
+  addressing one nobody answers to. AUTO_SETUP does not report which address
+  it used, so this cannot be done without guessing.
+- **Which endpoint the reports arrive on.** Endpoint 1 is assumed today,
+  because nearly every wired keyboard and mouse uses it. "Nearly every" is not
+  a thing to build on.
+
+Doing the enumeration by hand - GET_DESCR, SET_ADDRESS, SET_USB_ADDR,
+GET_DESCR again, SET_CONFIG - answers both, which is why this task exists.
+
+
 **Files:**
 - Create: `firmware/u1_main/ch375/enumerator.hpp`
 - Create: `firmware/u1_main/ch375/enumerator.cpp`
