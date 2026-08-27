@@ -63,40 +63,52 @@ prevented cannot happen here.
 
 Task 2 should drop the OE step rather than pretend to perform it.
 
-### The shifter is the one to suspect if the link is flaky
+### What the line actually does, measured
 
-**It was.** Measured on the bench, 2026-08-27: with nothing at all being
-transmitted, eight to nine whole frames per 100 ms arrive on each channel. A
-serial line at rest is silent, so those are not frames - they are the line
-being read as frames. Captured at higher resolution, it rings for ten or more
-microseconds after every edge, with transitions one to two microseconds apart,
-against a bit that lasts a hundred and four.
+On the bench, 2026-08-27, with a PIO port that reads whole nine-bit frames and
+reports framing errors: **before U1 transmits anything at all, 569 and 588
+frames arrive per second** on the two channels. A frame takes 1.15 ms, so the
+most that can be detected is about 870 per second - the line is disturbed
+almost continuously, and none of it is provoked by this firmware.
 
-Everything above the wire is by then known good: the PIO port reads whole
-nine-bit frames with no framing errors, the chips are in serial mode and
-execute what they are sent, and the wiring is continuous. None of that helps
-when the line carries traffic nobody sent.
+What that does *not* yet prove is where it comes from. Three candidates, none
+eliminated:
 
-The fix is a part change, not a firmware change:
+1. **USB frame packets coupling into the wires.** Both chips were left in host
+   mode generating SOF, which is one packet every millisecond - 1000 a second
+   against 570 observed, which is close enough to be worth taking seriously.
+   The serial wires are soldered to the chip pins and run beside the USB pair.
+   Cheap to test: power-cycle the controllers so they return to the mode they
+   reset into, which generates nothing, and listen again.
+2. **The level shifter.** TXS0108E senses direction automatically and is
+   sensitive to capacitance and wire length; TI's own documentation warns
+   about its one-shot retriggering and oscillating, and short traces are a
+   stated requirement. It is *not* an open-drain-only part - push-pull, UART
+   and SPI are all supported - so the fault would be the wiring around it
+   rather than the choice of it.
+3. **The wiring itself.** Hand-soldered flying leads to chip pins, unshielded,
+   next to a 12 Mbps bus.
 
-- **TXB0108** in place of the TXS0108E. Same package and pinout, meant for
-  push-pull signals; the TXS variant carries pull-ups and one-shots for
-  open-drain buses and is overdriven by design, which is what makes it ring
-  here.
-- Or drop the shifter on the receive direction and use a divider: the CH375's
-  TXD is a 5 V output and two resistors bring it to 3.3 V. The transmit
-  direction can usually go straight, since the chip reads a 3.3 V high as a
-  high.
+Swapping in a TXB0108 is not the first move. It is a different part with its
+own limits - a weak output through roughly 4 kOhm, unhappy with external
+pull-ups and capacitive loads - so it might help and might not, and doing it
+before the source is known is a guess wearing a part number.
 
-Original note, kept because it was written before any of this was measured:
+If the shifter does turn out to be the cause, the alternative is a divider per
+**input** to U1, and there are four of them: keyboard TXD and INT, mouse TXD
+and INT. Two resistors each, so eight. The transmit direction may be able to
+go straight from 3.3 V, but only after checking what the CH375B actually
+accepts as a logic high - not on the strength of "usually".
 
+Original note, kept because it was written before any measurement and turned
+out to point the right way:
 
-The TXS0108E senses direction automatically and carries its pull-ups on both
-sides, which suits open-drain buses. A serial line is driven push-pull, and
-this part is more sensitive there than its push-pull sibling the TXB0108,
-particularly as the rate goes up. CH375 starts at 9600 bps and this device has
-no reason to push it hard, so it should be comfortable - but if bytes start
-arriving damaged, the shifter is the first thing to test, not the last.
+> The TXS0108E senses direction automatically and carries its pull-ups on both
+> sides, which suits open-drain buses. A serial line is driven push-pull, and
+> this part is more sensitive there than its push-pull sibling the TXB0108,
+> particularly as the rate goes up. CH375 starts at 9600 bps and this device
+> has no reason to push it hard, so it should be comfortable - but if bytes
+> start arriving damaged, the shifter is the first thing to test, not the last.
 
 ## What the serial framing needs
 

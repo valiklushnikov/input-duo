@@ -79,7 +79,13 @@ bool PioCh375Transport::begin(PIO pio, unsigned tx_pin, unsigned rx_pin, unsigne
     pio_gpio_init(pio, tx_pin);
 
     pio_sm_config tx = ch375_tx_program_get_default_config(programs.tx_offset);
-    sm_config_set_out_shift(&tx, true, true, kFrameBits);
+    // Explicit pull, so autopull stays off.
+    //
+    // With both, the PULL at the top of the loop becomes a no-op whenever
+    // autopull has already refilled the output register - so the state machine
+    // stops waiting for the next word and can run a frame together with the
+    // one after it. One mechanism or the other, never both.
+    sm_config_set_out_shift(&tx, true, false, 32);
     sm_config_set_out_pins(&tx, tx_pin, 1);
     sm_config_set_sideset_pins(&tx, tx_pin);
     sm_config_set_fifo_join(&tx, PIO_FIFO_JOIN_TX);
@@ -94,7 +100,14 @@ bool PioCh375Transport::begin(PIO pio, unsigned tx_pin, unsigned rx_pin, unsigne
     gpio_pull_up(rx_pin);
 
     pio_sm_config rx = ch375_rx_program_get_default_config(programs.rx_offset);
-    sm_config_set_in_shift(&rx, true, true, kFrameBits);
+    // Explicit push, so autopush stays off - and this one was doing damage.
+    //
+    // With autopush at nine bits, the ninth IN already pushed the word and
+    // emptied the register; the PUSH after the stop bit then queued a second,
+    // empty one. Every real frame arrived followed by a zero, and those zeros
+    // were counted as frames from the wire. Half of the "unasked traffic" that
+    // this port was built to measure was made by this line.
+    sm_config_set_in_shift(&rx, true, false, 32);
     sm_config_set_in_pins(&rx, rx_pin);
     sm_config_set_jmp_pin(&rx, rx_pin);
     sm_config_set_fifo_join(&rx, PIO_FIFO_JOIN_RX);

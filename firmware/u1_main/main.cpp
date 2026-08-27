@@ -156,6 +156,12 @@ int main() {
                         duo_input::u1::kPinKeyboardInt);
     mouse_port.begin(pio0, duo_input::u1::kPinMouseTx, duo_input::u1::kPinMouseRx,
                      duo_input::u1::kPinMouseInt);
+    // Before a single byte goes out, on either port.
+    const std::uint16_t keyboard_quiet_at_boot =
+        duo_input::u1::listen_without_sending(keyboard_port, 1000);
+    const std::uint16_t mouse_quiet_at_boot =
+        duo_input::u1::listen_without_sending(mouse_port, 1000);
+
     duo_input::u1::ch375::Ch375Transport keyboard_commands(keyboard_port);
     duo_input::u1::ch375::Ch375Transport mouse_commands(mouse_port);
     duo_input::u1::Ch375ProbeResult keyboard_probe;
@@ -260,7 +266,7 @@ int main() {
                 mouse_probe = duo_input::u1::probe_ch375(mouse_port, mouse_commands);
             }
 
-            std::uint8_t report[32];
+            std::uint8_t report[36];
             const duo_input::u1::Ch375ProbeResult* probes[2] = {&keyboard_probe, &mouse_probe};
             for (int index = 0; index < 2; ++index) {
                 const duo_input::u1::Ch375ProbeResult& probe = *probes[index];
@@ -284,6 +290,10 @@ int main() {
                     raw[word * 2 + 1] = static_cast<std::uint8_t>(probe.raw[word] >> 8);
                 }
             }
+            report[32] = static_cast<std::uint8_t>(keyboard_quiet_at_boot & 0xFF);
+            report[33] = static_cast<std::uint8_t>(keyboard_quiet_at_boot >> 8);
+            report[34] = static_cast<std::uint8_t>(mouse_quiet_at_boot & 0xFF);
+            report[35] = static_cast<std::uint8_t>(mouse_quiet_at_boot >> 8);
             config.set_link_debug(report, sizeof(report));
         }
 #endif

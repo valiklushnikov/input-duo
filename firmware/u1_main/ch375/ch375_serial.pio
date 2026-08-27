@@ -17,9 +17,11 @@
 .program ch375_tx
 .side_set 1 opt
 
-; OUT pin 0 and the side-set pin are both the transmit line.
-; Autopull is set to nine bits: the caller writes the byte with the command
-; flag already in bit 8.
+; OUT pin 0 and the side-set pin are both the transmit line. The caller writes
+; the byte with the command flag already in bit 8, and this pulls it by hand -
+; autopull is off, because a PULL with autopull enabled is a no-op whenever the
+; output register happens to be full, and the frame after it then runs on
+; without waiting.
 
     pull       side 1 [7]  ; hold the line idle-high until there is something
     set x, 8   side 0 [7]  ; start bit, and nine bits to send
@@ -29,8 +31,10 @@ bitloop:
 
 .program ch375_rx
 
-; IN pin 0 and the JMP pin are both the receive line.
-; Autopush is set to nine bits.
+; IN pin 0 and the JMP pin are both the receive line. This pushes by hand, and
+; autopush is off: with both, the ninth IN pushes the word and empties the
+; register, and the PUSH below then queues a second, empty one. Every frame
+; would arrive followed by a zero that never crossed the wire.
 
 start:
     wait 0 pin 0           ; a start bit

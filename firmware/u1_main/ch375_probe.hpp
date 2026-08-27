@@ -67,6 +67,15 @@ struct Ch375ProbeResult {
     std::uint16_t quiet_first = 0;
 };
 
+/// Listen on a port for a second without ever transmitting.
+///
+/// Separates a line that is noisy on its own from one this firmware disturbs.
+/// Everything measured so far has been measured after U1 sent something, so
+/// U1's own switching has never been ruled out as the source.
+///
+/// A serial line at rest is silent, so the honest expectation is zero.
+std::uint16_t listen_without_sending(ch375::PioCh375Transport& port, std::uint32_t for_ms);
+
 /// Ask one CH375 the four questions.
 Ch375ProbeResult probe_ch375(ch375::PioCh375Transport& port, ch375::Ch375Transport& commands);
 

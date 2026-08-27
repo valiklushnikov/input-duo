@@ -10,6 +10,19 @@ using ch375::CommandStatus;
 using ch375::InterruptStatus;
 using ch375::UsbMode;
 
+std::uint16_t listen_without_sending(ch375::PioCh375Transport& port, std::uint32_t for_ms) {
+    port.drain();
+    const std::uint32_t started = to_ms_since_boot(get_absolute_time());
+    std::uint16_t frames = 0;
+    std::uint16_t word = 0;
+    while (to_ms_since_boot(get_absolute_time()) - started < for_ms) {
+        if (port.read_word(word) && frames < 0xFFFF) {
+            ++frames;
+        }
+    }
+    return frames;
+}
+
 Ch375ProbeResult probe_ch375(ch375::PioCh375Transport& port, ch375::Ch375Transport& commands) {
     Ch375ProbeResult result;
 
