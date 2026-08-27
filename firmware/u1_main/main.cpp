@@ -153,6 +153,52 @@ void configure_indicator() {
 
 }  // namespace
 
+
+#if DUO_CH375_PROBE
+/// Put a name to the byte AUTO_SETUP ended on.
+///
+/// DS1 5.12: bit 5 marks a failure and the low four bits carry what the device
+/// itself answered. Those are different faults with the same appearance from
+/// outside - a device that refuses, one that stalls, and one that is not
+/// answering at all want three different repairs.
+const char* describe_setup_status(std::uint8_t status) {
+    switch (status) {
+        case 0xFF:
+            return "still running";
+        case 0xFE:
+            return "no reply to GET_STATUS";
+        case 0xFD:
+            return "no interrupt before the deadline";
+        case 0x14:
+            return "success";
+        case 0x15:
+            return "connect";
+        case 0x16:
+            return "disconnect";
+        case 0x17:
+            return "buffer overflow or bad transfer";
+        default:
+            break;
+    }
+    if ((status & 0x20) == 0) {
+        return "not a host-mode status";
+    }
+    switch (status & 0x0F) {
+        case 0b1010:
+            return "device answered NAK";
+        case 0b1110:
+            return "device answered STALL";
+        case 0b0000:
+        case 0b0100:
+        case 0b1000:
+        case 0b1100:
+            return "device did not answer - timeout";
+        default:
+            return "device answered with another PID";
+    }
+}
+#endif
+
 int main() {
     configure_indicator();
     configure_button(kPinSw1);
@@ -400,6 +446,8 @@ int main() {
             // against. The report below is only a report.
             const std::uint32_t device_now_us = time_us_32();
             duo_input::u1::ch375::Ch375Device* devices[2] = {&keyboard_device, &mouse_device};
+            duo_input::u1::ch375::AutoSetupEnumerator* setups[2] = {&keyboard_setup,
+                                                                    &mouse_setup};
             DeviceTally* tallies[2] = {&keyboard_tally, &mouse_tally};
             for (int index = 0; index < 2; ++index) {
                 devices[index]->tick(device_now_us);
@@ -457,7 +505,8 @@ int main() {
                     "%s state=%s speed=%s attached=%u gone=%u ready=%u reports=%u\n"
                     "  check_exist=%s int_seen=%u status_read_failed=%u\n"
                     "  connect=%u disconnect=%u success=%u failure=%u impossible=%u\n"
-                    "  detach_disconnect=%u detach_lost=%u enum_failed=%u mode_failed=%u\n",
+                    "  detach_disconnect=%u detach_lost=%u enum_failed=%u mode_failed=%u\n"
+                    "  setup attempts=%u last=0x%02X (%s)\n",
                     names[index], state < 7 ? kStates[state] : "?",
                     device.device_is_low_speed() ? "low" : "full", tally.attached, tally.detached,
                     tally.ready, tally.reports,
@@ -466,7 +515,9 @@ int main() {
                     device.status_connect(), device.status_disconnect(), device.status_success(),
                     device.status_failure(), device.status_impossible(),
                     device.detach_from_disconnect(), device.detach_from_lost(),
-                    device.enumerate_failures(), device.mode_failures());
+                    device.enumerate_failures(), device.mode_failures(),
+                    setups[index]->attempts(), setups[index]->last_status(),
+                    describe_setup_status(setups[index]->last_status()));
                 // snprintf answers with how much it *would* have written. Left
                 // unclamped, the next call is handed a negative amount of room
                 // and the total runs past the end of the buffer.

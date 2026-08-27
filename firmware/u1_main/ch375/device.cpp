@@ -9,9 +9,24 @@ void Ch375Device::tick(std::uint32_t now_us) {
     // controller that is not powered yet would otherwise fail at construction
     // time, with nowhere to report it and no way to try again.
     if (!chip_ready_) {
-        if (state_ == Ch375State::RecoverWait && now_us - entered_us_ < kRecoverDelayUs) {
-            // Still counting down. Retrying flat out would hammer a controller
-            // that is already unhappy, every tick, forever.
+        if (chip_resetting_) {
+            if (now_us - chip_reset_at_us_ < kChipResetUs) {
+                return;
+            }
+            chip_resetting_ = false;
+        } else {
+            if (state_ == Ch375State::RecoverWait && now_us - entered_us_ < kRecoverDelayUs) {
+                // Still counting down. Retrying flat out would hammer a
+                // controller that is already unhappy, every tick, forever.
+                return;
+            }
+            // Start from a chip that is definitely idle. Whatever state the
+            // last run left it in - including ones it does not leave by itself
+            // - is gone after this, and the wait is the price.
+            transport_.reset_all();
+            transport_.drain_pending_status();
+            chip_resetting_ = true;
+            chip_reset_at_us_ = now_us;
             return;
         }
         // Mode 5 is where DS1 5.9 says to wait: enabled, generating no frames,
@@ -60,11 +75,15 @@ void Ch375Device::tick(std::uint32_t now_us) {
     // device again and resetting the bus again - which on the bench was a
     // mouse attaching and detaching six times over without ever coming up.
     //
-    // The exemption is deliberately narrow: one state, the one where this
-    // firmware caused it. Anywhere else it is somebody pulling a cable, and a
-    // missed one there would leave keys held down on the far side.
-    if (interrupted && status == InterruptStatus::Disconnect &&
-        state_ != Ch375State::Resetting) {
+    // The exemption covers the reset and the pause after it, and stops there.
+    // The chip's detection is not trustworthy until frames are flowing again -
+    // on the bench a device was reported gone during that pause every time,
+    // and configuring it was never once reached. Past that point a disconnect
+    // is somebody pulling a cable, and a missed one leaves keys held down on
+    // the far side.
+    const bool bringing_up =
+        state_ == Ch375State::Resetting || state_ == Ch375State::HostMode;
+    if (interrupted && status == InterruptStatus::Disconnect && !bringing_up) {
         ++detach_from_disconnect_;
         handle_detach(now_us);
         return;
@@ -137,7 +156,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
             return;
 
         case Ch375State::Enumerating: {
-            const SetupProgress progress = setup_.poll(now_us);
+            const SetupProgress progress = setup_.poll(now_us, interrupted, status);
             if (progress == SetupProgress::Busy) {
                 return;
             }

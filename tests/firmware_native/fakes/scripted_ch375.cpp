@@ -174,6 +174,11 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
             // The real chip puts the bus back to full speed here.
             bus_speed_ = UsbSpeed::Full12Mbps;
             speed_after_mode_ = false;
+            if (mode == UsbMode::HostWithSof && attached_ && report_disconnect_settling_) {
+                // Still catching up with the device after the reset.
+                pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Disconnect);
+                int_asserted_ = !silent_;
+            }
             if (mode == UsbMode::HostReset) {
                 saw_bus_reset_ = true;
                 ++reset_count_;
@@ -261,7 +266,10 @@ void FakeDeviceSetup::begin(std::uint32_t now_us) {
     begun_ = true;
 }
 
-SetupProgress FakeDeviceSetup::poll(std::uint32_t now_us) {
+SetupProgress FakeDeviceSetup::poll(std::uint32_t now_us, bool interrupted,
+                                    InterruptStatus status) {
+    (void)interrupted;
+    (void)status;
     if (!running_) {
         return SetupProgress::Failed;
     }

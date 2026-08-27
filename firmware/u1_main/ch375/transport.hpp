@@ -197,6 +197,17 @@ public:
         return true;
     }
 
+    /// DS1 5.4. Reset the chip and everything it was in the middle of.
+    ///
+    /// It answers nothing and takes about 40 ms, which the caller has to wait
+    /// out. Worth it at the start of every attempt: reaching this code does
+    /// not mean the chip just powered on - a firmware update restarts the
+    /// processor and leaves the controller exactly as the last run left it,
+    /// including states it will not come out of by itself.
+    void reset_all() {
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::ResetAll));
+    }
+
     /// DS2 1.2. Is the attached device a low-speed one?
     ///
     /// Takes the byte 07H and answers a rate type; bit 4 set means 1.5 Mbps.

@@ -17,21 +17,23 @@ void AutoSetupEnumerator::begin(std::uint32_t now_us) {
     started_us_ = now_us;
     running_ = true;
     endpoint_ = 0;
+    ++attempts_;
+    // 0xFF is not a status the chip can produce, so it stands for "this
+    // attempt has not ended yet" without needing a second flag.
+    last_status_ = 0xFF;
 }
 
-SetupProgress AutoSetupEnumerator::poll(std::uint32_t now_us) {
+SetupProgress AutoSetupEnumerator::poll(std::uint32_t now_us, bool interrupted,
+                                        InterruptStatus status) {
     if (!running_) {
         // Never started, or already finished. Reporting Busy here would leave
         // a caller waiting for something nobody set in motion.
         return SetupProgress::Failed;
     }
 
-    if (transport_.interrupt_pending()) {
-        InterruptStatus status = InterruptStatus::Success;
+    if (interrupted) {
         running_ = false;
-        if (!transport_.get_status(status)) {
-            return SetupProgress::Failed;
-        }
+        last_status_ = static_cast<std::uint8_t>(status);
         if (status != InterruptStatus::Success) {
             // The byte says why - which device response caused it - and the
             // caller can count it. What it does not say is anything that
@@ -47,6 +49,9 @@ SetupProgress AutoSetupEnumerator::poll(std::uint32_t now_us) {
     // side of the wrap and an hour on the other.
     if (now_us - started_us_ >= kSetupTimeoutUs) {
         running_ = false;
+        // The chip never raised an interrupt. 0xFD marks that apart from a
+        // failure it did report.
+        last_status_ = 0xFD;
         return SetupProgress::Failed;
     }
     return SetupProgress::Busy;

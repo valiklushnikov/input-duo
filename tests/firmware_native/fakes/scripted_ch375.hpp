@@ -136,6 +136,12 @@ public:
     /// what the real chip does with a device attached.
     void report_disconnect_on_reset(bool reporting) { report_disconnect_on_reset_ = reporting; }
 
+    /// Keep reporting it once frames are switched on, which is what the chip
+    /// does while a device is still coming back after the reset.
+    void report_disconnect_while_settling(bool reporting) {
+        report_disconnect_settling_ = reporting;
+    }
+
     /// Refuse to configure, as a device the chip cannot talk to would cause.
     void fail_auto_setup(bool failing) { fail_auto_setup_ = failing; }
 
@@ -185,6 +191,7 @@ private:
     bool saw_auto_setup_ = false;
     bool fail_auto_setup_ = false;
     bool report_disconnect_on_reset_ = false;
+    bool report_disconnect_settling_ = false;
     bool low_speed_ = false;
     UsbSpeed bus_speed_ = UsbSpeed::Full12Mbps;
     bool speed_after_mode_ = false;
@@ -205,7 +212,7 @@ private:
 class FakeDeviceSetup final : public IDeviceSetup {
 public:
     void begin(std::uint32_t now_us) override;
-    SetupProgress poll(std::uint32_t now_us) override;
+    SetupProgress poll(std::uint32_t now_us, bool interrupted, InterruptStatus status) override;
     std::uint8_t interrupt_endpoint() const override { return 1; }
 
     void always_fail(bool failing) { failing_ = failing; }

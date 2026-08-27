@@ -92,8 +92,12 @@ Ch375ProbeResult probe_ch375(ch375::PioCh375Transport& port, ch375::Ch375Transpo
                              Ch375ProbeMode mode) {
     Ch375ProbeResult result;
 
-    // Anything already waiting belongs to a question nobody asked. Reading it
-    // as this answer is how a stale byte becomes a confident wrong result.
+    // Start from a chip that is definitely idle. A firmware update restarts
+    // the processor and leaves the controller exactly as the last run left it,
+    // and one of those states is "answers nothing at all" - which reads
+    // identically to a chip that is not connected.
+    commands.reset_all();
+    sleep_ms(60);
     port.drain();
 
     // Listen first, saying nothing. Whatever arrives now was not asked for.

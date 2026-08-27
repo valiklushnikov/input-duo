@@ -84,7 +84,13 @@ public:
     virtual void begin(std::uint32_t now_us) = 0;
 
     /// Do a bounded piece of the work.
-    virtual SetupProgress poll(std::uint32_t now_us) = 0;
+    ///
+    /// The status is handed down rather than read here. Reading it is what
+    /// clears the chip's request, so two readers means each takes the answer
+    /// the other was waiting for - and the one that waits reports a timeout
+    /// against a chip that answered immediately. There is one reader, above.
+    virtual SetupProgress poll(std::uint32_t now_us, bool interrupted,
+                               InterruptStatus status) = 0;
 
     /// Which endpoint the device's reports arrive on. Valid after Done.
     virtual std::uint8_t interrupt_endpoint() const = 0;
@@ -96,6 +102,12 @@ public:
 /// switch to mode 6. USB requires the reset to last at least 10 ms; this is
 /// comfortably past that and still imperceptible.
 inline constexpr std::uint32_t kBusResetHoldUs = 20000;
+
+/// How long the chip needs after being told to reset itself.
+///
+/// DS1 5.4 gives about 40 ms, during which it answers nothing at all. Asking
+/// it anything sooner reads as a chip that is not there.
+inline constexpr std::uint32_t kChipResetUs = 60000;
 
 /// How long a device is left alone after the bus reset before it is addressed.
 ///
@@ -231,6 +243,9 @@ private:
 
     Ch375State state_ = Ch375State::Absent;
     bool chip_ready_ = false;
+    /// The chip has been told to reset and is still coming back.
+    bool chip_resetting_ = false;
+    std::uint32_t chip_reset_at_us_ = 0;
     bool skip_bus_reset_ = false;
     /// What the attached device turned out to be, asked while still in the
     /// mode where the question is valid.

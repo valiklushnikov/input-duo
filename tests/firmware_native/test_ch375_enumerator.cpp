@@ -31,7 +31,15 @@ struct Rig {
     /// Poll until it stops saying Busy, or until far past any real deadline.
     SetupProgress settle() {
         for (int pass = 0; pass < 10000; ++pass) {
-            const SetupProgress progress = enumerator.poll(chip.now_us());
+            // The device reads the chip's status and hands it down, which is
+            // what the real one does - there is exactly one reader.
+            bool interrupted = false;
+            duo_input::u1::ch375::InterruptStatus status =
+                duo_input::u1::ch375::InterruptStatus::Success;
+            if (transport.interrupt_pending()) {
+                interrupted = transport.get_status(status);
+            }
+            const SetupProgress progress = enumerator.poll(chip.now_us(), interrupted, status);
             if (progress != SetupProgress::Busy) {
                 return progress;
             }
@@ -70,7 +78,8 @@ TEST_CASE(configuring_takes_more_than_one_pass) {
     // Several control transfers happen inside that one command. A caller that
     // only worked when it finished instantly would not survive meeting a real
     // device.
-    CHECK_EQ(static_cast<int>(rig.enumerator.poll(rig.chip.now_us())),
+    CHECK_EQ(static_cast<int>(rig.enumerator.poll(rig.chip.now_us(), false,
+                                                  duo_input::u1::ch375::InterruptStatus::Success)),
              static_cast<int>(SetupProgress::Busy));
 }
 
@@ -120,7 +129,8 @@ TEST_CASE(polling_without_beginning_is_a_failure) {
 
     // Not Busy: a caller that never started would otherwise wait forever on
     // something that was never going to happen.
-    CHECK_EQ(static_cast<int>(rig.enumerator.poll(rig.chip.now_us())),
+    CHECK_EQ(static_cast<int>(rig.enumerator.poll(rig.chip.now_us(), false,
+                                                  duo_input::u1::ch375::InterruptStatus::Success)),
              static_cast<int>(SetupProgress::Failed));
 }
 

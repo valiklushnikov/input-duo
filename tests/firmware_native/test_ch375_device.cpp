@@ -85,7 +85,7 @@ TEST_CASE(nothing_happens_while_nothing_is_plugged_in) {
 TEST_CASE(the_chip_is_put_into_host_mode_before_anything_is_plugged_in) {
     Rig rig;
 
-    rig.run(50000);
+    rig.run(200000);
 
     // Mode 5 - enabled host, no frames - is where the datasheet says to wait.
     // Without it the chip never reports a device arriving and the firmware
@@ -218,7 +218,7 @@ TEST_CASE(a_failure_waits_before_trying_again) {
     Rig rig;
     rig.chip.answer_garbage(true);
     rig.chip.attach_device();
-    rig.run(50000);
+    rig.run(300000);
 
     CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::RecoverWait));
 }
@@ -231,7 +231,7 @@ TEST_CASE(a_retry_does_not_start_early) {
     Rig rig;
     rig.chip.answer_garbage(true);
     rig.chip.attach_device();
-    rig.run(50000);
+    rig.run(300000);
     const std::uint32_t attempts = rig.chip.mode_set_count();
 
     rig.run(kRecoverDelayUs / 2);
@@ -245,7 +245,7 @@ TEST_CASE(a_retry_does_start_once_the_wait_is_over) {
     Rig rig;
     rig.chip.answer_garbage(true);
     rig.chip.attach_device();
-    rig.run(50000);
+    rig.run(300000);
     const std::uint32_t attempts = rig.chip.mode_set_count();
 
     rig.run(kRecoverDelayUs + 100000);
@@ -541,4 +541,20 @@ TEST_CASE(a_device_that_comes_back_is_asked_its_speed_again) {
     CHECK(rig.device.device_is_low_speed());
     CHECK_EQ(static_cast<int>(rig.chip.bus_speed()),
              static_cast<int>(duo_input::u1::ch375::UsbSpeed::Low1_5Mbps));
+}
+
+
+TEST_CASE(a_disconnect_while_the_bus_is_still_coming_up_is_not_an_unplug) {
+    // The exemption covers the reset and the recovery pause after it, because
+    // the chip's detection is not trustworthy until frames are flowing again -
+    // on the bench a device was reported gone during that pause every single
+    // time, and enumeration was never once reached.
+    Rig rig;
+    rig.chip.report_disconnect_on_reset(true);
+    rig.chip.report_disconnect_while_settling(true);
+
+    rig.chip.attach_device();
+    rig.run(400000);
+
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
 }

@@ -37,14 +37,26 @@ public:
     explicit AutoSetupEnumerator(Ch375Transport& transport) : transport_(transport) {}
 
     void begin(std::uint32_t now_us) override;
-    SetupProgress poll(std::uint32_t now_us) override;
+    SetupProgress poll(std::uint32_t now_us, bool interrupted, InterruptStatus status) override;
     std::uint8_t interrupt_endpoint() const override { return endpoint_; }
+
+    /// The status byte the last attempt ended on, and how many attempts there
+    /// have been.
+    ///
+    /// Kept rather than reduced to success or failure, because the byte is the
+    /// diagnosis: DS1 5.12 puts the device's own response in its low four bits
+    /// - NAK, STALL, or a timeout meaning nothing answered at all. Those want
+    /// different repairs and look identical from outside.
+    std::uint8_t last_status() const { return last_status_; }
+    std::uint16_t attempts() const { return attempts_; }
 
 private:
     Ch375Transport& transport_;
     std::uint32_t started_us_ = 0;
     bool running_ = false;
     std::uint8_t endpoint_ = 0;
+    std::uint8_t last_status_ = 0;
+    std::uint16_t attempts_ = 0;
 };
 
 }  // namespace duo_input::u1::ch375
