@@ -67,6 +67,8 @@ class DiagnosticsPage(QWidget):
                 ("spi_crc_errors", QT_TRANSLATE_NOOP("DiagnosticsPage", "SPI CRC errors")),
                 ("spi_echoed_frames", QT_TRANSLATE_NOOP("DiagnosticsPage", "SPI frames echoed back")),
                 ("spi_timeouts", QT_TRANSLATE_NOOP("DiagnosticsPage", "SPI timeouts")),
+                ("endpoint_drops", QT_TRANSLATE_NOOP("DiagnosticsPage", "Link drops seen by U2")),
+                ("endpoint_release_ms", QT_TRANSLATE_NOOP("DiagnosticsPage", "U2 released after (ms)")),
             ),
         ),
         (

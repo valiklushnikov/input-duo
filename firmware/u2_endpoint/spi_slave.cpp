@@ -30,8 +30,8 @@ void SpiSlave::begin() {
     arm();
 }
 
-void SpiSlave::set_status(bool mounted) {
-    mounted_ = mounted;
+void SpiSlave::set_status(const Status& status) {
+    status_ = status;
 }
 
 void SpiSlave::prime() {
@@ -43,7 +43,12 @@ void SpiSlave::prime() {
     protocol::SpiFrame frame;
     frame.type = protocol::SpiMessageType::ENDPOINT_STATUS;
     frame.sequence = reply_sequence_++;
-    const std::uint8_t payload[1] = {static_cast<std::uint8_t>(mounted_ ? 1 : 0)};
+    const std::uint8_t payload[4] = {
+        static_cast<std::uint8_t>(status_.mounted ? 1 : 0),
+        status_.drops,
+        static_cast<std::uint8_t>(status_.last_release_ms & 0xFF),
+        static_cast<std::uint8_t>(status_.last_release_ms >> 8),
+    };
     frame.payload = protocol::ByteView{payload, sizeof(payload)};
 
     std::size_t written = 0;

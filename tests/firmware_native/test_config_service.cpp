@@ -542,7 +542,7 @@ TEST_CASE(diagnostics_carry_every_counter_the_host_expects) {
     const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
 
     CHECK_EQ(error_of(reply), CdcError::Ok);
-    CHECK_EQ(reply.payload.size, 35u);
+    CHECK_EQ(reply.payload.size, 38u);
 }
 
 TEST_CASE(diagnostics_say_whether_the_endpoint_is_answering) {
@@ -569,6 +569,25 @@ TEST_CASE(diagnostics_say_whether_the_endpoint_is_answering) {
     CHECK_EQ(read_u32(p + 23), 0x11223344u);
     CHECK_EQ(read_u32(p + 27), 7u);
     CHECK_EQ(read_u32(p + 31), 3u);
+}
+
+TEST_CASE(diagnostics_carry_what_the_endpoint_saw_when_the_link_died) {
+    // The fail-safe cannot be watched as it happens: the link that would
+    // carry the news is the one that went quiet. U2 records it and reports it
+    // on the way back, which is what lets "releases within 100 ms" be checked
+    // against real hardware rather than only against a unit test.
+    Link link;
+    link.hello();
+    duo_input::u1::LinkState state;
+    state.endpoint_drops = 2;
+    state.endpoint_release_ms = 104;
+    link.service.set_link_state(state);
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::uint8_t* p = reply.payload.data;
+
+    CHECK_EQ(p[35], 2u);
+    CHECK_EQ(static_cast<std::uint16_t>(p[36] | (p[37] << 8)), 104u);
 }
 
 TEST_CASE(a_silent_endpoint_is_reported_as_silent) {

@@ -73,6 +73,10 @@ struct LinkState {
     std::uint32_t crc_errors = 0;
     /// Frames U1 received that only U1 could have sent - see spi_master.hpp.
     std::uint32_t echoed_frames = 0;
+    /// How many times U2 has released everything because U1 went quiet.
+    std::uint8_t endpoint_drops = 0;
+    /// The silence that caused U2's most recent release, in milliseconds.
+    std::uint16_t endpoint_release_ms = 0;
 };
 
 class ConfigService {

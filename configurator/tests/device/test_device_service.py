@@ -734,3 +734,37 @@ def test_diagnostics_from_firmware_without_link_state_still_parse() -> None:
     assert counters.bad_crc == 1
     assert counters.endpoint_answering is None
     assert counters.link_frames_sent is None
+
+
+def test_diagnostics_carry_what_the_endpoint_saw_when_the_link_died() -> None:
+    """U2 releases every key 100 ms after U1 goes quiet, and nothing can watch
+    that happen - the link that would carry the news is the one that went
+    silent. So U2 remembers and reports it on the way back, and this is where
+    the host reads it."""
+    import struct
+
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        struct.pack("<BIIIII", 0, 0, 0, 0, 0, 0)
+        + struct.pack("<BBIII", 1, 1, 900, 0, 0)
+        + struct.pack("<BH", 2, 104)
+    )
+
+    counters = parse_diagnostics(payload)
+
+    assert counters.endpoint_drops == 2
+    assert counters.endpoint_release_ms == 104
+
+
+def test_diagnostics_without_the_endpoint_report_are_still_readable() -> None:
+    import struct
+
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = struct.pack("<BIIIII", 0, 0, 0, 0, 0, 0) + struct.pack("<BBIII", 1, 1, 900, 0, 0)
+
+    counters = parse_diagnostics(payload)
+
+    assert counters.endpoint_answering is True
+    assert counters.endpoint_drops is None

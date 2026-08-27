@@ -81,6 +81,23 @@ endif()
 
 add_test(NAME frame_resync COMMAND duo_frame_resync_test)
 
+add_executable(duo_link_drop_log_test
+    test_main.cpp
+    test_link_drop_log.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u2_endpoint/link_drop_log.cpp
+)
+
+target_link_libraries(duo_link_drop_log_test PRIVATE duo_common)
+target_include_directories(duo_link_drop_log_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u2_endpoint
+)
+
+if(MSVC)
+    target_compile_options(duo_link_drop_log_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME link_drop_log COMMAND duo_link_drop_log_test)
+
 add_executable(duo_output_runtime_test
     test_main.cpp
     test_output_runtime.cpp

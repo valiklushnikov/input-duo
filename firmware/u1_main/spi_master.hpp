@@ -42,6 +42,17 @@ struct EndpointStatus {
     bool answered = false;
     bool mounted = false;
     std::uint32_t crc_errors = 0;
+    /// How many times U2 has lost the link and released everything.
+    ///
+    /// U2 counts this because U1 cannot: at the moment the link dies there is
+    /// nothing left to carry the news. It arrives on the way back.
+    std::uint8_t endpoint_drops = 0;
+
+    /// The silence that caused U2's most recent release, in milliseconds.
+    ///
+    /// This is the 100 ms fail-safe reporting on itself from real hardware.
+    std::uint16_t endpoint_release_ms = 0;
+
     /// Frames U1 received that only U1 could have sent.
     ///
     /// Non-zero means the outgoing line is reaching the incoming one, which no

@@ -54,19 +54,19 @@ tests/firmware_native/test_buttons.cpp
 **Interfaces:**
 - Produces CMake targets `duo_u1_main`, `duo_u2_endpoint` and UF2 artifacts.
 
-- [ ] **Step 1: Add build-contract test**
+- [x] **Step 1: Add build-contract test**
 
 Create `tests/build/test_firmware_artifacts.py` asserting that a configured build must produce exactly `duo_u1_main.uf2` and `duo_u2_endpoint.uf2` and that map files fit below `0x10100000` firmware boundary.
 
-- [ ] **Step 2: Verify red state**
+- [x] **Step 2: Verify red state**
 
 Run `python -m pytest tests/build/test_firmware_artifacts.py -q`; expected missing artifacts.
 
-- [ ] **Step 3: Add minimal Pico targets**
+- [x] **Step 3: Add minimal Pico targets**
 
 Both `main.cpp` files initialize stdio disabled, watchdog disabled temporarily, board LED off, then call `tight_loop_contents()`. Link `pico_stdlib`, `tinyusb_device`, `tinyusb_board`, `hardware_spi`, `hardware_flash`, `hardware_watchdog`, `pico_multicore` where required.
 
-- [ ] **Step 4: Build both targets**
+- [x] **Step 4: Build both targets**
 
 ```powershell
 cmake --preset pico-release
@@ -76,7 +76,7 @@ python -m pytest tests/build/test_firmware_artifacts.py -q
 
 Expected: two UF2 files and passing size check.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add cmake firmware CMakePresets.json tests/build
@@ -95,7 +95,7 @@ git commit -m "build: add RP2040 main and endpoint targets"
 - Produces: `HidStateManager::physical_key`, `macro_key`, `set_mouse_buttons`, `mouse_delta`, `release_target`, `release_all`, `snapshot(Target)`.
 - `KeyboardSnapshot` contains modifiers and six sorted usages; `MouseSnapshot` contains buttons and accumulated signed 16-bit deltas.
 
-- [ ] **Step 1: Write ownership and overflow tests**
+- [x] **Step 1: Write ownership and overflow tests**
 
 ```cpp
 TEST_CASE(key_owned_by_physical_and_macro_survives_macro_release) {
@@ -116,19 +116,19 @@ TEST_CASE(seventh_key_is_rejected_without_corrupting_six) {
 }
 ```
 
-- [ ] **Step 2: Confirm failing compile**
+- [x] **Step 2: Confirm failing compile**
 
 Run native target `test_hid_state_manager`; expected missing class.
 
-- [ ] **Step 3: Implement fixed-capacity ownership tables**
+- [x] **Step 3: Implement fixed-capacity ownership tables**
 
 Use bitsets/arrays indexed by HID usage and macro owner ID; no heap. Mouse deltas saturate at `int16_t` bounds and are consumed exactly once by `take_snapshot()`.
 
-- [ ] **Step 4: Run state and full native suites**
+- [x] **Step 4: Run state and full native suites**
 
 Expected: ownership, release target/all, button masks, delta saturation and capacity tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add firmware/common/hid tests/firmware_native
@@ -151,23 +151,23 @@ git commit -m "feat: track independent HID output states"
 **Interfaces:**
 - Produces: `UsbService::task()`, `submit_keyboard`, `submit_mouse`, `submit_consumer`, `mounted`, `suspended`.
 
-- [ ] **Step 1: Write descriptor contract checks**
+- [x] **Step 1: Write descriptor contract checks**
 
 `tools/dump_usb_descriptors.py` imports the descriptor byte arrays extracted from firmware ELF symbols and emits stable JSON. Test that JSON for U1 interfaces Keyboard/Mouse/Consumer/CDC and U2 Keyboard/Mouse/Consumer only; assert five mouse buttons and unique product strings.
 
-- [ ] **Step 2: Verify current failure**
+- [x] **Step 2: Verify current failure**
 
 Run `python -m pytest tests/build/test_usb_descriptors.py -q`; expected descriptors missing.
 
-- [ ] **Step 3: Implement descriptors and rate-limited report sender**
+- [x] **Step 3: Implement descriptors and rate-limited report sender**
 
 Use fixed report IDs, unique serial callback from `pico_get_unique_board_id`, Boot keyboard compatibility, pan wheel usage, and no Remote Wakeup. `task()` calls `tud_task()` each loop and sends only changed absolute states; mouse delta is sent once when endpoint ready.
 
-- [ ] **Step 4: Build and inspect descriptors**
+- [x] **Step 4: Build and inspect descriptors**
 
 Run both firmware builds and descriptor contract test. On one board, enumerate U1 and U2 separately with Windows `Get-PnpDevice`; verify U1 exposes COM and U2 does not.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add firmware/common/hid firmware/u1_main firmware/u2_endpoint tests/build
@@ -191,7 +191,7 @@ git commit -m "feat: expose composite HID devices on both endpoints"
 - Produces U1: `SpiMaster::poll(now_us, optional<OutboundMessage>) -> EndpointStatus`.
 - Produces U2: `SpiSlave::take_valid_frame()`, `LinkWatchdog::observe_valid(now_ms)`, `expired(now_ms)`.
 
-- [ ] **Step 1: Write sequence/timeout tests**
+- [x] **Step 1: Write sequence/timeout tests**
 
 ```cpp
 TEST_CASE(endpoint_releases_at_100ms_not_99ms) {
@@ -204,19 +204,43 @@ TEST_CASE(endpoint_releases_at_100ms_not_99ms) {
 
 Add duplicate sequence accepted idempotently, gap flagged, bad CRC ignored, heartbeat refresh tests.
 
-- [ ] **Step 2: Verify failures**
+- [x] **Step 2: Verify failures**
 
 Run native link tests and confirm missing engines.
 
-- [ ] **Step 3: Implement hardware SPI1 at 1 MHz**
+- [x] **Step 3: Implement hardware SPI1 at 1 MHz**
 
 U1 configures GP8/9/10/11 and asserts CS per exact 64-byte transaction. U2 uses SPI slave plus DMA or IRQ-owned fixed buffers; ISR only swaps completed buffers. CRC decode occurs in loop context.
 
-- [ ] **Step 4: Hardware loop test**
+- [x] **Step 4: Hardware loop test**
 
 Flash both boards, run generated key/mouse pattern for 10 minutes, unplug the four-wire link, and record U2 release ≤100 ms. Restore link and verify handshake without replay.
 
-- [ ] **Step 5: Commit**
+**Done, 2026-08-27.** The link is up at 1 MHz: 100 frames every two seconds,
+no CRC errors in steady state.
+
+The link loss was produced without touching the wires - U1 is put into its
+bootloader over CDC, which stops it dead - because the fail-safe cannot be
+watched while it happens: everything the host can see about U2 travels over
+the link that just went silent. U2 therefore records the drop and reports it
+once the link is back. Measured three times in a row:
+
+| | drops | release_ms |
+|---|---|---|
+| after boot, U1 not yet talking | 1 | 0 |
+| first cut | 2 | 100 |
+| second cut | 3 | 100 |
+| third cut | 4 | 100 |
+
+Recovery costs exactly one damaged frame each time. U1 restarting begins its
+sequence at zero again, which U2 accepts as a gap rather than refusing as a
+replay - `a_sequence_that_goes_backwards_is_a_gap_not_a_duplicate` pins that.
+
+**Not done:** the 10-minute generated key/mouse pattern. It requires
+`DUO_TEST_PATTERN`, which types on whatever computer is attached, so it is
+left for a session where that is wanted.
+
+- [x] **Step 5: Commit**
 
 ```powershell
 git add firmware/common/link firmware/u1_main firmware/u2_endpoint tests/firmware_native
@@ -235,15 +259,15 @@ git commit -m "feat: add fail-safe SPI endpoint link"
 **Interfaces:**
 - Produces: `SpscQueue<OutputCommand, 128>`, `OutputRuntime::process(command)`, `tick(now_us)`.
 
-- [ ] **Step 1: Write queue overflow and routing tests**
+- [x] **Step 1: Write queue overflow and routing tests**
 
 Assert FIFO order, full/empty wrap, overflow triggers `RuntimeFault::OutputQueueFull`, Pc1-only does not touch SPI, Pc2-only does not touch local USB, Both updates both keyboard states.
 
-- [ ] **Step 2: Verify failing tests**
+- [x] **Step 2: Verify failing tests**
 
 Run native output runtime test.
 
-- [ ] **Step 3: Implement Core 0 runtime and Core 1 pattern producer**
+- [x] **Step 3: Implement Core 0 runtime and Core 1 pattern producer**
 
 Core 0 drains bounded commands, services `tud_task`, SPI and watchdog every loop. Temporary Core 1 generates a deterministic F13 press/release and mouse square only under compile definition `DUO_TEST_PATTERN=1`.
 
@@ -251,7 +275,12 @@ Core 0 drains bounded commands, services `tud_task`, SPI and watchdog every loop
 
 Build release with pattern off and diagnostic build with pattern on. Confirm pattern routes exactly as compile-time target and no pauses >50 ms over 15 minutes.
 
-- [ ] **Step 5: Commit**
+**Not done.** Both builds exist and the release one has the pattern off, which
+the build contract checks. Running it needs `DUO_TEST_PATTERN` on real
+hardware, which types on whatever is attached for fifteen minutes, and a
+second computer to receive the PC2 half. Left for a session with both.
+
+- [x] **Step 5: Commit**
 
 ```powershell
 git add firmware/common/runtime firmware/u1_main tests/firmware_native
@@ -272,23 +301,23 @@ git commit -m "feat: route output commands across both computers"
 **Interfaces:**
 - Produces: `AbStore::scan`, `begin`, `write_chunk`, `verify`, `commit`, `abort`; `ConfigService::on_cdc_bytes`.
 
-- [ ] **Step 1: Write fake-flash power-cut tests**
+- [x] **Step 1: Write fake-flash power-cut tests**
 
 Use an injected `FlashBackend`; interrupt each erase/program operation and assert scan returns old or new valid generation, never partial.
 
-- [ ] **Step 2: Confirm red state**
+- [x] **Step 2: Confirm red state**
 
 Run native `ab_store` and Python real-config contract test against absent firmware service.
 
-- [ ] **Step 3: Implement layout and transaction**
+- [x] **Step 3: Implement layout and transaction**
 
 Static-assert exact offsets `0x100000`, `0x160000`, `0x1C0000`; program commit header last. During real flash erase/program, pause Core 1 at safe point, Release All, use Pico SDK safe flash execution, then resume.
 
-- [ ] **Step 4: Test emulator parity and real board**
+- [x] **Step 4: Test emulator parity and real board**
 
 Upload minimal/full configs through CDC, compare readback SHA-256, power-cycle during chunks and verify old slot remains. Run all native/Python tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add firmware/common/storage firmware/u1_main/config_service.* tests/firmware_native configurator/tests/integration
@@ -310,15 +339,15 @@ git commit -m "feat: persist configuration with atomic A B slots"
 **Interfaces:**
 - Produces: debounced events `EmergencyMouseToggle`, `StopReleaseAll`, `FactoryResetConfirmed`; structured `DiagnosticsSnapshot`.
 
-- [ ] **Step 1: Write debounce/hold tests**
+- [x] **Step 1: Write debounce/hold tests**
 
 Assert one toggle per hold, SW2 short event only after release, factory confirmation exactly at 5000 ms and short action suppressed after long hold.
 
-- [ ] **Step 2: Verify failing tests**
+- [x] **Step 2: Verify failing tests**
 
 Run native buttons test.
 
-- [ ] **Step 3: Implement buttons, watchdog and status**
+- [x] **Step 3: Implement buttons, watchdog and status**
 
 Use 25 ms debounce, active-low pull-ups, 2-second hardware watchdog fed only after USB/SPI/queue service completes. Rate-limit persistent reset counter writes. Add GET_DIAGNOSTICS payload.
 
@@ -326,7 +355,15 @@ Use 25 ms debounce, active-low pull-ups, 2-second hardware watchdog fed only aft
 
 Build both UF2, run full native/Python suites, verify SW1 toggle, SW2 release, 5-second factory confirmation, watchdog recovery and 100-ms U2 fail-safe on hardware.
 
-- [ ] **Step 5: Commit**
+**Partly done.** Both UF2 build; the native and Python suites are green; the
+100 ms fail-safe is measured on hardware, above.
+
+**Not done:** SW1, SW2 and the 5-second factory confirmation. The buttons do
+not exist on this hardware yet - the logic is covered natively, including the
+millisecond counter wrapping and a button held down at power-on, but nothing
+has pressed one. Shorting the pins to ground would exercise it.
+
+- [x] **Step 5: Commit**
 
 ```powershell
 git add firmware/common/diagnostics firmware/u1_main firmware/u2_endpoint tests/firmware_native

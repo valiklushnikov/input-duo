@@ -32,6 +32,7 @@ _STATUS = struct.Struct("<BBBBI")
 _CONFIG_INFO = struct.Struct("<BII32s")
 _DIAGNOSTICS = struct.Struct("<BIIIII")
 _LINK_STATE = struct.Struct("<BBIII")
+_ENDPOINT_REPORT = struct.Struct("<BH")
 _CHUNK_ACK = struct.Struct("<BI")
 _CAPTURE_EVENT = struct.Struct("<BBB")
 
@@ -126,6 +127,13 @@ class DeviceDiagnostics:
     link_frames_sent: int | None = None
     link_crc_errors: int | None = None
     link_echoed_frames: int | None = None
+
+    # What U2 saw when the link died. U2 releases every key 100 ms after U1
+    # goes quiet, and nothing can watch that happen: the link that would carry
+    # the news is the one that went silent. U2 remembers and reports it once
+    # the link is back.
+    endpoint_drops: int | None = None
+    endpoint_release_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -254,10 +262,17 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
     rest = payload[_DIAGNOSTICS.size :]
     if not rest:
         return DeviceDiagnostics(bad_crc, disconnect, timeout, bad_sequence, aborted)
-    if len(rest) != _LINK_STATE.size:
-        raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
 
-    answering, mounted, frames_sent, link_crc, echoed = _LINK_STATE.unpack(rest)
+    link = rest[: _LINK_STATE.size]
+    if len(link) != _LINK_STATE.size:
+        raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
+    answering, mounted, frames_sent, link_crc, echoed = _LINK_STATE.unpack(link)
+
+    endpoint = rest[_LINK_STATE.size :]
+    if endpoint and len(endpoint) != _ENDPOINT_REPORT.size:
+        raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
+    drops, release_ms = _ENDPOINT_REPORT.unpack(endpoint) if endpoint else (None, None)
+
     return DeviceDiagnostics(
         bad_crc,
         disconnect,
@@ -269,6 +284,8 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
         link_frames_sent=frames_sent,
         link_crc_errors=link_crc,
         link_echoed_frames=echoed,
+        endpoint_drops=drops,
+        endpoint_release_ms=release_ms,
     )
 
 

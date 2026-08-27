@@ -12,6 +12,7 @@
 
 #include "hid/state_manager.hpp"
 #include "link/spi_protocol.hpp"
+#include "link_drop_log.hpp"
 #include "link_watchdog.hpp"
 #include "spi_slave.hpp"
 #include "usb_service.hpp"
@@ -115,6 +116,7 @@ int main() {
     duo_input::u2::UsbService usb;
     duo_input::u2::SpiSlave link;
     duo_input::u2::LinkWatchdog watchdog;
+    duo_input::u2::LinkDropLog drops;
     usb.begin();
     link.begin();
 
@@ -138,12 +140,17 @@ int main() {
             was_mounted = mounted;
         }
 
-        link.set_status(mounted);
+        duo_input::u2::SpiSlave::Status status;
+        status.mounted = mounted;
+        status.drops = drops.drops();
+        status.last_release_ms = drops.last_release_ms();
+        link.set_status(status);
 
         const std::uint32_t now_ms = to_ms_since_boot(get_absolute_time());
         duo_input::u2::ValidFrame frame;
         while (link.take_valid_frame(now_ms, frame)) {
             watchdog.observe_valid(now_ms);
+            drops.recovered();
             released_for_silence = false;
             apply(frame, outputs);
         }
@@ -155,6 +162,9 @@ int main() {
         const bool link_alive = !watchdog.expired(now_ms);
         if (!link_alive && !released_for_silence) {
             outputs.release_target(duo_input::hid::Target::Pc2);
+            // Recorded at the moment of release, so U1 can be told afterwards
+            // how long the silence had lasted when the keys were let go.
+            drops.released(watchdog.silence_ms(now_ms));
             released_for_silence = true;
         }
         show_link(link_alive);

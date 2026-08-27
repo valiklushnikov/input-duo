@@ -65,6 +65,8 @@ class DiagnosticSnapshot:
     spi_echoed_frames: int | str = UNKNOWN
     endpoint_answering: str = UNKNOWN
     endpoint_usb: str = UNKNOWN
+    endpoint_drops: int | str = UNKNOWN
+    endpoint_release_ms: int | str = UNKNOWN
     cdc_bad_crc: int | str = UNKNOWN
     cdc_bad_sequence: int | str = UNKNOWN
     cdc_timeout: int | str = UNKNOWN
@@ -111,6 +113,8 @@ class DiagnosticSnapshot:
             spi_echoed_frames=_counter(counters, "link_echoed_frames"),
             endpoint_answering=_yes_no(counters, "endpoint_answering"),
             endpoint_usb=_yes_no(counters, "endpoint_mounted"),
+            endpoint_drops=_counter(counters, "endpoint_drops"),
+            endpoint_release_ms=_counter(counters, "endpoint_release_ms"),
         )
 
     def to_json(self) -> str:

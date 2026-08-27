@@ -6,6 +6,7 @@ add_executable(duo_u2_endpoint
     usb_service.cpp
     spi_slave.cpp
     frame_resync.cpp
+    link_drop_log.cpp
     link_watchdog.cpp
 )
 

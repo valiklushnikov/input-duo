@@ -439,6 +439,7 @@ def test_diagnostics_count_crc_disconnect_timeout_bad_sequence_and_aborts(config
         bytes((ErrorCode.OK,))
         + struct.pack("<IIIII", 1, 1, 1, 1, 1)
         + struct.pack("<BBIII", 1, 1, 0, 0, 0)
+        + struct.pack("<BH", 0, 0)
     )
 
 

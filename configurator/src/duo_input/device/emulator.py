@@ -134,6 +134,8 @@ class U1Emulator(AbstractByteTransport):
         self.link_frames_sent = 0
         self.link_crc_errors = 0
         self.link_echoed_frames = 0
+        self.endpoint_drops = 0
+        self.endpoint_release_ms = 0
         self._timeout_once = False
         self._disconnect_once = False
         self._bad_crc_response_once = False
@@ -568,6 +570,7 @@ class U1Emulator(AbstractByteTransport):
                 self.link_crc_errors,
                 self.link_echoed_frames,
             )
+            + struct.pack("<BH", self.endpoint_drops, self.endpoint_release_ms)
         )
 
     def _handle_factory_reset_arm(self, payload: bytes) -> bytes:

@@ -223,6 +223,8 @@ int main() {
             state.frames_sent = link.frames_sent();
             state.crc_errors = link.status().crc_errors;
             state.echoed_frames = link.status().echoed_frames;
+            state.endpoint_drops = link.status().endpoint_drops;
+            state.endpoint_release_ms = link.status().endpoint_release_ms;
             config.set_link_state(state);
         }
         show_link(link.status().answered);

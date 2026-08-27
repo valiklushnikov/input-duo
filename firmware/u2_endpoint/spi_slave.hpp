@@ -59,7 +59,21 @@ public:
     bool take_valid_frame(std::uint32_t now_ms, ValidFrame& frame);
 
     /// Publish what U2 will say in the next transfer.
-    void set_status(bool mounted);
+    /// What U2 tells U1 about itself in every reply.
+    struct Status {
+        /// U2's own USB is up.
+        bool mounted = false;
+        /// How many times the link has died under U2, saturating at 255.
+        std::uint8_t drops = 0;
+        /// The silence that caused the most recent release, in milliseconds.
+        ///
+        /// This is the fail-safe reporting on itself. It cannot be observed as
+        /// it happens - the link that would carry the news is the one that
+        /// went quiet - so it is carried out afterwards instead.
+        std::uint16_t last_release_ms = 0;
+    };
+
+    void set_status(const Status& status);
 
     std::uint32_t crc_errors() const { return crc_errors_; }
     std::uint32_t frames_received() const { return frames_; }
@@ -84,7 +98,7 @@ private:
     FrameResync resync_;
     int rx_channel_ = -1;
     int tx_channel_ = -1;
-    bool mounted_ = false;
+    Status status_{};
 };
 
 }  // namespace duo_input::u2

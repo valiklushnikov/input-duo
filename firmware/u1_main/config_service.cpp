@@ -323,7 +323,10 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
     put_u32(out + 23, link_state_.frames_sent);
     put_u32(out + 27, link_state_.crc_errors);
     put_u32(out + 31, link_state_.echoed_frames);
-    return 35;
+    out[35] = link_state_.endpoint_drops;
+    out[36] = static_cast<std::uint8_t>(link_state_.endpoint_release_ms & 0xFF);
+    out[37] = static_cast<std::uint8_t>(link_state_.endpoint_release_ms >> 8);
+    return 38;
 #endif
 }
 
