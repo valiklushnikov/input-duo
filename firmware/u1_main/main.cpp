@@ -445,6 +445,22 @@ int main() {
             // Ticked every pass, which is what the state machine is written
             // against. The report below is only a report.
             const std::uint32_t device_now_us = time_us_32();
+            // How long a pass round the loop takes.
+            //
+            // The state machine polls an endpoint every 8 ms and gives a
+            // configured device a second before declaring it lost. Both are
+            // meaningless if a pass takes longer than they do - and a device
+            // that came up was declared gone without a single poll being
+            // issued, which is what that looks like.
+            static std::uint32_t last_pass_us = 0;
+            static std::uint32_t worst_pass_us = 0;
+            if (last_pass_us != 0) {
+                const std::uint32_t elapsed = device_now_us - last_pass_us;
+                if (elapsed > worst_pass_us) {
+                    worst_pass_us = elapsed;
+                }
+            }
+            last_pass_us = device_now_us;
             duo_input::u1::ch375::Ch375Device* devices[2] = {&keyboard_device, &mouse_device};
             duo_input::u1::ch375::AutoSetupEnumerator* setups[2] = {&keyboard_setup,
                                                                     &mouse_setup};
@@ -506,7 +522,8 @@ int main() {
                     "  check_exist=%s int_seen=%u status_read_failed=%u\n"
                     "  connect=%u disconnect=%u success=%u failure=%u impossible=%u\n"
                     "  detach_disconnect=%u detach_lost=%u enum_failed=%u mode_failed=%u\n"
-                    "  setup attempts=%u last=0x%02X (%s) polls=%u\n",
+                    "  setup attempts=%u last=0x%02X (%s) polls=%u\n"
+                    "  slowest pass round the loop=%u us\n",
                     names[index], state < 7 ? kStates[state] : "?",
                     device.device_is_low_speed() ? "low" : "full", tally.attached, tally.detached,
                     tally.ready, tally.reports,
@@ -517,7 +534,8 @@ int main() {
                     device.detach_from_disconnect(), device.detach_from_lost(),
                     device.enumerate_failures(), device.mode_failures(),
                     setups[index]->attempts(), setups[index]->last_status(),
-                    describe_setup_status(setups[index]->last_status()));
+                    describe_setup_status(setups[index]->last_status()),
+                    device.polls_issued(), worst_pass_us);
                 // snprintf answers with how much it *would* have written. Left
                 // unclamped, the next call is handed a negative amount of room
                 // and the total runs past the end of the buffer.
