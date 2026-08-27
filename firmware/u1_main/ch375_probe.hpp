@@ -17,6 +17,7 @@
 
 #include "ch375/pio_transport.hpp"
 #include "ch375/transport.hpp"
+#include "diagnostics/ch375_baud_scan.hpp"
 
 namespace duo_input::u1 {
 
@@ -67,6 +68,11 @@ struct Ch375ProbeResult {
     std::uint16_t quiet_first = 0;
 };
 
+enum class Ch375ProbeMode : std::uint8_t {
+    CompleteCheckExist,
+    CommandOnly,
+};
+
 /// What a bare pin does, read as an ordinary input rather than through PIO.
 ///
 /// Counts how much of a second the pin spends low and how often it changes.
@@ -102,8 +108,17 @@ PinActivity watch_bare_pin(unsigned pin, std::uint32_t for_ms);
 std::uint16_t listen_without_sending(ch375::PioCh375Transport& port, std::uint32_t for_ms,
                                      std::uint16_t& bad_frames);
 
-/// Ask one CH375 the four questions.
-Ch375ProbeResult probe_ch375(ch375::PioCh375Transport& port, ch375::Ch375Transport& commands);
+/// Ask one CH375 the four questions, or stop after the deliberately incomplete
+/// CHECK_EXIST command when isolating transmit-to-receive coupling.
+Ch375ProbeResult probe_ch375(
+    ch375::PioCh375Transport& port, ch375::Ch375Transport& commands,
+    Ch375ProbeMode mode = Ch375ProbeMode::CompleteCheckExist);
+
+/// Send CHECK_EXIST at the documented 9600 baud and receive its answer at a
+/// series of nearby rates. The hardware stays untouched during this test.
+std::size_t scan_ch375_baud(ch375::PioCh375Transport& port,
+                           diagnostics::Ch375BaudObservation* out,
+                           std::size_t capacity);
 
 /// The pins as the board is built. See docs/hardware/ch375-wiring.md.
 inline constexpr unsigned kPinKeyboardTx = 0;

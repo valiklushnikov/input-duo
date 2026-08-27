@@ -211,3 +211,16 @@ if(MSVC)
 endif()
 
 add_test(NAME ch375_device COMMAND duo_ch375_device_test)
+
+add_executable(duo_ch375_baud_scan_test
+    test_main.cpp
+    test_ch375_baud_scan.cpp
+)
+
+target_link_libraries(duo_ch375_baud_scan_test PRIVATE duo_common)
+
+if(MSVC)
+    target_compile_options(duo_ch375_baud_scan_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME ch375_baud_scan COMMAND duo_ch375_baud_scan_test)

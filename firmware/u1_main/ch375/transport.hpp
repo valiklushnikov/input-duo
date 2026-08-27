@@ -63,12 +63,21 @@ public:
     std::uint32_t reply_timeout_us() const { return reply_timeout_us_; }
     void set_reply_timeout_us(std::uint32_t micros) { reply_timeout_us_ = micros; }
 
+    /// Start CHECK_EXIST without supplying its data byte.
+    ///
+    /// During bring-up this separates a real controller response from the
+    /// transmit frame coupling into the receive path. Until the data byte
+    /// arrives, the command is incomplete and the chip has no valid reply.
+    void start_check_exist() {
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::CheckExist));
+    }
+
     /// DS1 5.5. Send a byte, expect its bitwise inverse.
     ///
     /// A chip that answers wrongly is worse than one that says nothing - it
     /// looks alive - so only the exact inverse counts.
     bool check_exist(std::uint8_t probe) {
-        io_.write_command(static_cast<std::uint8_t>(Ch375Command::CheckExist));
+        start_check_exist();
         io_.write_data(probe);
 
         std::uint8_t answer = 0;

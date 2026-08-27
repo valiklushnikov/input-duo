@@ -17,6 +17,7 @@
 
 #include "buttons.hpp"
 #include "ch375_probe.hpp"
+#include "diagnostics/ch375_baud_scan.hpp"
 #include "config_service.hpp"
 #include "diagnostics_service.hpp"
 #include "hid/state_manager.hpp"
@@ -66,6 +67,33 @@ void configure_button(uint pin) {
     gpio_set_dir(pin, GPIO_IN);
     gpio_pull_up(pin);
 }
+
+#if DUO_CH375_PROBE
+duo_input::u1::PinActivity watch_existing_pin(unsigned pin, std::uint32_t for_us) {
+    duo_input::u1::PinActivity activity;
+    const std::uint32_t started = time_us_32();
+    std::uint32_t samples = 0;
+    std::uint32_t low = 0;
+    bool level = gpio_get(pin);
+    while (time_us_32() - started < for_us) {
+        const bool now = gpio_get(pin);
+        ++samples;
+        if (!now) {
+            ++low;
+        }
+        if (now != level) {
+            level = now;
+            if (activity.transitions < 0xFFFF) {
+                ++activity.transitions;
+            }
+        }
+    }
+    if (samples != 0) {
+        activity.low_percent = static_cast<std::uint8_t>((low * 100u) / samples);
+    }
+    return activity;
+}
+#endif
 
 /// Sends the configurator's replies back down the CDC pipe.
 class CdcWriter : public duo_input::u1::CdcSink {
@@ -160,6 +188,44 @@ int main() {
     const duo_input::u1::PinActivity mouse_pad =
         duo_input::u1::watch_bare_pin(duo_input::u1::kPinMouseRx, 1000);
 
+    // Static-level loopback test, deliberately performed before PIO owns the
+    // pins.  With S1 tied to S3 the level driven on GP0 must return on GP1.
+    // This separates an electrical oscillator from a malformed UART program:
+    // no UART state machine is running while these four readings are taken.
+    gpio_init(duo_input::u1::kPinKeyboardTx);
+    gpio_set_dir(duo_input::u1::kPinKeyboardTx, GPIO_OUT);
+    gpio_put(duo_input::u1::kPinKeyboardTx, 1);
+    sleep_us(100);
+    const duo_input::u1::PinActivity tx_while_high =
+        watch_existing_pin(duo_input::u1::kPinKeyboardTx, 3000);
+    const duo_input::u1::PinActivity rx_while_high =
+        watch_existing_pin(duo_input::u1::kPinKeyboardRx, 3000);
+
+    gpio_put(duo_input::u1::kPinKeyboardTx, 0);
+    sleep_us(100);
+    const duo_input::u1::PinActivity tx_while_low =
+        watch_existing_pin(duo_input::u1::kPinKeyboardTx, 3000);
+    const duo_input::u1::PinActivity rx_while_low =
+        watch_existing_pin(duo_input::u1::kPinKeyboardRx, 3000);
+    gpio_put(duo_input::u1::kPinKeyboardTx, 1);
+
+    // Repeat the same static test on the independently wired mouse channel.
+    // Two channels failing alike implicate their shared translator/power
+    // arrangement; one failing alone points back to that channel's wiring.
+    gpio_init(duo_input::u1::kPinMouseTx);
+    gpio_set_dir(duo_input::u1::kPinMouseTx, GPIO_OUT);
+    gpio_put(duo_input::u1::kPinMouseTx, 1);
+    sleep_us(100);
+    const duo_input::u1::PinActivity mouse_tx_while_high =
+        watch_existing_pin(duo_input::u1::kPinMouseTx, 3000);
+    const duo_input::u1::PinActivity mouse_rx_while_high =
+        watch_existing_pin(duo_input::u1::kPinMouseRx, 3000);
+    gpio_put(duo_input::u1::kPinMouseTx, 0);
+    sleep_us(100);
+    const duo_input::u1::PinActivity mouse_tx_while_low =
+        watch_existing_pin(duo_input::u1::kPinMouseTx, 3000);
+    gpio_put(duo_input::u1::kPinMouseTx, 1);
+
     keyboard_port.begin(pio0, duo_input::u1::kPinKeyboardTx, duo_input::u1::kPinKeyboardRx,
                         duo_input::u1::kPinKeyboardInt);
     mouse_port.begin(pio0, duo_input::u1::kPinMouseTx, duo_input::u1::kPinMouseRx,
@@ -172,12 +238,31 @@ int main() {
     const std::uint16_t mouse_quiet_at_boot =
         duo_input::u1::listen_without_sending(mouse_port, 1000, mouse_bad_at_boot);
 
+    // The static level readings above say the wiring is sane. They cannot say
+    // the two data lines are the right way round, or that a chip is in serial
+    // mode - only asking it something can. CHECK_EXIST needs nothing to be
+    // configured first: send a byte, get its inverse back (DS1 5.5).
     duo_input::u1::ch375::Ch375Transport keyboard_commands(keyboard_port);
     duo_input::u1::ch375::Ch375Transport mouse_commands(mouse_port);
     duo_input::u1::Ch375ProbeResult keyboard_probe;
     duo_input::u1::Ch375ProbeResult mouse_probe;
     std::uint32_t last_probe_ms = 0;
     bool probed_once = false;
+
+    duo_input::diagnostics::Ch375SingleProbeObservation single_probe;
+    single_probe.pad_low_percent = tx_while_high.low_percent;
+    single_probe.pad_transitions = tx_while_high.transitions;
+    single_probe.quiet_frames = rx_while_high.low_percent;
+    single_probe.quiet_bad_frames = rx_while_high.transitions;
+    single_probe.probe_quiet_frames = tx_while_low.low_percent;
+    single_probe.probe_quiet_first = rx_while_low.low_percent;
+    single_probe.raw_count = static_cast<std::uint8_t>(tx_while_low.transitions & 0xFFu);
+    single_probe.raw[0] = rx_while_low.transitions;
+    single_probe.raw[1] = mouse_tx_while_high.transitions;
+    single_probe.raw[2] = static_cast<std::uint16_t>(mouse_tx_while_high.low_percent) |
+                          (static_cast<std::uint16_t>(mouse_rx_while_high.low_percent) << 8);
+    single_probe.raw[3] = mouse_rx_while_high.transitions;
+    single_probe.framing_errors = mouse_tx_while_low.low_percent;
 #endif
 
 
@@ -276,51 +361,22 @@ int main() {
                 mouse_probe = duo_input::u1::probe_ch375(mouse_port, mouse_commands);
             }
 
-            std::uint8_t report[52];
-            const duo_input::u1::Ch375ProbeResult* probes[2] = {&keyboard_probe, &mouse_probe};
-            for (int index = 0; index < 2; ++index) {
-                const duo_input::u1::Ch375ProbeResult& probe = *probes[index];
-                std::uint8_t* at = report + index * 8;
-                at[0] = static_cast<std::uint8_t>((probe.answered ? 1 : 0) |
-                                                  (probe.check_exist_ok ? 2 : 0) |
-                                                  (probe.ic_version_answered ? 4 : 0) |
-                                                  (probe.host_mode_ok ? 8 : 0) |
-                                                  (probe.connect_answered ? 16 : 0) |
-                                                  (probe.int_asserted ? 32 : 0));
-                at[1] = probe.check_exist_reply;
-                at[2] = probe.ic_version;
-                at[3] = probe.host_mode_reply;
-                at[4] = probe.connect_reply;
-                at[5] = static_cast<std::uint8_t>(probe.framing_errors);
-                at[6] = probe.raw_count;
-                at[7] = probe.quiet_frames;
-                std::uint8_t* raw = report + 16 + index * 8;
-                for (std::size_t word = 0; word < 4; ++word) {
-                    raw[word * 2] = static_cast<std::uint8_t>(probe.raw[word] & 0xFF);
-                    raw[word * 2 + 1] = static_cast<std::uint8_t>(probe.raw[word] >> 8);
+            std::uint8_t report[128] = {};
+            std::size_t report_size = duo_input::diagnostics::pack_ch375_single_probe(
+                single_probe, report, sizeof(report));
+
+            // Appended after the level readings rather than mixed into them,
+            // so an older reader still finds what it expects at the front.
+            const duo_input::u1::Ch375ProbeResult* asked[2] = {&keyboard_probe, &mouse_probe};
+            if (report_size + 8 <= sizeof(report)) {
+                report[report_size++] = 0xA8;  // marks what follows
+                for (int index = 0; index < 2; ++index) {
+                    report[report_size++] = asked[index]->answered ? 1 : 0;
+                    report[report_size++] = asked[index]->check_exist_ok ? 1 : 0;
+                    report[report_size++] = asked[index]->check_exist_reply;
                 }
             }
-            report[32] = static_cast<std::uint8_t>(keyboard_quiet_at_boot & 0xFF);
-            report[33] = static_cast<std::uint8_t>(keyboard_quiet_at_boot >> 8);
-            report[34] = static_cast<std::uint8_t>(mouse_quiet_at_boot & 0xFF);
-            report[35] = static_cast<std::uint8_t>(mouse_quiet_at_boot >> 8);
-            report[36] = static_cast<std::uint8_t>(keyboard_bad_at_boot & 0xFF);
-            report[37] = static_cast<std::uint8_t>(keyboard_bad_at_boot >> 8);
-            report[38] = static_cast<std::uint8_t>(mouse_bad_at_boot & 0xFF);
-            report[39] = static_cast<std::uint8_t>(mouse_bad_at_boot >> 8);
-            report[40] = keyboard_pad.low_percent;
-            report[41] = static_cast<std::uint8_t>(keyboard_pad.transitions & 0xFF);
-            report[42] = static_cast<std::uint8_t>(keyboard_pad.transitions >> 8);
-            report[43] = mouse_pad.low_percent;
-            report[44] = static_cast<std::uint8_t>(mouse_pad.transitions & 0xFF);
-            report[45] = static_cast<std::uint8_t>(mouse_pad.transitions >> 8);
-            report[46] = static_cast<std::uint8_t>(keyboard_pad.shortest_run_samples & 0xFF);
-            report[47] = static_cast<std::uint8_t>(keyboard_pad.shortest_run_samples >> 8);
-            report[48] = static_cast<std::uint8_t>(mouse_pad.shortest_run_samples & 0xFF);
-            report[49] = static_cast<std::uint8_t>(mouse_pad.shortest_run_samples >> 8);
-            report[50] = static_cast<std::uint8_t>(keyboard_pad.samples_per_ms & 0xFF);
-            report[51] = static_cast<std::uint8_t>((keyboard_pad.samples_per_ms >> 8) & 0xFF);
-            config.set_link_debug(report, sizeof(report));
+            config.set_link_debug(report, report_size);
         }
 #endif
 

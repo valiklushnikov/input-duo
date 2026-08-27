@@ -77,7 +77,8 @@ std::uint16_t listen_without_sending(ch375::PioCh375Transport& port, std::uint32
     return frames;
 }
 
-Ch375ProbeResult probe_ch375(ch375::PioCh375Transport& port, ch375::Ch375Transport& commands) {
+Ch375ProbeResult probe_ch375(ch375::PioCh375Transport& port, ch375::Ch375Transport& commands,
+                             Ch375ProbeMode mode) {
     Ch375ProbeResult result;
 
     // Anything already waiting belongs to a question nobody asked. Reading it
@@ -103,8 +104,10 @@ Ch375ProbeResult probe_ch375(ch375::PioCh375Transport& port, ch375::Ch375Transpo
     // Sent by hand rather than through the command layer, and everything that
     // comes back is kept. One frame is the answer; more than one means
     // something else is talking, and none means nothing is.
-    port.write_command(static_cast<std::uint8_t>(Ch375Command::CheckExist));
-    port.write_data(0x57);
+    commands.start_check_exist();
+    if (mode == Ch375ProbeMode::CompleteCheckExist) {
+        port.write_data(0x57);
+    }
     sleep_ms(30);
     while (result.raw_count < Ch375ProbeResult::kRawWords &&
            port.read_word(result.raw[result.raw_count])) {
@@ -112,6 +115,11 @@ Ch375ProbeResult probe_ch375(ch375::PioCh375Transport& port, ch375::Ch375Transpo
     }
 
     result.answered = result.raw_count > 0;
+    if (mode == Ch375ProbeMode::CommandOnly) {
+        result.framing_errors = port.framing_errors();
+        result.int_asserted = port.int_asserted();
+        return result;
+    }
     if (result.answered) {
         result.check_exist_reply = static_cast<std::uint8_t>(result.raw[0] & 0xFF);
         result.check_exist_ok = result.check_exist_reply == 0xA8;
@@ -148,6 +156,51 @@ Ch375ProbeResult probe_ch375(ch375::PioCh375Transport& port, ch375::Ch375Transpo
     result.framing_errors = port.framing_errors();
     result.int_asserted = port.int_asserted();
     return result;
+}
+
+std::size_t scan_ch375_baud(ch375::PioCh375Transport& port,
+                           diagnostics::Ch375BaudObservation* out,
+                           std::size_t capacity) {
+    static constexpr std::uint16_t kRates[] = {
+        7200, 7600, 8000, 8400, 8800, 9200, 9600,
+        10000, 10400, 10800, 11200, 11600, 12000,
+    };
+    const std::size_t count = capacity < (sizeof(kRates) / sizeof(kRates[0]))
+                                  ? capacity
+                                  : (sizeof(kRates) / sizeof(kRates[0]));
+
+    for (std::size_t index = 0; index < count; ++index) {
+        diagnostics::Ch375BaudObservation& observation = out[index];
+        observation = {};
+        observation.baud = kRates[index];
+
+        port.set_baud(ch375::kCh375DefaultBaud);
+        port.drain();
+        (void)port.framing_errors();
+        sleep_ms(5);
+
+        port.write_command(static_cast<std::uint8_t>(Ch375Command::CheckExist));
+        port.write_data(0x57);
+        // The two transmitted frames take more than 2 ms, so the receiver is
+        // already at the candidate rate before the chip can answer.
+        port.set_rx_baud(kRates[index]);
+        sleep_ms(30);
+
+        std::uint16_t word = 0;
+        while (port.read_word(word)) {
+            if (observation.frame_count == 0) {
+                observation.first_word = word;
+            }
+            if (observation.frame_count < 0xFF) {
+                ++observation.frame_count;
+            }
+        }
+        observation.framing_errors = static_cast<std::uint8_t>(port.framing_errors() != 0);
+    }
+
+    port.set_baud(ch375::kCh375DefaultBaud);
+    port.drain();
+    return count;
 }
 
 }  // namespace duo_input::u1

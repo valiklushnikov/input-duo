@@ -155,6 +155,15 @@ void PioCh375Transport::set_baud(unsigned baud) {
     pio_sm_set_clkdiv(pio_, rx_sm_, divider);
 }
 
+void PioCh375Transport::set_rx_baud(unsigned baud) {
+    if (!started_) {
+        return;
+    }
+    const float divider =
+        static_cast<float>(clock_get_hz(clk_sys)) / static_cast<float>(baud * kCyclesPerBit);
+    pio_sm_set_clkdiv(pio_, rx_sm_, divider);
+}
+
 void PioCh375Transport::write_command(std::uint8_t command) {
     if (!started_) {
         return;

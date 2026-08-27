@@ -48,6 +48,13 @@ public:
     /// and anything still in flight is lost.
     void set_baud(unsigned baud);
 
+    /// Change only the receiver rate while transmission remains at 9600.
+    ///
+    /// Bring-up uses this to ask the same known question at the documented
+    /// rate and sample the answer across nearby rates. It distinguishes a
+    /// timing mismatch from level-shifter corruption without moving a wire.
+    void set_rx_baud(unsigned baud);
+
     // --- the port ----------------------------------------------------------
 
     void write_command(std::uint8_t command) override;

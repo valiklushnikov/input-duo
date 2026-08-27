@@ -63,7 +63,37 @@ prevented cannot happen here.
 
 Task 2 should drop the OE step rather than pretend to perform it.
 
-### What the line actually does, measured
+### It works with the shifter removed
+
+**2026-08-27.** With the TXS0108E taken out and the CH375s wired to U1
+directly, both chips answer CHECK_EXIST with 0xA8 - the inverse of the 0x57
+they were sent (DS1 5.5). First time either of them has answered anything.
+
+That also settles two questions the level readings could not: the data lines
+are not swapped, and both chips really are in serial mode. A chip in parallel
+mode, or one wired backwards, cannot return that byte.
+
+So the shifter was the cause. The proof was taking it out, not the reasoning
+that led there - which had already named it once on evidence that fitted a
+part relaying noise just as well as one making it.
+
+**This leaves an electrical problem that has to be solved before the wiring is
+finished.** A CH375 running at 5 V drives its TXD to 5 V, and an RP2040 pin is
+not 5 V tolerant: the protection diode into the 3.3 V rail conducts, and the
+pin degrades. It works today and that is not the same as being safe. Either:
+
+- run the CH375s from 3.3 V - the part supports it, with V3 tied to VCC
+  (DS1 section 6.2.3) - which removes the mismatch entirely; or
+- put a divider on each input to U1. There are four of them: keyboard TXD and
+  INT, mouse TXD and INT. Two resistors each, so eight.
+
+The transmit direction, U1 to CH375 RXD, is 3.3 V into a 5 V input and is the
+easier half, but check what the chip accepts as a logic high rather than
+assuming.
+
+### What the line looked like with the shifter in place
+
+
 
 The measurement that counts does not involve PIO at all. Both receive pads are
 read as ordinary inputs with the internal pull-up, for one second, before any

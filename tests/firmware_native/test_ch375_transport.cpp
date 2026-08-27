@@ -28,6 +28,17 @@ using duo_input::u1::ch375::testing::ScriptedCh375;
 
 // -------------------------------------------------------------- check_exist
 
+TEST_CASE(check_exist_command_only_sends_no_parameter) {
+    // A deliberately incomplete command is a diagnostic boundary: CH375 has
+    // not received the probe byte yet, so it has no valid reply to send.
+    ScriptedCh375 io({expect_command(Ch375Command::CheckExist)});
+    Ch375Transport transport(io);
+
+    transport.start_check_exist();
+
+    CHECK(io.complete());
+}
+
 TEST_CASE(check_exist_requires_the_inverted_reply) {
     // CH375DS1 section 5.5: the chip answers with the bitwise inverse of
     // whatever byte it is given. It is the one command that proves the port

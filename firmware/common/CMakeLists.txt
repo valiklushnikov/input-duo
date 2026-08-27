@@ -1,6 +1,7 @@
 add_library(duo_common STATIC
     config/validator.cpp
     crypto/sha256.cpp
+    diagnostics/ch375_baud_scan.cpp
     hid/state_manager.cpp
     link/spi_protocol.cpp
     protocol/cobs.cpp
