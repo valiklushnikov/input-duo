@@ -144,15 +144,33 @@ bool PioCh375Transport::begin(PIO pio, unsigned tx_pin, unsigned rx_pin, unsigne
     return true;
 }
 
-void PioCh375Transport::set_baud(unsigned baud) {
-    if (!started_) {
-        return;
+bool PioCh375Transport::set_baud(unsigned baud) {
+    if (!started_ || baud == 0) {
+        return false;
     }
+
+    // The last byte of the command has to leave at the old rate before the
+    // rate moves underneath it. Changing the divider with a frame still in the
+    // transmit FIFO sends the tail of that frame at the new speed, which the
+    // chip reads as a framing error and answers nothing at all.
+    while (!pio_sm_is_tx_fifo_empty(pio_, tx_sm_)) {
+    }
+    sleep_us(kFrameTailUs);
+
     baud_ = baud;
     const float divider =
         static_cast<float>(clock_get_hz(clk_sys)) / static_cast<float>(baud * kCyclesPerBit);
     pio_sm_set_clkdiv(pio_, tx_sm_, divider);
     pio_sm_set_clkdiv(pio_, rx_sm_, divider);
+
+    // Whatever the receiver was part-way through belongs to the old rate and
+    // is nonsense at the new one.
+    pio_sm_clear_fifos(pio_, rx_sm_);
+
+    // DS1 5.2: about a millisecond, during which the chip answers at neither
+    // rate. Reading before that is reading its silence as a refusal.
+    sleep_us(kBaudChangeUs);
+    return true;
 }
 
 void PioCh375Transport::set_rx_baud(unsigned baud) {

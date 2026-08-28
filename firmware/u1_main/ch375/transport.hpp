@@ -43,6 +43,14 @@ public:
     virtual bool int_asserted() const = 0;
 
     virtual std::uint32_t now_us() const = 0;
+
+    /// Change the port's own speed, if it can.
+    ///
+    /// Returns false when the port has a fixed rate. Answering true without
+    /// changing anything would leave the chip talking at a speed nothing on
+    /// this side is listening at, which is silence that looks like a dead
+    /// chip.
+    virtual bool set_baud(unsigned) { return false; }
 };
 
 /// How long to wait for a byte the chip owes us.
@@ -190,6 +198,63 @@ public:
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::IssueToken));
         io_.write_data(transaction(endpoint, pid));
         return true;
+    }
+
+    /// DS1 5.2. Raise the port speed, and the chip's with it.
+    ///
+    /// At 9600 the port is the slowest thing in the system by a wide margin.
+    /// A frame is eleven bits - the ninth data bit is the command flag - so a
+    /// byte costs 1.15 ms, and reading one mouse report takes fifteen of them
+    /// between the status, the length, the data and the next token. Seventeen
+    /// milliseconds to collect a report a moving mouse produces every eight is
+    /// a deficit that never closes while the hand keeps moving.
+    ///
+    /// The chip replies at the *new* rate (DS1 5.2), so the port has to be
+    /// switched between sending this and reading the answer. It also needs
+    /// about a millisecond to make the change, during which it says nothing.
+    ///
+    /// Re-establish this after every chip reset: RESET_ALL returns the port to
+    /// 9600, and a host still talking at the old speed to a chip that has gone
+    /// back to the default is the same silence as a chip that is not there.
+    bool set_baud_rate(std::uint8_t coefficient, std::uint8_t constant, unsigned baud) {
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::SetBaudRate));
+        io_.write_data(coefficient);
+        io_.write_data(constant);
+
+        if (!io_.set_baud(baud)) {
+            return false;
+        }
+
+        std::uint8_t answer = 0;
+        if (!read_reply(answer)) {
+            return false;
+        }
+        return answer == static_cast<std::uint8_t>(CommandStatus::Success);
+    }
+
+    /// Put this side back to the rate a chip comes up at.
+    ///
+    /// RESET_ALL returns the chip to 9600 whatever it was doing before, so a
+    /// port left at the raised rate is talking to something that is no longer
+    /// listening at it.
+    bool reset_port_speed(unsigned default_baud) { return io_.set_baud(default_baud); }
+
+    /// Raise both ends, and find out where they are if that fails.
+    ///
+    /// A chip that did not answer at the new rate may never have left the old
+    /// one - the command may not have arrived at all. Going back and asking is
+    /// the only way to know; leaving both ends guessing gives a chip that
+    /// looks dead and is not.
+    ///
+    /// Returns false when the port stayed at ``slow``, which is a working
+    /// system and a slow one rather than a broken one.
+    bool raise_speed(std::uint8_t coefficient, std::uint8_t constant, unsigned fast,
+                     unsigned slow) {
+        if (set_baud_rate(coefficient, constant, fast)) {
+            return true;
+        }
+        io_.set_baud(slow);
+        return false;
     }
 
     /// DS1 5.10. Ask whether a device is attached, rather than waiting to be

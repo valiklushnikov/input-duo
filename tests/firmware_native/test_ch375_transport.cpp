@@ -296,3 +296,47 @@ TEST_CASE(a_deadline_that_has_already_passed_does_not_wait_at_all) {
 
     CHECK(!transport.wait_for_interrupt(io.now_us() - 1000));
 }
+
+// ------------------------------------------------------------- port speed
+
+TEST_CASE(raising_the_port_speed_sends_the_divisor_the_datasheet_names) {
+    ScriptedCh375 port({expect_command(Ch375Command::SetBaudRate), expect_data(0x03),
+                        expect_data(0xCC), reply(0x51)});
+    Ch375Transport transport(port);
+
+    CHECK(transport.set_baud_rate(0x03, 0xCC, 115200));
+    CHECK(port.complete());
+}
+
+TEST_CASE(the_port_switches_before_the_answer_is_read) {
+    ScriptedCh375 port({expect_command(Ch375Command::SetBaudRate), expect_data(0x03),
+                        expect_data(0xCC), reply(0x51)});
+    Ch375Transport transport(port);
+
+    transport.set_baud_rate(0x03, 0xCC, 115200);
+
+    // The chip answers at the new rate, not the old one. A port still set to
+    // 9600 reads that answer as noise, and then reads every byte after it as
+    // noise too.
+    CHECK_EQ(port.baud(), 115200u);
+    CHECK_EQ(port.baud_changes(), 1);
+}
+
+TEST_CASE(a_port_that_cannot_change_speed_says_so) {
+    ScriptedCh375 port({expect_command(Ch375Command::SetBaudRate), expect_data(0x03),
+                        expect_data(0xCC)});
+    Ch375Transport transport(port);
+    port.refuse_baud_changes();
+
+    // Reporting success without changing anything leaves the chip talking at a
+    // speed nothing here is listening at - silence that looks like a dead chip.
+    CHECK(!transport.set_baud_rate(0x03, 0xCC, 115200));
+}
+
+TEST_CASE(a_chip_that_refuses_the_new_speed_is_not_treated_as_agreeing) {
+    ScriptedCh375 port({expect_command(Ch375Command::SetBaudRate), expect_data(0x03),
+                        expect_data(0xCC), reply(0x00)});
+    Ch375Transport transport(port);
+
+    CHECK(!transport.set_baud_rate(0x03, 0xCC, 115200));
+}

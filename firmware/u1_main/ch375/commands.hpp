@@ -175,4 +175,18 @@ enum class DescriptorType : std::uint8_t {
     Configuration = 2,
 };
 
+/// The rate a CH375 comes up at, and returns to after RESET_ALL (DS1 5.2).
+inline constexpr unsigned kCh375DefaultBaud = 9600;
+
+/// What the port is raised to once the chip is answering.
+///
+/// At 9600 a frame is eleven bits and so costs 1.15 ms, and one mouse report
+/// takes fifteen bytes to collect: seventeen milliseconds for something a
+/// moving mouse produces every eight. DS1 5.2 lists this rate with the same
+/// 0.16% error as the default, so it is no less reliable - only twelve times
+/// faster, which turns that seventeen milliseconds into 1.4.
+inline constexpr unsigned kCh375FastBaud = 115200;
+inline constexpr std::uint8_t kFastBaudCoefficient = 0x03;
+inline constexpr std::uint8_t kFastBaudConstant = 0xCC;
+
 }  // namespace duo_input::u1::ch375

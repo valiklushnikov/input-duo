@@ -29,6 +29,21 @@ void Ch375Device::tick(std::uint32_t now_us) {
             chip_reset_at_us_ = now_us;
             return;
         }
+        // The chip has just come back from RESET_ALL, which returns its port
+        // to 9600 whatever it was doing before. This side has to go back with
+        // it before anything can be said at all.
+        transport_.reset_port_speed(kCh375DefaultBaud);
+
+        // Then raise both ends. At 9600 one mouse report costs fifteen bytes
+        // of eleven bits each - seventeen milliseconds for something a moving
+        // hand produces every eight - and the deficit never closes while the
+        // hand keeps moving. A chip that will not change rate is left at the
+        // default: slow is worse than fast and much better than nothing.
+        if (!transport_.raise_speed(kFastBaudCoefficient, kFastBaudConstant, kCh375FastBaud,
+                                    kCh375DefaultBaud)) {
+            ++baud_change_failures_;
+        }
+
         // Mode 5 is where DS1 5.9 says to wait: enabled, generating no frames,
         // watching for a device by itself.
         if (!transport_.set_usb_mode(UsbMode::HostNoSof)) {

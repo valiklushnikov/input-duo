@@ -24,8 +24,10 @@
 
 namespace duo_input::u1::ch375 {
 
-/// Where a CH375 starts after reset (DS1 section 5.2).
-inline constexpr unsigned kCh375DefaultBaud = 9600;
+/// How long the chip takes to change rate, and how long a frame's tail needs
+/// to finish leaving before the rate moves underneath it.
+inline constexpr std::uint32_t kBaudChangeUs = 2000;
+inline constexpr std::uint32_t kFrameTailUs = 1500;
 
 /// Load both programs into a PIO block. Call once before any port is opened.
 ///
@@ -45,8 +47,9 @@ public:
     ///
     /// The chip answers the command that changes its own rate *at the new
     /// rate* (DS1 5.2), so this must be called immediately after sending it,
-    /// and anything still in flight is lost.
-    void set_baud(unsigned baud);
+    /// and anything still in flight is lost. It also needs about a millisecond
+    /// to make the change, during which it says nothing at either rate.
+    bool set_baud(unsigned baud) override;
 
     /// Change only the receiver rate while transmission remains at 9600.
     ///

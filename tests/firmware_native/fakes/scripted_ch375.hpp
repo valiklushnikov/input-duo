@@ -54,6 +54,9 @@ inline Step reply(std::uint8_t value) {
     return Step{Step::Kind::Reply, value};
 }
 
+/// The rate a CH375 comes up at, and goes back to after a reset.
+inline constexpr unsigned kScriptedDefaultBaud = 9600;
+
 class ScriptedCh375 final : public ICh375Transport {
 public:
     ScriptedCh375(std::initializer_list<Step> script) : script_(script) {}
@@ -65,6 +68,21 @@ public:
     bool read_data(std::uint8_t& value) override;
     bool int_asserted() const override { return int_asserted_; }
     std::uint32_t now_us() const override { return now_us_; }
+
+    bool set_baud(unsigned baud) override {
+        if (refuse_baud_) {
+            return false;
+        }
+        baud_ = baud;
+        ++baud_changes_;
+        return true;
+    }
+
+    /// Stand in for a port with a fixed rate.
+    void refuse_baud_changes() { refuse_baud_ = true; }
+
+    unsigned baud() const { return baud_; }
+    int baud_changes() const { return baud_changes_; }
 
     // --- what the test drives and asks ------------------------------------
 
@@ -87,6 +105,9 @@ private:
     std::vector<Step> script_;
     std::size_t next_ = 0;
     std::string violations_;
+    unsigned baud_ = kScriptedDefaultBaud;
+    bool refuse_baud_ = false;
+    int baud_changes_ = 0;
     bool int_asserted_ = false;
     std::uint32_t start_us_ = 1000;
     std::uint32_t now_us_ = 1000;

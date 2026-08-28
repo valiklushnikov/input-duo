@@ -219,6 +219,13 @@ public:
     std::uint16_t detach_from_disconnect() const { return detach_from_disconnect_; }
     std::uint16_t detach_from_lost() const { return detach_from_lost_; }
     std::uint16_t enumerate_failures() const { return enumerate_failures_; }
+
+    /// How often the chip would not move to the faster port rate.
+    ///
+    /// Nonzero means the link is running at 9600, where collecting one mouse
+    /// report costs more time than a moving hand takes to produce the next -
+    /// so the pointer will be slow and behind, and it will not be obvious why.
+    std::uint16_t baud_change_failures() const { return baud_change_failures_; }
     std::uint16_t mode_failures() const { return mode_failures_; }
 
     /// How many times the device's endpoint has been polled, and how many
@@ -287,6 +294,7 @@ private:
     std::uint16_t detach_from_disconnect_ = 0;
     std::uint16_t detach_from_lost_ = 0;
     std::uint16_t enumerate_failures_ = 0;
+    std::uint16_t baud_change_failures_ = 0;
     std::uint16_t mode_failures_ = 0;
     std::uint16_t polls_issued_ = 0;
     /// Which data packet the next IN transaction should expect. Alternates on
