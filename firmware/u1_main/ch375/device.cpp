@@ -23,14 +23,6 @@ void Ch375Device::tick(std::uint32_t now_us) {
             // Start from a chip that is definitely idle. Whatever state the
             // last run left it in - including ones it does not leave by itself
             // - is gone after this, and the wait is the price.
-            // A chip that has already refused once is not merely idle: it may
-            // be part way through a command it read out of the noise on a
-            // floating line while this board was being reflashed, in which
-            // case the reset below is swallowed as a parameter like everything
-            // else. Give it enough to finish whatever that was first.
-            if (setup_mode_failures_ != 0) {
-                transport_.flush_command_state();
-            }
             transport_.reset_all();
             transport_.drain_pending_status();
             chip_resetting_ = true;
@@ -41,28 +33,6 @@ void Ch375Device::tick(std::uint32_t now_us) {
         // to 9600 whatever it was doing before. This side has to go back with
         // it before anything can be said at all.
         transport_.reset_port_speed(kCh375DefaultBaud);
-
-        // Then raise both ends. At 9600 one mouse report costs fifteen bytes
-        // of eleven bits each - seventeen milliseconds for something a moving
-        // hand produces every eight - and the deficit never closes while the
-        // hand keeps moving. A chip that will not change rate is left at the
-        // default: slow is worse than fast and much better than nothing.
-        // Only while there are rungs left to try. A channel that has been
-        // through the whole ladder is one this wiring cannot go faster on, and
-        // asking again every second - which is how often this loop recovers -
-        // is a hundred and eighty pointless attempts an hour on a link that
-        // works perfectly well at the rate it started at.
-        if (!baud_exhausted_) {
-            port_baud_ = transport_.try_speed(kBaudLadder[baud_rung_], kCh375DefaultBaud);
-            if (port_baud_ == kCh375DefaultBaud) {
-                ++baud_change_failures_;
-                if (baud_rung_ + 1 < kBaudLadderSize) {
-                    ++baud_rung_;
-                } else {
-                    baud_exhausted_ = true;
-                }
-            }
-        }
 
         // Mode 5 is where DS1 5.9 says to wait: enabled, generating no frames,
         // watching for a device by itself.
@@ -81,26 +51,10 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 ++alive_but_refusing_;
             }
 
-            // A chip that will not take a mode is often not deaf but
-            // elsewhere: left at a rate this side abandoned, where nothing is
-            // asking. Look for it before giving up, since the alternative is
-            // somebody walking to the board to pull its power.
-            if (setup_mode_failures_ % kLostChipSearchEvery == 0) {
-                if (transport_.find_chip(kCh375DefaultBaud)) {
-                    ++chip_found_elsewhere_;
-                }
-            }
-
-            // Once per boot, and only after enough failures to be sure this is
-            // not a passing thing: ask whether the chip is silent or whether
-            // this side is listening in the wrong place. The two are identical
-            // from outside and want opposite repairs - one is a wire, the
-            // other is this code - and nothing has ever distinguished them.
-            if (!rx_swept_ && setup_mode_failures_ >= kRxSweepAfterFailures) {
-                rx_swept_ = true;
-                rx_sweep_hit_ = transport_.sweep_rx(kRxSweepRates, kRxSweepCount,
-                                                    kCh375DefaultBaud);
-            }
+            // Nothing else is sent. Searching for the chip at other rates,
+            // flushing it with filler and sweeping the receiver all write
+            // bytes at rates it may not be using, and each of those can wedge
+            // a chip that was about to come good on its own.
             fail(now_us);
             return;
         }
@@ -108,6 +62,34 @@ void Ch375Device::tick(std::uint32_t now_us) {
         // that stops answering would then hold the firmware inside a single
         // command, and everything else on this loop stops with it.
         transport_.set_retry(kRetryReportNak);
+
+        // Only now is the rate raised - after the chip has proved it is alive
+        // by taking a mode command.
+        //
+        // At 9600 one mouse report costs fifteen bytes of eleven bits each:
+        // seventeen milliseconds for something a moving hand produces every
+        // eight. The deficit never closes while the hand keeps moving, and the
+        // peripheral is reset and re-enumerated for a silence this side is
+        // causing. That is the fault this exists to fix.
+        //
+        // But asking costs a write at a rate the chip may not be using, and a
+        // chip that half-hears one stops answering entirely. Asked before the
+        // chip had answered anything, that barrage met every dead channel once
+        // a second - including the freshly powered one somebody had just
+        // walked over to revive, wedged again before they got back to their
+        // chair. A chip that has just accepted a mode command is not in that
+        // state, and is the only kind worth asking.
+        if (!baud_exhausted_) {
+            port_baud_ = transport_.try_speed(kBaudLadder[baud_rung_], kCh375DefaultBaud);
+            if (port_baud_ == kCh375DefaultBaud) {
+                ++baud_change_failures_;
+                if (baud_rung_ + 1 < kBaudLadderSize) {
+                    ++baud_rung_;
+                } else {
+                    baud_exhausted_ = true;
+                }
+            }
+        }
         chip_ready_ = true;
         enter(Ch375State::Absent, now_us);
         last_connect_poll_us_ = now_us - kConnectPollUs;
