@@ -199,13 +199,26 @@ bool PioCh375Transport::set_baud(unsigned baud) {
     return true;
 }
 
-void PioCh375Transport::set_rx_baud(unsigned baud) {
-    if (!started_) {
-        return;
+bool PioCh375Transport::set_rx_baud(unsigned baud) {
+    if (!started_ || baud == 0) {
+        return false;
     }
     const float divider =
         static_cast<float>(clock_get_hz(clk_sys)) / static_cast<float>(baud * kCyclesPerBit);
+
+    // Stopped and restarted, not merely re-divided - for the same reason the
+    // transmit side is. A receiver holding a shift counter part way through a
+    // byte and a divider part way through a bit does not adopt a new rate; it
+    // counts the new rate's bits from the old rate's phase and never finds a
+    // start bit again.
+    pio_sm_set_enabled(pio_, rx_sm_, false);
     pio_sm_set_clkdiv(pio_, rx_sm_, divider);
+    pio_sm_clear_fifos(pio_, rx_sm_);
+    pio_sm_restart(pio_, rx_sm_);
+    pio_sm_clkdiv_restart(pio_, rx_sm_);
+    pio_sm_exec(pio_, rx_sm_, pio_encode_jmp(g_programs[block_index(pio_)].rx_offset));
+    pio_sm_set_enabled(pio_, rx_sm_, true);
+    return true;
 }
 
 void PioCh375Transport::write_command(std::uint8_t command) {

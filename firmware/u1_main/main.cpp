@@ -529,6 +529,7 @@ int main() {
                     "  last report (%u bytes): %02X %02X %02X %02X\n"
                     "  port=%u baud, refused_changes=%u\n"
                     "  mode_refused setup=%u recover=%u  found_elsewhere=%u alive_refusing=%u\n"
+                    "  rx_sweep=%s hit=%u\n"
                     "  slowest pass round the loop=%u us\n",
                     names[index], state < 7 ? kStates[state] : "?",
                     device.device_is_low_speed() ? "low" : "full", tally.attached, tally.detached,
@@ -555,6 +556,8 @@ int main() {
                     device.baud_change_failures(), device.setup_mode_failures(),
                     device.recover_mode_failures(), device.chip_found_elsewhere(),
                     device.alive_but_refusing(),
+                    device.rx_swept() ? "done" : "not run",
+                    device.rx_sweep_hit(),
                     worst_pass_us);
                 // snprintf answers with how much it *would* have written. Left
                 // unclamped, the next call is handed a negative amount of room

@@ -568,3 +568,41 @@ TEST_CASE(a_good_block_is_not_drained_of_anything) {
     CHECK(transport.check_exist(0xA5));
     CHECK(port.complete());
 }
+
+// -------------------------------------------- looking in the wrong place
+
+TEST_CASE(a_reply_that_only_reads_at_another_rate_names_that_rate) {
+    // A silent chip and a receiver sampling at the wrong rate are the same
+    // thing from outside: a channel that answers nothing. They want completely
+    // different repairs - one is a wire or a module, the other is this side's
+    // own timing - and nothing until now could tell them apart.
+    ScriptedCh375 port({expect_command(Ch375Command::CheckExist), expect_data(0xA5),
+                        expect_command(Ch375Command::CheckExist), expect_data(0xA5),
+                        reply(0x5A)});
+    Ch375Transport transport(port);
+    const unsigned rates[] = {9600, 10400};
+
+    CHECK_EQ(transport.sweep_rx(rates, 2, 9600), 10400u);
+}
+
+TEST_CASE(a_chip_that_answers_at_no_sampling_rate_names_none) {
+    ScriptedCh375 port({});
+    port.allow_unscripted();
+    Ch375Transport transport(port);
+    const unsigned rates[] = {9600, 10400, 8800};
+
+    // Nothing anywhere. The receiver is not the problem, so the answer is
+    // zero rather than a rate somebody might act on.
+    CHECK_EQ(transport.sweep_rx(rates, 3, 9600), 0u);
+}
+
+TEST_CASE(a_sweep_leaves_the_receiver_where_it_started) {
+    ScriptedCh375 port({});
+    port.allow_unscripted();
+    Ch375Transport transport(port);
+    const unsigned rates[] = {10400, 8800};
+
+    transport.sweep_rx(rates, 2, 9600);
+
+    CHECK_EQ(port.rx_baud(), 9600u);
+}

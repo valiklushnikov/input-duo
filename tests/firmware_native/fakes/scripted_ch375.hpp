@@ -74,6 +74,7 @@ public:
             return false;
         }
         baud_ = baud;
+        rx_baud_ = baud;
         ++baud_changes_;
         return true;
     }
@@ -101,6 +102,13 @@ public:
     }
 
     unsigned baud() const { return baud_; }
+
+    bool set_rx_baud(unsigned baud) override {
+        rx_baud_ = baud;
+        return true;
+    }
+
+    unsigned rx_baud() const { return rx_baud_; }
     int baud_changes() const { return baud_changes_; }
 
     // --- what the test drives and asks ------------------------------------
@@ -125,6 +133,7 @@ private:
     std::size_t next_ = 0;
     std::string violations_;
     unsigned baud_ = kScriptedDefaultBaud;
+    unsigned rx_baud_ = kScriptedDefaultBaud;
     bool refuse_baud_ = false;
     bool unscripted_ = false;
     int data_written_ = 0;

@@ -51,6 +51,14 @@ public:
     /// this side is listening at, which is silence that looks like a dead
     /// chip.
     virtual bool set_baud(unsigned) { return false; }
+
+    /// Change only the rate this side listens at, leaving transmission alone.
+    ///
+    /// Asking the same known question at the documented rate and sampling the
+    /// answer at a different one separates a chip that is silent from a
+    /// receiver that is looking in the wrong place - two faults that are
+    /// identical from outside and want completely different repairs.
+    virtual bool set_rx_baud(unsigned) { return false; }
 };
 
 /// How long to wait for a byte the chip owes us.
@@ -326,6 +334,43 @@ public:
         }
         io_.set_baud(slow);
         return slow;
+    }
+
+    /// Ask the same question at the usual rate and listen at several others.
+    ///
+    /// A silent chip and a receiver sampling in the wrong place are the same
+    /// thing from outside: a channel that answers nothing. One is a wire or a
+    /// module and the other is this side's own timing, and telling them apart
+    /// is the difference between somebody rewiring a board that is fine and
+    /// somebody fixing the code.
+    ///
+    /// CHECK_EXIST is what is asked, because its answer is the bitwise inverse
+    /// of the byte it was given (DS1 5.5) - so a reply that arrives is either
+    /// right or obviously not, with nothing in between to be hopeful about.
+    ///
+    /// Returns the rate the answer read correctly at, or zero.
+    unsigned sweep_rx(const unsigned* rates, std::size_t count, unsigned tx_baud) {
+        for (std::size_t index = 0; index < count; ++index) {
+            io_.set_baud(tx_baud);
+            drain_port();
+
+            io_.write_command(static_cast<std::uint8_t>(Ch375Command::CheckExist));
+            io_.write_data(kPortProbeByte);
+            // The two transmitted frames take longer than the chip needs to
+            // start answering, so the receiver is at the candidate rate before
+            // the first bit of the reply arrives.
+            io_.set_rx_baud(rates[index]);
+
+            std::uint8_t answer = 0;
+            if (read_reply(answer) &&
+                answer == static_cast<std::uint8_t>(~kPortProbeByte)) {
+                io_.set_baud(tx_baud);
+                return rates[index];
+            }
+        }
+
+        io_.set_baud(tx_baud);
+        return 0;
     }
 
     /// Find a chip that has stopped answering, and bring it home.

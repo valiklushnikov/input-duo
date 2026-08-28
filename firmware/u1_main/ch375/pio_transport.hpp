@@ -60,7 +60,7 @@ public:
     /// Bring-up uses this to ask the same known question at the documented
     /// rate and sample the answer across nearby rates. It distinguishes a
     /// timing mismatch from level-shifter corruption without moving a wire.
-    void set_rx_baud(unsigned baud);
+    bool set_rx_baud(unsigned baud) override;
 
     // --- the port ----------------------------------------------------------
 

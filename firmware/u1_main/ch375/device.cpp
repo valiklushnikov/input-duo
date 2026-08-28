@@ -90,6 +90,17 @@ void Ch375Device::tick(std::uint32_t now_us) {
                     ++chip_found_elsewhere_;
                 }
             }
+
+            // Once per boot, and only after enough failures to be sure this is
+            // not a passing thing: ask whether the chip is silent or whether
+            // this side is listening in the wrong place. The two are identical
+            // from outside and want opposite repairs - one is a wire, the
+            // other is this code - and nothing has ever distinguished them.
+            if (!rx_swept_ && setup_mode_failures_ >= kRxSweepAfterFailures) {
+                rx_swept_ = true;
+                rx_sweep_hit_ = transport_.sweep_rx(kRxSweepRates, kRxSweepCount,
+                                                    kCh375DefaultBaud);
+            }
             fail(now_us);
             return;
         }

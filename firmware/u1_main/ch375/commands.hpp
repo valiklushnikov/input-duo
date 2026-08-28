@@ -191,6 +191,15 @@ struct BaudOption {
 /// costs about seventy milliseconds at the rate the chip comes up at.
 inline constexpr std::size_t kWedgeFlushBytes = 64;
 
+/// Sampling rates to try when a channel answers nothing.
+///
+/// Spread either side of the rate the chip actually uses. A reply that reads
+/// correctly at one of the neighbours means this side's timing is off - the
+/// divider, the system clock, the cycles per bit - and not that the chip is
+/// silent. A reply at none of them means it really is silent.
+inline constexpr unsigned kRxSweepRates[] = {9600, 9200, 10000, 8800, 10400, 8400, 11000};
+inline constexpr std::size_t kRxSweepCount = sizeof(kRxSweepRates) / sizeof(kRxSweepRates[0]);
+
 /// How many refused mode commands before looking for the chip elsewhere.
 ///
 /// Not every time: the search writes to rates the chip may not be using, which
