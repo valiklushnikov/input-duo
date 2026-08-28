@@ -229,12 +229,16 @@ int main() {
     const duo_input::diagnostics::ResetRecord reset = duo_input::u1::read_reset_record();
     (void)reset;  // Reported over CDC once protocol v1 carries a field for it.
 
-    duo_input::u1::UsbService usb;
-    duo_input::u1::SpiMaster link;
-    duo_input::u1::PicoFlash flash;
-    duo_input::storage::AbStore store(flash);
-    CdcWriter cdc_writer;
-    duo_input::u1::ConfigService config(store, cdc_writer);
+    // Static, for the same reason as the controllers below: main's frame has
+    // to fit in core 0's two-kilobyte stack, and ConfigService alone carries
+    // three wire-frame buffers and the diagnostic payload - over four
+    // kilobytes that outlive every call anyway.
+    static duo_input::u1::UsbService usb;
+    static duo_input::u1::SpiMaster link;
+    static duo_input::u1::PicoFlash flash;
+    static duo_input::storage::AbStore store(flash);
+    static CdcWriter cdc_writer;
+    static duo_input::u1::ConfigService config(store, cdc_writer);
 
     // Whatever was stored last time is what the device runs now.
     const duo_input::storage::ScanResult stored = store.scan();
@@ -322,8 +326,24 @@ int main() {
     // the two data lines are the right way round, or that a chip is in serial
     // mode - only asking it something can. CHECK_EXIST needs nothing to be
     // configured first: send a byte, get its inverse back (DS1 5.5).
-    duo_input::u1::ch375::Ch375Transport keyboard_commands(keyboard_port);
-    duo_input::u1::ch375::Ch375Transport mouse_commands(mouse_port);
+    // These live in static storage, not on the stack.
+    //
+    // Core 0's stack region is two kilobytes and main's frame was measured at
+    // 7972 - four kilobytes past its own floor and straight across core 1's
+    // entire stack. Nothing faulted, because nothing had been launched on core
+    // 1 yet; the moment anything is, the two cores overwrite each other with
+    // no trap, no watchdog, and a board that keeps looping and keeps printing
+    // plausible numbers while its data is rewritten underneath it.
+    //
+    // The linker cannot catch this. Its only guard compares __StackLimit
+    // against the heap, and __StackLimit is the bottom of RAM - it says
+    // nothing about how far a frame actually descends.
+    //
+    // Each of these carries an event queue of eight 64-byte reports, so two
+    // controllers alone are most of the frame. They last as long as the
+    // program does, which is what static storage is for.
+    static duo_input::u1::ch375::Ch375Transport keyboard_commands(keyboard_port);
+    static duo_input::u1::ch375::Ch375Transport mouse_commands(mouse_port);
     // Asked once, here, before the state machines below take the chips over.
     //
     // Running it periodically alongside them made two owners of one chip: the
@@ -342,10 +362,10 @@ int main() {
     // Enumerated by hand rather than with AUTO_SETUP, which assigns an
     // address without saying which and never reports the endpoint - see
     // descriptor_setup.hpp.
-    duo_input::u1::ch375::DescriptorSetup keyboard_setup(keyboard_commands);
-    duo_input::u1::ch375::DescriptorSetup mouse_setup(mouse_commands);
-    duo_input::u1::ch375::Ch375Device keyboard_device(keyboard_commands, keyboard_setup);
-    duo_input::u1::ch375::Ch375Device mouse_device(mouse_commands, mouse_setup);
+    static duo_input::u1::ch375::DescriptorSetup keyboard_setup(keyboard_commands);
+    static duo_input::u1::ch375::DescriptorSetup mouse_setup(mouse_commands);
+    static duo_input::u1::ch375::Ch375Device keyboard_device(keyboard_commands, keyboard_setup);
+    static duo_input::u1::ch375::Ch375Device mouse_device(mouse_commands, mouse_setup);
     // The experiment that left the bus reset out changed nothing - the device
     // was lost at exactly the same rate without it - so the reset is not what
     // loses it, and the datasheet's sequence is back.
@@ -358,8 +378,8 @@ int main() {
         std::uint8_t last_size = 0;
         std::uint8_t last[8] = {};
     };
-    DeviceTally keyboard_tally;
-    DeviceTally mouse_tally;
+    static DeviceTally keyboard_tally;
+    static DeviceTally mouse_tally;
 
     duo_input::diagnostics::Ch375SingleProbeObservation single_probe;
     single_probe.pad_low_percent = tx_while_high.low_percent;
@@ -531,7 +551,7 @@ int main() {
             // Zeroed, because what is sent is measured from what was
             // written - and anything past that in an uninitialised
             // buffer goes out as part of the message.
-            char text[900] = {};
+            static char text[900] = {};
             int used = 0;
             const char* names[2] = {"keyboard", "mouse"};
             for (int index = 0; index < 2 && used < static_cast<int>(sizeof(text)) - 1; ++index) {

@@ -330,7 +330,11 @@ void Ch375Device::tick(std::uint32_t now_us) {
                     } else {
                         baud_exhausted_ = true;
                     }
-                    raised_baud_ = kCh375DefaultBaud;
+                    // raised_baud_ is deliberately left alone. The chip may be
+                    // stranded at it right now - that is what a collapse looks
+                    // like from here - and this is the only record of where it
+                    // was put. Clearing it here threw away the one thing the
+                    // recovery needs, and left the chip unreachable.
                 }
 
                 handle_detach(now_us);
