@@ -27,6 +27,7 @@ using duo_input::u1::CdcError;
 using duo_input::u1::CdcSink;
 using duo_input::u1::CaptureRequest;
 using duo_input::u1::ConfigService;
+using duo_input::u1::IRuntimeConfig;
 using duo_input::u1::mapping::CapturedTrigger;
 
 namespace {
@@ -73,12 +74,32 @@ private:
     std::vector<std::vector<std::uint8_t>> frames_;
 };
 
+class RuntimeConfigRecorder final : public IRuntimeConfig {
+public:
+    bool activate(duo_input::protocol::ByteView package) override {
+        ++activations;
+        active = package;
+        return package.data != nullptr && package.size != 0;
+    }
+
+    bool clear() override {
+        ++clears;
+        active = {nullptr, 0};
+        return true;
+    }
+
+    int activations = 0;
+    int clears = 0;
+    duo_input::protocol::ByteView active{nullptr, 0};
+};
+
 /// One conversation: a device, its flash and the wire between them.
 struct Link {
     MemoryFlash flash;
     AbStore store{flash};
     Recorder replies;
-    ConfigService service{store, replies};
+    RuntimeConfigRecorder runtime;
+    ConfigService service{store, replies, runtime};
     std::uint16_t sequence = 0;
 
     /// Send one request and return the decoded reply.
@@ -357,7 +378,68 @@ CdcFrame send_chunk(Link& link, std::uint32_t offset, const std::uint8_t* data,
     return link.send(CdcMessageType::WRITE_CHUNK, request, 4 + size);
 }
 
+std::vector<std::uint8_t> valid_package() {
+    const std::string path =
+        std::string(DUO_TEST_VECTOR_DIR) + "/config_vectors/valid_full.bin";
+    std::FILE* file = std::fopen(path.c_str(), "rb");
+    if (file == nullptr) {
+        return {};
+    }
+    std::vector<std::uint8_t> bytes;
+    std::uint8_t chunk[4096];
+    std::size_t read = 0;
+    while ((read = std::fread(chunk, 1, sizeof(chunk), file)) > 0) {
+        bytes.insert(bytes.end(), chunk, chunk + read);
+    }
+    std::fclose(file);
+    return bytes;
+}
+
+CdcFrame write_valid_package(Link& link, const std::vector<std::uint8_t>& data) {
+    begin_write(link, data);
+    for (std::size_t offset = 0; offset < data.size();) {
+        const std::size_t remaining = data.size() - offset;
+        const std::size_t size = remaining < ProtocolLimits::CONFIG_CHUNK_MAX_BYTES
+                                     ? remaining
+                                     : ProtocolLimits::CONFIG_CHUNK_MAX_BYTES;
+        send_chunk(link, static_cast<std::uint32_t>(offset), data.data() + offset, size);
+        offset += size;
+    }
+    link.send(CdcMessageType::WRITE_VERIFY);
+    return link.send(CdcMessageType::WRITE_COMMIT);
+}
+
 }  // namespace
+
+TEST_CASE(a_committed_configuration_is_activated_before_commit_is_acknowledged) {
+    Link link;
+    link.hello();
+    const std::vector<std::uint8_t> data = valid_package();
+    CHECK(!data.empty());
+
+    const CdcFrame reply = write_valid_package(link, data);
+
+    CHECK_EQ(error_of(reply), CdcError::Ok);
+    CHECK_EQ(link.runtime.activations, 1);
+    CHECK(link.runtime.active.data != nullptr);
+    CHECK_EQ(link.service.active_profile(), 8u);
+}
+
+TEST_CASE(a_factory_reset_detaches_the_runtime_before_erasing_its_flash) {
+    Link link;
+    link.hello();
+    const std::vector<std::uint8_t> data = valid_package();
+    CHECK_EQ(error_of(write_valid_package(link, data)), CdcError::Ok);
+    CHECK(link.runtime.active.data != nullptr);
+
+    link.service.confirm_factory_reset();
+    CHECK_EQ(error_of(link.send(CdcMessageType::FACTORY_RESET_ARM)), CdcError::Ok);
+    const CdcFrame reply = link.send(CdcMessageType::FACTORY_RESET_COMMIT);
+
+    CHECK_EQ(error_of(reply), CdcError::Ok);
+    CHECK_EQ(link.runtime.clears, 1);
+    CHECK(link.runtime.active.data == nullptr);
+}
 
 TEST_CASE(a_write_begins_and_reports_that_it_is_staging) {
     Link link;
@@ -757,6 +839,22 @@ TEST_CASE(a_mouse_capture_travels_as_the_host_will_accept_it) {
     CHECK_EQ(event.payload.data[2], 0u);
 }
 
+TEST_CASE(an_invalid_mouse_capture_is_not_published_to_the_host) {
+    Link link;
+    link.hello();
+    link.send(CdcMessageType::CAPTURE_BEGIN);
+
+    CapturedTrigger invalid;
+    invalid.kind = TriggerKind::MOUSE_BUTTON;
+    invalid.code = 0;
+    invalid.modifiers = 0x01;
+    link.replies.clear();
+    link.service.emit_capture_event(invalid);
+
+    CHECK_EQ(link.replies.count(), 0u);
+    CHECK(link.service.capture_active());
+}
+
 TEST_CASE(an_unsolicited_event_moves_the_sequence_on) {
     Link link;
     link.hello();
@@ -814,6 +912,18 @@ TEST_CASE(a_host_that_went_away_stops_the_capture_it_left_running) {
 
     // Otherwise a configurator that crashed mid-question leaves a keyboard
     // silently eating its own input until the timeout runs out.
+    CHECK(link.service.take_capture_request() == CaptureRequest::Cancel);
+}
+
+TEST_CASE(a_new_hello_session_cancels_a_capture_left_by_the_previous_session) {
+    Link link;
+    link.hello();
+    link.send(CdcMessageType::CAPTURE_BEGIN);
+    CHECK(link.service.take_capture_request() == CaptureRequest::Begin);
+
+    const std::uint8_t request[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+    link.send(CdcMessageType::HELLO, request, sizeof(request));
+
     CHECK(link.service.take_capture_request() == CaptureRequest::Cancel);
 }
 
@@ -896,10 +1006,23 @@ TEST_CASE(the_reported_profile_is_the_one_the_runtime_confirmed) {
     std::uint8_t wanted = 0;
     link.service.take_profile_request(wanted);
 
-    // What the loop does once Core 1 says the swap happened.
-    link.service.set_active_profile(wanted);
+    // A wrong/stale acknowledgement cannot publish a profile that was never
+    // installed, but the matching acknowledgement can.
+    CHECK_FALSE(link.service.confirm_profile_applied(2));
+    CHECK(link.service.active_profile() != 2u);
+    CHECK(link.service.confirm_profile_applied(wanted));
 
     CHECK_EQ(link.send(CdcMessageType::GET_STATUS).payload.data[1], 3u);
+    CHECK_FALSE(link.service.confirm_profile_applied(wanted));
+}
+
+TEST_CASE(a_profile_selected_on_the_device_is_reported_without_a_host_request) {
+    Link link;
+    link.hello();
+
+    link.service.publish_local_profile(4);
+
+    CHECK_EQ(link.send(CdcMessageType::GET_STATUS).payload.data[1], 4u);
 }
 
 TEST_CASE(a_profile_the_configuration_does_not_have_is_not_asked_for) {

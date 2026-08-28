@@ -150,3 +150,27 @@ def test_a_release_image_cannot_generate_its_own_input():
     generated = [name for name in symbols if "test_pattern" in name]
 
     assert generated == []
+
+
+@pytest.mark.skipif(not _u1_elf().is_file(), reason="no U1 ELF in this build")
+def test_a_release_image_contains_the_real_peripheral_input_path():
+    """Release must read CH375 reports and feed them into the input pipeline.
+
+    Bring-up diagnostics may be compiled out, but the product's only physical
+    input path may not disappear with them.  Inspect the linked image rather
+    than the source: a misplaced preprocessor guard still looks plausible in
+    ``main.cpp`` while producing a Core 1 loop that can never receive input.
+    """
+    import sys
+
+    sys.path.insert(0, str(REPOSITORY_ROOT / "tools"))
+    from dump_usb_descriptors import Elf32
+
+    symbols = Elf32(_u1_elf().read_bytes()).symbols()
+
+    assert any("Ch375Device4tick" in name for name in symbols), (
+        "release ELF does not contain Ch375Device::tick"
+    )
+    assert any("InputPipeline8on_event" in name for name in symbols), (
+        "release ELF does not contain InputPipeline::on_event"
+    )

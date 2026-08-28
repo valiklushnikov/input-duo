@@ -70,7 +70,7 @@ enum class StopReason : std::uint8_t {
 inline constexpr std::size_t kMacroQueueDepth = 4;
 
 /// How many macros can be defined at once.
-inline constexpr std::size_t kMaxMacros = 16;
+inline constexpr std::size_t kMaxMacros = protocol::ProtocolLimits::MACROS_PER_PROFILE;
 
 /// A boot keyboard report carries six usages, and a macro cannot hold more.
 ///

@@ -411,6 +411,46 @@ TEST_CASE(a_cancelled_capture_stops_swallowing) {
     CHECK_EQ(sink.keys(CommandKind::KeyPress, 0x1A), 1);
 }
 
+TEST_CASE(a_capture_request_crosses_to_core_one_before_becoming_active) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    Core1Runtime runtime(sink, profiles);
+
+    runtime.request_capture_begin();
+
+    CHECK(!runtime.capture_active());
+    runtime.tick(1000);
+    CHECK(runtime.capture_active());
+}
+
+TEST_CASE(a_captured_trigger_is_published_before_inactive_state) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    Core1Runtime runtime(sink, profiles);
+    runtime.request_capture_begin();
+    runtime.tick(1000);
+
+    runtime.handle_input(key(InputEventKind::KeyDown, 0x1A), 1010);
+
+    CapturedTrigger trigger;
+    CHECK(runtime.take_capture_event(trigger));
+    CHECK_EQ(static_cast<int>(trigger.code), 0x1A);
+    CHECK(!runtime.capture_active());
+}
+
+TEST_CASE(a_capture_cancel_request_is_applied_only_by_core_one) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    Core1Runtime runtime(sink, profiles);
+    runtime.begin_capture(1000);
+
+    runtime.request_capture_cancel();
+
+    CHECK(runtime.capture_active());
+    runtime.tick(1010);
+    CHECK(!runtime.capture_active());
+}
+
 // ----------------------------------------------------------- profile swap
 
 TEST_CASE(a_profile_request_is_not_applied_until_core_one_sees_it) {
@@ -435,8 +475,31 @@ TEST_CASE(the_swap_happens_on_the_next_tick_and_is_acknowledged) {
 
     CHECK_EQ(static_cast<int>(runtime.active_profile()), 1);
     std::uint8_t acknowledged = 0;
-    CHECK(runtime.take_profile_ack(acknowledged));
+    bool requested_by_host = false;
+    CHECK(runtime.take_profile_ack(acknowledged, requested_by_host));
     CHECK_EQ(static_cast<int>(acknowledged), 1);
+    CHECK(requested_by_host);
+}
+
+TEST_CASE(a_profile_selected_by_a_macro_is_acknowledged_as_local) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    MacroStep select;
+    select.kind = MacroStepType::SET_PROFILE;
+    select.code = 1;
+    const MacroStep steps[] = {select};
+    Core1Runtime runtime(sink, profiles);
+    runtime.define_macro(0, MacroDefinition{steps, 1});
+    runtime.run_macro(0, 1000);
+
+    runtime.tick(1000);  // macro publishes the local request
+    runtime.tick(1001);  // Core 1 applies it
+
+    std::uint8_t acknowledged = 0;
+    bool requested_by_host = true;
+    CHECK(runtime.take_profile_ack(acknowledged, requested_by_host));
+    CHECK_EQ(static_cast<int>(acknowledged), 1);
+    CHECK_FALSE(requested_by_host);
 }
 
 TEST_CASE(an_acknowledgement_is_reported_once) {
@@ -570,6 +633,45 @@ TEST_CASE(a_macro_delay_does_not_stop_the_operators_own_typing) {
     runtime.handle_input(key(InputEventKind::KeyDown, 0x04), 1010);
 
     CHECK_EQ(sink.keys(CommandKind::KeyPress, 0x04), 1);
+}
+
+TEST_CASE(one_runtime_tick_has_a_fixed_macro_output_budget) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    Core1Runtime runtime(sink, profiles);
+
+    // One hundred letters owe two hundred output commands.  They must span
+    // several Core 1 passes rather than filling the 128-slot cross-core queue
+    // before Core 0 gets another chance to drain it.
+    std::uint8_t pairs[200] = {};
+    for (std::size_t index = 0; index < sizeof(pairs); index += 2) {
+        pairs[index + 1] = 0x04;
+    }
+    MacroStep text;
+    text.kind = MacroStepType::TEXT;
+    text.pairs = pairs;
+    text.pair_bytes = sizeof(pairs);
+    const MacroStep steps[] = {text};
+    runtime.define_macro(0, MacroDefinition{steps, 1});
+    CHECK(runtime.run_macro(0, 1000));
+
+    runtime.tick(1000);
+
+    CHECK_EQ(sink.commands.size(), duo_input::u1::kMacroOutputsPerTick);
+    CHECK(runtime.macro_active());
+}
+
+TEST_CASE(the_last_protocol_macro_slot_is_reachable) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    Core1Runtime runtime(sink, profiles);
+    const MacroStep steps[] = {tap_step(0x09)};
+
+    runtime.define_macro(31, MacroDefinition{steps, 1});
+
+    CHECK(runtime.run_macro(31, 1000));
+    runtime.tick(1000);
+    CHECK_EQ(sink.keys(CommandKind::KeyPress, 0x09), 1);
 }
 
 

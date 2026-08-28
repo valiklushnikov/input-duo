@@ -64,7 +64,6 @@ duo_input::u1::StoredProfiles g_profiles;
 /// Everything between a peripheral report and a queued command.
 duo_input::u1::Core1Runtime g_runtime(g_commands, g_profiles);
 
-#if DUO_CH375_PROBE
 /// Where a normalized event goes.
 class RuntimeInput final : public duo_input::u1::input::IInputHandler {
 public:
@@ -96,6 +95,7 @@ duo_input::u1::ch375::DescriptorSetup g_mouse_setup(g_mouse_commands);
 duo_input::u1::ch375::Ch375Device g_keyboard_device(g_keyboard_commands, g_keyboard_setup);
 duo_input::u1::ch375::Ch375Device g_mouse_device(g_mouse_commands, g_mouse_setup);
 
+#if DUO_CH375_PROBE
 struct DeviceTally {
     std::uint8_t attached = 0;
     std::uint8_t detached = 0;
@@ -136,6 +136,39 @@ void install_macros(std::uint8_t profile) {
     }
 }
 
+/// Switch every flash-backed runtime view while Core 1 is stopped.
+///
+/// A committed A/B slot becomes the spare slot on the following write.  Core
+/// 0 therefore cannot acknowledge WRITE_COMMIT until Core 1 has stopped
+/// reading the old slot and all macro pointers have been rebuilt against the
+/// new one.  The Pico lockout is the acknowledgement: it returns only after
+/// the victim core is paused, and the new views are complete before release.
+class RuntimeConfig final : public duo_input::u1::IRuntimeConfig {
+public:
+    bool activate(duo_input::protocol::ByteView package) override {
+        multicore_lockout_start_blocking();
+        g_runtime.release_all();
+        const bool loaded = g_profiles.load(package);
+        if (loaded) {
+            const std::uint8_t profile = g_profiles.active_profile_id();
+            g_runtime.set_profile_now(profile);
+            install_macros(profile);
+        }
+        multicore_lockout_end_blocking();
+        return loaded;
+    }
+
+    bool clear() override {
+        multicore_lockout_start_blocking();
+        g_runtime.release_all();
+        (void)g_profiles.load(duo_input::protocol::ByteView{nullptr, 0});
+        g_runtime.set_profile_now(0);
+        install_macros(0);
+        multicore_lockout_end_blocking();
+        return true;
+    }
+};
+
 /// Core 1: peripherals in, commands out, and nothing else.
 ///
 /// It never touches the output state, the link or USB. It also never blocks,
@@ -160,8 +193,8 @@ void core1_entry() {
     while (true) {
         const std::uint32_t now_ms = to_ms_since_boot(get_absolute_time());
 
-#if DUO_CH375_PROBE
         const std::uint32_t now_us = time_us_32();
+#if DUO_CH375_PROBE
         if (g_last_pass_us != 0) {
             const std::uint32_t elapsed = now_us - g_last_pass_us;
             if (elapsed > g_worst_pass_us) {
@@ -169,18 +202,22 @@ void core1_entry() {
             }
         }
         g_last_pass_us = now_us;
+#endif
 
         duo_input::u1::ch375::Ch375Device* devices[2] = {&g_keyboard_device, &g_mouse_device};
         duo_input::u1::ch375::DescriptorSetup* setups[2] = {&g_keyboard_setup, &g_mouse_setup};
         duo_input::u1::input::InputPipeline* pipelines[2] = {&g_keyboard_pipeline,
                                                              &g_mouse_pipeline};
+#if DUO_CH375_PROBE
         DeviceTally* tallies[2] = {&g_keyboard_tally, &g_mouse_tally};
+#endif
         // Static: one of these is seventy-odd bytes of report buffer, and this
         // core has two kilobytes for everything below it.
         static duo_input::u1::ch375::Ch375Event event;
         for (int index = 0; index < 2; ++index) {
             devices[index]->tick(now_us);
             while (devices[index]->take_event(event)) {
+#if DUO_CH375_PROBE
                 DeviceTally& tally = *tallies[index];
                 switch (event.kind) {
                     case duo_input::u1::ch375::Ch375EventKind::Attached:
@@ -204,13 +241,13 @@ void core1_entry() {
                     default:
                         break;
                 }
+#endif
                 // A detach synthesises the releases the peripheral never sent,
                 // which is the only thing standing between a yanked cable and
                 // a computer that types until it is rebooted.
                 pipelines[index]->on_event(event, setups[index]->kind(), now_ms);
             }
         }
-#endif
 
         g_runtime.tick(now_ms);
 
@@ -410,7 +447,8 @@ int main() {
     static duo_input::u1::PicoFlash flash;
     static duo_input::storage::AbStore store(flash);
     static CdcWriter cdc_writer;
-    static duo_input::u1::ConfigService config(store, cdc_writer);
+    static RuntimeConfig runtime_config;
+    static duo_input::u1::ConfigService config(store, cdc_writer, runtime_config);
 
     // Whatever was stored last time is what the device runs now.
     //
@@ -422,7 +460,7 @@ int main() {
         const duo_input::protocol::ByteView package =
             store.payload_view(stored.active, stored.active_slot().size);
         if (package.data != nullptr && g_profiles.load(package)) {
-            config.set_active_profile(g_profiles.active_profile_id());
+            config.set_initial_active_profile(g_profiles.active_profile_id());
         }
     }
 
@@ -488,10 +526,17 @@ int main() {
         watch_existing_pin(duo_input::u1::kPinMouseTx, 3000);
     gpio_put(duo_input::u1::kPinMouseTx, 1);
 
+#endif
+
+    // The physical input path is product functionality, not a bring-up probe.
+    // Only the observations around it are conditional; both ports and both
+    // device state machines run in every release image.
     g_keyboard_port.begin(pio0, duo_input::u1::kPinKeyboardTx, duo_input::u1::kPinKeyboardRx,
                           duo_input::u1::kPinKeyboardInt);
     g_mouse_port.begin(pio0, duo_input::u1::kPinMouseTx, duo_input::u1::kPinMouseRx,
                        duo_input::u1::kPinMouseInt);
+
+#if DUO_CH375_PROBE
     // Before a single byte goes out, on either port.
     std::uint16_t keyboard_bad_at_boot = 0;
     std::uint16_t mouse_bad_at_boot = 0;
@@ -608,10 +653,10 @@ int main() {
         // other is halfway through reading a binding table.
         switch (config.take_capture_request()) {
             case duo_input::u1::CaptureRequest::Begin:
-                g_runtime.begin_capture(now_ms);
+                g_runtime.request_capture_begin();
                 break;
             case duo_input::u1::CaptureRequest::Cancel:
-                g_runtime.cancel_capture();
+                g_runtime.request_capture_cancel();
                 break;
             case duo_input::u1::CaptureRequest::None:
                 break;
@@ -630,10 +675,15 @@ int main() {
         if (config.take_profile_request(profile)) {
             g_runtime.request_profile(profile);
         }
-        if (g_runtime.take_profile_ack(profile)) {
+        bool requested_by_host = false;
+        if (g_runtime.take_profile_ack(profile, requested_by_host)) {
             // Only now is it true. Core 1 has stopped its macros and let go of
             // what was held under the old profile's meaning.
-            config.set_active_profile(profile);
+            if (requested_by_host) {
+                config.confirm_profile_applied(profile);
+            } else {
+                config.publish_local_profile(profile);
+            }
         }
 
         // Bounded, so a burst of input cannot starve the USB it is for.

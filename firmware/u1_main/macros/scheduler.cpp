@@ -3,6 +3,9 @@
 namespace duo_input::u1::macros {
 namespace {
 
+static_assert(kMaxMacros == protocol::ProtocolLimits::MACROS_PER_PROFILE,
+              "the runtime must expose every macro slot accepted by the config format");
+
 using input::InputEvent;
 using input::InputEventKind;
 

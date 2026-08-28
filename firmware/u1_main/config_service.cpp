@@ -215,6 +215,12 @@ void ConfigService::handle_frame(const std::uint8_t* wire, std::size_t size) {
         have_sequence_ = false;
         factory_confirmed_ = false;
         factory_armed_ = false;
+        if (capture_active_ || capture_request_ == CaptureRequest::Begin) {
+            // HELLO starts a new owner of the CDC session. A question left by
+            // the previous owner must not keep swallowing this one's keys.
+            capture_active_ = false;
+            capture_request_ = CaptureRequest::Cancel;
+        }
         if (store_.staging()) {
             // Closing a serial port does not unmount USB, so a configurator
             // that quit mid-write leaves the transaction open. A new session
@@ -580,12 +586,15 @@ void ConfigService::dispatch(const CdcFrame& frame) {
             const storage::ScanResult found = store_.scan();
             const protocol::ByteView view =
                 store_.payload_view(found.active, found.active_slot().size);
-            if (view.data != nullptr) {
-                const config::ValidationResult validated = config::validate_config(view);
-                if (validated) {
-                    active_profile_ = validated.view().active_profile_id();
-                }
+            const config::ValidationResult validated = config::validate_config(view);
+            if (!validated || !runtime_.activate(view)) {
+                // The new slot is durable, but the runtime still owns views of
+                // the previous slot.  Do not acknowledge a state in which the
+                // next WRITE_BEGIN may erase memory Core 1 is still reading.
+                reply_error(frame, CdcError::BadState);
+                return;
             }
+            active_profile_ = validated.view().active_profile_id();
             payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
             reply(frame.type, frame.sequence, payload, 1);
             return;
@@ -633,6 +642,8 @@ void ConfigService::dispatch(const CdcFrame& frame) {
             // the one that reports back which profile is actually running.
             requested_profile_ = frame.payload.data[0];
             profile_requested_ = true;
+            pending_profile_ = frame.payload.data[0];
+            profile_confirmation_pending_ = true;
             payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
             reply(frame.type, frame.sequence, payload, 1);
             return;
@@ -694,6 +705,12 @@ void ConfigService::dispatch(const CdcFrame& frame) {
                 reply_error(frame, CdcError::BadState);
                 return;
             }
+            if (!runtime_.clear()) {
+                factory_confirmed_ = false;
+                factory_armed_ = false;
+                reply_error(frame, CdcError::BadState);
+                return;
+            }
             const storage::StoreError error = store_.erase_everything();
             // Spent either way: a failed erase does not leave a standing
             // permission to try again unattended.
@@ -735,8 +752,26 @@ bool ConfigService::take_profile_request(std::uint8_t& profile) {
     return true;
 }
 
+bool ConfigService::confirm_profile_applied(std::uint8_t profile) {
+    if (!profile_confirmation_pending_ || profile != pending_profile_) {
+        return false;
+    }
+    profile_confirmation_pending_ = false;
+    active_profile_ = profile;
+    return true;
+}
+
 void ConfigService::emit_capture_event(const mapping::CapturedTrigger& trigger) {
     if (!capture_active_) {
+        return;
+    }
+
+    const bool keyboard = trigger.kind == config::TriggerKind::KEYBOARD_USAGE;
+    const bool mouse = trigger.kind == config::TriggerKind::MOUSE_BUTTON;
+    if ((!keyboard && !mouse) || trigger.code == 0 ||
+        (mouse && (trigger.code > 5 || trigger.modifiers != 0))) {
+        // The configurator would reject this payload. Keep the capture alive
+        // so the operator can answer again instead of silently losing it.
         return;
     }
     capture_active_ = false;

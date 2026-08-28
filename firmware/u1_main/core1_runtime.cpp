@@ -41,6 +41,12 @@ Route route_of(hid::Target target) {
     return target == hid::Target::Pc2 ? Route::Pc2 : Route::Pc1;
 }
 
+constexpr std::uint16_t kProfileMailboxOccupied = 0x100u;
+constexpr std::uint16_t kProfileMailboxFromHost = 0x200u;
+constexpr std::uint32_t kCaptureMailboxOccupied = 0x80000000u;
+constexpr std::uint8_t kCaptureRequestBegin = 1;
+constexpr std::uint8_t kCaptureRequestCancel = 2;
+
 }  // namespace
 
 Core1Runtime::Core1Runtime(ICommandSink& sink, IProfileSource& profiles)
@@ -57,7 +63,7 @@ void Core1Runtime::submit(const OutputCommand& command) {
         // Core 1 cannot wait for Core 0, which is waiting for the host. What
         // it can do is record that the output state no longer matches what
         // actually happened, so somebody can be told.
-        ++dropped_;
+        dropped_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -158,7 +164,7 @@ void Core1Runtime::apply(const mapping::Outcome& outcome, std::uint32_t now_ms) 
                 // Through the same handshake as a request from the host, so
                 // there is one path that swaps a profile and one place where
                 // everything held is let go of first.
-                request_profile(action.parameter);
+                request_profile_from_core1(action.parameter);
                 break;
 
             case mapping::ActionRequestKind::None:
@@ -172,6 +178,7 @@ void Core1Runtime::handle_input(const InputEvent& event, std::uint32_t now_ms) {
     // key belongs to the question - running its current binding would act on
     // the old meaning of a key the operator is in the middle of replacing.
     if (capture_.handle(event) == mapping::CaptureDisposition::Swallow) {
+        publish_capture_state();
         return;
     }
 
@@ -180,7 +187,9 @@ void Core1Runtime::handle_input(const InputEvent& event, std::uint32_t now_ms) {
 
 void Core1Runtime::drain_macros(std::uint32_t now_ms) {
     macros::MacroOutput output;
-    while (macros_.tick(now_ms, output)) {
+    std::size_t emitted = 0;
+    while (emitted < kMacroOutputsPerTick && macros_.tick(now_ms, output)) {
+        ++emitted;
         switch (output.kind) {
             case macros::MacroOutputKind::SendInput: {
                 OutputCommand command;
@@ -213,7 +222,7 @@ void Core1Runtime::drain_macros(std::uint32_t now_ms) {
             }
 
             case macros::MacroOutputKind::SetProfile:
-                request_profile(output.parameter);
+                request_profile_from_core1(output.parameter);
                 break;
 
             case macros::MacroOutputKind::SetKeyboardRoute:
@@ -236,38 +245,103 @@ void Core1Runtime::drain_macros(std::uint32_t now_ms) {
 }
 
 void Core1Runtime::tick(std::uint32_t now_ms) {
+    const std::uint8_t capture_request =
+        capture_request_mailbox_.exchange(0, std::memory_order_acq_rel);
+    if (capture_request == kCaptureRequestBegin) {
+        capture_.begin(now_ms);
+    } else if (capture_request == kCaptureRequestCancel) {
+        capture_.cancel();
+    }
+
     capture_.tick(now_ms);
+    publish_capture_state();
 
     // First, and before the swap below: whatever else was asked for, the point
     // of this one is that it happens.
-    if (release_all_requested_) {
-        release_all_requested_ = false;
+    if (release_all_requested_.exchange(false, std::memory_order_acq_rel)) {
         release_all();
     }
 
-    if (profile_requested_) {
-        profile_requested_ = false;
-        swap_profile(requested_profile_, now_ms);
+    const std::uint16_t requested =
+        requested_profile_mailbox_.exchange(0, std::memory_order_acq_rel);
+    if ((requested & kProfileMailboxOccupied) != 0) {
+        swap_profile(static_cast<std::uint8_t>(requested), now_ms, true);
+    } else if (local_profile_requested_) {
+        local_profile_requested_ = false;
+        swap_profile(local_requested_profile_, now_ms, false);
     }
 
     drain_macros(now_ms);
 }
 
-void Core1Runtime::begin_capture(std::uint32_t now_ms) { capture_.begin(now_ms); }
+void Core1Runtime::begin_capture(std::uint32_t now_ms) {
+    capture_.begin(now_ms);
+    publish_capture_state();
+}
 
-void Core1Runtime::cancel_capture() { capture_.cancel(); }
+void Core1Runtime::cancel_capture() {
+    capture_.cancel();
+    publish_capture_state();
+}
+
+void Core1Runtime::request_capture_begin() {
+    capture_request_mailbox_.store(kCaptureRequestBegin, std::memory_order_release);
+}
+
+void Core1Runtime::request_capture_cancel() {
+    capture_request_mailbox_.store(kCaptureRequestCancel, std::memory_order_release);
+}
+
+void Core1Runtime::publish_capture_state() {
+    mapping::CapturedTrigger trigger;
+    if (capture_.take(trigger)) {
+        const std::uint32_t packed =
+            kCaptureMailboxOccupied |
+            (static_cast<std::uint32_t>(trigger.kind) << 16) |
+            (static_cast<std::uint32_t>(trigger.code) << 8) |
+            static_cast<std::uint32_t>(trigger.modifiers);
+        capture_event_mailbox_.store(packed, std::memory_order_release);
+    }
+    // Event first, state second. Main reads in the same order.
+    capture_active_published_.store(capture_.active(), std::memory_order_release);
+}
+
+bool Core1Runtime::take_capture_event(mapping::CapturedTrigger& out) {
+    const std::uint32_t packed =
+        capture_event_mailbox_.exchange(0, std::memory_order_acq_rel);
+    if ((packed & kCaptureMailboxOccupied) == 0) {
+        return false;
+    }
+    out.kind = static_cast<config::TriggerKind>((packed >> 16) & 0xFFu);
+    out.code = static_cast<std::uint8_t>((packed >> 8) & 0xFFu);
+    out.modifiers = static_cast<std::uint8_t>(packed & 0xFFu);
+    return true;
+}
 
 void Core1Runtime::request_profile(std::uint8_t profile) {
-    requested_profile_ = profile;
-    profile_requested_ = true;
+    requested_profile_mailbox_.store(
+        static_cast<std::uint16_t>(kProfileMailboxOccupied | profile),
+        std::memory_order_release);
+}
+
+void Core1Runtime::request_profile_from_core1(std::uint8_t profile) {
+    local_requested_profile_ = profile;
+    local_profile_requested_ = true;
 }
 
 bool Core1Runtime::take_profile_ack(std::uint8_t& profile) {
-    if (!profile_acknowledged_) {
+    bool requested_by_host = false;
+    return take_profile_ack(profile, requested_by_host);
+}
+
+bool Core1Runtime::take_profile_ack(std::uint8_t& profile, bool& requested_by_host) {
+    const std::uint16_t acknowledged =
+        profile_ack_mailbox_.exchange(0, std::memory_order_acq_rel);
+    if ((acknowledged & kProfileMailboxOccupied) == 0) {
         return false;
     }
-    profile_acknowledged_ = false;
-    profile = acknowledged_profile_;
+    profile = static_cast<std::uint8_t>(acknowledged);
+    requested_by_host = (acknowledged & kProfileMailboxFromHost) != 0;
     return true;
 }
 
@@ -279,10 +353,11 @@ void Core1Runtime::set_profile_now(std::uint8_t profile) {
     static mapping::Binding bindings[mapping::kMaxBindings];
     const std::size_t count = profiles_.bindings_for(profile, bindings);
     engine_.set_bindings(bindings, count);
-    active_profile_ = profile;
+    active_profile_.store(profile, std::memory_order_release);
 }
 
-void Core1Runtime::swap_profile(std::uint8_t profile, std::uint32_t now_ms) {
+void Core1Runtime::swap_profile(std::uint8_t profile, std::uint32_t now_ms,
+                                bool requested_by_host) {
     // A macro halfway through typing under the old profile's routing would
     // send the rest of its keystrokes wherever the new one happens to point.
     macros_.stop_all();
@@ -298,8 +373,10 @@ void Core1Runtime::swap_profile(std::uint8_t profile, std::uint32_t now_ms) {
 
     set_profile_now(profile);
 
-    acknowledged_profile_ = profile;
-    profile_acknowledged_ = true;
+    profile_ack_mailbox_.store(
+        static_cast<std::uint16_t>(kProfileMailboxOccupied |
+                                   (requested_by_host ? kProfileMailboxFromHost : 0u) | profile),
+        std::memory_order_release);
 }
 
 void Core1Runtime::define_macro(std::uint8_t macro_id,

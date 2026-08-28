@@ -68,6 +68,20 @@ public:
     virtual void write(const std::uint8_t* data, std::size_t size) = 0;
 };
 
+/// Makes a newly committed flash slot safe for the realtime runtime.
+///
+/// The A/B store may erase the old slot on the next write, so acknowledging a
+/// commit before Core 1 has stopped reading that slot creates a dangling
+/// pointer.  The hardware implementation performs the Core 0/Core 1 handoff;
+/// tests provide an immediate recorder.
+class IRuntimeConfig {
+public:
+    virtual ~IRuntimeConfig() = default;
+    virtual bool activate(protocol::ByteView package) = 0;
+    /// Stop using every flash-backed view before a factory reset erases both.
+    virtual bool clear() = 0;
+};
+
 /// Largest wire frame: header, maximum payload, CRC, COBS overhead, delimiter.
 inline constexpr std::size_t kMaxWireFrame = 1100;
 
@@ -94,7 +108,8 @@ struct LinkState {
 
 class ConfigService {
 public:
-    ConfigService(storage::AbStore& store, CdcSink& sink) : store_(store), sink_(sink) {}
+    ConfigService(storage::AbStore& store, CdcSink& sink, IRuntimeConfig& runtime)
+        : store_(store), sink_(sink), runtime_(runtime) {}
 
     /// Feed bytes as they arrive from the CDC endpoint.
     ///
@@ -120,7 +135,12 @@ public:
     /// would have the configurator show one thing while the keyboard does
     /// another for as long as the swap takes.
     std::uint8_t active_profile() const { return active_profile_; }
-    void set_active_profile(std::uint8_t profile) { active_profile_ = profile; }
+    /// Startup publication, before Core 1 is launched.
+    void set_initial_active_profile(std::uint8_t profile) { active_profile_ = profile; }
+    /// Accept an acknowledgement only for the outstanding host request.
+    bool confirm_profile_applied(std::uint8_t profile);
+    /// Publish a profile selected by a binding or macro on Core 1.
+    void publish_local_profile(std::uint8_t profile) { active_profile_ = profile; }
 
     /// Whether a capture is running, as Core 1 last reported it.
     ///
@@ -193,6 +213,7 @@ private:
 
     storage::AbStore& store_;
     CdcSink& sink_;
+    IRuntimeConfig& runtime_;
 
     // Assembly of an incoming frame.
     std::uint8_t pending_[kMaxWireFrame] = {};
@@ -218,6 +239,8 @@ private:
     CaptureRequest capture_request_ = CaptureRequest::None;
     std::uint8_t requested_profile_ = 0;
     bool profile_requested_ = false;
+    std::uint8_t pending_profile_ = 0;
+    bool profile_confirmation_pending_ = false;
     bool release_all_requested_ = false;
     bool factory_confirmed_ = false;
     bool factory_armed_ = false;

@@ -16,6 +16,7 @@
 // which matters, because the failure modes worth catching are the ones about
 // what is held on a computer nobody is looking at.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -27,6 +28,13 @@
 #include "runtime/output_command.hpp"
 
 namespace duo_input::u1 {
+
+/// Maximum macro commands emitted in one pass around Core 1.
+///
+/// Core 0 drains 32 commands per pass and the cross-core queue holds 127.  A
+/// budget below both prevents a long TEXT step from monopolising Core 1 or
+/// filling the queue before USB, SPI and physical input are serviced again.
+inline constexpr std::size_t kMacroOutputsPerTick = 16;
 
 /// Where commands go. Core 0's queue on hardware, a recorder in tests.
 class ICommandSink {
@@ -58,9 +66,14 @@ public:
 
     void begin_capture(std::uint32_t now_ms);
     void cancel_capture();
-    bool capture_active() const { return capture_.active(); }
+    /// Post a capture command from Core 0. Core 1 applies it in tick().
+    void request_capture_begin();
+    void request_capture_cancel();
+    bool capture_active() const {
+        return capture_active_published_.load(std::memory_order_acquire);
+    }
     /// Take the captured trigger to send as CAPTURE_EVENT, if one is waiting.
-    bool take_capture_event(mapping::CapturedTrigger& out) { return capture_.take(out); }
+    bool take_capture_event(mapping::CapturedTrigger& out);
 
     // --- profiles, across the two cores
 
@@ -72,8 +85,11 @@ public:
 
     /// Report a completed swap, once.
     bool take_profile_ack(std::uint8_t& profile);
+    bool take_profile_ack(std::uint8_t& profile, bool& requested_by_host);
 
-    std::uint8_t active_profile() const { return active_profile_; }
+    std::uint8_t active_profile() const {
+        return active_profile_.load(std::memory_order_acquire);
+    }
 
     /// Load a profile's bindings directly, outside the handshake. Startup.
     void set_profile_now(std::uint8_t profile);
@@ -83,6 +99,7 @@ public:
     void define_macro(std::uint8_t macro_id, const macros::MacroDefinition& definition);
     /// Run a macro wherever the keyboard currently points.
     bool run_macro(std::uint8_t macro_id, std::uint32_t now_ms);
+    bool macro_active() const { return macros_.active(); }
 
     /// Let go of everything, everywhere, and stop every macro.
     ///
@@ -95,11 +112,15 @@ public:
     /// exactly one producer. Two cores pushing into it lose a command, and the
     /// one they lose may be the release that stops a key repeating forever -
     /// which would make the emergency stop the thing that stranded the key.
-    void request_release_all() { release_all_requested_ = true; }
+    void request_release_all() {
+        release_all_requested_.store(true, std::memory_order_release);
+    }
 
     /// How many commands the queue refused. Nonzero means what is held on a
     /// computer no longer matches what the operator did.
-    std::uint32_t dropped_commands() const { return dropped_; }
+    std::uint32_t dropped_commands() const {
+        return dropped_.load(std::memory_order_relaxed);
+    }
 
     mapping::BindingEngine& engine() { return engine_; }
 
@@ -108,7 +129,9 @@ private:
     void apply(const mapping::Outcome& outcome, std::uint32_t now_ms);
     void send_input(const input::InputEvent& event);
     void drain_macros(std::uint32_t now_ms);
-    void swap_profile(std::uint8_t profile, std::uint32_t now_ms);
+    void swap_profile(std::uint8_t profile, std::uint32_t now_ms, bool requested_by_host);
+    void request_profile_from_core1(std::uint8_t profile);
+    void publish_capture_state();
 
     runtime::Route keyboard_route() const;
     runtime::Route mouse_route() const;
@@ -120,21 +143,33 @@ private:
     mapping::BindingEngine engine_;
     macros::MacroScheduler macros_;
 
-    std::uint8_t active_profile_ = 0;
-    /// A profile Core 0 has asked for and Core 1 has not applied yet.
-    std::uint8_t requested_profile_ = 0;
-    bool profile_requested_ = false;
-    bool profile_acknowledged_ = false;
-    std::uint8_t acknowledged_profile_ = 0;
+    std::atomic<std::uint8_t> active_profile_{0};
+
+    /// Core 0 is the only writer, Core 1 the only reader. Bit 8 means valid.
+    std::atomic<std::uint16_t> requested_profile_mailbox_{0};
+    /// A binding/macro on Core 1 may also request a profile, without becoming
+    /// a second writer to the cross-core mailbox.
+    std::uint8_t local_requested_profile_ = 0;
+    bool local_profile_requested_ = false;
+    /// Core 1 is the only writer, Core 0 the only reader. Bit 8 means valid.
+    std::atomic<std::uint16_t> profile_ack_mailbox_{0};
+
+    /// 0 none, 1 begin, 2 cancel. Written by Core 0, consumed by Core 1.
+    std::atomic<std::uint8_t> capture_request_mailbox_{0};
+    /// Published after any captured event, so Core 0 cannot observe the end
+    /// and discard the answer that caused it.
+    std::atomic<bool> capture_active_published_{false};
+    /// Packed trigger, with bit 31 as the occupied flag. Core 1 -> Core 0.
+    std::atomic<std::uint32_t> capture_event_mailbox_{0};
 
     /// A release Core 0 has asked for and Core 1 has not performed yet.
-    bool release_all_requested_ = false;
+    std::atomic<bool> release_all_requested_{false};
 
     /// Which mouse buttons are held. The report carries them all at once, so
     /// every change resends the whole mask.
     std::uint8_t buttons_ = 0;
 
-    std::uint32_t dropped_ = 0;
+    std::atomic<std::uint32_t> dropped_{0};
 };
 
 }  // namespace duo_input::u1
