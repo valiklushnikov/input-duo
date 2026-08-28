@@ -26,7 +26,7 @@ by `tests/firmware_native/test_hid_parser.cpp`, which pins the exact
 |---|---|---|
 | `boot_keyboard.bin` | A single-interface boot keyboard: class HID, subclass boot, protocol keyboard, one interrupt IN endpoint. | Supported. `DeviceKind::Keyboard`, endpoint 1, 8-byte packets, interface 0. |
 | `boot_mouse.bin` | A single-interface boot mouse, boot subclass declared. | Supported. `DeviceKind::Mouse`, endpoint 2, 4-byte packets, `boot_protocol = true`. |
-| `mouse_5_button.bin` | A mouse that declares the mouse protocol but not the boot subclass — most mice sold today. | Supported. `DeviceKind::Mouse`, `boot_protocol = false`. The parser does not require the boot subclass; requiring it would refuse most wired mice on the market. |
+| `mouse_5_button.bin` | A mouse that declares the mouse protocol but not the boot subclass — most mice sold today. | Supported. `DeviceKind::Mouse`, `boot_protocol = false`. The parser does not require the boot subclass; requiring it would refuse most wired mice on the market. Enumeration does not ask this interface to switch to boot protocol either — there is no boot report behind an interface that does not declare the subclass — so it is read in whatever format it sends, and one that leads its reports with a Report ID is read one byte out of place. |
 | `consumer_composite.bin` | A composite device whose *first* HID interface is consumer controls (protocol neither keyboard nor mouse) and whose *second* is a boot keyboard. | Supported. The parser keeps walking past an interface it cannot route; it finds the keyboard at interface 1, endpoint 1. A parser that stopped at the first HID interface would call this device unsupported. |
 | `hub.bin` | A USB hub descriptor — no HID interface at all. | Refused: `ParseError::NoUsableInterface`. Hubs are outside what U1 promises to route; enumerating one and then appearing to work until a second device is plugged into it would be worse than refusing it up front. |
 | `vendor_only.bin` | An interface with a vendor-specific class, no HID interface present. | Refused: `ParseError::NoUsableInterface`. Same code path as `hub.bin` — nothing in the descriptor was a keyboard or a mouse this firmware can route. |
@@ -54,15 +54,22 @@ What follows is a plain record of what was actually observed on the bench on
 the night of 2026-08-28, against the firmware built from commit `25d3730` and
 later diagnostic builds in a separate worktree — not a compatibility claim.
 
-**Mouse.** A wired USB mouse enumerated successfully: recognised as a
-boot-protocol mouse (`found=mouse endpoint=1 packet=7 boot=yes`), setup
-returned success (`0x14`), and it delivered HID reports (observed as few as
+**Mouse.** A wired USB mouse enumerated successfully: recognised as a mouse
+whose interface *advertises* boot support (`found=mouse endpoint=1 packet=7
+boot=yes`), setup returned success (`0x14`), and it delivered HID reports (observed as few as
 one and as many as 68 in different sessions). In every session observed, the
 channel then lost the device after a burst of reports — `detach_lost`/
 `collapses` incremented and the channel re-entered `RecoverWait` — without
 anything being unplugged. This loss-after-a-burst is the open link defect
 above, not a parser or enumeration failure; the descriptor itself was read
 and routed correctly.
+
+That `boot=yes` was read at the time as meaning the device was *in* boot
+protocol. It never was: nothing selected a protocol, so the mouse went on
+sending its own seven-byte report led by a Report ID, which the normalizer
+read as the buttons — a left button held down for ever and sideways movement
+arriving as vertical. Enumeration now issues SET_PROTOCOL, and the probe line
+reports the two facts separately as `boot=adv:yes sel:yes`.
 
 **Keyboard.** A wired USB keyboard attached (the CH375 saw connect
 interrupts, `con=2`) but never completed enumeration: `Ch375Enumerator` timed
