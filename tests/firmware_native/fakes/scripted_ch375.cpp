@@ -169,12 +169,21 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
             }
             break;
 
+        case Ch375Command::WriteUsbData7:
+            // A length, then that many bytes. Nothing is decided until the
+            // token that carries the block goes out.
+            outbound_block_.clear();
+            block_remaining_ = -1;
+            expecting_data_ = true;
+            break;
+
         case Ch375Command::GetDeviceRate:
         case Ch375Command::SetUsbSpeed:
         case Ch375Command::CheckExist:
         case Ch375Command::SetUsbMode:
         case Ch375Command::SetRetry:
         case Ch375Command::SetUsbAddress:
+        case Ch375Command::SetEndpoint6:
         case Ch375Command::IssueToken:
             expecting_data_ = true;
             break;
@@ -236,12 +245,48 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
             break;
         }
 
-        case Ch375Command::IssueToken:
+        case Ch375Command::WriteUsbData7:
+            if (block_remaining_ < 0) {
+                block_remaining_ = static_cast<int>(value);
+            } else if (block_remaining_ > 0) {
+                outbound_block_.push_back(value);
+                --block_remaining_;
+            }
+            if (block_remaining_ == 0) {
+                block_remaining_ = -1;
+                expecting_data_ = false;
+            }
+            break;
+
+        case Ch375Command::SetEndpoint6:
+            // The receiver's data toggle, set by hand (DS2 1.6). Recorded
+            // rather than acted on: what the tests are about is that it is set
+            // at all before a transaction that depends on it.
+            expecting_data_ = false;
+            break;
+
+        case Ch375Command::IssueToken: {
+            expecting_data_ = false;
+            // DS2 1.15: the high nibble is the endpoint, the low nibble the
+            // PID. Endpoint zero is where control transfers happen, and this
+            // chip has no command for most of them.
+            const std::uint8_t endpoint = static_cast<std::uint8_t>(value >> 4);
+            const TokenPid pid = static_cast<TokenPid>(value & 0x0F);
+            if (endpoint == 0 && pid == TokenPid::Setup) {
+                begin_control_transfer();
+                break;
+            }
+            // Endpoint zero is never an interrupt endpoint, so an IN token
+            // there is the status stage of a control transfer and nothing
+            // else.
+            if (endpoint == 0 && pid == TokenPid::In) {
+                finish_control_stage();
+                break;
+            }
             // A real device answers a poll with an interrupt, whether or not
             // it had anything to say - but not instantly.
             ++tokens_issued_;
             pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Success);
-            expecting_data_ = false;
             if (token_delay_us_ == 0) {
                 int_asserted_ = !silent_;
             } else {
@@ -249,6 +294,7 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
                 token_ready_us_ = now_us_ + token_delay_us_;
             }
             break;
+        }
 
         case Ch375Command::SetRetry:
             // Two data bytes: the 25H prefix and the policy. DS2 1.3.
@@ -415,6 +461,14 @@ void append(std::vector<std::uint8_t>& into, const std::vector<std::uint8_t>& mo
     into.insert(into.end(), more.begin(), more.end());
 }
 
+/// A USB setup packet is eight bytes, always.
+constexpr std::size_t kSetupPacketSize = 8;
+/// Host to device, class request, addressed to an interface. USB 2.0 9.3.1.
+constexpr std::uint8_t kRequestTypeInterfaceOut = 0x21;
+/// HID 1.11 7.2.5. Written out here rather than taken from the firmware, so
+/// that a test cannot agree with a wrong constant by sharing it.
+constexpr std::uint8_t kRequestSetProtocol = 0x0B;
+
 }  // namespace
 
 void FakeCh375Chip::finish_transfer(bool stalled) {
@@ -432,9 +486,73 @@ void FakeCh375Chip::finish_transfer(bool stalled) {
     int_asserted_ = !silent_;
 }
 
+void FakeCh375Chip::begin_control_transfer() {
+    setup_packets_.push_back(outbound_block_);
+    control_pending_ = false;
+
+    if (ignore_setup_) {
+        // Nothing comes back at all. No data, no interrupt, no clue - which
+        // is the case a bounded wait exists for.
+        pending_read_.clear();
+        return;
+    }
+    if (refuse_setup_) {
+        pending_read_.clear();
+        // Bit 5 marks a failure and 1110 is a STALL (DS1 5.12). A device that
+        // does not implement a request refuses it exactly this way.
+        pending_status_ = 0x2E;
+        int_asserted_ = !silent_;
+        return;
+    }
+
+    control_pending_ = outbound_block_.size() == kSetupPacketSize;
+    finish_transfer(false);
+}
+
+void FakeCh375Chip::finish_control_stage() {
+    ++control_status_stages_;
+    if (control_pending_) {
+        // A device acts on a request when the transfer completes, not when
+        // the setup packet lands. Half a transfer changes nothing.
+        const std::vector<std::uint8_t>& packet = setup_packets_.back();
+        const std::uint16_t value = static_cast<std::uint16_t>(
+            packet[2] | (static_cast<std::uint16_t>(packet[3]) << 8));
+        if (packet[0] == kRequestTypeInterfaceOut && packet[1] == kRequestSetProtocol) {
+            // wValue 0 is boot protocol, 1 is report protocol (HID 1.11 7.2.6).
+            boot_protocol_ = value == 0;
+        }
+    }
+    control_pending_ = false;
+    // A request with no data stage has nothing to hand back.
+    pending_read_.clear();
+    pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Success);
+    int_asserted_ = !silent_;
+}
+
+std::vector<std::uint8_t> FakeCh375Chip::report_for(std::int8_t dx, std::int8_t dy) const {
+    const std::uint8_t x = static_cast<std::uint8_t>(dx);
+    const std::uint8_t y = static_cast<std::uint8_t>(dy);
+    if (boot_protocol_) {
+        // Buttons, X, Y, wheel. No identifier: that is what boot protocol is.
+        return {0x00, x, y, 0x00};
+    }
+    // What the mouse on the bench sends when nobody asked it to switch: seven
+    // bytes led by a Report ID, with the real buttons behind it.
+    return {0x01, 0x00, x, y, 0x00, 0x00, 0x00};
+}
+
 void FakeCh375Chip::serve_boot_mouse() {
     std::vector<std::uint8_t> body;
     append(body, interface_record(0, 0x03, 0x01, 0x02, 1));
+    append(body, endpoint_record(0x82, 4));
+    configuration_ = configuration_header(9 + body.size(), 1);
+    append(configuration_, body);
+}
+
+void FakeCh375Chip::serve_mouse_without_boot() {
+    std::vector<std::uint8_t> body;
+    // Subclass 0: the mouse protocol, but no boot report behind it.
+    append(body, interface_record(0, 0x03, 0x00, 0x02, 1));
     append(body, endpoint_record(0x82, 4));
     configuration_ = configuration_header(9 + body.size(), 1);
     append(configuration_, body);

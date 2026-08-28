@@ -302,6 +302,7 @@ add_executable(duo_ch375_descriptor_setup_test
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/enumerator.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/descriptor_setup.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/hid_parser.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/mouse_normalizer.cpp
 )
 
 target_link_libraries(duo_ch375_descriptor_setup_test PRIVATE duo_common)

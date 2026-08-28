@@ -87,7 +87,7 @@ public:
     /// the one thing none of its tests could see.
     void answers_at(unsigned baud) { chip_baud_ = baud; }
 
-    /// Stand in for a port with a fixed rate.
+    /// Stand in for a port with a fixed rate.
     void refuse_baud_changes() { refuse_baud_ = true; }
 
     /// Accept anything and answer nothing - a chip that is simply not there.
@@ -195,6 +195,50 @@ public:
     void serve_composite_keyboard();
     /// A hub, which this firmware does not support.
     void serve_hub();
+    /// A mouse that declares the mouse protocol but not the boot subclass.
+    ///
+    /// Most mice sold today are this. There is no boot report behind the
+    /// interface, so asking it to switch to one is asking for something that
+    /// does not exist.
+    void serve_mouse_without_boot();
+
+    // --- control transfers the chip has no dedicated command for ------------
+    //
+    // SET_ADDRESS, SET_CONFIG and GET_DESCR are commands of their own; every
+    // other request has to be assembled by hand - the eight bytes of a setup
+    // packet into the endpoint buffer, then a SETUP token at endpoint zero,
+    // then the status stage. This models all three parts, because a transfer
+    // left half done is a device that never received the request.
+
+    /// Every setup packet the device was sent, in order, eight bytes each.
+    const std::vector<std::vector<std::uint8_t>>& setup_packets() const {
+        return setup_packets_;
+    }
+
+    /// Is the device in boot protocol?
+    ///
+    /// True only once a SET_PROTOCOL asking for it has completed its status
+    /// stage, because that is when a real device applies the request.
+    bool boot_protocol_selected() const { return boot_protocol_; }
+
+    /// How many control transfers were finished off with a status stage.
+    int control_status_stages() const { return control_status_stages_; }
+
+    /// Refuse every setup packet with a STALL, as a device that does not
+    /// support the request does.
+    void refuse_setup_requests(bool refusing) { refuse_setup_ = refusing; }
+
+    /// Answer setup packets with nothing whatsoever - no data, no interrupt.
+    ///
+    /// The worst case for anything that waits: only a deadline ends it.
+    void ignore_setup_requests(bool ignoring) { ignore_setup_ = ignoring; }
+
+    /// What this mouse would send for a movement, in the protocol it is in.
+    ///
+    /// In report protocol it leads with its Report ID, which is what the
+    /// mouse on the bench does: seven bytes, `01 00 dx dy 00 00 00`. Put into
+    /// boot protocol it sends the fixed report and no identifier at all.
+    std::vector<std::uint8_t> report_for(std::int8_t dx, std::int8_t dy) const;
 
     /// Refuse everything after this many control transfers have succeeded.
     void stall_after(int transfers) { stall_after_ = transfers; }
@@ -312,6 +356,18 @@ private:
     /// What the next RD_USB_DATA0 will hand back.
     std::vector<std::uint8_t> pending_read_;
     void finish_transfer(bool stalled);
+    /// The block WR_USB_DATA7 is filling, and how much of it is still to come.
+    std::vector<std::uint8_t> outbound_block_;
+    int block_remaining_ = -1;
+    std::vector<std::vector<std::uint8_t>> setup_packets_;
+    /// A setup packet has been accepted and is waiting for its status stage.
+    bool control_pending_ = false;
+    int control_status_stages_ = 0;
+    bool refuse_setup_ = false;
+    bool ignore_setup_ = false;
+    bool boot_protocol_ = false;
+    void begin_control_transfer();
+    void finish_control_stage();
     UsbSpeed bus_speed_ = UsbSpeed::Full12Mbps;
     bool speed_after_mode_ = false;
     /// AUTO_SETUP is several control transfers, so its answer is not instant.

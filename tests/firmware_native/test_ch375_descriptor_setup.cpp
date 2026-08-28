@@ -15,8 +15,13 @@
 // watchdog on the same pass.
 
 #include "ch375/descriptor_setup.hpp"
+#include "input/mouse_normalizer.hpp"
 #include "fakes/scripted_ch375.hpp"
 #include "test_support.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <vector>
 
 using duo_input::u1::ch375::Ch375Transport;
 using duo_input::u1::ch375::DescriptorSetup;
@@ -216,4 +221,206 @@ TEST_CASE(each_attempt_gives_the_device_a_fresh_address) {
     // what matters is that the host and the device agree on it afterwards.
     CHECK_EQ(rig.chip.host_address(), rig.chip.device_address());
     CHECK(first != 0);
+}
+
+// ------------------------------------------------- putting it in boot protocol
+//
+// The firmware never selected a protocol, so every device stayed in the one it
+// comes up in - its own. A mouse whose native report leads with a Report ID
+// then had that identifier read as its buttons: a click on every movement, and
+// the horizontal axis lost off the end. `boot=yes` in the diagnostics said only
+// that the interface *advertises* boot support, which is not the same thing and
+// was read as if it were for weeks.
+
+namespace {
+
+/// The eight bytes of a setup packet, read out by hand.
+///
+/// Written from USB 2.0 9.3 and HID 1.11 7.2.5 rather than from the firmware's
+/// own constants, so that a test cannot agree with a wrong value by sharing it.
+struct SetupPacket {
+    std::uint8_t request_type = 0;
+    std::uint8_t request = 0;
+    std::uint16_t value = 0;
+    std::uint16_t index = 0;
+    std::uint16_t length = 0;
+};
+
+/// The one setup packet sent, or a run of zeroes if none was.
+///
+/// Zeroes rather than reading past the end of an empty list: a test that
+/// crashes says far less about what went wrong than one that fails.
+std::vector<std::uint8_t> only_setup(const FakeCh375Chip& chip) {
+    if (chip.setup_packets().size() != 1) {
+        return std::vector<std::uint8_t>(8, 0);
+    }
+    return chip.setup_packets().front();
+}
+
+bool read_setup(const std::vector<std::uint8_t>& bytes, SetupPacket& out) {
+    if (bytes.size() != 8) {
+        return false;
+    }
+    out.request_type = bytes[0];
+    out.request = bytes[1];
+    out.value = static_cast<std::uint16_t>(bytes[2] | (bytes[3] << 8));
+    out.index = static_cast<std::uint16_t>(bytes[4] | (bytes[5] << 8));
+    out.length = static_cast<std::uint16_t>(bytes[6] | (bytes[7] << 8));
+    return true;
+}
+
+}  // namespace
+
+TEST_CASE(a_device_that_advertises_boot_support_is_asked_to_use_it) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_boot_mouse();
+
+    rig.setup.begin(rig.chip.now_us());
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+
+    // One request, and it has to be the right one: SET_PROTOCOL, host to
+    // device, class, to an interface, asking for protocol 0 - boot.
+    CHECK_EQ(rig.chip.setup_packets().size(), std::size_t{1});
+    SetupPacket packet;
+    CHECK(read_setup(only_setup(rig.chip), packet));
+    CHECK_EQ(packet.request_type, std::uint8_t{0x21});
+    CHECK_EQ(packet.request, std::uint8_t{0x0B});
+    CHECK_EQ(packet.value, std::uint16_t{0});
+    CHECK_EQ(packet.length, std::uint16_t{0});
+}
+
+TEST_CASE(the_protocol_request_names_the_interface_that_was_chosen) {
+    Rig rig;
+    rig.chip.attach_device();
+    // The keyboard is the second interface; the first is consumer controls.
+    rig.chip.serve_composite_keyboard();
+
+    rig.setup.begin(rig.chip.now_us());
+    rig.settle();
+
+    // wIndex is an interface number, and a composite device has several. Sent
+    // to the wrong one it configures something nobody is reading.
+    CHECK_EQ(rig.chip.setup_packets().size(), std::size_t{1});
+    SetupPacket packet;
+    CHECK(read_setup(only_setup(rig.chip), packet));
+    CHECK_EQ(packet.index, std::uint16_t{1});
+}
+
+TEST_CASE(the_device_is_actually_left_in_boot_protocol) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_boot_mouse();
+
+    rig.setup.begin(rig.chip.now_us());
+    rig.settle();
+
+    // A control transfer that stops after its setup packet changes nothing on
+    // the device: the request is applied when the transfer completes.
+    CHECK(rig.chip.boot_protocol_selected());
+    CHECK(rig.chip.control_status_stages() > 0);
+    CHECK(rig.setup.boot_protocol_selected());
+}
+
+TEST_CASE(an_interface_that_does_not_advertise_boot_is_not_asked_to_switch) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_mouse_without_boot();
+
+    rig.setup.begin(rig.chip.now_us());
+
+    // There is no boot report behind an interface that does not declare the
+    // subclass, so asking for one is asking for something that does not exist.
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK_EQ(rig.chip.setup_packets().size(), std::size_t{0});
+    CHECK_FALSE(rig.setup.boot_protocol_selected());
+}
+
+TEST_CASE(a_device_that_refuses_the_protocol_request_is_still_brought_up) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_boot_mouse();
+    rig.chip.refuse_setup_requests(true);
+
+    rig.setup.begin(rig.chip.now_us());
+
+    // It refused one request, not the whole enumeration. A mouse that will not
+    // switch protocol is worse than one that will and better than none at all.
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK_EQ(rig.setup.interrupt_endpoint(), 2u);
+    CHECK_FALSE(rig.setup.boot_protocol_selected());
+}
+
+TEST_CASE(a_device_that_never_answers_the_protocol_request_is_still_brought_up) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_boot_mouse();
+    rig.chip.ignore_setup_requests(true);
+
+    rig.setup.begin(rig.chip.now_us());
+
+    // That this test finishes is as much the assertion as what it returns: a
+    // request nobody answers must end on a deadline, not hold the channel.
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK_FALSE(rig.setup.boot_protocol_selected());
+}
+
+TEST_CASE(a_refusal_and_a_silence_are_not_reported_as_the_same_thing) {
+    Rig refused;
+    refused.chip.attach_device();
+    refused.chip.serve_boot_mouse();
+    refused.chip.refuse_setup_requests(true);
+    refused.setup.begin(refused.chip.now_us());
+    refused.settle();
+
+    Rig silent;
+    silent.chip.attach_device();
+    silent.chip.serve_boot_mouse();
+    silent.chip.ignore_setup_requests(true);
+    silent.setup.begin(silent.chip.now_us());
+    silent.settle();
+
+    // Three outcomes, three bytes. A device that took the request, one that
+    // said no, and one that said nothing want different things done about
+    // them, and the diagnostics are the only place anyone can tell.
+    CHECK(refused.setup.last_status() != silent.setup.last_status());
+    // 0x14 is USB_INT_SUCCESS. Reporting it here is the lie that started this:
+    // a mouse still in report protocol looking like one that switched.
+    CHECK(refused.setup.last_status() != 0x14);
+    CHECK(silent.setup.last_status() != 0x14);
+}
+
+// -------------------------------------------------- what the far end receives
+
+TEST_CASE(the_report_a_mouse_sends_after_setup_is_movement_and_not_a_click) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_boot_mouse();
+
+    rig.setup.begin(rig.chip.now_us());
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+
+    // The movement from the bench: 0xF6 is -10 across, 0x4F is +79 down. The
+    // report that carries it is whatever protocol the device was left in.
+    const std::vector<std::uint8_t> report = rig.chip.report_for(-10, 79);
+
+    duo_input::u1::input::MouseNormalizer normalizer;
+    duo_input::u1::input::InputEvent events[duo_input::u1::input::kMaxEventsPerReport];
+    const std::size_t count = normalizer.apply(
+        duo_input::protocol::ByteView{report.data(), report.size()}, events,
+        duo_input::u1::input::kMaxEventsPerReport);
+
+    // Nobody touched a button, and the mouse went sideways as well as down.
+    // Left in its own protocol this produced a held left button, no horizontal
+    // movement at all, and the sideways motion showing up as vertical.
+    std::size_t moves = 0;
+    for (std::size_t index = 0; index < count; ++index) {
+        CHECK(events[index].kind != duo_input::u1::input::InputEventKind::MouseButtonDown);
+        if (events[index].kind == duo_input::u1::input::InputEventKind::MouseMove) {
+            ++moves;
+            CHECK_EQ(events[index].x, std::int16_t{-10});
+            CHECK_EQ(events[index].y, std::int16_t{79});
+        }
+    }
+    CHECK_EQ(moves, std::size_t{1});
 }

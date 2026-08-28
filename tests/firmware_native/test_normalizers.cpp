@@ -349,6 +349,39 @@ TEST_CASE(a_report_that_leads_with_an_identifier_is_read_past_it) {
     CHECK_EQ(out.count_of(InputEventKind::MouseMove), 1);
 }
 
+TEST_CASE(the_movement_in_an_identified_report_is_taken_from_behind_the_buttons) {
+    MouseNormalizer normalizer;
+    normalizer.set_report_id(true);
+    Collected out;
+
+    // Seven bytes from the bench: identifier, buttons, then the movement.
+    // Counting the events is not enough - a report read one byte further out
+    // still produces exactly one movement, of the wrong thing.
+    const std::vector<std::uint8_t> report{0x01, 0x00, 0xF6, 0x4F, 0x00, 0x00, 0x00};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 1u);
+    CHECK_EQ(out.events[0].kind, InputEventKind::MouseMove);
+    CHECK_EQ(out.events[0].x, static_cast<std::int16_t>(-10));
+    CHECK_EQ(out.events[0].y, static_cast<std::int16_t>(79));
+}
+
+TEST_CASE(a_boot_report_is_read_from_its_first_byte) {
+    MouseNormalizer normalizer;
+    Collected out;
+
+    // The same movement as a boot mouse sends it: buttons, X, Y, wheel, with
+    // nothing in front. Skipping a byte here loses the buttons and shifts the
+    // movement one axis over, which is the same fault from the other side.
+    const std::vector<std::uint8_t> report{0x00, 0xF6, 0x4F, 0x00};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 1u);
+    CHECK_EQ(out.events[0].kind, InputEventKind::MouseMove);
+    CHECK_EQ(out.events[0].x, static_cast<std::int16_t>(-10));
+    CHECK_EQ(out.events[0].y, static_cast<std::int16_t>(79));
+}
+
 TEST_CASE(a_mouse_report_that_is_too_short_is_ignored) {
     MouseNormalizer normalizer;
     Collected out;

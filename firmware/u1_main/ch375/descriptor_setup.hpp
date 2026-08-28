@@ -48,7 +48,15 @@ public:
 
     DeviceKind kind() const { return capabilities_.kind; }
     std::uint16_t max_packet() const { return capabilities_.max_packet; }
+    /// Does the interface descriptor *advertise* boot support?
+    ///
+    /// Only that. It says nothing about which protocol the device is actually
+    /// in, and reading it as if it did is what put a click on every movement
+    /// of the mouse on the bench for weeks.
     bool boot_protocol() const { return capabilities_.boot_protocol; }
+
+    /// Was the device actually put into boot protocol?
+    bool boot_protocol_selected() const { return boot_protocol_selected_; }
 
     /// Why the last attempt ended, for a bring-up build to report.
     std::uint8_t last_status() const { return last_status_; }
@@ -73,6 +81,7 @@ private:
     std::uint32_t started_us_ = 0;
     std::uint8_t last_status_ = 0;
     ParseError last_parse_error_ = ParseError::None;
+    bool boot_protocol_selected_ = false;
     std::uint16_t attempts_ = 0;
 };
 
