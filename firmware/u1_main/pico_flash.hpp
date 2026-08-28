@@ -18,6 +18,15 @@
 
 namespace duo_input::u1 {
 
+/// Say whether the second core is running and can be stopped.
+///
+/// Both halves of that matter. A core executing from flash while flash is
+/// being erased fetches instructions from a chip that is busy erasing itself;
+/// a core that has not armed itself to be stopped never answers the request to
+/// stop, and the erase waits forever. So Core 1 announces itself, once, after
+/// arming - not Core 0 on its behalf.
+void set_core1_running(bool running);
+
 class PicoFlash : public storage::FlashBackend {
 public:
     bool erase(std::uint32_t offset, std::size_t size) override;

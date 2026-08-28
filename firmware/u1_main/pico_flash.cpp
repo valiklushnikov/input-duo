@@ -14,16 +14,20 @@ namespace {
 /// Where the flash appears in the address space.
 const std::uint8_t* const kXipBase = reinterpret_cast<const std::uint8_t*>(XIP_BASE);
 
-/// True while the second core is running and might be executing from flash.
-bool core1_is_running() {
-#if DUO_TEST_PATTERN
-    return true;
-#else
-    return false;
-#endif
-}
+/// True once the second core is running and has armed itself to be stopped.
+///
+/// It used to be a build flag, which was right while the only thing on Core 1
+/// was an opt-in test pattern. Core 1 now carries the whole input runtime in
+/// every build, so the answer is a fact about this run rather than about how
+/// it was compiled - and the flag being off while a core was executing was an
+/// erase running against a chip somebody else was fetching code from.
+volatile bool g_core1_running = false;
+
+bool core1_is_running() { return g_core1_running; }
 
 }  // namespace
+
+void set_core1_running(bool running) { g_core1_running = running; }
 
 bool PicoFlash::erase(std::uint32_t offset, std::size_t size) {
     if (offset % storage::kSectorSize != 0 || size % storage::kSectorSize != 0) {

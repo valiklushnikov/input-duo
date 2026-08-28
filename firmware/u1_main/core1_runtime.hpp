@@ -85,7 +85,17 @@ public:
     bool run_macro(std::uint8_t macro_id, std::uint32_t now_ms);
 
     /// Let go of everything, everywhere, and stop every macro.
+    ///
+    /// Called on Core 1. Core 0 asks for it instead - see below.
     void release_all();
+
+    /// Ask for that from the other core. Acted on at the next tick.
+    ///
+    /// Not release_all() directly: it submits a command, and the queue has
+    /// exactly one producer. Two cores pushing into it lose a command, and the
+    /// one they lose may be the release that stops a key repeating forever -
+    /// which would make the emergency stop the thing that stranded the key.
+    void request_release_all() { release_all_requested_ = true; }
 
     /// How many commands the queue refused. Nonzero means what is held on a
     /// computer no longer matches what the operator did.
@@ -116,6 +126,9 @@ private:
     bool profile_requested_ = false;
     bool profile_acknowledged_ = false;
     std::uint8_t acknowledged_profile_ = 0;
+
+    /// A release Core 0 has asked for and Core 1 has not performed yet.
+    bool release_all_requested_ = false;
 
     /// Which mouse buttons are held. The report carries them all at once, so
     /// every change resends the whole mask.

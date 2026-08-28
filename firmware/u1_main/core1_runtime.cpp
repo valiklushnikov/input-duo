@@ -238,6 +238,13 @@ void Core1Runtime::drain_macros(std::uint32_t now_ms) {
 void Core1Runtime::tick(std::uint32_t now_ms) {
     capture_.tick(now_ms);
 
+    // First, and before the swap below: whatever else was asked for, the point
+    // of this one is that it happens.
+    if (release_all_requested_) {
+        release_all_requested_ = false;
+        release_all();
+    }
+
     if (profile_requested_) {
         profile_requested_ = false;
         swap_profile(requested_profile_, now_ms);
@@ -265,7 +272,11 @@ bool Core1Runtime::take_profile_ack(std::uint8_t& profile) {
 }
 
 void Core1Runtime::set_profile_now(std::uint8_t profile) {
-    mapping::Binding bindings[mapping::kMaxBindings];
+    // Static, and measured rather than guessed at. A hundred and twenty-eight
+    // bindings is a kilobyte, and Core 1's whole stack is two - with the swap
+    // that calls this already carrying the macro drain and the release beneath
+    // it. Nothing re-enters here: one core swaps profiles, one at a time.
+    static mapping::Binding bindings[mapping::kMaxBindings];
     const std::size_t count = profiles_.bindings_for(profile, bindings);
     engine_.set_bindings(bindings, count);
     active_profile_ = profile;

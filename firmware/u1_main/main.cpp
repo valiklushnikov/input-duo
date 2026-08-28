@@ -1,10 +1,16 @@
 // U1 entry point.
 //
-// At this stage U1 enumerates as its three HID interfaces plus CDC, drives the
-// SPI link to U2, and holds nothing. There is no CH375B and no stored
-// configuration yet, so nothing ever presses a key - but every later task adds
-// input on top of this loop, and none of them get to revisit the invariant
-// that a board with no input holds nothing.
+// The two cores divide the work along one line and never cross it. Core 0 owns
+// USB, the SPI link to U2, flash and the whole output state; Core 1 owns the
+// peripherals, the bindings, the capture and the macros. Everything Core 1
+// decides becomes a command in a queue that Core 0 drains, which is why there
+// is no lock anywhere between a keypress and a HID report.
+//
+// What crosses the other way is small and deliberate: a capture the host asked
+// for, a profile it asked for, and the answers to both. Those go through the
+// config service's take_* accessors rather than either side reaching into the
+// other, because the alternative is a USB callback writing state that another
+// core is in the middle of reading.
 
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
@@ -19,19 +25,18 @@
 #include "buttons.hpp"
 #include "ch375/descriptor_setup.hpp"
 #include "ch375_probe.hpp"
-#include "diagnostics/ch375_baud_scan.hpp"
+#include "config_profiles.hpp"
 #include "config_service.hpp"
+#include "core1_runtime.hpp"
+#include "diagnostics/ch375_baud_scan.hpp"
 #include "diagnostics_service.hpp"
 #include "hid/state_manager.hpp"
+#include "input/pipeline.hpp"
 #include "output_runtime.hpp"
 #include "pico_flash.hpp"
 #include "spi_master.hpp"
 #include "storage/ab_store.hpp"
 #include "usb_service.hpp"
-
-#if DUO_TEST_PATTERN
-#include "test_pattern.hpp"
-#endif
 
 namespace {
 
@@ -39,17 +44,184 @@ namespace {
 // exactly one writer and no locking between a keypress and a USB report.
 duo_input::u1::OutputRuntime g_outputs;
 
-#if DUO_TEST_PATTERN
-// Core 1's stand-in until the CH375B exists. Compiled out of a release build:
-// a device that can generate its own input must not ship by accident.
-void core1_entry() {
-    while (true) {
-        duo_input::u1::advance_test_pattern(g_outputs,
-                                            to_ms_since_boot(get_absolute_time()));
-        sleep_ms(1);
+/// Core 1's only reach into the output: the queue, and nothing else.
+///
+/// Not the HID state, not the link, not the reports. A full queue is refused
+/// rather than waited on - Core 1 cannot block on Core 0, which is busy being
+/// blocked on the host.
+class QueuedCommands final : public duo_input::u1::ICommandSink {
+public:
+    bool submit(const duo_input::runtime::OutputCommand& command) override {
+        return g_outputs.submit(command);
+    }
+};
+
+QueuedCommands g_commands;
+
+/// The stored configuration, pointed at where it lies in flash.
+duo_input::u1::StoredProfiles g_profiles;
+
+/// Everything between a peripheral report and a queued command.
+duo_input::u1::Core1Runtime g_runtime(g_commands, g_profiles);
+
+#if DUO_CH375_PROBE
+/// Where a normalized event goes.
+class RuntimeInput final : public duo_input::u1::input::IInputHandler {
+public:
+    void on_input(const duo_input::u1::input::InputEvent& event,
+                  std::uint32_t now_ms) override {
+        g_runtime.handle_input(event, now_ms);
+    }
+};
+
+RuntimeInput g_input;
+duo_input::u1::input::InputPipeline g_keyboard_pipeline(g_input);
+duo_input::u1::input::InputPipeline g_mouse_pipeline(g_input);
+
+// The controllers, the ports beneath them and the enumeration above them.
+//
+// At namespace scope rather than inside main, because Core 1 is what ticks
+// them now and it cannot see main's locals. They were already static: each
+// carries an event queue of eight 64-byte reports, and main's frame has to fit
+// in a two-kilobyte stack.
+duo_input::u1::ch375::PioCh375Transport g_keyboard_port;
+duo_input::u1::ch375::PioCh375Transport g_mouse_port;
+duo_input::u1::ch375::Ch375Transport g_keyboard_commands(g_keyboard_port);
+duo_input::u1::ch375::Ch375Transport g_mouse_commands(g_mouse_port);
+// Enumerated by hand rather than with AUTO_SETUP, which assigns an address
+// without saying which and never reports the endpoint - see
+// descriptor_setup.hpp.
+duo_input::u1::ch375::DescriptorSetup g_keyboard_setup(g_keyboard_commands);
+duo_input::u1::ch375::DescriptorSetup g_mouse_setup(g_mouse_commands);
+duo_input::u1::ch375::Ch375Device g_keyboard_device(g_keyboard_commands, g_keyboard_setup);
+duo_input::u1::ch375::Ch375Device g_mouse_device(g_mouse_commands, g_mouse_setup);
+
+struct DeviceTally {
+    std::uint8_t attached = 0;
+    std::uint8_t detached = 0;
+    std::uint8_t ready = 0;
+    std::uint8_t reports = 0;
+    std::uint8_t last_size = 0;
+    std::uint8_t last[8] = {};
+};
+
+DeviceTally g_keyboard_tally;
+DeviceTally g_mouse_tally;
+
+/// How long a pass round Core 1 takes.
+///
+/// The state machine polls an endpoint every 8 ms and gives a configured
+/// device a second before declaring it lost. Both are meaningless if a pass
+/// takes longer than they do - and a device that came up was once declared
+/// gone without a single poll being issued, which is what that looks like.
+/// Measured on the core that ticks the controllers, because that is the loop
+/// those deadlines are written against.
+std::uint32_t g_last_pass_us = 0;
+std::uint32_t g_worst_pass_us = 0;
+#endif
+
+/// Install a profile's macros, indexed by the slot a binding names.
+///
+/// The definitions point into the step pool inside StoredProfiles, which this
+/// rewrites. Safe only because the scheduler was stopped and drained before
+/// the profile changed, so nothing is mid-macro reading what this replaces.
+void install_macros(std::uint8_t profile) {
+    // Static: Core 1 has a two-kilobyte stack and the binding table sits below
+    // this on the same path.
+    static duo_input::u1::macros::MacroDefinition
+        definitions[duo_input::u1::kMaxProfileMacros];
+    g_profiles.macros_for(profile, definitions, duo_input::u1::kMaxProfileMacros);
+    for (std::size_t slot = 0; slot < duo_input::u1::kMaxProfileMacros; ++slot) {
+        g_runtime.define_macro(static_cast<std::uint8_t>(slot), definitions[slot]);
     }
 }
+
+/// Core 1: peripherals in, commands out, and nothing else.
+///
+/// It never touches the output state, the link or USB. It also never blocks,
+/// which is what lets Core 0 keep feeding a two-second watchdog while a macro
+/// with a two-second pause in it is running.
+void core1_entry() {
+    // Core 0 erases and programs flash, and it cannot do that while this core
+    // might be fetching instructions from the chip being erased. This is what
+    // lets it stop us; without it the request would wait forever.
+    //
+    // Announced from here rather than from Core 0, and only after arming:
+    // between launching a core and that core arming itself there is a window
+    // where it is running from flash and cannot yet be stopped, and a write
+    // landing in it would be a request that never returns.
+    multicore_lockout_victim_init();
+    duo_input::u1::set_core1_running(true);
+
+    std::uint8_t installed = g_profiles.active_profile_id();
+    g_runtime.set_profile_now(installed);
+    install_macros(installed);
+
+    while (true) {
+        const std::uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+
+#if DUO_CH375_PROBE
+        const std::uint32_t now_us = time_us_32();
+        if (g_last_pass_us != 0) {
+            const std::uint32_t elapsed = now_us - g_last_pass_us;
+            if (elapsed > g_worst_pass_us) {
+                g_worst_pass_us = elapsed;
+            }
+        }
+        g_last_pass_us = now_us;
+
+        duo_input::u1::ch375::Ch375Device* devices[2] = {&g_keyboard_device, &g_mouse_device};
+        duo_input::u1::ch375::DescriptorSetup* setups[2] = {&g_keyboard_setup, &g_mouse_setup};
+        duo_input::u1::input::InputPipeline* pipelines[2] = {&g_keyboard_pipeline,
+                                                             &g_mouse_pipeline};
+        DeviceTally* tallies[2] = {&g_keyboard_tally, &g_mouse_tally};
+        // Static: one of these is seventy-odd bytes of report buffer, and this
+        // core has two kilobytes for everything below it.
+        static duo_input::u1::ch375::Ch375Event event;
+        for (int index = 0; index < 2; ++index) {
+            devices[index]->tick(now_us);
+            while (devices[index]->take_event(event)) {
+                DeviceTally& tally = *tallies[index];
+                switch (event.kind) {
+                    case duo_input::u1::ch375::Ch375EventKind::Attached:
+                        ++tally.attached;
+                        break;
+                    case duo_input::u1::ch375::Ch375EventKind::Detached:
+                        ++tally.detached;
+                        break;
+                    case duo_input::u1::ch375::Ch375EventKind::Ready:
+                        ++tally.ready;
+                        break;
+                    case duo_input::u1::ch375::Ch375EventKind::Report: {
+                        ++tally.reports;
+                        const std::size_t keep = event.report_size > sizeof(tally.last)
+                                                     ? sizeof(tally.last)
+                                                     : event.report_size;
+                        tally.last_size = static_cast<std::uint8_t>(keep);
+                        std::memcpy(tally.last, event.report, keep);
+                        break;
+                    }
+                    default:
+                        break;
+                }
+                // A detach synthesises the releases the peripheral never sent,
+                // which is the only thing standing between a yanked cable and
+                // a computer that types until it is rebooted.
+                pipelines[index]->on_event(event, setups[index]->kind(), now_ms);
+            }
+        }
 #endif
+
+        g_runtime.tick(now_ms);
+
+        // A swap happened - a binding, a macro, or the host asked for one. The
+        // bindings moved with it and the macros have to follow.
+        if (g_runtime.active_profile() != installed) {
+            installed = g_runtime.active_profile();
+            install_macros(installed);
+        }
+    }
+}
 
 // Both switches are read as active-low with an internal pull-up, from the
 // first instant, so a board that stops early still has defined input pins
@@ -241,17 +413,23 @@ int main() {
     static duo_input::u1::ConfigService config(store, cdc_writer);
 
     // Whatever was stored last time is what the device runs now.
+    //
+    // Read before Core 1 is launched, because Core 1 reads the bindings out of
+    // it the moment it starts. The bytes are not copied - they are pointed at
+    // where they lie in flash, which outlives everything that reads them.
     const duo_input::storage::ScanResult stored = store.scan();
     if (stored.has_active) {
-        config.set_active_profile(1);
+        const duo_input::protocol::ByteView package =
+            store.payload_view(stored.active, stored.active_slot().size);
+        if (package.data != nullptr && g_profiles.load(package)) {
+            config.set_active_profile(g_profiles.active_profile_id());
+        }
     }
 
 #if DUO_CH375_PROBE
-    // Both ports come up before anything else touches these pins. The chips
-    // are asked their four questions here and again every few seconds below,
-    // so a controller powered up later is still found.
-    static duo_input::u1::ch375::PioCh375Transport keyboard_port;
-    static duo_input::u1::ch375::PioCh375Transport mouse_port;
+    // Both ports come up before anything else touches these pins, and before
+    // Core 1 - which owns the controllers above them - is launched.
+    //
     // Before any state machine touches them, read both receive pads as plain
     // inputs. A pad with nothing on it and a pull-up should sit high and never
     // move; if one of them does move, the answer is about solder, not software.
@@ -310,76 +488,38 @@ int main() {
         watch_existing_pin(duo_input::u1::kPinMouseTx, 3000);
     gpio_put(duo_input::u1::kPinMouseTx, 1);
 
-    keyboard_port.begin(pio0, duo_input::u1::kPinKeyboardTx, duo_input::u1::kPinKeyboardRx,
-                        duo_input::u1::kPinKeyboardInt);
-    mouse_port.begin(pio0, duo_input::u1::kPinMouseTx, duo_input::u1::kPinMouseRx,
-                     duo_input::u1::kPinMouseInt);
+    g_keyboard_port.begin(pio0, duo_input::u1::kPinKeyboardTx, duo_input::u1::kPinKeyboardRx,
+                          duo_input::u1::kPinKeyboardInt);
+    g_mouse_port.begin(pio0, duo_input::u1::kPinMouseTx, duo_input::u1::kPinMouseRx,
+                       duo_input::u1::kPinMouseInt);
     // Before a single byte goes out, on either port.
     std::uint16_t keyboard_bad_at_boot = 0;
     std::uint16_t mouse_bad_at_boot = 0;
     const std::uint16_t keyboard_quiet_at_boot =
-        duo_input::u1::listen_without_sending(keyboard_port, 1000, keyboard_bad_at_boot);
+        duo_input::u1::listen_without_sending(g_keyboard_port, 1000, keyboard_bad_at_boot);
     const std::uint16_t mouse_quiet_at_boot =
-        duo_input::u1::listen_without_sending(mouse_port, 1000, mouse_bad_at_boot);
+        duo_input::u1::listen_without_sending(g_mouse_port, 1000, mouse_bad_at_boot);
 
     // The static level readings above say the wiring is sane. They cannot say
     // the two data lines are the right way round, or that a chip is in serial
     // mode - only asking it something can. CHECK_EXIST needs nothing to be
     // configured first: send a byte, get its inverse back (DS1 5.5).
-    // These live in static storage, not on the stack.
     //
-    // Core 0's stack region is two kilobytes and main's frame was measured at
-    // 7972 - four kilobytes past its own floor and straight across core 1's
-    // entire stack. Nothing faulted, because nothing had been launched on core
-    // 1 yet; the moment anything is, the two cores overwrite each other with
-    // no trap, no watchdog, and a board that keeps looping and keeps printing
-    // plausible numbers while its data is rewritten underneath it.
-    //
-    // The linker cannot catch this. Its only guard compares __StackLimit
-    // against the heap, and __StackLimit is the bottom of RAM - it says
-    // nothing about how far a frame actually descends.
-    //
-    // Each of these carries an event queue of eight 64-byte reports, so two
-    // controllers alone are most of the frame. They last as long as the
-    // program does, which is what static storage is for.
-    static duo_input::u1::ch375::Ch375Transport keyboard_commands(keyboard_port);
-    static duo_input::u1::ch375::Ch375Transport mouse_commands(mouse_port);
-    // Asked once, here, before the state machines below take the chips over.
+    // Asked once, here, before Core 1 takes the chips over.
     //
     // Running it periodically alongside them made two owners of one chip: the
     // probe sets the working mode and reads statuses, and reading a status is
     // what clears it - so each was consuming the interrupts the other was
     // waiting for. On the bench that looked like a device attaching and
-    // detaching twenty-three times in a row.
+    // detaching twenty-three times in a row. The controllers now live on the
+    // other core, which makes that mistake harder to make by accident.
     const duo_input::u1::Ch375ProbeResult keyboard_probe =
-        duo_input::u1::probe_ch375(keyboard_port, keyboard_commands);
+        duo_input::u1::probe_ch375(g_keyboard_port, g_keyboard_commands);
     const duo_input::u1::Ch375ProbeResult mouse_probe =
-        duo_input::u1::probe_ch375(mouse_port, mouse_commands);
-
-    // The lifecycle itself, on real hardware for the first time: one state
-    // machine per controller, sharing nothing, each doing a bounded piece of
-    // work per pass.
-    // Enumerated by hand rather than with AUTO_SETUP, which assigns an
-    // address without saying which and never reports the endpoint - see
-    // descriptor_setup.hpp.
-    static duo_input::u1::ch375::DescriptorSetup keyboard_setup(keyboard_commands);
-    static duo_input::u1::ch375::DescriptorSetup mouse_setup(mouse_commands);
-    static duo_input::u1::ch375::Ch375Device keyboard_device(keyboard_commands, keyboard_setup);
-    static duo_input::u1::ch375::Ch375Device mouse_device(mouse_commands, mouse_setup);
+        duo_input::u1::probe_ch375(g_mouse_port, g_mouse_commands);
     // The experiment that left the bus reset out changed nothing - the device
     // was lost at exactly the same rate without it - so the reset is not what
     // loses it, and the datasheet's sequence is back.
-
-    struct DeviceTally {
-        std::uint8_t attached = 0;
-        std::uint8_t detached = 0;
-        std::uint8_t ready = 0;
-        std::uint8_t reports = 0;
-        std::uint8_t last_size = 0;
-        std::uint8_t last[8] = {};
-    };
-    static DeviceTally keyboard_tally;
-    static DeviceTally mouse_tally;
 
     duo_input::diagnostics::Ch375SingleProbeObservation single_probe;
     single_probe.pad_low_percent = tx_while_high.low_percent;
@@ -415,9 +555,9 @@ int main() {
     usb.begin();
     link.begin();
 
-#if DUO_TEST_PATTERN
+    // Everything Core 1 reads at start-up is in place, so it can go. It tells
+    // the flash routines about itself once it can be stopped by them.
     multicore_launch_core1(core1_entry);
-#endif
 
     duo_input::u1::Buttons buttons;
     bool was_mounted = false;
@@ -429,6 +569,8 @@ int main() {
     watchdog_enable(kWatchdogMs, true);
 
     while (true) {
+        const std::uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+
         usb.task();
 
         const bool mounted = usb.mounted();
@@ -453,7 +595,45 @@ int main() {
         }
         if (config.take_release_all_request()) {
             g_outputs.release_all();
-            link.send_release_all(to_ms_since_boot(get_absolute_time()));
+            link.send_release_all(now_ms);
+            // Asked for rather than done here: the command queue has exactly
+            // one producer and this core is not it.
+            g_runtime.request_release_all();
+        }
+
+        // What the host asked of Core 1, and what Core 1 has to say back.
+        //
+        // Both directions pass through here rather than either side calling
+        // into the other, because one of those sides is a USB callback and the
+        // other is halfway through reading a binding table.
+        switch (config.take_capture_request()) {
+            case duo_input::u1::CaptureRequest::Begin:
+                g_runtime.begin_capture(now_ms);
+                break;
+            case duo_input::u1::CaptureRequest::Cancel:
+                g_runtime.cancel_capture();
+                break;
+            case duo_input::u1::CaptureRequest::None:
+                break;
+        }
+        {
+            // Taken before the state below is published, so a capture that
+            // ended by being answered is reported rather than swallowed.
+            duo_input::u1::mapping::CapturedTrigger captured;
+            if (g_runtime.take_capture_event(captured)) {
+                config.emit_capture_event(captured);
+            }
+        }
+        config.set_capture_active(g_runtime.capture_active());
+
+        std::uint8_t profile = 0;
+        if (config.take_profile_request(profile)) {
+            g_runtime.request_profile(profile);
+        }
+        if (g_runtime.take_profile_ack(profile)) {
+            // Only now is it true. Core 1 has stopped its macros and let go of
+            // what was held under the old profile's meaning.
+            config.set_active_profile(profile);
         }
 
         // Bounded, so a burst of input cannot starve the USB it is for.
@@ -464,7 +644,6 @@ int main() {
         // PC2's half of the state goes over the link. It sends on change and
         // otherwise heartbeats, so a quiet device does not saturate the bus
         // and does not look severed either.
-        const std::uint32_t now_ms = to_ms_since_boot(get_absolute_time());
         link.poll(now_ms, g_outputs.take_snapshot(duo_input::hid::Target::Pc2));
 
         // Published every pass, so the host can see the link rather than infer
@@ -485,57 +664,18 @@ int main() {
 
 #if DUO_CH375_PROBE
         {
-            // Ticked every pass, which is what the state machine is written
-            // against. The report below is only a report.
-            const std::uint32_t device_now_us = time_us_32();
-            // How long a pass round the loop takes.
-            //
-            // The state machine polls an endpoint every 8 ms and gives a
-            // configured device a second before declaring it lost. Both are
-            // meaningless if a pass takes longer than they do - and a device
-            // that came up was declared gone without a single poll being
-            // issued, which is what that looks like.
-            static std::uint32_t last_pass_us = 0;
-            static std::uint32_t worst_pass_us = 0;
-            if (last_pass_us != 0) {
-                const std::uint32_t elapsed = device_now_us - last_pass_us;
-                if (elapsed > worst_pass_us) {
-                    worst_pass_us = elapsed;
-                }
-            }
-            last_pass_us = device_now_us;
-            duo_input::u1::ch375::Ch375Device* devices[2] = {&keyboard_device, &mouse_device};
-            duo_input::u1::ch375::DescriptorSetup* setups[2] = {&keyboard_setup, &mouse_setup};
-            DeviceTally* tallies[2] = {&keyboard_tally, &mouse_tally};
-            for (int index = 0; index < 2; ++index) {
-                devices[index]->tick(device_now_us);
-                duo_input::u1::ch375::Ch375Event event;
-                while (devices[index]->take_event(event)) {
-                    DeviceTally& tally = *tallies[index];
-                    switch (event.kind) {
-                        case duo_input::u1::ch375::Ch375EventKind::Attached:
-                            ++tally.attached;
-                            break;
-                        case duo_input::u1::ch375::Ch375EventKind::Detached:
-                            ++tally.detached;
-                            break;
-                        case duo_input::u1::ch375::Ch375EventKind::Ready:
-                            ++tally.ready;
-                            break;
-                        case duo_input::u1::ch375::Ch375EventKind::Report: {
-                            ++tally.reports;
-                            const std::size_t keep =
-                                event.report_size > sizeof(tally.last) ? sizeof(tally.last)
-                                                                       : event.report_size;
-                            tally.last_size = static_cast<std::uint8_t>(keep);
-                            std::memcpy(tally.last, event.report, keep);
-                            break;
-                        }
-                        default:
-                            break;
-                    }
-                }
-            }
+            // A report and nothing else. The controllers are ticked on Core 1,
+            // which is where their event queues are drained and where their
+            // 8 ms poll deadlines are actually measured; two cores ticking one
+            // chip made each consume the interrupts the other was waiting for,
+            // and on the bench that looked like a device attaching and
+            // detaching twenty-three times in a row.
+            duo_input::u1::ch375::Ch375Device* devices[2] = {&g_keyboard_device,
+                                                             &g_mouse_device};
+            duo_input::u1::ch375::DescriptorSetup* setups[2] = {&g_keyboard_setup,
+                                                                &g_mouse_setup};
+            DeviceTally* tallies[2] = {&g_keyboard_tally, &g_mouse_tally};
+            const std::uint32_t worst_pass_us = g_worst_pass_us;
 
             // Written as text rather than packed into a struct.
             //
@@ -593,7 +733,7 @@ int main() {
                     setups[index]->boot_protocol() ? "yes" : "no",
                     static_cast<unsigned>(setups[index]->last_parse_error()),
                     tally.last_size, tally.last[0], tally.last[1], tally.last[2], tally.last[3],
-                    (index == 0 ? keyboard_port : mouse_port).baud(),
+                    (index == 0 ? g_keyboard_port : g_mouse_port).baud(),
                     device.baud_change_failures(), device.setup_mode_failures(),
                     device.recover_mode_failures(), device.chip_found_elsewhere(),
                     device.alive_but_refusing(),
@@ -648,6 +788,9 @@ int main() {
             case duo_input::u1::ButtonEvent::StopReleaseAll:
                 g_outputs.release_all();
                 link.send_release_all(now_ms);
+                // The macro that is holding keys down is on the other core,
+                // and a stop that leaves it typing is not a stop.
+                g_runtime.request_release_all();
                 break;
             case duo_input::u1::ButtonEvent::FactoryResetConfirmed:
                 // Someone is at the device and held the button for five

@@ -571,3 +571,52 @@ TEST_CASE(a_macro_delay_does_not_stop_the_operators_own_typing) {
 
     CHECK_EQ(sink.keys(CommandKind::KeyPress, 0x04), 1);
 }
+
+
+// --------------------------------------------------- releasing from Core 0
+
+TEST_CASE(a_release_asked_for_by_the_other_core_waits_for_the_tick) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    Core1Runtime runtime(sink, profiles);
+
+    runtime.request_release_all();
+
+    // Nothing yet. The command queue has exactly one producer, and the core
+    // asking is not it: two cores pushing into it lose a command, and the one
+    // they lose may be the release that stops a key repeating forever.
+    CHECK_EQ(sink.count_of(CommandKind::ReleaseAll), 0);
+}
+
+TEST_CASE(a_release_asked_for_by_the_other_core_happens_on_the_next_tick) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    const MacroStep steps[] = {tap_step(0x09)};
+    Core1Runtime runtime(sink, profiles);
+    runtime.define_macro(2, MacroDefinition{steps, 1});
+    runtime.run_macro(2, 1000);
+    runtime.handle_input(key(InputEventKind::KeyDown, 0x04), 1000);
+    sink.commands.clear();
+
+    runtime.request_release_all();
+    runtime.tick(1001);
+
+    CHECK_EQ(sink.count_of(CommandKind::ReleaseAll), 1);
+    // And the macro is stopped rather than left to carry on typing into a
+    // computer that was just told to let go of everything.
+    runtime.tick(1002);
+    CHECK_EQ(sink.keys(CommandKind::KeyPress, 0x09), 0);
+}
+
+TEST_CASE(a_release_is_asked_for_once_and_not_repeated_every_tick) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    Core1Runtime runtime(sink, profiles);
+
+    runtime.request_release_all();
+    runtime.tick(1000);
+    runtime.tick(1001);
+    runtime.tick(1002);
+
+    CHECK_EQ(sink.count_of(CommandKind::ReleaseAll), 1);
+}

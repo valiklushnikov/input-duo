@@ -5,8 +5,16 @@ add_executable(duo_u1_main
     usb_service.cpp
     spi_master.cpp
     output_runtime.cpp
-    test_pattern.cpp
     config_service.cpp
+    config_profiles.cpp
+    core1_runtime.cpp
+    input/pipeline.cpp
+    input/keyboard_normalizer.cpp
+    input/mouse_normalizer.cpp
+    mapping/capture.cpp
+    mapping/engine.cpp
+    mapping/routes.cpp
+    macros/scheduler.cpp
     pico_flash.cpp
     buttons.cpp
     ch375_probe.cpp
@@ -42,9 +50,6 @@ pico_generate_pio_header(duo_u1_main ${CMAKE_CURRENT_LIST_DIR}/ch375/ch375_seria
 pico_enable_stdio_usb(duo_u1_main 0)
 pico_enable_stdio_uart(duo_u1_main 0)
 
-# The generated-input pattern is opt-in and off by default. A device that can
-# type on its own must not ship because someone forgot a flag.
-option(DUO_TEST_PATTERN "Generate synthetic input on Core 1" OFF)
 # Bring-up only: replaces the diagnostics reply with raw link bytes, which the
 # configurator cannot parse. Never enabled in a release build.
 option(DUO_SPI_DEBUG "Report raw SPI link bytes over CDC" OFF)
@@ -53,7 +58,6 @@ option(DUO_SPI_DEBUG "Report raw SPI link bytes over CDC" OFF)
 # driver exists to blame. Never enabled in a release build.
 option(DUO_CH375_PROBE "Probe both CH375s over CDC at start-up" OFF)
 target_compile_definitions(duo_u1_main PRIVATE
-    DUO_TEST_PATTERN=$<BOOL:${DUO_TEST_PATTERN}>
     DUO_SPI_DEBUG=$<BOOL:${DUO_SPI_DEBUG}>
     DUO_CH375_PROBE=$<BOOL:${DUO_CH375_PROBE}>
 )
