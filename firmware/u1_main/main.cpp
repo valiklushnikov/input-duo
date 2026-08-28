@@ -55,6 +55,14 @@ public:
     bool submit(const duo_input::runtime::OutputCommand& command) override {
         return g_outputs.submit(command);
     }
+
+    /// What Core 0 has not taken yet. Read, never written.
+    ///
+    /// Core 1 paces its macro output against this. Core 0 holds output state
+    /// and not a queue of reports, so a press and its release applied in one
+    /// drain leave the state as it was and no report is sent at all - a macro
+    /// that outran the drain would type nothing on the far computer.
+    std::size_t pending() const override { return g_outputs.pending(); }
 };
 
 QueuedCommands g_commands;

@@ -153,6 +153,25 @@ void MacroScheduler::stop_all() {
     }
 }
 
+void MacroScheduler::abandon() {
+    stop_all();
+    // Everything stop_all() left owed. Nothing is emitted, so nothing may be
+    // remembered either: a held_ entry that outlived the release it stands for
+    // would be handed out later as a release of a key nobody is holding.
+    releasing_ = 0;
+    held_count_ = 0;
+    consumer_pending_ = false;
+    consumer_usage_ = 0;
+    typing_ = false;
+    // The pairs point into the step pool, which the caller is about to
+    // rewrite.
+    pairs_ = nullptr;
+    pair_count_ = 0;
+    pair_index_ = 0;
+    phase_ = 0;
+    mod_bit_ = 0;
+}
+
 bool MacroScheduler::typing_step(MacroOutput& output) {
     while (pair_index_ < pair_count_) {
         const std::uint8_t modifiers = pairs_[pair_index_ * 2u];

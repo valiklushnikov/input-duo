@@ -29,12 +29,12 @@
 
 namespace duo_input::u1 {
 
-/// Maximum macro commands emitted in one pass around Core 1.
+/// The shortest gap between two things a macro emits.
 ///
-/// Core 0 drains 32 commands per pass and the cross-core queue holds 127.  A
-/// budget below both prevents a long TEXT step from monopolising Core 1 or
-/// filling the queue before USB, SPI and physical input are serviced again.
-inline constexpr std::size_t kMacroOutputsPerTick = 16;
+/// One USB frame. A macro that types faster than the host polls is a macro
+/// whose keystrokes are dropped by the endpoint rather than delivered, and a
+/// human being does not type at a megahertz either.
+inline constexpr std::uint32_t kMacroEventIntervalMs = 1;
 
 /// Where commands go. Core 0's queue on hardware, a recorder in tests.
 class ICommandSink {
@@ -42,6 +42,21 @@ public:
     virtual ~ICommandSink() = default;
     /// Returns false when the queue is full. Never blocks.
     virtual bool submit(const runtime::OutputCommand& command) = 0;
+
+    /// How many submitted commands the consumer has not taken yet.
+    ///
+    /// Macro output is paced against this. Core 0 holds output *state*, not a
+    /// queue of reports: a press and the release that follows it, applied in
+    /// the same drain, leave the state exactly as it was and no report is sent
+    /// at all - so a macro that outran the drain would type nothing. Waiting
+    /// for the queue to empty puts each keystroke in its own drain, and
+    /// therefore in its own report.
+    ///
+    /// Pure, and deliberately so. A default of nothing-pending would be right
+    /// for a recorder and silently wrong for the one implementation that
+    /// matters: a sink over the real queue that forgot to override it would
+    /// pace macros against a constant and put the defect straight back.
+    virtual std::size_t pending() const = 0;
 };
 
 /// Where a profile's bindings come from - stored configuration on hardware.
@@ -188,6 +203,11 @@ private:
 
     /// A release Core 0 has asked for and Core 1 has not performed yet.
     std::atomic<bool> release_all_requested_{false};
+
+    /// The earliest millisecond at which the next macro event may be emitted.
+    ///
+    /// Compared by subtraction: the millisecond counter wraps after 49 days.
+    std::uint32_t next_macro_event_ms_ = 0;
 
     /// Which mouse buttons are held. The report carries them all at once, so
     /// every change resends the whole mask.

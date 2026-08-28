@@ -107,6 +107,14 @@ public:
     /// Stop everything and release whatever the running macro was holding.
     void stop_all();
 
+    /// Stop everything and forget what was held, emitting nothing.
+    ///
+    /// For the caller that has already let go of everything on both computers
+    /// by other means. Releases handed out afterwards would be noise, and -
+    /// since they are paced one to a pass - noise that arrived after the step
+    /// pool they came from had been rewritten underneath this.
+    void abandon();
+
     bool active() const { return running_; }
     std::size_t queued_count() const { return queued_; }
     StopReason last_stop_reason() const { return last_stop_; }

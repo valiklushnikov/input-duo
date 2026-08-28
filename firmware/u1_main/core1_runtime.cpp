@@ -41,6 +41,11 @@ Route route_of(hid::Target target) {
     return target == hid::Target::Pc2 ? Route::Pc2 : Route::Pc1;
 }
 
+/// Has ``deadline`` arrived? Subtraction, because the counter wraps at 49 days.
+bool reached(std::uint32_t now_ms, std::uint32_t deadline_ms) {
+    return static_cast<std::int32_t>(now_ms - deadline_ms) >= 0;
+}
+
 constexpr std::uint16_t kProfileMailboxOccupied = 0x100u;
 constexpr std::uint16_t kProfileMailboxFromHost = 0x200u;
 
@@ -183,10 +188,35 @@ void Core1Runtime::handle_input(const InputEvent& event, std::uint32_t now_ms) {
 }
 
 void Core1Runtime::drain_macros(std::uint32_t now_ms) {
+    // One macro event per pass of Core 0's loop, and never two inside the same
+    // millisecond. Both halves matter, and neither alone is enough.
+    //
+    // Core 0 holds output *state*, not a queue of reports. A press and the
+    // release that follows it, applied in the same drain, leave that state
+    // identical to what was last sent and produce no report at all - so a
+    // macro that emitted faster than Core 0 drained would type nothing on the
+    // far computer, which is precisely what an unpaced TEXT step did. The two
+    // cores do not loop at the same rate and never will: Core 1's pass is two
+    // controller ticks, Core 0's is USB, the CDC service, a drain, a publish
+    // and an SPI transaction. Counting events per Core 1 pass measures the
+    // wrong loop.
+    //
+    // Waiting for the queue to empty is what makes the pass boundary
+    // observable from here: it is empty only once Core 0 has drained what was
+    // in it, so the next event cannot join the previous one in a drain. The
+    // millisecond floor is what stops a fast Core 0 loop from driving the
+    // macro faster than the host polls the endpoint. It is also why a long
+    // TEXT step no longer fills the queue it shares with the other core.
+    if (!reached(now_ms, next_macro_event_ms_)) {
+        return;
+    }
+    if (sink_.pending() != 0) {
+        return;
+    }
+
     macros::MacroOutput output;
-    std::size_t emitted = 0;
-    while (emitted < kMacroOutputsPerTick && macros_.tick(now_ms, output)) {
-        ++emitted;
+    if (macros_.tick(now_ms, output)) {
+        next_macro_event_ms_ = now_ms + kMacroEventIntervalMs;
         switch (output.kind) {
             case macros::MacroOutputKind::SendInput: {
                 OutputCommand command;
@@ -409,12 +439,11 @@ void Core1Runtime::release_all() {
     command.kind = CommandKind::ReleaseAll;
     submit(command);
 
-    macros_.stop_all();
-    // Its releases are not sent: ReleaseAll has already let go of everything
-    // on both computers, and repeating them would be noise on the link.
-    macros::MacroOutput ignored;
-    while (macros_.tick(0, ignored)) {
-    }
+    // Abandoned rather than drained. ReleaseAll has already let go of
+    // everything on both computers, so the releases would be noise on the link
+    // - and, paced one event to a pass, noise that arrived milliseconds later,
+    // after the step pool it came from had been rewritten underneath this.
+    macros_.abandon();
 
     (void)engine_.release_everything();
     buttons_ = 0;

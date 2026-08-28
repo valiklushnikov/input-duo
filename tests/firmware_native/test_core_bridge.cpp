@@ -95,6 +95,10 @@ public:
 
 struct RecordingSink final : ICommandSink {
     std::vector<OutputCommand> commands;
+
+    /// Taken the instant it is given, so there is never anything waiting.
+    std::size_t pending() const override { return 0; }
+
     bool accept = true;
 
     bool submit(const OutputCommand& command) override {

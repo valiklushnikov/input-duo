@@ -33,11 +33,6 @@ bool UsbService::suspended() const {
     return tud_suspended();
 }
 
-void UsbService::forget_sent_state() {
-    keyboard_valid_ = false;
-    last_buttons_ = 0;
-}
-
 bool UsbService::send_keyboard(const hid::KeyboardSnapshot& keyboard) {
     if (!tud_hid_n_ready(kKeyboard)) {
         return false;
@@ -67,23 +62,6 @@ bool UsbService::send_mouse(const hid::MouseSnapshot& mouse) {
     return tud_hid_n_mouse_report(kMouse, hid::kNoReportId, mouse.buttons,
                                   clamp(mouse.delta_x), clamp(mouse.delta_y), mouse.wheel,
                                   mouse.pan);
-}
-
-bool UsbService::same_as_last_keyboard(const hid::KeyboardSnapshot& keyboard) const {
-    if (keyboard.modifiers != last_keyboard_.modifiers ||
-        keyboard.key_count != last_keyboard_.key_count) {
-        return false;
-    }
-    for (std::uint8_t index = 0; index < keyboard.key_count; ++index) {
-        if (keyboard.keys[index] != last_keyboard_.keys[index]) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool UsbService::has_movement(const hid::MouseSnapshot& mouse) {
-    return mouse.delta_x != 0 || mouse.delta_y != 0 || mouse.wheel != 0 || mouse.pan != 0;
 }
 
 }  // namespace duo_input::u1

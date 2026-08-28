@@ -79,13 +79,34 @@ public:
     /// A host that has just re-enumerated knows nothing about the reports we
     /// sent before; without this, a key released while unplugged would never
     /// be reported as released.
-    void forget_sent_state();
+    void forget_sent_state() {
+        keyboard_valid_ = false;
+        last_buttons_ = 0;
+    }
 
 private:
+    // Only these two touch TinyUSB, which is why they are the only two defined
+    // out of line. What decides *whether* to send is here, where the whole
+    // path from a macro step to a report can be exercised on a desktop.
     bool send_keyboard(const hid::KeyboardSnapshot& keyboard);
     bool send_mouse(const hid::MouseSnapshot& mouse);
-    bool same_as_last_keyboard(const hid::KeyboardSnapshot& keyboard) const;
-    static bool has_movement(const hid::MouseSnapshot& mouse);
+
+    bool same_as_last_keyboard(const hid::KeyboardSnapshot& keyboard) const {
+        if (keyboard.modifiers != last_keyboard_.modifiers ||
+            keyboard.key_count != last_keyboard_.key_count) {
+            return false;
+        }
+        for (std::uint8_t index = 0; index < keyboard.key_count; ++index) {
+            if (keyboard.keys[index] != last_keyboard_.keys[index]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static bool has_movement(const hid::MouseSnapshot& mouse) {
+        return mouse.delta_x != 0 || mouse.delta_y != 0 || mouse.wheel != 0 || mouse.pan != 0;
+    }
 
     hid::KeyboardSnapshot last_keyboard_{};
     std::uint8_t last_buttons_ = 0;

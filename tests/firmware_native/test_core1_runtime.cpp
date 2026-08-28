@@ -80,6 +80,10 @@ MacroStep tap_step(std::uint16_t usage) {
 
 struct RecordingSink final : ICommandSink {
     std::vector<OutputCommand> commands;
+
+    /// Taken the instant it is given, so there is never anything waiting.
+    std::size_t pending() const override { return 0; }
+
     bool accept = true;
 
     bool submit(const OutputCommand& command) override {
@@ -676,14 +680,16 @@ TEST_CASE(a_macro_delay_does_not_stop_the_operators_own_typing) {
     CHECK_EQ(sink.keys(CommandKind::KeyPress, 0x04), 1);
 }
 
-TEST_CASE(one_runtime_tick_has_a_fixed_macro_output_budget) {
+TEST_CASE(a_macro_emits_one_event_per_pass_however_often_core_one_goes_round) {
     RecordingSink sink;
     TwoProfiles profiles;
     Core1Runtime runtime(sink, profiles);
 
-    // One hundred letters owe two hundred output commands.  They must span
-    // several Core 1 passes rather than filling the 128-slot cross-core queue
-    // before Core 0 gets another chance to drain it.
+    // One hundred letters owe two hundred output commands. Core 1 goes round
+    // many times for each pass Core 0 makes, so a per-pass count of anything
+    // above one measures the wrong loop: Core 0 holds output state and not a
+    // queue of reports, and a press and its release inside one drain leave
+    // that state unchanged and produce no report at all.
     std::uint8_t pairs[200] = {};
     for (std::size_t index = 0; index < sizeof(pairs); index += 2) {
         pairs[index + 1] = 0x04;
@@ -696,10 +702,56 @@ TEST_CASE(one_runtime_tick_has_a_fixed_macro_output_budget) {
     runtime.define_macro(0, MacroDefinition{steps, 1});
     CHECK(runtime.run_macro(0, 1000));
 
-    runtime.tick(1000);
+    for (int index = 0; index < 20; ++index) {
+        runtime.tick(1000);
+    }
 
-    CHECK_EQ(sink.commands.size(), duo_input::u1::kMacroOutputsPerTick);
+    CHECK_EQ(sink.commands.size(), 1u);
     CHECK(runtime.macro_active());
+
+    // And the millisecond after, one more - not twenty.
+    for (int index = 0; index < 20; ++index) {
+        runtime.tick(1001);
+    }
+    CHECK_EQ(sink.commands.size(), 2u);
+}
+
+TEST_CASE(a_macro_waits_for_the_other_core_to_take_what_it_already_sent) {
+    // A sink that keeps everything, so nothing is ever consumed. The macro has
+    // to stop after one event: a second one queued behind the first would be
+    // applied in the same drain, and the far computer would see neither.
+    struct HoldingSink final : ICommandSink {
+        std::size_t held = 0;
+        bool submit(const OutputCommand& command) override {
+            (void)command;
+            ++held;
+            return true;
+        }
+        std::size_t pending() const override { return held; }
+    };
+
+    HoldingSink sink;
+    TwoProfiles profiles;
+    Core1Runtime runtime(sink, profiles);
+    std::uint8_t pairs[8] = {0, 0x04, 0, 0x05, 0, 0x06, 0, 0x07};
+    MacroStep text;
+    text.kind = MacroStepType::TEXT;
+    text.pairs = pairs;
+    text.pair_bytes = sizeof(pairs);
+    const MacroStep steps[] = {text};
+    runtime.define_macro(0, MacroDefinition{steps, 1});
+    CHECK(runtime.run_macro(0, 1000));
+
+    for (std::uint32_t now = 1000; now < 1050; ++now) {
+        runtime.tick(now);
+    }
+
+    CHECK_EQ(sink.held, 1u);
+
+    // Taken, and the macro carries on.
+    sink.held = 0;
+    runtime.tick(1050);
+    CHECK_EQ(sink.held, 1u);
 }
 
 TEST_CASE(the_last_protocol_macro_slot_is_reachable) {
@@ -749,6 +801,41 @@ TEST_CASE(a_release_asked_for_by_the_other_core_happens_on_the_next_tick) {
     // computer that was just told to let go of everything.
     runtime.tick(1002);
     CHECK_EQ(sink.keys(CommandKind::KeyPress, 0x09), 0);
+}
+
+TEST_CASE(a_release_all_leaves_the_scheduler_owing_nothing) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    MacroStep down;
+    down.kind = MacroStepType::KEY_DOWN;
+    down.code = 0x09;
+    MacroStep wait;
+    wait.kind = MacroStepType::DELAY;
+    wait.delay_ms = 5000;
+    const MacroStep steps[] = {down, wait};
+    Core1Runtime runtime(sink, profiles);
+    runtime.define_macro(0, MacroDefinition{steps, 2});
+    runtime.run_macro(0, 1000);
+    runtime.tick(1000);
+    CHECK_EQ(sink.keys(CommandKind::KeyPress, 0x09), 1);
+
+    sink.commands.clear();
+    runtime.request_release_all();
+    runtime.tick(1001);
+
+    // ReleaseAll already let go of everything on both computers. A release the
+    // scheduler still owed would be handed out afterwards - one event to a
+    // pass, over the following milliseconds, after the step pool it came from
+    // may have been rewritten - and would say a key came up that nothing is
+    // holding.
+    CHECK_EQ(sink.commands.size(), 1u);
+    CHECK_EQ(sink.count_of(CommandKind::ReleaseAll), 1);
+
+    for (std::uint32_t now = 1002; now < 1030; ++now) {
+        runtime.tick(now);
+    }
+    CHECK_EQ(sink.commands.size(), 1u);
+    CHECK_FALSE(runtime.macro_active());
 }
 
 TEST_CASE(a_release_is_asked_for_once_and_not_repeated_every_tick) {
