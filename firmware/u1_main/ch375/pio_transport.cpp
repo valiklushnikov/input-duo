@@ -160,12 +160,38 @@ bool PioCh375Transport::set_baud(unsigned baud) {
     baud_ = baud;
     const float divider =
         static_cast<float>(clock_get_hz(clk_sys)) / static_cast<float>(baud * kCyclesPerBit);
+
+    // Both state machines are stopped and put back to their first instruction,
+    // not merely handed a new divider.
+    //
+    // A running state machine holds a program counter part way through a
+    // frame, a shift counter part way through a byte and a clock divider part
+    // way through a bit. Moving the divider underneath all of that leaves the
+    // receiver counting the new rate's bits from the old rate's phase - it
+    // never recovers, because nothing in the program resynchronises except
+    // the start bit it is no longer looking for. The channel goes deaf, and
+    // stays deaf through anything done to the chip at the other end, which is
+    // the one symptom that says the fault is on this side of the wire.
+    pio_sm_set_enabled(pio_, tx_sm_, false);
+    pio_sm_set_enabled(pio_, rx_sm_, false);
+
     pio_sm_set_clkdiv(pio_, tx_sm_, divider);
     pio_sm_set_clkdiv(pio_, rx_sm_, divider);
 
-    // Whatever the receiver was part-way through belongs to the old rate and
-    // is nonsense at the new one.
+    // Whatever either was part way through belongs to the old rate and is
+    // nonsense at the new one.
+    pio_sm_clear_fifos(pio_, tx_sm_);
     pio_sm_clear_fifos(pio_, rx_sm_);
+    pio_sm_restart(pio_, tx_sm_);
+    pio_sm_restart(pio_, rx_sm_);
+    pio_sm_clkdiv_restart(pio_, tx_sm_);
+    pio_sm_clkdiv_restart(pio_, rx_sm_);
+    const LoadedPrograms& loaded = g_programs[block_index(pio_)];
+    pio_sm_exec(pio_, tx_sm_, pio_encode_jmp(loaded.tx_offset));
+    pio_sm_exec(pio_, rx_sm_, pio_encode_jmp(loaded.rx_offset));
+
+    pio_sm_set_enabled(pio_, tx_sm_, true);
+    pio_sm_set_enabled(pio_, rx_sm_, true);
 
     // DS1 5.2: about a millisecond, during which the chip answers at neither
     // rate. Reading before that is reading its silence as a refusal.
