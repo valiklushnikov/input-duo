@@ -15,22 +15,6 @@ namespace {
 
 spi_inst_t* const kSpi = spi1;
 
-bool same_keyboard(const hid::KeyboardSnapshot& left, const hid::KeyboardSnapshot& right) {
-    if (left.modifiers != right.modifiers || left.key_count != right.key_count) {
-        return false;
-    }
-    for (std::uint8_t index = 0; index < left.key_count; ++index) {
-        if (left.keys[index] != right.keys[index]) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool moved(const hid::MouseSnapshot& mouse) {
-    return mouse.delta_x != 0 || mouse.delta_y != 0 || mouse.wheel != 0 || mouse.pan != 0;
-}
-
 }  // namespace
 
 #if DUO_SPI_DEBUG
@@ -229,46 +213,6 @@ bool SpiMaster::send_release_all(std::uint32_t now_ms) {
     last_buttons_ = 0;
     return send(protocol::SpiMessageType::CONTROL_RELEASE_ALL,
                 protocol::ByteView{nullptr, 0}, now_ms);
-}
-
-bool SpiMaster::poll(std::uint32_t now_ms, const hid::TargetSnapshot& pc2) {
-    std::uint8_t payload[link::kKeyboardStateSize > link::kMouseDeltaSize
-                             ? link::kKeyboardStateSize
-                             : link::kMouseDeltaSize] = {};
-    std::size_t written = 0;
-
-    if (!keyboard_valid_ || !same_keyboard(pc2.keyboard, last_keyboard_)) {
-        if (link::encode_keyboard_state(pc2.keyboard,
-                                        protocol::MutableByteView{payload, sizeof(payload)},
-                                        written) &&
-            send(protocol::SpiMessageType::KBD_STATE,
-                 protocol::ByteView{payload, written}, now_ms)) {
-            last_keyboard_ = pc2.keyboard;
-            keyboard_valid_ = true;
-            return true;
-        }
-    }
-
-    if (moved(pc2.mouse) || pc2.mouse.buttons != last_buttons_) {
-        if (link::encode_mouse_delta(pc2.mouse,
-                                     protocol::MutableByteView{payload, sizeof(payload)},
-                                     written) &&
-            send(protocol::SpiMessageType::MOUSE_DELTA,
-                 protocol::ByteView{payload, written}, now_ms)) {
-            last_buttons_ = pc2.mouse.buttons;
-            return true;
-        }
-    }
-
-    // Silence and a severed cable look identical from the far end, so a quiet
-    // link still has to say something.
-    const bool heartbeat_due =
-        !ever_sent_ || (now_ms - last_sent_ms_) >= kHeartbeatIntervalMs;
-    if (heartbeat_due) {
-        return send(protocol::SpiMessageType::HEARTBEAT, protocol::ByteView{nullptr, 0},
-                    now_ms);
-    }
-    return false;
 }
 
 }  // namespace duo_input::u1

@@ -102,7 +102,29 @@ public:
     ///
     /// Returns whether a frame went out. Called every loop; it sends only when
     /// the state changed or the heartbeat is due, so an idle device is quiet.
-    bool poll(std::uint32_t now_ms, const hid::TargetSnapshot& pc2);
+    ///
+    /// ``source`` is anything that answers ``snapshot`` and ``take_snapshot``
+    /// - the command runtime on hardware, a recorder in tests - and this asks
+    /// it for the movement only on the branch that actually hands a mouse
+    /// frame to the link. Consuming it up front, which is what the caller used
+    /// to do, threw the pass's motion away whenever the keyboard changed in
+    /// the same pass: poll returns after sending KBD_STATE, so every keystroke
+    /// on PC2 cost the pointer a movement, as did every failed send. Movement
+    /// is a delta and cannot be asked for twice; an endpoint that was busy has
+    /// cost the pointer a millisecond, not a movement. UsbService::publish
+    /// already does exactly this for PC1.
+    template <typename StateSource>
+    bool poll(std::uint32_t now_ms, StateSource& source) {
+        bool consumed_mouse = false;
+        const bool sent =
+            poll_snapshot(now_ms, source.snapshot(hid::Target::Pc2), consumed_mouse);
+        if (consumed_mouse) {
+            // Only here, and only because a mouse frame actually went out.
+            // Movement is a delta and cannot be asked for twice.
+            source.take_snapshot(hid::Target::Pc2);
+        }
+        return sent;
+    }
 
     /// Tell U2 to let go of everything, now.
     ///
@@ -123,6 +145,21 @@ public:
     const std::uint8_t* last_reply() const { return rx_; }
 
 private:
+    /// poll's decision, with the state it was given.
+    ///
+    /// Out of line so that main's frame carries this function's payload buffer
+    /// no more than it did when poll was out of line entirely - Core 0's whole
+    /// stack is two kilobytes and the CDC path sits on top of main's frame.
+    /// In its own translation unit rather than in spi_master.cpp, because
+    /// nothing it does needs the SPI block and the branch it takes is the
+    /// whole of what this file was getting wrong.
+    ///
+    /// ``consumed_mouse`` says whether PC2 was actually told about the
+    /// movement, which is the only condition under which the caller may
+    /// consume it.
+    bool poll_snapshot(std::uint32_t now_ms, const hid::TargetSnapshot& pc2,
+                       bool& consumed_mouse);
+
     bool send(protocol::SpiMessageType type, protocol::ByteView payload,
               std::uint32_t now_ms);
     void consume_reply(const std::uint8_t* reply);

@@ -888,7 +888,7 @@ int main() {
         // PC2's half of the state goes over the link. It sends on change and
         // otherwise heartbeats, so a quiet device does not saturate the bus
         // and does not look severed either.
-        link.poll(now_ms, g_outputs.take_snapshot(duo_input::hid::Target::Pc2));
+        link.poll(now_ms, g_outputs);
 
         // Published every pass, so the host can see the link rather than infer
         // it from an absence of errors.

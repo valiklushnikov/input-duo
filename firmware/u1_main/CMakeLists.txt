@@ -4,6 +4,7 @@ add_executable(duo_u1_main
     usb_descriptors.cpp
     usb_service.cpp
     spi_master.cpp
+    spi_master_poll.cpp
     output_runtime.cpp
     config_service.cpp
     config_profiles.cpp
