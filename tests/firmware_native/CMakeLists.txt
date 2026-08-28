@@ -145,6 +145,7 @@ add_executable(duo_config_service_test
     test_main.cpp
     test_config_service.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/config_service.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/capture.cpp
 )
 
 target_link_libraries(duo_config_service_test PRIVATE duo_common)
@@ -160,6 +161,30 @@ if(MSVC)
 endif()
 
 add_test(NAME config_service COMMAND duo_config_service_test)
+
+add_executable(duo_core_bridge_test
+    test_main.cpp
+    test_core_bridge.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/core_bridge.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/config_service.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/core1_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/macros/scheduler.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/capture.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/engine.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/routes.cpp
+)
+
+target_link_libraries(duo_core_bridge_test PRIVATE duo_common)
+target_include_directories(duo_core_bridge_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+if(MSVC)
+    target_compile_options(duo_core_bridge_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME core_bridge COMMAND duo_core_bridge_test)
 
 add_executable(duo_buttons_test
     test_main.cpp

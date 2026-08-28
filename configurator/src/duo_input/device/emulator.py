@@ -136,6 +136,9 @@ class U1Emulator(AbstractByteTransport):
         self.link_echoed_frames = 0
         self.endpoint_drops = 0
         self.endpoint_release_ms = 0
+        # Commands the real U1's Core 1 could not hand to Core 0. Nonzero means
+        # what a computer is holding no longer matches what the operator did.
+        self.dropped_commands = 0
         self._timeout_once = False
         self._disconnect_once = False
         self._bad_crc_response_once = False
@@ -326,6 +329,11 @@ class U1Emulator(AbstractByteTransport):
 
     def _dispatch(self, frame: CdcFrame, major: int) -> tuple[CdcMessageType, bytes]:
         if frame.type is CdcMessageType.HELLO:
+            # A handshake starts a new owner of the session, and a question the
+            # previous owner left running would go on swallowing this one's
+            # keys. The firmware ends it here; so does this.
+            self._capture_active = False
+            self._capture_event = None
             if not self._payload_shape_is_valid(frame):
                 return CdcMessageType.DEVICE_INFO, self._device_info_payload(
                     ErrorCode.INVALID_REQUEST, 0
@@ -571,6 +579,7 @@ class U1Emulator(AbstractByteTransport):
                 self.link_echoed_frames,
             )
             + struct.pack("<BH", self.endpoint_drops, self.endpoint_release_ms)
+            + struct.pack("<I", self.dropped_commands)
         )
 
     def _handle_factory_reset_arm(self, payload: bytes) -> bytes:

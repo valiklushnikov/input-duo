@@ -498,6 +498,19 @@ def test_get_diagnostics_reports_device_counters(qtbot, service, emulator, confi
     assert diagnostics.aborted_staging == 0
 
 
+def test_diagnostics_report_input_the_device_could_not_deliver(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    emulator.dropped_commands = 4
+    _connect(qtbot, service, emulator)
+
+    result = _succeed(qtbot, service, service.get_diagnostics)
+
+    # Four presses, releases or macro steps the device produced and could not
+    # deliver. Nothing else the operator can see says so: the keyboard simply
+    # missed some letters, which reads as a hardware fault and is not one.
+    assert result.value.dropped_commands == 4
+
+
 def test_diagnostics_report_the_device_timeout_counter(qtbot, emulator, config_a):
     service = DeviceService(timeout_ms=40)
     emulator.install_active(config_a)

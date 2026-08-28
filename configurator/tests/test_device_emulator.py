@@ -364,6 +364,33 @@ def test_capture_event_uses_next_sequence_queues_one_and_auto_ends():
     assert emulator.feed(b"") == b""
 
 
+def test_a_handshake_ends_the_capture_the_previous_session_left_running():
+    emulator = U1Emulator()
+    _hello(emulator, int(Capability.CAPTURE), 0xFFFF)
+    assert _error(_request(emulator, CdcMessageType.CAPTURE_BEGIN, sequence=0)) is ErrorCode.OK
+    assert emulator.queue_capture_event(b"first")
+
+    # A new owner of the session. The firmware ends the question the last one
+    # left open, because a keyboard that goes on swallowing its own input has
+    # no way out except the ten-second timeout.
+    _hello(emulator, int(Capability.CAPTURE), 1)
+
+    assert not emulator.capture_active
+    assert emulator.feed(b"") == b""
+
+
+def test_a_factory_reset_ends_a_running_capture():
+    emulator = U1Emulator()
+    emulator.physical_confirmation = True
+    _hello(emulator)
+    assert _error(_request(emulator, CdcMessageType.CAPTURE_BEGIN)) is ErrorCode.OK
+    assert _error(_request(emulator, CdcMessageType.FACTORY_RESET_ARM)) is ErrorCode.OK
+
+    assert _error(_request(emulator, CdcMessageType.FACTORY_RESET_COMMIT)) is ErrorCode.OK
+
+    assert not emulator.capture_active
+
+
 def test_stop_clears_capture_and_staging_and_increments_once(config_b: bytes):
     emulator = U1Emulator()
     _hello(emulator)
@@ -440,6 +467,9 @@ def test_diagnostics_count_crc_disconnect_timeout_bad_sequence_and_aborts(config
         + struct.pack("<IIIII", 1, 1, 1, 1, 1)
         + struct.pack("<BBIII", 1, 1, 0, 0, 0)
         + struct.pack("<BH", 0, 0)
+        # Commands U1's input core could not hand to its output core. Appended
+        # last, after everything an older host already knew how to read.
+        + struct.pack("<I", 0)
     )
 
 

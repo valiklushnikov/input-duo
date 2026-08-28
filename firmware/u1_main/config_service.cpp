@@ -176,9 +176,10 @@ void ConfigService::on_disconnect() {
 
 void ConfigService::handle_frame(const std::uint8_t* wire, std::size_t size) {
     protocol::DecodeResult result;
-    std::uint8_t scratch[ProtocolLimits::CDC_MAX_PAYLOAD];
+    // decoded_, not a local: see the comment on it. frame.payload points into
+    // this buffer for the whole of dispatch below.
     if (!protocol::decode_cdc_frame(protocol::ByteView{wire, size},
-                                    protocol::MutableByteView{scratch, sizeof(scratch)},
+                                    protocol::MutableByteView{decoded_, sizeof(decoded_)},
                                     result)) {
         // Damaged on the wire. There is nothing to answer, and answering the
         // sequence we guessed at would be worse than silence.
@@ -258,11 +259,10 @@ void ConfigService::reply(CdcMessageType type, std::uint16_t sequence,
     frame.sequence = sequence;
     frame.payload = protocol::ByteView{payload, size};
 
-    std::uint8_t scratch[ProtocolLimits::CDC_MAX_PAYLOAD + 32];
     std::size_t written = 0;
     if (!protocol::encode_cdc_frame(
             frame, protocol::MutableByteView{last_response_, sizeof(last_response_)},
-            protocol::MutableByteView{scratch, sizeof(scratch)}, written)) {
+            protocol::MutableByteView{encode_scratch_, sizeof(encode_scratch_)}, written)) {
         last_response_size_ = 0;
         return;
     }
@@ -339,12 +339,19 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
     out[35] = link_state_.endpoint_drops;
     out[36] = static_cast<std::uint8_t>(link_state_.endpoint_release_ms & 0xFF);
     out[37] = static_cast<std::uint8_t>(link_state_.endpoint_release_ms >> 8);
-    return 38;
+
+    // Appended last, for the same reason the link state was appended before
+    // it: a host that stops reading at byte 38 still reads everything it knew
+    // about. This is the only outward sign that Core 1 had something to say
+    // and the queue would not take it, which means a key press, a release or
+    // a macro step never reached the computer it was meant for.
+    put_u32(out + 38, dropped_commands_);
+    return 42;
 #endif
 }
 
 void ConfigService::reply_error(const CdcFrame& frame, CdcError error) {
-    std::uint8_t payload[ProtocolLimits::CDC_MAX_PAYLOAD];
+    std::uint8_t* const payload = error_payload_;
     std::size_t size = 1;
     payload[0] = static_cast<std::uint8_t>(error);
     CdcMessageType type = frame.type;
@@ -393,7 +400,7 @@ void ConfigService::reply_error(const CdcFrame& frame, CdcError error) {
 // -------------------------------------------------------------- dispatch
 
 void ConfigService::dispatch(const CdcFrame& frame) {
-    std::uint8_t payload[ProtocolLimits::CDC_MAX_PAYLOAD];
+    std::uint8_t* const payload = dispatch_payload_;
 
     if (frame.type == CdcMessageType::HELLO) {
         if (!payload_shape_is_valid(frame)) {
@@ -704,6 +711,15 @@ void ConfigService::dispatch(const CdcFrame& frame) {
             if (!factory_armed_) {
                 reply_error(frame, CdcError::BadState);
                 return;
+            }
+            if (capture_active_ || capture_request_ == CaptureRequest::Begin) {
+                // Everything the capture was for is about to be erased, and
+                // the emulator - which the configurator was written against -
+                // ends the capture here too. Cancelled before the erase rather
+                // than after it, so a reset that fails part way still leaves
+                // the keyboard answering to its operator.
+                capture_active_ = false;
+                capture_request_ = CaptureRequest::Cancel;
             }
             if (!runtime_.clear()) {
                 factory_confirmed_ = false;

@@ -23,11 +23,11 @@ const std::uint8_t* const kXipBase = reinterpret_cast<const std::uint8_t*>(XIP_B
 /// erase running against a chip somebody else was fetching code from.
 volatile bool g_core1_running = false;
 
-bool core1_is_running() { return g_core1_running; }
-
 }  // namespace
 
 void set_core1_running(bool running) { g_core1_running = running; }
+
+bool core1_running() { return g_core1_running; }
 
 bool PicoFlash::erase(std::uint32_t offset, std::size_t size) {
     if (offset % storage::kSectorSize != 0 || size % storage::kSectorSize != 0) {
@@ -39,13 +39,13 @@ bool PicoFlash::erase(std::uint32_t offset, std::size_t size) {
         return false;
     }
 
-    if (core1_is_running()) {
+    if (core1_running()) {
         multicore_lockout_start_blocking();
     }
     const std::uint32_t interrupts = save_and_disable_interrupts();
     flash_range_erase(offset, size);
     restore_interrupts(interrupts);
-    if (core1_is_running()) {
+    if (core1_running()) {
         multicore_lockout_end_blocking();
     }
     return true;
@@ -61,13 +61,13 @@ bool PicoFlash::program(std::uint32_t offset, const std::uint8_t* data, std::siz
         return false;
     }
 
-    if (core1_is_running()) {
+    if (core1_running()) {
         multicore_lockout_start_blocking();
     }
     const std::uint32_t interrupts = save_and_disable_interrupts();
     flash_range_program(offset, data, size);
     restore_interrupts(interrupts);
-    if (core1_is_running()) {
+    if (core1_running()) {
         multicore_lockout_end_blocking();
     }
     return true;

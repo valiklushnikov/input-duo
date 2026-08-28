@@ -28,6 +28,9 @@ using duo_input::u1::CdcSink;
 using duo_input::u1::CaptureRequest;
 using duo_input::u1::ConfigService;
 using duo_input::u1::IRuntimeConfig;
+using duo_input::u1::input::InputEvent;
+using duo_input::u1::input::InputEventKind;
+using duo_input::u1::mapping::CaptureController;
 using duo_input::u1::mapping::CapturedTrigger;
 
 namespace {
@@ -629,7 +632,20 @@ TEST_CASE(diagnostics_carry_every_counter_the_host_expects) {
     const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
 
     CHECK_EQ(error_of(reply), CdcError::Ok);
-    CHECK_EQ(reply.payload.size, 38u);
+    CHECK_EQ(reply.payload.size, 42u);
+}
+
+TEST_CASE(the_diagnostics_carry_what_the_other_core_could_not_hand_over) {
+    Link link;
+    link.hello();
+    link.service.set_dropped_commands(9);
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+
+    // Nine presses, releases or macro steps that never reached a computer.
+    // Without this the only outward sign is a keyboard that missed some
+    // letters, which reads as a hardware fault and is not one.
+    CHECK_EQ(read_u32(reply.payload.data + 38), 9u);
 }
 
 TEST_CASE(diagnostics_say_whether_the_endpoint_is_answering) {
@@ -823,19 +839,52 @@ TEST_CASE(a_mouse_capture_travels_as_the_host_will_accept_it) {
     link.hello();
     link.send(CdcMessageType::CAPTURE_BEGIN);
 
+    // Filled in by the controller that captures it, not written out here.
+    //
+    // The two conventions the host insists on - buttons counted from one, and
+    // no modifiers on a mouse trigger, whatever is actually held - live in
+    // mapping/capture.cpp. A trigger built by hand beside this assertion
+    // agrees with the assertion and with nothing else, and both of those
+    // conventions could be deleted from the firmware without it noticing.
+    CaptureController capture;
+    InputEvent control;
+    control.kind = InputEventKind::KeyDown;
+    control.code = 0xE0;
+    InputEvent letter;
+    letter.kind = InputEventKind::KeyDown;
+    letter.code = 0x04;
+    InputEvent press;
+    press.kind = InputEventKind::MouseButtonDown;
+    press.code = 4;  // the fifth button, counting from zero as the wire does
     CapturedTrigger trigger;
-    trigger.kind = TriggerKind::MOUSE_BUTTON;
-    trigger.code = 5;
-    trigger.modifiers = 0;
+
+    // The second question of a session, after one that was answered with a
+    // modifier held. The controller is the same object and the trigger it
+    // fills in is the same field, so the mouse branch has to write the
+    // modifier byte rather than leave the last answer's in place.
+    capture.begin(1000);
+    capture.handle(control);
+    capture.handle(letter);
+    CHECK(capture.take(trigger));
+    CHECK_EQ(trigger.modifiers, 0x01u);
+
+    capture.begin(2000);
+    capture.handle(press);
+    CHECK(capture.take(trigger));
     link.replies.clear();
     link.service.emit_capture_event(trigger);
 
-    const CdcFrame event = link.decode_last();
     // The host refuses a button outside one to five, refuses one carrying
     // modifiers and refuses a zero code, so a payload it throws away is a
-    // capture the operator has to perform again for nothing.
+    // capture the operator has to perform again for nothing - and the service
+    // refuses to send one at all, which is why an empty reply is the failure.
+    CHECK_EQ(link.replies.count(), 1u);
+    if (link.replies.count() != 1) {
+        return;
+    }
+    const CdcFrame event = link.decode_last();
     CHECK_EQ(event.payload.data[0], static_cast<std::uint8_t>(TriggerKind::MOUSE_BUTTON));
-    CHECK(event.payload.data[1] >= 1u && event.payload.data[1] <= 5u);
+    CHECK_EQ(event.payload.data[1], 5u);
     CHECK_EQ(event.payload.data[2], 0u);
 }
 
@@ -925,6 +974,24 @@ TEST_CASE(a_new_hello_session_cancels_a_capture_left_by_the_previous_session) {
     link.send(CdcMessageType::HELLO, request, sizeof(request));
 
     CHECK(link.service.take_capture_request() == CaptureRequest::Cancel);
+}
+
+TEST_CASE(a_factory_reset_stops_a_capture_too) {
+    Link link;
+    link.hello();
+    link.send(CdcMessageType::CAPTURE_BEGIN);
+    link.service.take_capture_request();
+    link.service.confirm_factory_reset();
+    link.send(CdcMessageType::FACTORY_RESET_ARM);
+
+    link.send(CdcMessageType::FACTORY_RESET_COMMIT);
+
+    // Everything the question was about has just been erased. The emulator the
+    // configurator was written against ends the capture here, and a keyboard
+    // left swallowing its own input after a reset has no way back except the
+    // ten-second timeout.
+    CHECK(link.service.take_capture_request() == CaptureRequest::Cancel);
+    CHECK_EQ(error_of(link.send(CdcMessageType::CAPTURE_END)), CdcError::BadState);
 }
 
 TEST_CASE(releasing_everything_stops_a_capture_too) {

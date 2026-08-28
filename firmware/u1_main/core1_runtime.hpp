@@ -69,7 +69,25 @@ public:
     /// Post a capture command from Core 0. Core 1 applies it in tick().
     void request_capture_begin();
     void request_capture_cancel();
+
+    /// Whether a capture is running, as Core 0 has to report it.
+    ///
+    /// Three states count as running, and the two extra ones are what stop
+    /// Core 0 announcing the end of a capture it is about to be given the
+    /// answer to. A begin Core 0 posted and this core has not reached yet is a
+    /// capture that is going to run; a trigger sitting in the mailbox is a
+    /// capture whose answer has not been sent, and the host is still waiting
+    /// on it. Both would otherwise read as "no capture" for a pass, and
+    /// ConfigService discards an answer arriving with no capture to answer.
     bool capture_active() const {
+        if (capture_request_mailbox_.load(std::memory_order_acquire) ==
+            kCaptureRequestBegin) {
+            return true;
+        }
+        if ((capture_event_mailbox_.load(std::memory_order_acquire) &
+             kCaptureMailboxOccupied) != 0) {
+            return true;
+        }
         return capture_active_published_.load(std::memory_order_acquire);
     }
     /// Take the captured trigger to send as CAPTURE_EVENT, if one is waiting.
@@ -125,6 +143,12 @@ public:
     mapping::BindingEngine& engine() { return engine_; }
 
 private:
+    /// 1 begin, 2 cancel, 0 nothing asked for.
+    static constexpr std::uint8_t kCaptureRequestBegin = 1;
+    static constexpr std::uint8_t kCaptureRequestCancel = 2;
+    /// Bit 31 of the packed trigger says the mailbox holds one.
+    static constexpr std::uint32_t kCaptureMailboxOccupied = 0x80000000u;
+
     void submit(const runtime::OutputCommand& command);
     void apply(const mapping::Outcome& outcome, std::uint32_t now_ms);
     void send_input(const input::InputEvent& event);

@@ -33,6 +33,7 @@ _CONFIG_INFO = struct.Struct("<BII32s")
 _DIAGNOSTICS = struct.Struct("<BIIIII")
 _LINK_STATE = struct.Struct("<BBIII")
 _ENDPOINT_REPORT = struct.Struct("<BH")
+_DROPPED_COMMANDS = struct.Struct("<I")
 _CHUNK_ACK = struct.Struct("<BI")
 _CAPTURE_EVENT = struct.Struct("<BBB")
 
@@ -134,6 +135,12 @@ class DeviceDiagnostics:
     # the link is back.
     endpoint_drops: int | None = None
     endpoint_release_ms: int | None = None
+
+    # Commands U1's input core produced that its output core would not take.
+    # Nonzero means a press, a release or a macro step never reached the
+    # computer it was for, so what is held there no longer matches what the
+    # operator did. There is no other outward sign of it.
+    dropped_commands: int | None = None
 
 
 @dataclass(frozen=True)
@@ -268,10 +275,15 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
         raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
     answering, mounted, frames_sent, link_crc, echoed = _LINK_STATE.unpack(link)
 
-    endpoint = rest[_LINK_STATE.size :]
+    endpoint = rest[_LINK_STATE.size : _LINK_STATE.size + _ENDPOINT_REPORT.size]
     if endpoint and len(endpoint) != _ENDPOINT_REPORT.size:
         raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
     drops, release_ms = _ENDPOINT_REPORT.unpack(endpoint) if endpoint else (None, None)
+
+    dropped = rest[_LINK_STATE.size + _ENDPOINT_REPORT.size :]
+    if dropped and len(dropped) != _DROPPED_COMMANDS.size:
+        raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
+    (dropped_commands,) = _DROPPED_COMMANDS.unpack(dropped) if dropped else (None,)
 
     return DeviceDiagnostics(
         bad_crc,
@@ -286,6 +298,7 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
         link_echoed_frames=echoed,
         endpoint_drops=drops,
         endpoint_release_ms=release_ms,
+        dropped_commands=dropped_commands,
     )
 
 

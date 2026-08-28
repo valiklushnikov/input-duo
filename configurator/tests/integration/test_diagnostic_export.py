@@ -286,6 +286,25 @@ def test_the_report_says_whether_the_second_board_is_answering(qtbot, emulator):
     assert snapshot.spi_crc_errors == 4321
 
 
+def test_input_the_device_could_not_deliver_reaches_the_report(qtbot, emulator):
+    """The one counter with no other outward sign at all.
+
+    A refused command is a press, a release or a macro step that never reached
+    the computer it was meant for. The operator sees a keyboard that missed a
+    letter, which reads as a hardware fault; this is the reading that says
+    otherwise, and the report is what they send when they ask."""
+    emulator.dropped_commands = 6
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    snapshot = DiagnosticSnapshot.from_service(service)
+
+    assert snapshot.dropped_commands == 6
+
+
 def test_a_healthy_link_reads_as_healthy(qtbot, emulator):
     service = DeviceService(timeout_ms=5000)
     with qtbot.waitSignal(service.operation_succeeded, timeout=5000):

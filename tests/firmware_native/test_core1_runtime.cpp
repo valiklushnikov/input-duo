@@ -272,7 +272,27 @@ TEST_CASE(capture_ends_at_the_first_press) {
 
     runtime.handle_input(key(InputEventKind::KeyDown, 0x1A), 1000);
 
+    // The answer is still in the mailbox here, and until Core 0 has taken it
+    // the capture is not over as far as the host is concerned - see the test
+    // below. Once it is taken, nothing is running.
+    CapturedTrigger trigger;
+    CHECK(runtime.take_capture_event(trigger));
     CHECK(!runtime.capture_active());
+}
+
+TEST_CASE(a_capture_that_has_been_answered_is_running_until_the_answer_is_taken) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    Core1Runtime runtime(sink, profiles);
+    runtime.begin_capture(1000);
+
+    runtime.handle_input(key(InputEventKind::KeyDown, 0x1A), 1000);
+
+    // Core 0 reports this to the host and gates the answer on it. If the
+    // moment the trigger lands reads as "no capture", the pass that takes the
+    // trigger has already been told there is nothing to answer, and it throws
+    // the operator's keypress away.
+    CHECK(runtime.capture_active());
 }
 
 TEST_CASE(a_second_key_after_capture_ends_goes_through_normally) {
@@ -411,15 +431,36 @@ TEST_CASE(a_cancelled_capture_stops_swallowing) {
     CHECK_EQ(sink.keys(CommandKind::KeyPress, 0x1A), 1);
 }
 
-TEST_CASE(a_capture_request_crosses_to_core_one_before_becoming_active) {
+TEST_CASE(a_capture_request_crosses_to_core_one_before_it_swallows_anything) {
     RecordingSink sink;
     TwoProfiles profiles;
     Core1Runtime runtime(sink, profiles);
 
     runtime.request_capture_begin();
 
-    CHECK(!runtime.capture_active());
+    // Posted, not performed. Core 0 must not start a capture inside a USB
+    // callback while this core is halfway through an event, so the key that
+    // arrives before the tick still belongs to the computer.
+    runtime.handle_input(key(InputEventKind::KeyDown, 0x1A), 1000);
+    CHECK_EQ(sink.keys(CommandKind::KeyPress, 0x1A), 1);
+
     runtime.tick(1000);
+
+    runtime.handle_input(key(InputEventKind::KeyDown, 0x04), 1010);
+    CHECK_EQ(sink.keys(CommandKind::KeyPress, 0x04), 0);
+}
+
+TEST_CASE(a_capture_asked_for_and_not_yet_started_already_counts_as_running) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    Core1Runtime runtime(sink, profiles);
+
+    runtime.request_capture_begin();
+
+    // Between the request and the tick there would otherwise be a pass in
+    // which nothing anywhere says a capture is coming. Core 0 publishes what
+    // this answers, and publishing "no capture" there is what makes the
+    // operator's answer arrive with nothing to answer.
     CHECK(runtime.capture_active());
 }
 

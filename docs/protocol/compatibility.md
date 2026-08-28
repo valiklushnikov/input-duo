@@ -63,7 +63,7 @@ Successful or shape-preserving direct payloads are:
 | `GET_ACTIVE_CONFIG_INFO`, `READ_CONFIG_BEGIN` | `generation:u32, length:u32, sha256:bytes[32]` |
 | `READ_CONFIG_CHUNK` | `offset:u32, bytes` |
 | `WRITE_CHUNK` | `accepted_next_offset:u32` |
-| `GET_DIAGNOSTICS` | five `u32`: bad CRC, disconnect, timeout, bad sequence, aborted staging |
+| `GET_DIAGNOSTICS` | five `u32`: bad CRC, disconnect, timeout, bad sequence, aborted staging; then the link state (`answering:u8, endpoint_usb:u8, frames_sent:u32, crc_errors:u32, echoed_frames:u32`), the endpoint report (`drops:u8, release_ms:u16`), and `dropped_commands:u32` |
 | `PING` | the request payload unchanged (at most 1023 bytes so the error prefix fits) |
 
 All other successful direct replies contain only `error=OK`. Malformed fixed-size requests
@@ -82,4 +82,13 @@ Until successful commit, the active slot never changes. Abort, disconnect, timeo
 bad chunk, bad hash, invalid configuration, and power loss therefore leave the previous active
 configuration intact. Factory reset clears both slots only after a successful arm and commit
 while physical confirmation remains asserted. `STOP_AND_RELEASE_ALL` remains a safety command:
-it increments its counter and clears capture and staging state.
+it increments its counter and clears capture and staging state. So do `HELLO` and
+`FACTORY_RESET_COMMIT`: a handshake starts a new owner of the session and a reset erases
+everything the question was about, and in both cases a capture left running would go on
+swallowing the operator's input until its ten-second timeout.
+
+The three groups after the five counters in `GET_DIAGNOSTICS` were appended in that order and
+each is optional: a reply that stops after any group is still a valid reply, so a host reads
+what it recognises and leaves the rest. `dropped_commands` counts input the device produced
+and could not deliver - a nonzero value means what a computer is holding no longer matches
+what the operator did.

@@ -69,6 +69,7 @@ class DiagnosticsPage(QWidget):
                 ("spi_timeouts", QT_TRANSLATE_NOOP("DiagnosticsPage", "SPI timeouts")),
                 ("endpoint_drops", QT_TRANSLATE_NOOP("DiagnosticsPage", "Link drops seen by U2")),
                 ("endpoint_release_ms", QT_TRANSLATE_NOOP("DiagnosticsPage", "U2 released after (ms)")),
+                ("dropped_commands", QT_TRANSLATE_NOOP("DiagnosticsPage", "Input commands never delivered")),
             ),
         ),
         (

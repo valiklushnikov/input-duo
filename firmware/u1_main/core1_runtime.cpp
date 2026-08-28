@@ -43,9 +43,6 @@ Route route_of(hid::Target target) {
 
 constexpr std::uint16_t kProfileMailboxOccupied = 0x100u;
 constexpr std::uint16_t kProfileMailboxFromHost = 0x200u;
-constexpr std::uint32_t kCaptureMailboxOccupied = 0x80000000u;
-constexpr std::uint8_t kCaptureRequestBegin = 1;
-constexpr std::uint8_t kCaptureRequestCancel = 2;
 
 }  // namespace
 
@@ -245,8 +242,20 @@ void Core1Runtime::drain_macros(std::uint32_t now_ms) {
 }
 
 void Core1Runtime::tick(std::uint32_t now_ms) {
+    // Read, act, publish, and only then clear - in that order.
+    //
+    // Core 0 reports a posted-but-not-yet-started capture as running, because
+    // between posting it and this core reaching it there is otherwise a pass
+    // in which nothing anywhere says a capture is coming. Clearing the mailbox
+    // before publishing would put that same gap back, a few instructions wide:
+    // the request gone, the state not yet stored, and Core 0 free to read
+    // both and announce that no capture is running. It then refuses the
+    // trigger the operator is about to press.
+    //
+    // Compare-exchange rather than a plain store, so a request Core 0 posted
+    // while this was running is not silently dropped on the floor.
     const std::uint8_t capture_request =
-        capture_request_mailbox_.exchange(0, std::memory_order_acq_rel);
+        capture_request_mailbox_.load(std::memory_order_acquire);
     if (capture_request == kCaptureRequestBegin) {
         capture_.begin(now_ms);
     } else if (capture_request == kCaptureRequestCancel) {
@@ -255,6 +264,13 @@ void Core1Runtime::tick(std::uint32_t now_ms) {
 
     capture_.tick(now_ms);
     publish_capture_state();
+
+    if (capture_request != 0) {
+        std::uint8_t consumed = capture_request;
+        capture_request_mailbox_.compare_exchange_strong(consumed, 0,
+                                                         std::memory_order_acq_rel,
+                                                         std::memory_order_relaxed);
+    }
 
     // First, and before the swap below: whatever else was asked for, the point
     // of this one is that it happens.

@@ -8,6 +8,7 @@ add_executable(duo_u1_main
     config_service.cpp
     config_profiles.cpp
     core1_runtime.cpp
+    core_bridge.cpp
     input/pipeline.cpp
     input/keyboard_normalizer.cpp
     input/mouse_normalizer.cpp

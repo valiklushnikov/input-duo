@@ -142,6 +142,16 @@ public:
     /// Publish a profile selected by a binding or macro on Core 1.
     void publish_local_profile(std::uint8_t profile) { active_profile_ = profile; }
 
+    /// How many commands Core 1's queue refused, as Core 1 last reported it.
+    ///
+    /// Published by the bridge each pass, for the same reason the link state
+    /// is: the counter lives on the other core and this class must not reach
+    /// across for it. Nonzero means a keypress, a release or a macro step
+    /// never reached the far computer - what is held there no longer matches
+    /// what the operator did - so it is reported rather than merely counted.
+    void set_dropped_commands(std::uint32_t dropped) { dropped_commands_ = dropped; }
+    std::uint32_t dropped_commands() const { return dropped_commands_; }
+
     /// Whether a capture is running, as Core 1 last reported it.
     ///
     /// Published by the main loop rather than owned here, for the same reason
@@ -215,6 +225,30 @@ private:
     CdcSink& sink_;
     IRuntimeConfig& runtime_;
 
+    // The working buffers, kept here rather than on the stack.
+    //
+    // Core 0's stack region is two kilobytes, and the region immediately below
+    // it is Core 1's live stack rather than a guard page. A rejected or
+    // malformed frame walks handle_frame -> dispatch -> reply_error -> reply,
+    // and each of those used to declare a payload-sized array of its own: the
+    // four together measured 4824 bytes of live frame on the release image and
+    // 5400 on the probe image, both of which reach past the bottom of Core 0's
+    // region into Core 1's. reply_error is on the path of every malformed or
+    // refused CDC frame, so that was not an exotic path.
+    //
+    // There is exactly one ConfigService, exactly one core calling into it,
+    // and none of these calls re-enter, so a member is as good as a local and
+    // costs the stack nothing.
+    //
+    // Four separate buffers rather than one shared scratch, deliberately:
+    // handle_frame's decoded payload is what frame.payload points at for the
+    // whole of dispatch, and reply's encoder reads the payload its caller has
+    // just finished filling in.
+    std::uint8_t decoded_[protocol::ProtocolLimits::CDC_MAX_PAYLOAD] = {};
+    std::uint8_t dispatch_payload_[protocol::ProtocolLimits::CDC_MAX_PAYLOAD] = {};
+    std::uint8_t error_payload_[protocol::ProtocolLimits::CDC_MAX_PAYLOAD] = {};
+    std::uint8_t encode_scratch_[protocol::ProtocolLimits::CDC_MAX_PAYLOAD + 32] = {};
+
     // Assembly of an incoming frame.
     std::uint8_t pending_[kMaxWireFrame] = {};
     std::size_t pending_size_ = 0;
@@ -235,6 +269,7 @@ private:
     std::uint32_t expected_offset_ = 0;
 
     std::uint8_t active_profile_ = 1;
+    std::uint32_t dropped_commands_ = 0;
     bool capture_active_ = false;
     CaptureRequest capture_request_ = CaptureRequest::None;
     std::uint8_t requested_profile_ = 0;

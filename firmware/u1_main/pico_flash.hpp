@@ -27,6 +27,11 @@ namespace duo_input::u1 {
 /// arming - not Core 0 on its behalf.
 void set_core1_running(bool running);
 
+/// Whether it is. Anything that would stop the other core has to ask first:
+/// a core that has not armed itself never answers the request to stop, and
+/// the caller waits forever.
+bool core1_running();
+
 class PicoFlash : public storage::FlashBackend {
 public:
     bool erase(std::uint32_t offset, std::size_t size) override;

@@ -28,6 +28,7 @@
 #include "config_profiles.hpp"
 #include "config_service.hpp"
 #include "core1_runtime.hpp"
+#include "core_bridge.hpp"
 #include "diagnostics/ch375_baud_scan.hpp"
 #include "diagnostics_service.hpp"
 #include "hid/state_manager.hpp"
@@ -108,6 +109,36 @@ struct DeviceTally {
 DeviceTally g_keyboard_tally;
 DeviceTally g_mouse_tally;
 
+/// What the start-up probe saw, at namespace scope rather than in main's frame.
+///
+/// Core 0's whole stack is two kilobytes, and the deepest chain on it runs
+/// from main through the CDC service into the SHA-256 of a staged
+/// configuration. These are one-shot observations taken once before the loop
+/// starts and read once inside it; on the stack they were most of an
+/// eight-hundred-byte frame that the whole of that chain sits on top of.
+struct ProbeObservations {
+    duo_input::u1::PinActivity keyboard_pad;
+    duo_input::u1::PinActivity mouse_pad;
+    duo_input::u1::PinActivity keyboard_int;
+    duo_input::u1::PinActivity mouse_int;
+    duo_input::u1::PinActivity tx_while_high;
+    duo_input::u1::PinActivity rx_while_high;
+    duo_input::u1::PinActivity tx_while_low;
+    duo_input::u1::PinActivity rx_while_low;
+    duo_input::u1::PinActivity mouse_tx_while_high;
+    duo_input::u1::PinActivity mouse_rx_while_high;
+    duo_input::u1::PinActivity mouse_tx_while_low;
+    std::uint16_t keyboard_bad_at_boot = 0;
+    std::uint16_t mouse_bad_at_boot = 0;
+    std::uint16_t keyboard_quiet_at_boot = 0;
+    std::uint16_t mouse_quiet_at_boot = 0;
+    duo_input::u1::Ch375ProbeResult keyboard_probe;
+    duo_input::u1::Ch375ProbeResult mouse_probe;
+    duo_input::diagnostics::Ch375SingleProbeObservation single_probe;
+};
+
+ProbeObservations g_probe;
+
 /// How long a pass round Core 1 takes.
 ///
 /// The state machine polls an endpoint every 8 ms and gives a configured
@@ -123,8 +154,14 @@ std::uint32_t g_worst_pass_us = 0;
 /// Install a profile's macros, indexed by the slot a binding names.
 ///
 /// The definitions point into the step pool inside StoredProfiles, which this
-/// rewrites. Safe only because the scheduler was stopped and drained before
-/// the profile changed, so nothing is mid-macro reading what this replaces.
+/// rewrites.
+///
+/// Runs on Core 1 and nowhere else, and only after the scheduler has been
+/// stopped and drained - by swap_profile, or by the release_all that starts
+/// adopt_configuration below. Nothing is mid-macro reading what this replaces,
+/// and no other core is inside these structures: Core 0 asks for a
+/// configuration change and waits to be told it happened rather than reaching
+/// in and making it.
 void install_macros(std::uint8_t profile) {
     // Static: Core 1 has a two-kilobyte stack and the binding table sits below
     // this on the same path.
@@ -136,36 +173,96 @@ void install_macros(std::uint8_t profile) {
     }
 }
 
-/// Switch every flash-backed runtime view while Core 1 is stopped.
+/// Where Core 0 leaves a configuration for Core 1 to pick up.
+duo_input::u1::ConfigHandoff g_config_handoff;
+
+/// Switch every flash-backed runtime view. Runs on Core 1.
+///
+/// Let go of everything first. What was held was held under the old
+/// configuration's meaning, and the computer it was sent to will never hear
+/// about it again; release_all also stops and drains the scheduler, which is
+/// what makes rewriting the step pool underneath it safe.
+///
+/// The ReleaseAll this queues is submitted by Core 1, which is the queue's one
+/// producer. Core 0 submitting it - which is what this code used to do, under
+/// a lockout - races the producer at whatever instruction the lockout
+/// interrupt landed on, and the command it overwrites may be the release that
+/// stops a key repeating forever.
+bool adopt_configuration(duo_input::protocol::ByteView package) {
+    g_runtime.release_all();
+    const bool loaded = g_profiles.load(package);
+    // A package that is not a configuration leaves StoredProfiles empty, which
+    // is also what a factory reset asks for. Profile zero is what an empty
+    // configuration answers to.
+    const std::uint8_t profile = loaded ? g_profiles.active_profile_id() : 0;
+    g_runtime.set_profile_now(profile);
+    install_macros(profile);
+    return loaded;
+}
+
+/// How long Core 0 waits for Core 1 to adopt a configuration.
+///
+/// A pass round Core 1 is microseconds to a few milliseconds; this is orders
+/// of magnitude longer, and still far short of the two-second watchdog, so a
+/// core that has genuinely stopped produces a refused WRITE_COMMIT rather than
+/// a board that hangs inside a USB callback.
+constexpr std::uint32_t kConfigHandoffTimeoutMs = 250;
+
+/// Hand a configuration to Core 1 and wait to be told it was adopted.
+///
+/// Returns false only when Core 1 never answered. Whether the package was a
+/// configuration comes back in ``loaded``.
+bool hand_configuration_to_core1(duo_input::protocol::ByteView package, bool& loaded) {
+    if (!duo_input::u1::core1_running()) {
+        // Nothing else is executing yet, so there is nobody to hand it to and
+        // nothing to race with - and nobody to answer a handshake either.
+        loaded = adopt_configuration(package);
+        return true;
+    }
+
+    const std::uint32_t ticket = g_config_handoff.post(package);
+    const absolute_time_t deadline = make_timeout_time_ms(kConfigHandoffTimeoutMs);
+    while (!g_config_handoff.finished(ticket)) {
+        if (time_reached(deadline)) {
+            return false;
+        }
+        tight_loop_contents();
+    }
+    loaded = g_config_handoff.succeeded();
+    return true;
+}
+
+/// Switch every flash-backed runtime view, from Core 0's side.
 ///
 /// A committed A/B slot becomes the spare slot on the following write.  Core
 /// 0 therefore cannot acknowledge WRITE_COMMIT until Core 1 has stopped
 /// reading the old slot and all macro pointers have been rebuilt against the
-/// new one.  The Pico lockout is the acknowledgement: it returns only after
-/// the victim core is paused, and the new views are complete before release.
+/// new one.
+///
+/// It asks and waits rather than stopping Core 1 and doing the work itself.
+/// `multicore_lockout` pauses the other core at an arbitrary instruction: in
+/// the middle of set_profile_now's binding table, or of install_macros'
+/// definition loop. Rebuilding those underneath a core that then resumes its
+/// own half-finished rebuild produces a binding table interleaved from two
+/// profiles, which is reachable whenever a binding- or macro-driven profile
+/// swap coincides with a WRITE_COMMIT. Here Core 1 does the work at a point it
+/// chose, and the acknowledgement means the work is finished rather than
+/// merely interrupted.
 class RuntimeConfig final : public duo_input::u1::IRuntimeConfig {
 public:
     bool activate(duo_input::protocol::ByteView package) override {
-        multicore_lockout_start_blocking();
-        g_runtime.release_all();
-        const bool loaded = g_profiles.load(package);
-        if (loaded) {
-            const std::uint8_t profile = g_profiles.active_profile_id();
-            g_runtime.set_profile_now(profile);
-            install_macros(profile);
+        bool loaded = false;
+        if (!hand_configuration_to_core1(package, loaded)) {
+            return false;
         }
-        multicore_lockout_end_blocking();
         return loaded;
     }
 
     bool clear() override {
-        multicore_lockout_start_blocking();
-        g_runtime.release_all();
-        (void)g_profiles.load(duo_input::protocol::ByteView{nullptr, 0});
-        g_runtime.set_profile_now(0);
-        install_macros(0);
-        multicore_lockout_end_blocking();
-        return true;
+        // Nothing to load: the point is that Core 1 stops reading the slots
+        // that are about to be erased.
+        bool loaded = false;
+        return hand_configuration_to_core1(duo_input::protocol::ByteView{nullptr, 0}, loaded);
     }
 };
 
@@ -192,6 +289,18 @@ void core1_entry() {
 
     while (true) {
         const std::uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+
+        // First thing in the pass, between one whole turn and the next: not
+        // inside a binding table, not inside the macro definitions, not
+        // holding an event half-processed. That is the difference between this
+        // and being paused wherever a lockout interrupt happened to land.
+        {
+            duo_input::protocol::ByteView package{nullptr, 0};
+            if (g_config_handoff.take(package)) {
+                g_config_handoff.complete(adopt_configuration(package));
+                installed = g_runtime.active_profile();
+            }
+        }
 
         const std::uint32_t now_us = time_us_32();
 #if DUO_CH375_PROBE
@@ -426,6 +535,127 @@ const char* describe_setup_status(std::uint8_t status) {
             return "device answered with another PID";
     }
 }
+
+namespace {
+/// Write the bring-up report into the diagnostics reply.
+///
+/// Its own function, and not for tidiness: forty-odd arguments to one
+/// snprintf, three pointer arrays and the format temporaries put four
+/// hundred bytes into main's frame, and main is where Core 0's deepest call
+/// chain starts - through the CDC service and into the SHA-256 of a staged
+/// configuration, on a two-kilobyte stack. Down here those bytes are on a
+/// branch of their own that reaches nothing else - which only holds if it
+/// stays a branch: called from one place, the compiler folds it straight back
+/// into main and the frame comes with it.
+[[gnu::noinline]] void report_probe(duo_input::u1::ConfigService& config) {
+    // A report and nothing else. The controllers are ticked on Core 1,
+    // which is where their event queues are drained and where their
+    // 8 ms poll deadlines are actually measured; two cores ticking one
+    // chip made each consume the interrupts the other was waiting for,
+    // and on the bench that looked like a device attaching and
+    // detaching twenty-three times in a row.
+    duo_input::u1::ch375::Ch375Device* devices[2] = {&g_keyboard_device,
+                                                     &g_mouse_device};
+    duo_input::u1::ch375::DescriptorSetup* setups[2] = {&g_keyboard_setup,
+                                                        &g_mouse_setup};
+    DeviceTally* tallies[2] = {&g_keyboard_tally, &g_mouse_tally};
+    const std::uint32_t worst_pass_us = g_worst_pass_us;
+
+    // Written as text rather than packed into a struct.
+    //
+    // Every layout change to the packed version cost a reader that
+    // silently drifted, and three separate wrong conclusions were
+    // drawn from fields that had moved underneath it - including one
+    // line that read "no interrupts were ever seen" beside "seventeen
+    // devices attached". Text cannot come apart that way, and the
+    // whole point of this build is to be believed.
+    static const char* kStates[] = {"Absent",      "Resetting",   "HostMode",
+                                    "Enumerating", "Ready",       "RecoverWait",
+                                    "Fault"};
+    // Zeroed, because what is sent is measured from what was
+    // written - and anything past that in an uninitialised
+    // buffer goes out as part of the message.
+    static char text[900] = {};
+    int used = 0;
+    const char* names[2] = {"keyboard", "mouse"};
+    for (int index = 0; index < 2 && used < static_cast<int>(sizeof(text)) - 1; ++index) {
+        const duo_input::u1::ch375::Ch375Device& device = *devices[index];
+        const DeviceTally& tally = *tallies[index];
+        const unsigned state = static_cast<unsigned>(device.state());
+        used += snprintf(
+            text + used, sizeof(text) - static_cast<std::size_t>(used),
+            "%s state=%s speed=%s attached=%u gone=%u ready=%u reports=%u\n"
+            "  check_exist=%s int_seen=%u status_read_failed=%u\n"
+            "  connect=%u disconnect=%u success=%u failure=%u impossible=%u\n"
+            "  detach_disconnect=%u detach_lost=%u enum_failed=%u mode_failed=%u\n"
+            "  setup attempts=%u last=0x%02X (%s) polls=%u\n"
+            "  found=%s endpoint=%u packet=%u boot=%s parse=%u\n"
+            "  last report (%u bytes): %02X %02X %02X %02X\n"
+            "  port=%u baud, refused_changes=%u\n"
+            "  mode_refused setup=%u recover=%u  found_elsewhere=%u alive_refusing=%u\n"
+            "  not_back_yet=%u recovered_raised=%u quiet_rearms=%u collapses=%u\n"
+            "  mode_reply=%s 0x%02X (%s)\n"
+            "  slowest pass round the loop=%u us\n"
+            "  commands the output queue refused=%u\n",
+            names[index], state < 7 ? kStates[state] : "?",
+            device.device_is_low_speed() ? "low" : "full", tally.attached, tally.detached,
+            tally.ready, tally.reports,
+            (index == 0 ? g_probe.keyboard_probe : g_probe.mouse_probe).check_exist_ok
+                ? "0xA8"
+                : "WRONG",
+            device.interrupts_seen(), device.status_reads_failed(),
+            device.status_connect(), device.status_disconnect(), device.status_success(),
+            device.status_failure(), device.status_impossible(),
+            device.detach_from_disconnect(), device.detach_from_lost(),
+            device.enumerate_failures(), device.mode_failures(),
+            setups[index]->attempts(), setups[index]->last_status(),
+            describe_setup_status(setups[index]->last_status()),
+            device.polls_issued(),
+            setups[index]->kind() == duo_input::u1::ch375::DeviceKind::Keyboard
+                ? "keyboard"
+                : (setups[index]->kind() == duo_input::u1::ch375::DeviceKind::Mouse
+                       ? "mouse"
+                       : "nothing"),
+            setups[index]->interrupt_endpoint(), setups[index]->max_packet(),
+            setups[index]->boot_protocol() ? "yes" : "no",
+            static_cast<unsigned>(setups[index]->last_parse_error()),
+            tally.last_size, tally.last[0], tally.last[1], tally.last[2], tally.last[3],
+            (index == 0 ? g_keyboard_port : g_mouse_port).baud(),
+            device.baud_change_failures(), device.setup_mode_failures(),
+            device.recover_mode_failures(), device.chip_found_elsewhere(),
+            device.alive_but_refusing(),
+            device.chip_not_back_yet(), device.chip_recovered_from_raised(),
+            device.quiet_rearms(), device.collapses_while_raised(),
+            device.mode_answered() ? "answered" : "silent", device.mode_reply(),
+            describe_mode_reply(device.mode_answered(), device.mode_reply()),
+            worst_pass_us,
+            // Not per device - it is the whole runtime's count, and
+            // this build replaces the diagnostics reply that would
+            // otherwise carry it with this text.
+            static_cast<unsigned>(g_runtime.dropped_commands()));
+        // snprintf answers with how much it *would* have written. Left
+        // unclamped, the next call is handed a negative amount of room
+        // and the total runs past the end of the buffer.
+        if (used < 0 || used > static_cast<int>(sizeof(text)) - 1) {
+            used = static_cast<int>(sizeof(text)) - 1;
+            break;
+        }
+    }
+    // snprintf answers with how much it *would* have written, not
+    // how much it did. Trusting that sends whatever lies past the end
+    // of the buffer, which is how this report arrived unprintable.
+    if (used < 0) {
+        used = 0;
+    }
+    if (used > static_cast<int>(sizeof(text))) {
+        used = static_cast<int>(sizeof(text));
+    }
+    config.set_link_debug(reinterpret_cast<const std::uint8_t*>(text),
+                          static_cast<std::size_t>(used));
+}
+
+}  // namespace
+
 #endif
 
 int main() {
@@ -471,10 +701,8 @@ int main() {
     // Before any state machine touches them, read both receive pads as plain
     // inputs. A pad with nothing on it and a pull-up should sit high and never
     // move; if one of them does move, the answer is about solder, not software.
-    const duo_input::u1::PinActivity keyboard_pad =
-        duo_input::u1::watch_bare_pin(duo_input::u1::kPinKeyboardRx, 1000);
-    const duo_input::u1::PinActivity mouse_pad =
-        duo_input::u1::watch_bare_pin(duo_input::u1::kPinMouseRx, 1000);
+    g_probe.keyboard_pad = duo_input::u1::watch_bare_pin(duo_input::u1::kPinKeyboardRx, 1000);
+    g_probe.mouse_pad = duo_input::u1::watch_bare_pin(duo_input::u1::kPinMouseRx, 1000);
 
     // Watch both interrupt lines for a second rather than sampling them once.
     //
@@ -483,10 +711,8 @@ int main() {
     // asserting, because the signal is active low. So it reported "no wire" for
     // whichever chip happened to have an interrupt pending, which is exactly
     // the chip with a device on it. It measured the wrong thing confidently.
-    const duo_input::u1::PinActivity keyboard_int =
-        duo_input::u1::watch_bare_pin(duo_input::u1::kPinKeyboardInt, 1000);
-    const duo_input::u1::PinActivity mouse_int =
-        duo_input::u1::watch_bare_pin(duo_input::u1::kPinMouseInt, 1000);
+    g_probe.keyboard_int = duo_input::u1::watch_bare_pin(duo_input::u1::kPinKeyboardInt, 1000);
+    g_probe.mouse_int = duo_input::u1::watch_bare_pin(duo_input::u1::kPinMouseInt, 1000);
 
     // Static-level loopback test, deliberately performed before PIO owns the
     // pins.  With S1 tied to S3 the level driven on GP0 must return on GP1.
@@ -496,17 +722,13 @@ int main() {
     gpio_set_dir(duo_input::u1::kPinKeyboardTx, GPIO_OUT);
     gpio_put(duo_input::u1::kPinKeyboardTx, 1);
     sleep_us(100);
-    const duo_input::u1::PinActivity tx_while_high =
-        watch_existing_pin(duo_input::u1::kPinKeyboardTx, 3000);
-    const duo_input::u1::PinActivity rx_while_high =
-        watch_existing_pin(duo_input::u1::kPinKeyboardRx, 3000);
+    g_probe.tx_while_high = watch_existing_pin(duo_input::u1::kPinKeyboardTx, 3000);
+    g_probe.rx_while_high = watch_existing_pin(duo_input::u1::kPinKeyboardRx, 3000);
 
     gpio_put(duo_input::u1::kPinKeyboardTx, 0);
     sleep_us(100);
-    const duo_input::u1::PinActivity tx_while_low =
-        watch_existing_pin(duo_input::u1::kPinKeyboardTx, 3000);
-    const duo_input::u1::PinActivity rx_while_low =
-        watch_existing_pin(duo_input::u1::kPinKeyboardRx, 3000);
+    g_probe.tx_while_low = watch_existing_pin(duo_input::u1::kPinKeyboardTx, 3000);
+    g_probe.rx_while_low = watch_existing_pin(duo_input::u1::kPinKeyboardRx, 3000);
     gpio_put(duo_input::u1::kPinKeyboardTx, 1);
 
     // Repeat the same static test on the independently wired mouse channel.
@@ -516,14 +738,11 @@ int main() {
     gpio_set_dir(duo_input::u1::kPinMouseTx, GPIO_OUT);
     gpio_put(duo_input::u1::kPinMouseTx, 1);
     sleep_us(100);
-    const duo_input::u1::PinActivity mouse_tx_while_high =
-        watch_existing_pin(duo_input::u1::kPinMouseTx, 3000);
-    const duo_input::u1::PinActivity mouse_rx_while_high =
-        watch_existing_pin(duo_input::u1::kPinMouseRx, 3000);
+    g_probe.mouse_tx_while_high = watch_existing_pin(duo_input::u1::kPinMouseTx, 3000);
+    g_probe.mouse_rx_while_high = watch_existing_pin(duo_input::u1::kPinMouseRx, 3000);
     gpio_put(duo_input::u1::kPinMouseTx, 0);
     sleep_us(100);
-    const duo_input::u1::PinActivity mouse_tx_while_low =
-        watch_existing_pin(duo_input::u1::kPinMouseTx, 3000);
+    g_probe.mouse_tx_while_low = watch_existing_pin(duo_input::u1::kPinMouseTx, 3000);
     gpio_put(duo_input::u1::kPinMouseTx, 1);
 
 #endif
@@ -538,12 +757,10 @@ int main() {
 
 #if DUO_CH375_PROBE
     // Before a single byte goes out, on either port.
-    std::uint16_t keyboard_bad_at_boot = 0;
-    std::uint16_t mouse_bad_at_boot = 0;
-    const std::uint16_t keyboard_quiet_at_boot =
-        duo_input::u1::listen_without_sending(g_keyboard_port, 1000, keyboard_bad_at_boot);
-    const std::uint16_t mouse_quiet_at_boot =
-        duo_input::u1::listen_without_sending(g_mouse_port, 1000, mouse_bad_at_boot);
+    g_probe.keyboard_quiet_at_boot = duo_input::u1::listen_without_sending(
+        g_keyboard_port, 1000, g_probe.keyboard_bad_at_boot);
+    g_probe.mouse_quiet_at_boot = duo_input::u1::listen_without_sending(
+        g_mouse_port, 1000, g_probe.mouse_bad_at_boot);
 
     // The static level readings above say the wiring is sane. They cannot say
     // the two data lines are the right way round, or that a chip is in serial
@@ -558,28 +775,28 @@ int main() {
     // waiting for. On the bench that looked like a device attaching and
     // detaching twenty-three times in a row. The controllers now live on the
     // other core, which makes that mistake harder to make by accident.
-    const duo_input::u1::Ch375ProbeResult keyboard_probe =
-        duo_input::u1::probe_ch375(g_keyboard_port, g_keyboard_commands);
-    const duo_input::u1::Ch375ProbeResult mouse_probe =
-        duo_input::u1::probe_ch375(g_mouse_port, g_mouse_commands);
+    g_probe.keyboard_probe = duo_input::u1::probe_ch375(g_keyboard_port, g_keyboard_commands);
+    g_probe.mouse_probe = duo_input::u1::probe_ch375(g_mouse_port, g_mouse_commands);
     // The experiment that left the bus reset out changed nothing - the device
     // was lost at exactly the same rate without it - so the reset is not what
     // loses it, and the datasheet's sequence is back.
 
-    duo_input::diagnostics::Ch375SingleProbeObservation single_probe;
-    single_probe.pad_low_percent = tx_while_high.low_percent;
-    single_probe.pad_transitions = tx_while_high.transitions;
-    single_probe.quiet_frames = rx_while_high.low_percent;
-    single_probe.quiet_bad_frames = rx_while_high.transitions;
-    single_probe.probe_quiet_frames = tx_while_low.low_percent;
-    single_probe.probe_quiet_first = rx_while_low.low_percent;
-    single_probe.raw_count = static_cast<std::uint8_t>(tx_while_low.transitions & 0xFFu);
-    single_probe.raw[0] = rx_while_low.transitions;
-    single_probe.raw[1] = mouse_tx_while_high.transitions;
-    single_probe.raw[2] = static_cast<std::uint16_t>(mouse_tx_while_high.low_percent) |
-                          (static_cast<std::uint16_t>(mouse_rx_while_high.low_percent) << 8);
-    single_probe.raw[3] = mouse_rx_while_high.transitions;
-    single_probe.framing_errors = mouse_tx_while_low.low_percent;
+    duo_input::diagnostics::Ch375SingleProbeObservation& single_probe = g_probe.single_probe;
+    single_probe.pad_low_percent = g_probe.tx_while_high.low_percent;
+    single_probe.pad_transitions = g_probe.tx_while_high.transitions;
+    single_probe.quiet_frames = g_probe.rx_while_high.low_percent;
+    single_probe.quiet_bad_frames = g_probe.rx_while_high.transitions;
+    single_probe.probe_quiet_frames = g_probe.tx_while_low.low_percent;
+    single_probe.probe_quiet_first = g_probe.rx_while_low.low_percent;
+    single_probe.raw_count =
+        static_cast<std::uint8_t>(g_probe.tx_while_low.transitions & 0xFFu);
+    single_probe.raw[0] = g_probe.rx_while_low.transitions;
+    single_probe.raw[1] = g_probe.mouse_tx_while_high.transitions;
+    single_probe.raw[2] =
+        static_cast<std::uint16_t>(g_probe.mouse_tx_while_high.low_percent) |
+        (static_cast<std::uint16_t>(g_probe.mouse_rx_while_high.low_percent) << 8);
+    single_probe.raw[3] = g_probe.mouse_rx_while_high.transitions;
+    single_probe.framing_errors = g_probe.mouse_tx_while_low.low_percent;
 #endif
 
 
@@ -648,43 +865,10 @@ int main() {
 
         // What the host asked of Core 1, and what Core 1 has to say back.
         //
-        // Both directions pass through here rather than either side calling
-        // into the other, because one of those sides is a USB callback and the
-        // other is halfway through reading a binding table.
-        switch (config.take_capture_request()) {
-            case duo_input::u1::CaptureRequest::Begin:
-                g_runtime.request_capture_begin();
-                break;
-            case duo_input::u1::CaptureRequest::Cancel:
-                g_runtime.request_capture_cancel();
-                break;
-            case duo_input::u1::CaptureRequest::None:
-                break;
-        }
-        {
-            // Taken before the state below is published, so a capture that
-            // ended by being answered is reported rather than swallowed.
-            duo_input::u1::mapping::CapturedTrigger captured;
-            if (g_runtime.take_capture_event(captured)) {
-                config.emit_capture_event(captured);
-            }
-        }
-        config.set_capture_active(g_runtime.capture_active());
-
-        std::uint8_t profile = 0;
-        if (config.take_profile_request(profile)) {
-            g_runtime.request_profile(profile);
-        }
-        bool requested_by_host = false;
-        if (g_runtime.take_profile_ack(profile, requested_by_host)) {
-            // Only now is it true. Core 1 has stopped its macros and let go of
-            // what was held under the old profile's meaning.
-            if (requested_by_host) {
-                config.confirm_profile_applied(profile);
-            } else {
-                config.publish_local_profile(profile);
-            }
-        }
+        // In core_bridge.cpp rather than here, and tested there: the ordering
+        // this depends on is not visible from the calls, and main.cpp cannot
+        // be built on a desktop.
+        duo_input::u1::pump_core_bridge(config, g_runtime);
 
         // Bounded, so a burst of input cannot starve the USB it is for.
         g_outputs.drain();
@@ -713,105 +897,7 @@ int main() {
 
 
 #if DUO_CH375_PROBE
-        {
-            // A report and nothing else. The controllers are ticked on Core 1,
-            // which is where their event queues are drained and where their
-            // 8 ms poll deadlines are actually measured; two cores ticking one
-            // chip made each consume the interrupts the other was waiting for,
-            // and on the bench that looked like a device attaching and
-            // detaching twenty-three times in a row.
-            duo_input::u1::ch375::Ch375Device* devices[2] = {&g_keyboard_device,
-                                                             &g_mouse_device};
-            duo_input::u1::ch375::DescriptorSetup* setups[2] = {&g_keyboard_setup,
-                                                                &g_mouse_setup};
-            DeviceTally* tallies[2] = {&g_keyboard_tally, &g_mouse_tally};
-            const std::uint32_t worst_pass_us = g_worst_pass_us;
-
-            // Written as text rather than packed into a struct.
-            //
-            // Every layout change to the packed version cost a reader that
-            // silently drifted, and three separate wrong conclusions were
-            // drawn from fields that had moved underneath it - including one
-            // line that read "no interrupts were ever seen" beside "seventeen
-            // devices attached". Text cannot come apart that way, and the
-            // whole point of this build is to be believed.
-            static const char* kStates[] = {"Absent",      "Resetting",   "HostMode",
-                                            "Enumerating", "Ready",       "RecoverWait",
-                                            "Fault"};
-            // Zeroed, because what is sent is measured from what was
-            // written - and anything past that in an uninitialised
-            // buffer goes out as part of the message.
-            static char text[900] = {};
-            int used = 0;
-            const char* names[2] = {"keyboard", "mouse"};
-            for (int index = 0; index < 2 && used < static_cast<int>(sizeof(text)) - 1; ++index) {
-                const duo_input::u1::ch375::Ch375Device& device = *devices[index];
-                const DeviceTally& tally = *tallies[index];
-                const unsigned state = static_cast<unsigned>(device.state());
-                used += snprintf(
-                    text + used, sizeof(text) - static_cast<std::size_t>(used),
-                    "%s state=%s speed=%s attached=%u gone=%u ready=%u reports=%u\n"
-                    "  check_exist=%s int_seen=%u status_read_failed=%u\n"
-                    "  connect=%u disconnect=%u success=%u failure=%u impossible=%u\n"
-                    "  detach_disconnect=%u detach_lost=%u enum_failed=%u mode_failed=%u\n"
-                    "  setup attempts=%u last=0x%02X (%s) polls=%u\n"
-                    "  found=%s endpoint=%u packet=%u boot=%s parse=%u\n"
-                    "  last report (%u bytes): %02X %02X %02X %02X\n"
-                    "  port=%u baud, refused_changes=%u\n"
-                    "  mode_refused setup=%u recover=%u  found_elsewhere=%u alive_refusing=%u\n"
-                    "  not_back_yet=%u recovered_raised=%u quiet_rearms=%u collapses=%u\n"
-                    "  mode_reply=%s 0x%02X (%s)\n"
-                    "  slowest pass round the loop=%u us\n",
-                    names[index], state < 7 ? kStates[state] : "?",
-                    device.device_is_low_speed() ? "low" : "full", tally.attached, tally.detached,
-                    tally.ready, tally.reports,
-                    (index == 0 ? keyboard_probe : mouse_probe).check_exist_ok ? "0xA8" : "WRONG",
-                    device.interrupts_seen(), device.status_reads_failed(),
-                    device.status_connect(), device.status_disconnect(), device.status_success(),
-                    device.status_failure(), device.status_impossible(),
-                    device.detach_from_disconnect(), device.detach_from_lost(),
-                    device.enumerate_failures(), device.mode_failures(),
-                    setups[index]->attempts(), setups[index]->last_status(),
-                    describe_setup_status(setups[index]->last_status()),
-                    device.polls_issued(),
-                    setups[index]->kind() == duo_input::u1::ch375::DeviceKind::Keyboard
-                        ? "keyboard"
-                        : (setups[index]->kind() == duo_input::u1::ch375::DeviceKind::Mouse
-                               ? "mouse"
-                               : "nothing"),
-                    setups[index]->interrupt_endpoint(), setups[index]->max_packet(),
-                    setups[index]->boot_protocol() ? "yes" : "no",
-                    static_cast<unsigned>(setups[index]->last_parse_error()),
-                    tally.last_size, tally.last[0], tally.last[1], tally.last[2], tally.last[3],
-                    (index == 0 ? g_keyboard_port : g_mouse_port).baud(),
-                    device.baud_change_failures(), device.setup_mode_failures(),
-                    device.recover_mode_failures(), device.chip_found_elsewhere(),
-                    device.alive_but_refusing(),
-                    device.chip_not_back_yet(), device.chip_recovered_from_raised(),
-                    device.quiet_rearms(), device.collapses_while_raised(),
-                    device.mode_answered() ? "answered" : "silent", device.mode_reply(),
-                    describe_mode_reply(device.mode_answered(), device.mode_reply()),
-                    worst_pass_us);
-                // snprintf answers with how much it *would* have written. Left
-                // unclamped, the next call is handed a negative amount of room
-                // and the total runs past the end of the buffer.
-                if (used < 0 || used > static_cast<int>(sizeof(text)) - 1) {
-                    used = static_cast<int>(sizeof(text)) - 1;
-                    break;
-                }
-            }
-            // snprintf answers with how much it *would* have written, not
-            // how much it did. Trusting that sends whatever lies past the end
-            // of the buffer, which is how this report arrived unprintable.
-            if (used < 0) {
-                used = 0;
-            }
-            if (used > static_cast<int>(sizeof(text))) {
-                used = static_cast<int>(sizeof(text));
-            }
-            config.set_link_debug(reinterpret_cast<const std::uint8_t*>(text),
-                                  static_cast<std::size_t>(used));
-        }
+        report_probe(config);
 #endif
 
 #if DUO_SPI_DEBUG
