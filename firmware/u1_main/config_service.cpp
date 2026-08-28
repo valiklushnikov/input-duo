@@ -17,13 +17,15 @@ constexpr std::uint8_t kFrameDelimiter = 0;
 /// Everything this build can actually do.
 ///
 /// Sent in DEVICE_INFO and masked with what the host asked for, so both ends
-/// agree on the subset in use. CAPTURE and TEST_MACRO are deliberately absent:
-/// there is no peripheral to capture from and no macro engine yet, and a
-/// device that advertised them would leave the configurator waiting for an
-/// event that is never coming. FACTORY_RESET is present, because the device
-/// can do it - it simply insists on someone being at the device.
+/// agree on the subset in use. CAPTURE is here now that Core 1 has peripherals
+/// to capture from; TEST_MACRO is still absent, because nothing yet runs a
+/// macro on the host's say-so and a device that advertised it would leave the
+/// configurator waiting for something that is not coming. FACTORY_RESET is
+/// present, because the device can do it - it simply insists on someone being
+/// at the device.
 constexpr std::uint32_t device_capabilities() {
-    return static_cast<std::uint32_t>(protocol::Capability::KEYBOARD_HID) |
+    return static_cast<std::uint32_t>(protocol::Capability::CAPTURE) |
+           static_cast<std::uint32_t>(protocol::Capability::KEYBOARD_HID) |
            static_cast<std::uint32_t>(protocol::Capability::MOUSE_HID) |
            static_cast<std::uint32_t>(protocol::Capability::CONSUMER_HID) |
            static_cast<std::uint32_t>(protocol::Capability::CONFIG_READ) |
@@ -156,7 +158,12 @@ void ConfigService::on_disconnect() {
     have_sequence_ = false;
     negotiated_ = false;
     negotiated_capabilities_ = 0;
-    capture_active_ = false;
+    if (capture_active_) {
+        // A configurator that crashed mid-question would otherwise leave a
+        // keyboard silently eating its own input until the timeout runs out.
+        capture_active_ = false;
+        capture_request_ = CaptureRequest::Cancel;
+    }
     if (store_.staging()) {
         // The slot has no header, so it is already nothing. The counter is the
         // part worth keeping: a host that keeps vanishing mid-write is a fact
@@ -621,13 +628,47 @@ void ConfigService::dispatch(const CdcFrame& frame) {
                 reply_error(frame, CdcError::InvalidRequest);
                 return;
             }
-            active_profile_ = frame.payload.data[0];
+            // Asked for, not done. Core 1 has a macro to stop and held keys to
+            // let go of before the bindings change underneath them, and it is
+            // the one that reports back which profile is actually running.
+            requested_profile_ = frame.payload.data[0];
+            profile_requested_ = true;
+            payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
+            reply(frame.type, frame.sequence, payload, 1);
+            return;
+        }
+        case CdcMessageType::CAPTURE_BEGIN: {
+            if (capture_active_) {
+                // One question at a time. Two captures running would answer
+                // one of them with the other's keypress.
+                reply_error(frame, CdcError::Busy);
+                return;
+            }
+            capture_active_ = true;
+            capture_request_ = CaptureRequest::Begin;
+            payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
+            reply(frame.type, frame.sequence, payload, 1);
+            return;
+        }
+        case CdcMessageType::CAPTURE_END: {
+            if (!capture_active_) {
+                reply_error(frame, CdcError::BadState);
+                return;
+            }
+            capture_active_ = false;
+            capture_request_ = CaptureRequest::Cancel;
             payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
             reply(frame.type, frame.sequence, payload, 1);
             return;
         }
         case CdcMessageType::STOP_AND_RELEASE_ALL: {
             release_all_requested_ = true;
+            if (capture_active_) {
+                // The way out of anything, including a question the operator
+                // can no longer answer.
+                capture_active_ = false;
+                capture_request_ = CaptureRequest::Cancel;
+            }
             payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
             reply(frame.type, frame.sequence, payload, 1);
             return;
@@ -677,6 +718,47 @@ bool ConfigService::take_release_all_request() {
     const bool requested = release_all_requested_;
     release_all_requested_ = false;
     return requested;
+}
+
+CaptureRequest ConfigService::take_capture_request() {
+    const CaptureRequest requested = capture_request_;
+    capture_request_ = CaptureRequest::None;
+    return requested;
+}
+
+bool ConfigService::take_profile_request(std::uint8_t& profile) {
+    if (!profile_requested_) {
+        return false;
+    }
+    profile_requested_ = false;
+    profile = requested_profile_;
+    return true;
+}
+
+void ConfigService::emit_capture_event(const mapping::CapturedTrigger& trigger) {
+    if (!capture_active_) {
+        return;
+    }
+    capture_active_ = false;
+
+    // Exactly three bytes, in the order the host unpacks them.
+    std::uint8_t payload[3];
+    payload[0] = static_cast<std::uint8_t>(trigger.kind);
+    payload[1] = trigger.code;
+    payload[2] = trigger.modifiers;
+
+    // A session that has not seen a request yet has no count to continue, so
+    // the device starts one - which is what a first request would have done.
+    const std::uint16_t sequence =
+        have_sequence_ ? static_cast<std::uint16_t>(last_sequence_ + 1) : 0;
+    reply(CdcMessageType::CAPTURE_EVENT, sequence, payload, sizeof(payload));
+    last_sequence_ = sequence;
+    have_sequence_ = true;
+
+    // The cached exchange no longer describes the last thing on the wire, and
+    // serving it to a retry would answer a request with somebody else's reply.
+    last_request_size_ = 0;
+    last_response_size_ = 0;
 }
 
 }  // namespace duo_input::u1

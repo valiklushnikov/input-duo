@@ -151,6 +151,9 @@ target_link_libraries(duo_config_service_test PRIVATE duo_common)
 target_include_directories(duo_config_service_test PRIVATE
     ${CMAKE_SOURCE_DIR}/firmware/u1_main
 )
+target_compile_definitions(duo_config_service_test PRIVATE
+    DUO_TEST_VECTOR_DIR="${CMAKE_SOURCE_DIR}/tests/vectors"
+)
 
 if(MSVC)
     target_compile_options(duo_config_service_test PRIVATE /EHsc)

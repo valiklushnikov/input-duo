@@ -17,11 +17,24 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "mapping/capture.hpp"
 #include "protocol/frame.hpp"
 #include "protocol/generated.hpp"
 #include "storage/ab_store.hpp"
 
 namespace duo_input::u1 {
+
+/// What the host last asked the capture to do.
+///
+/// The capture itself runs on Core 1. This class only records what was asked
+/// for and the main loop carries it across, because a USB callback writing the
+/// other core's state is how a keyboard ends up swallowing keys nobody meant
+/// it to.
+enum class CaptureRequest : std::uint8_t {
+    None,
+    Begin,
+    Cancel,
+};
 
 /// Errors the protocol defines. Mirrors the emulator, which is the reference.
 enum class CdcError : std::uint8_t {
@@ -101,16 +114,21 @@ public:
     const LinkState& link_state() const { return link_state_; }
 
     /// Which profile the device is running.
+    ///
+    /// Set by the main loop when Core 1 confirms a swap, not when the host
+    /// asks for one. Reporting a profile before the bindings behind it changed
+    /// would have the configurator show one thing while the keyboard does
+    /// another for as long as the swap takes.
     std::uint8_t active_profile() const { return active_profile_; }
     void set_active_profile(std::uint8_t profile) { active_profile_ = profile; }
 
-    /// Whether a capture is running.
+    /// Whether a capture is running, as Core 1 last reported it.
     ///
-    /// Always false today: the device does not advertise the CAPTURE
-    /// capability, because it has no peripheral to capture from until the
-    /// CH375B exists. The field is reported in GET_STATUS regardless, so the
-    /// host reads a truthful answer rather than a missing one.
+    /// Published by the main loop rather than owned here, for the same reason
+    /// the link state is: a capture ends on its own after ten seconds and this
+    /// class would otherwise go on telling the host one is running.
     bool capture_active() const { return capture_active_; }
+    void set_capture_active(bool active) { capture_active_ = active; }
 
     const CdcDiagnostics& diagnostics() const { return diagnostics_; }
 
@@ -138,6 +156,27 @@ public:
     /// Read and cleared by the main loop: this class must not reach into the
     /// output state, which belongs to Core 0's runtime.
     bool take_release_all_request();
+
+    /// What the host last asked of the capture, taken once.
+    ///
+    /// Read twice, a Begin would start a second capture nobody asked for and
+    /// the operator's next keystroke would vanish into it.
+    CaptureRequest take_capture_request();
+
+    /// The profile the host asked for, if it asked. Taken once.
+    bool take_profile_request(std::uint8_t& profile);
+
+    /// Send the trigger the operator pressed, unprompted.
+    ///
+    /// The host is waiting on this and nothing else, so it goes out on the
+    /// sequence the next request would have used and moves the count on - a
+    /// configurator that carried on from its own last request would be refused
+    /// from here to the end of the session. The capture ends with it: one
+    /// question, one answer.
+    ///
+    /// Ignored when no capture is running. Speaking out of turn costs the host
+    /// its sequence over a trigger it never asked for.
+    void emit_capture_event(const mapping::CapturedTrigger& trigger);
 
 private:
     void handle_frame(const std::uint8_t* wire, std::size_t size);
@@ -176,6 +215,9 @@ private:
 
     std::uint8_t active_profile_ = 1;
     bool capture_active_ = false;
+    CaptureRequest capture_request_ = CaptureRequest::None;
+    std::uint8_t requested_profile_ = 0;
+    bool profile_requested_ = false;
     bool release_all_requested_ = false;
     bool factory_confirmed_ = false;
     bool factory_armed_ = false;

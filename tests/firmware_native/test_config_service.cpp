@@ -5,7 +5,9 @@
 // byte for byte, because the configurator was written against it and cannot
 // tell the two apart.
 
+#include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "config_service.hpp"
@@ -13,6 +15,7 @@
 #include "storage/ab_store.hpp"
 #include "test_support.hpp"
 
+using duo_input::config::TriggerKind;
 using duo_input::crypto::kSha256DigestSize;
 using duo_input::crypto::sha256;
 using duo_input::protocol::CdcFrame;
@@ -22,7 +25,9 @@ using duo_input::storage::AbStore;
 using duo_input::storage::FlashBackend;
 using duo_input::u1::CdcError;
 using duo_input::u1::CdcSink;
+using duo_input::u1::CaptureRequest;
 using duo_input::u1::ConfigService;
+using duo_input::u1::mapping::CapturedTrigger;
 
 namespace {
 
@@ -620,16 +625,6 @@ TEST_CASE(running_a_macro_is_refused_because_the_device_cannot_yet) {
     CHECK_EQ(error_of(reply), CdcError::UnsupportedCapability);
 }
 
-TEST_CASE(capture_is_refused_because_there_is_nothing_to_capture_from) {
-    Link link;
-    link.hello();
-
-    const CdcFrame reply = link.send(CdcMessageType::CAPTURE_BEGIN);
-
-    // The CH375B does not exist yet, so no key can arrive to be captured.
-    CHECK_EQ(error_of(reply), CdcError::UnsupportedCapability);
-}
-
 TEST_CASE(status_reports_that_no_capture_is_running) {
     Link link;
     link.hello();
@@ -638,6 +633,287 @@ TEST_CASE(status_reports_that_no_capture_is_running) {
 
     // Reported truthfully rather than omitted, so the host reads an answer.
     CHECK_EQ(reply.payload.data[2], 0u);
+}
+
+// ----------------------------------------------------------------- capture
+
+TEST_CASE(the_device_says_it_can_capture) {
+    Link link;
+    std::uint8_t request[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+
+    const CdcFrame reply = link.send(CdcMessageType::HELLO, request, sizeof(request));
+
+    // There is a peripheral to capture from now, so the configurator may ask.
+    // A device that stayed quiet about it would leave the operator looking at
+    // a greyed-out button beside a keyboard that works.
+    const std::uint32_t capabilities = u32_at(reply, 3);
+    CHECK((capabilities &
+           static_cast<std::uint32_t>(duo_input::protocol::Capability::CAPTURE)) != 0u);
+}
+
+TEST_CASE(a_capture_is_asked_for_rather_than_started_here) {
+    Link link;
+    link.hello();
+
+    const CdcFrame reply = link.send(CdcMessageType::CAPTURE_BEGIN);
+
+    CHECK_EQ(error_of(reply), CdcError::Ok);
+    CHECK_EQ(reply.payload.size, 1u);
+    // The capture runs on the other core. This class records what was asked
+    // for and the loop carries it across; reaching into the runtime from here
+    // would be one core writing the other's state from a USB callback.
+    CHECK(link.service.take_capture_request() == CaptureRequest::Begin);
+    // Taken once. A request read twice starts a second capture nobody asked
+    // for, and the operator's next keystroke disappears into it.
+    CHECK(link.service.take_capture_request() == CaptureRequest::None);
+}
+
+TEST_CASE(a_second_capture_while_one_is_running_is_busy) {
+    Link link;
+    link.hello();
+    link.send(CdcMessageType::CAPTURE_BEGIN);
+
+    const CdcFrame reply = link.send(CdcMessageType::CAPTURE_BEGIN);
+
+    CHECK_EQ(error_of(reply), CdcError::Busy);
+}
+
+TEST_CASE(ending_a_capture_nobody_started_is_a_bad_state) {
+    Link link;
+    link.hello();
+
+    CHECK_EQ(error_of(link.send(CdcMessageType::CAPTURE_END)), CdcError::BadState);
+}
+
+TEST_CASE(ending_a_capture_is_asked_for_rather_than_done_here) {
+    Link link;
+    link.hello();
+    link.send(CdcMessageType::CAPTURE_BEGIN);
+    link.service.take_capture_request();
+
+    const CdcFrame reply = link.send(CdcMessageType::CAPTURE_END);
+
+    CHECK_EQ(error_of(reply), CdcError::Ok);
+    CHECK(link.service.take_capture_request() == CaptureRequest::Cancel);
+}
+
+TEST_CASE(status_reports_a_capture_the_runtime_says_is_running) {
+    Link link;
+    link.hello();
+    link.send(CdcMessageType::CAPTURE_BEGIN);
+
+    // Pushed in by the loop, the way the link state is. A capture ends on its
+    // own after ten seconds and this class would never hear about it.
+    link.service.set_capture_active(true);
+    CHECK_EQ(link.send(CdcMessageType::GET_STATUS).payload.data[2], 1u);
+
+    link.service.set_capture_active(false);
+    CHECK_EQ(link.send(CdcMessageType::GET_STATUS).payload.data[2], 0u);
+}
+
+TEST_CASE(a_completed_capture_is_reported_without_being_asked) {
+    Link link;
+    link.hello();
+    link.send(CdcMessageType::CAPTURE_BEGIN);
+    const std::uint16_t asked = static_cast<std::uint16_t>(link.sequence - 1);
+
+    CapturedTrigger trigger;
+    trigger.kind = TriggerKind::KEYBOARD_USAGE;
+    trigger.code = 0x1A;
+    trigger.modifiers = 0x02;
+    link.replies.clear();
+    link.service.emit_capture_event(trigger);
+
+    CHECK_EQ(link.replies.count(), 1u);
+    const CdcFrame event = link.decode_last();
+    CHECK(event.type == CdcMessageType::CAPTURE_EVENT);
+    // Nobody asked, so it takes the sequence the next request would have used.
+    CHECK_EQ(event.sequence, static_cast<std::uint16_t>(asked + 1));
+    // Three bytes, in the order the host unpacks them.
+    CHECK_EQ(event.payload.size, 3u);
+    CHECK_EQ(event.payload.data[0], static_cast<std::uint8_t>(TriggerKind::KEYBOARD_USAGE));
+    CHECK_EQ(event.payload.data[1], 0x1Au);
+    CHECK_EQ(event.payload.data[2], 0x02u);
+}
+
+TEST_CASE(a_mouse_capture_travels_as_the_host_will_accept_it) {
+    Link link;
+    link.hello();
+    link.send(CdcMessageType::CAPTURE_BEGIN);
+
+    CapturedTrigger trigger;
+    trigger.kind = TriggerKind::MOUSE_BUTTON;
+    trigger.code = 5;
+    trigger.modifiers = 0;
+    link.replies.clear();
+    link.service.emit_capture_event(trigger);
+
+    const CdcFrame event = link.decode_last();
+    // The host refuses a button outside one to five, refuses one carrying
+    // modifiers and refuses a zero code, so a payload it throws away is a
+    // capture the operator has to perform again for nothing.
+    CHECK_EQ(event.payload.data[0], static_cast<std::uint8_t>(TriggerKind::MOUSE_BUTTON));
+    CHECK(event.payload.data[1] >= 1u && event.payload.data[1] <= 5u);
+    CHECK_EQ(event.payload.data[2], 0u);
+}
+
+TEST_CASE(an_unsolicited_event_moves_the_sequence_on) {
+    Link link;
+    link.hello();
+    link.send(CdcMessageType::CAPTURE_BEGIN);
+
+    CapturedTrigger trigger;
+    trigger.code = 0x04;
+    link.replies.clear();
+    link.service.emit_capture_event(trigger);
+    const std::uint16_t event_sequence = link.decode_last().sequence;
+
+    // The device spoke, so the host's next request counts from what the device
+    // said. A configurator carrying on from its own last request would be
+    // refused from here to the end of the session.
+    link.sequence = static_cast<std::uint16_t>(event_sequence + 1);
+    CHECK_EQ(error_of(link.send(CdcMessageType::GET_STATUS)), CdcError::Ok);
+}
+
+TEST_CASE(reporting_a_capture_ends_it) {
+    Link link;
+    link.hello();
+    link.send(CdcMessageType::CAPTURE_BEGIN);
+
+    CapturedTrigger trigger;
+    trigger.code = 0x04;
+    link.service.emit_capture_event(trigger);
+    link.sequence = static_cast<std::uint16_t>(link.decode_last().sequence + 1);
+
+    // One question, one answer. A capture still running after it was answered
+    // goes on eating the operator's keystrokes.
+    CHECK_EQ(error_of(link.send(CdcMessageType::CAPTURE_END)), CdcError::BadState);
+}
+
+TEST_CASE(a_capture_nobody_started_is_not_reported) {
+    Link link;
+    link.hello();
+    link.replies.clear();
+
+    CapturedTrigger trigger;
+    trigger.code = 0x04;
+    link.service.emit_capture_event(trigger);
+
+    // Speaking out of turn costs the host its sequence over a trigger it never
+    // asked for.
+    CHECK_EQ(link.replies.count(), 0u);
+}
+
+TEST_CASE(a_host_that_went_away_stops_the_capture_it_left_running) {
+    Link link;
+    link.hello();
+    link.send(CdcMessageType::CAPTURE_BEGIN);
+    link.service.take_capture_request();
+
+    link.service.on_disconnect();
+
+    // Otherwise a configurator that crashed mid-question leaves a keyboard
+    // silently eating its own input until the timeout runs out.
+    CHECK(link.service.take_capture_request() == CaptureRequest::Cancel);
+}
+
+TEST_CASE(releasing_everything_stops_a_capture_too) {
+    Link link;
+    link.hello();
+    link.send(CdcMessageType::CAPTURE_BEGIN);
+    link.service.take_capture_request();
+
+    link.send(CdcMessageType::STOP_AND_RELEASE_ALL);
+
+    // The one control that has to work when everything else is wrong.
+    CHECK(link.service.take_capture_request() == CaptureRequest::Cancel);
+    CHECK_EQ(error_of(link.send(CdcMessageType::CAPTURE_END)), CdcError::BadState);
+}
+
+// ---------------------------------------------------------- active profile
+
+namespace {
+
+/// The interoperability vector, seeded straight into the store.
+///
+/// Building a configuration by hand beside the code that reads it would test
+/// this file's idea of the format. This is the one the configurator writes.
+bool seed_stored_config(Link& link) {
+    const std::string path = std::string(DUO_TEST_VECTOR_DIR) + "/config_vectors/valid_full.bin";
+    std::FILE* file = std::fopen(path.c_str(), "rb");
+    if (file == nullptr) {
+        return false;
+    }
+    std::vector<std::uint8_t> bytes;
+    std::uint8_t chunk[4096];
+    std::size_t read = 0;
+    while ((read = std::fread(chunk, 1, sizeof(chunk), file)) > 0) {
+        bytes.insert(bytes.end(), chunk, chunk + read);
+    }
+    std::fclose(file);
+    if (bytes.empty()) {
+        return false;
+    }
+
+    std::uint8_t digest[kSha256DigestSize];
+    sha256(bytes.data(), bytes.size(), digest);
+    link.store.begin(static_cast<std::uint32_t>(bytes.size()), digest);
+    link.store.write_chunk(0, bytes.data(), bytes.size());
+    link.store.verify();
+    link.store.commit();
+    return link.store.scan().has_active;
+}
+
+}  // namespace
+
+TEST_CASE(a_profile_change_is_asked_for_rather_than_asserted) {
+    Link link;
+    CHECK(seed_stored_config(link));
+    link.hello();
+    const std::uint8_t before = link.service.active_profile();
+
+    std::uint8_t request[1] = {3};
+    const CdcFrame reply =
+        link.send(CdcMessageType::SET_ACTIVE_PROFILE, request, sizeof(request));
+
+    CHECK_EQ(error_of(reply), CdcError::Ok);
+    std::uint8_t wanted = 0;
+    CHECK(link.service.take_profile_request(wanted));
+    CHECK_EQ(wanted, 3u);
+    CHECK_FALSE(link.service.take_profile_request(wanted));
+    // Not running it yet. Core 1 has a macro to stop and held keys to let go
+    // of before the bindings change underneath them, and saying the swap
+    // happened before it did is how a key ends up stranded on a computer.
+    CHECK_EQ(link.service.active_profile(), before);
+}
+
+TEST_CASE(the_reported_profile_is_the_one_the_runtime_confirmed) {
+    Link link;
+    CHECK(seed_stored_config(link));
+    link.hello();
+    std::uint8_t request[1] = {3};
+    link.send(CdcMessageType::SET_ACTIVE_PROFILE, request, sizeof(request));
+    std::uint8_t wanted = 0;
+    link.service.take_profile_request(wanted);
+
+    // What the loop does once Core 1 says the swap happened.
+    link.service.set_active_profile(wanted);
+
+    CHECK_EQ(link.send(CdcMessageType::GET_STATUS).payload.data[1], 3u);
+}
+
+TEST_CASE(a_profile_the_configuration_does_not_have_is_not_asked_for) {
+    Link link;
+    CHECK(seed_stored_config(link));
+    link.hello();
+
+    std::uint8_t request[1] = {200};
+    const CdcFrame reply =
+        link.send(CdcMessageType::SET_ACTIVE_PROFILE, request, sizeof(request));
+
+    CHECK_EQ(error_of(reply), CdcError::InvalidRequest);
+    std::uint8_t wanted = 0;
+    CHECK_FALSE(link.service.take_profile_request(wanted));
 }
 
 
