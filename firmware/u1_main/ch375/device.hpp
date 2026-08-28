@@ -274,6 +274,9 @@ public:
     /// chip is not coming back at all, which is a different fault.
     std::uint16_t chip_not_back_yet() const { return chip_not_back_yet_; }
 
+    /// How often the chip was found still at the rate this code raised it to.
+    std::uint16_t chip_recovered_from_raised() const { return chip_recovered_from_raised_; }
+
     std::uint8_t mode_reply() const { return mode_reply_; }
     bool mode_answered() const { return mode_answered_; }
     bool rx_swept() const { return rx_swept_; }
@@ -363,6 +366,8 @@ private:
     bool rx_swept_ = false;
     unsigned rx_sweep_hit_ = 0;
     std::uint16_t chip_not_back_yet_ = 0;
+    std::uint16_t chip_recovered_from_raised_ = 0;
+    unsigned raised_baud_ = kCh375DefaultBaud;
     std::uint8_t mode_reply_ = 0;
     bool mode_answered_ = false;
     unsigned port_baud_ = kCh375DefaultBaud;

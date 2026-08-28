@@ -589,3 +589,42 @@ TEST_CASE(a_sweep_leaves_the_receiver_where_it_started) {
 
     CHECK_EQ(port.rx_baud(), 9600u);
 }
+
+// -------------------------------------- bringing a stranded chip home
+
+TEST_CASE(a_chip_left_at_the_raised_rate_is_found_there_and_reset) {
+    // When a raised link degrades, the reset meant to bring the chip home goes
+    // out at the rate it can no longer hold, so it never arrives. The chip
+    // stays where it was put while this side knocks on an empty door.
+    ScriptedCh375 port({expect_command(Ch375Command::CheckExist), expect_data(0xA5), reply(0x5A),
+                        expect_command(Ch375Command::CheckExist), expect_data(0x5A), reply(0xA5),
+                        expect_data(0x00), expect_data(0x00), expect_data(0x00), expect_data(0x00),
+                        expect_command(Ch375Command::ResetAll)});
+    port.answers_at(62500);
+    Ch375Transport transport(port);
+
+    CHECK(transport.recover_from(62500, 9600));
+    CHECK(port.saw_reset_at(62500));
+    CHECK_EQ(port.baud(), 9600u);
+    CHECK(port.complete());
+}
+
+TEST_CASE(a_chip_not_at_the_raised_rate_either_is_left_alone) {
+    ScriptedCh375 port({expect_command(Ch375Command::CheckExist), expect_data(0xA5)});
+    port.answers_at(9600);
+    Ch375Transport transport(port);
+
+    CHECK(!transport.recover_from(62500, 9600));
+    CHECK(!port.saw_reset_at(62500));
+    CHECK_EQ(port.baud(), 9600u);
+}
+
+TEST_CASE(nothing_is_probed_when_no_rate_was_ever_raised) {
+    // The rate is known because this code chose it. With nothing chosen there
+    // is nothing to ask, and probing anyway is guessing at the chip's expense.
+    ScriptedCh375 port({});
+    Ch375Transport transport(port);
+
+    CHECK(!transport.recover_from(9600, 9600));
+    CHECK_EQ(port.commands_written(), 0);
+}

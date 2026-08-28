@@ -44,6 +44,21 @@ void Ch375Device::tick(std::uint32_t now_us) {
         // answers nothing at all.
         if (!transport_.check_exist(kPortProbeByte)) {
             ++chip_not_back_yet_;
+
+            // Silent at the rate it should have come back to. If this code had
+            // raised it, that is where it may still be - the reset was sent at
+            // a rate it had stopped holding, so it never heard it. One known
+            // rate is worth asking; anything else is guessing at its expense.
+            if (raised_baud_ != kCh375DefaultBaud &&
+                transport_.recover_from(raised_baud_, kCh375DefaultBaud)) {
+                ++chip_recovered_from_raised_;
+                raised_baud_ = kCh375DefaultBaud;
+                // It has just been reset, so it needs the same wait as any
+                // other reset before anything else is said to it.
+                chip_resetting_ = true;
+                chip_reset_at_us_ = now_us;
+                return;
+            }
             fail(now_us);
             return;
         }
@@ -99,6 +114,8 @@ void Ch375Device::tick(std::uint32_t now_us) {
         // state, and is the only kind worth asking.
         if (!baud_exhausted_) {
             port_baud_ = transport_.try_speed(kBaudLadder[baud_rung_], kCh375DefaultBaud);
+            // Remembered, because it is the only other place the chip can be.
+            raised_baud_ = port_baud_;
             if (port_baud_ == kCh375DefaultBaud) {
                 ++baud_change_failures_;
                 if (baud_rung_ + 1 < kBaudLadderSize) {

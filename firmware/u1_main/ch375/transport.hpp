@@ -403,6 +403,35 @@ public:
         return 0;
     }
 
+    /// Look for a chip at the one rate this code put it at.
+    ///
+    /// When a raised link degrades, the reset meant to bring the chip home is
+    /// sent at the rate it can no longer hold - so it never arrives, and the
+    /// chip stays where it was while this side goes back to the default and
+    /// knocks on an empty door for ever.
+    ///
+    /// One rate, not a sweep. This is not a search: the rate is known, because
+    /// this code chose it. Probing rates the chip was never put at is how a
+    /// controller that was about to come good gets a half-heard opcode
+    /// instead.
+    ///
+    /// Returns true if it answered there, with the port back at ``home`` and
+    /// the chip reset.
+    bool recover_from(unsigned raised, unsigned home) {
+        if (raised == home || !io_.set_baud(raised)) {
+            io_.set_baud(home);
+            return false;
+        }
+        if (!port_answers(kPortProofRounds)) {
+            io_.set_baud(home);
+            return false;
+        }
+        // It is there and it can hear us. Send it home.
+        reset_all();
+        io_.set_baud(home);
+        return true;
+    }
+
     /// Find a chip that has stopped answering, and bring it home.
     ///
     /// A chip left at a rate this side abandoned answers nothing where it is
