@@ -39,9 +39,16 @@ void Ch375Device::tick(std::uint32_t now_us) {
         // hand produces every eight - and the deficit never closes while the
         // hand keeps moving. A chip that will not change rate is left at the
         // default: slow is worse than fast and much better than nothing.
-        if (!transport_.raise_speed(kFastBaudCoefficient, kFastBaudConstant, kCh375FastBaud,
-                                    kCh375DefaultBaud)) {
+        port_baud_ = transport_.try_speed(kBaudLadder[baud_rung_], kCh375DefaultBaud);
+        if (port_baud_ == kCh375DefaultBaud) {
             ++baud_change_failures_;
+            // Down a rung, and the chip has just been reset - so the wait this
+            // loop already does before the next attempt is the wait that reset
+            // needs. The ladder is short and the bottom of it is the rate the
+            // chip came up at, so this settles rather than cycling.
+            if (baud_rung_ + 1 < kBaudLadderSize) {
+                ++baud_rung_;
+            }
         }
 
         // Mode 5 is where DS1 5.9 says to wait: enabled, generating no frames,

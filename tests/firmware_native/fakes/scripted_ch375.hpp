@@ -78,8 +78,21 @@ public:
         return true;
     }
 
-    /// Stand in for a port with a fixed rate.
+    /// Stand in for a port with a fixed rate.
     void refuse_baud_changes() { refuse_baud_ = true; }
+
+    /// Was a chip reset sent while the port was at this rate?
+    ///
+    /// The question that matters when a rate is abandoned: a chip that moved
+    /// has to be told to reset while it can still hear.
+    bool saw_reset_at(unsigned baud) const {
+        for (unsigned at : reset_baud_) {
+            if (at == baud) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     unsigned baud() const { return baud_; }
     int baud_changes() const { return baud_changes_; }
@@ -107,6 +120,7 @@ private:
     std::string violations_;
     unsigned baud_ = kScriptedDefaultBaud;
     bool refuse_baud_ = false;
+    std::vector<unsigned> reset_baud_;
     int baud_changes_ = 0;
     bool int_asserted_ = false;
     std::uint32_t start_us_ = 1000;

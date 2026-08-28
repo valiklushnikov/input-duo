@@ -295,6 +295,8 @@ private:
     std::uint16_t detach_from_lost_ = 0;
     std::uint16_t enumerate_failures_ = 0;
     std::uint16_t baud_change_failures_ = 0;
+    unsigned port_baud_ = kCh375DefaultBaud;
+    std::size_t baud_rung_ = 0;
     std::uint16_t mode_failures_ = 0;
     std::uint16_t polls_issued_ = 0;
     /// Which data packet the next IN transaction should expect. Alternates on

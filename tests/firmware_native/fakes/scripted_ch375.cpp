@@ -29,6 +29,9 @@ void ScriptedCh375::note(const char* what, std::uint8_t value) {
 }
 
 void ScriptedCh375::write_command(std::uint8_t command) {
+    if (command == static_cast<std::uint8_t>(Ch375Command::ResetAll)) {
+        reset_baud_.push_back(baud_);
+    }
     if (next_ >= script_.size()) {
         note("unexpected command past the end of the script:", command);
         return;

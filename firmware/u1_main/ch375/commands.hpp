@@ -175,6 +175,18 @@ enum class DescriptorType : std::uint8_t {
     Configuration = 2,
 };
 
+/// One rung of the speed ladder: the chip's two divisor bytes and the rate
+/// they produce (DS1 5.2 - coefficient 02H gives 750000/(256-constant) and
+/// 03H gives 6000000/(256-constant)).
+struct BaudOption {
+    std::uint8_t coefficient;
+    std::uint8_t constant;
+    unsigned baud;
+};
+
+/// How many times a rate has to answer before it is believed.
+inline constexpr int kPortProofRounds = 2;
+
 /// The byte CHECK_EXIST is asked with when the port itself is in question.
 ///
 /// Any value works - the chip answers the inverse of whatever it is given
@@ -194,6 +206,24 @@ inline constexpr unsigned kCh375DefaultBaud = 9600;
 /// 0.16% error as the default, so it is no less reliable - only twelve times
 /// faster, which turns that seventeen milliseconds into 1.4.
 inline constexpr unsigned kCh375FastBaud = 115200;
+
+/// The rates to try, fastest first.
+///
+/// Both are exact or near-exact on the chip's own divisor, and both are far
+/// enough above 9600 to make the difference that matters: at 9600 one mouse
+/// report costs seventeen milliseconds and a moving hand produces one every
+/// eight, so anything above about 20000 closes the gap.
+///
+/// A ladder rather than a single rate, because the two channels on this board
+/// do not manage the same speed - one runs at 115200 and the other refuses it
+/// every time. Whether that is wiring, length or the module, the firmware
+/// cannot tell and does not need to.
+inline constexpr BaudOption kBaudLadder[] = {
+    {0x03, 0xCC, 115200},  // 6000000 / 52
+    {0x02, 0xF4, 62500},   // 750000 / 12, exact
+    {0x02, 0xEC, 37500},   // 750000 / 20, exact
+};
+inline constexpr std::size_t kBaudLadderSize = sizeof(kBaudLadder) / sizeof(kBaudLadder[0]);
 inline constexpr std::uint8_t kFastBaudCoefficient = 0x03;
 inline constexpr std::uint8_t kFastBaudConstant = 0xCC;
 

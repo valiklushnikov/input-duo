@@ -239,36 +239,47 @@ public:
     /// listening at it.
     bool reset_port_speed(unsigned default_baud) { return io_.set_baud(default_baud); }
 
-    /// Raise both ends, and find out where they are if that fails.
+    /// Does the port work well enough to be trusted at this rate?
     ///
-    /// A chip that did not answer at the new rate may never have left the old
-    /// one - the command may not have arrived at all. Going back and asking is
-    /// the only way to know; leaving both ends guessing gives a chip that
-    /// looks dead and is not.
+    /// Asked more than once, with a different byte each time. A marginal rate
+    /// answers sometimes, and accepting it on one byte is how a link that half
+    /// works gets chosen over one that works.
+    bool port_answers(int rounds) {
+        std::uint8_t probe = kPortProbeByte;
+        for (int round = 0; round < rounds; ++round) {
+            if (!check_exist(probe)) {
+                return false;
+            }
+            probe = static_cast<std::uint8_t>(~probe);
+        }
+        return true;
+    }
+
+    /// Try one rung of the speed ladder.
     ///
-    /// Returns false when the port stayed at ``slow``, which is a working
-    /// system and a slow one rather than a broken one.
-    bool raise_speed(std::uint8_t coefficient, std::uint8_t constant, unsigned fast,
-                     unsigned slow) {
-        if (set_baud_rate(coefficient, constant, fast)) {
-            return true;
+    /// One rung per call, not the whole ladder, because giving up on a rate
+    /// means resetting the chip and a chip takes about 40 ms to come back
+    /// (DS1 5.4). Waiting for that here would block the loop that everything
+    /// else on this board shares; the caller already has a reset cycle with
+    /// the wait built into it, so the next rung is simply tried on the next
+    /// pass through it.
+    ///
+    /// Returns the rate settled on, which is ``slow`` if this rung did not
+    /// hold.
+    unsigned try_speed(const BaudOption& option, unsigned slow) {
+        if (set_baud_rate(option.coefficient, option.constant, option.baud) &&
+            port_answers(kPortProofRounds)) {
+            return option.baud;
         }
 
-        // No answer at the new rate has two opposite causes. The chip may
-        // never have heard the command, in which case it is still at the old
-        // rate; or it may have changed and had its one-byte answer lost, in
-        // which case it is at the new one. Guessing picks the wrong one half
-        // the time and leaves a chip that looks dead and is not - which costs
-        // somebody a trip to the board to pull its power.
-        //
-        // So ask. CHECK_EXIST is the one command that proves the port itself
-        // works, and it is safe to repeat.
-        if (check_exist(kPortProbeByte)) {
-            return true;
-        }
+        // Giving up is the dangerous part. The chip may have moved to this
+        // rate and simply be unreadable here; dropping quietly back would
+        // leave something nothing can reach, because RESET_ALL sent at the old
+        // rate is not even heard. So it is told to reset while this side can
+        // still be heard, and only then does the port come back down.
+        reset_all();
         io_.set_baud(slow);
-        (void)check_exist(kPortProbeByte);
-        return false;
+        return slow;
     }
 
     /// DS1 5.10. Ask whether a device is attached, rather than waiting to be
