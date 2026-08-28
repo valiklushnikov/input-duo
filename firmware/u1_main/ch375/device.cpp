@@ -262,6 +262,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
             enter(Ch375State::Ready, now_us);
             last_answer_us_ = now_us;
             token_outstanding_ = false;
+            relights_ = 0;
             if (!announced_ready_) {
                 // Once per device, not once per attempt: a controller that
                 // needed three tries still produced one working keyboard, and
@@ -280,10 +281,33 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 // came to.
                 token_outstanding_ = false;
             } else if (now_us - last_answer_us_ >= kDeviceLostUs) {
-                // The controller has gone quiet with a device configured. Its
-                // reports cannot be read and its disconnection cannot be
-                // noticed, so whatever it was holding would be held forever.
-                // Treat it as gone: releasing a key nobody pressed is a
+                // Quiet for a second with a device configured. That is not the
+                // same as the device being gone - the controller has said
+                // nothing about a disconnection - and the two have been
+                // treated alike, at a cost the operator can see.
+                //
+                // Tearing the chip and the bus down re-enumerates the
+                // peripheral: its lights go out and come back, and every key
+                // or button held on it is released and re-acquired. Doing that
+                // for a transient silence is a fault of its own, and on this
+                // bench it is the fault the operator actually notices.
+                //
+                // So the endpoint is re-armed first. Setting the receive
+                // toggle back to DATA0 and polling again costs four bytes and
+                // recovers the case that is actually common: one transaction
+                // lost, and the two ends one packet out of step over it.
+                if (relights_ < kQuietRetriesBeforeTeardown) {
+                    ++relights_;
+                    ++quiet_rearms_;
+                    expect_data1_ = false;
+                    transport_.set_receive_toggle(kToggleData0);
+                    token_outstanding_ = false;
+                    last_answer_us_ = now_us;
+                    return;
+                }
+
+                // It has had its chances. Whatever it was holding would be
+                // held forever otherwise: releasing a key nobody pressed is a
                 // nuisance, and holding one nobody can release is not.
                 ++detach_from_lost_;
                 handle_detach(now_us);

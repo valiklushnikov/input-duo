@@ -21,6 +21,8 @@ using duo_input::u1::ch375::Ch375Event;
 using duo_input::u1::ch375::Ch375EventKind;
 using duo_input::u1::ch375::Ch375State;
 using duo_input::u1::ch375::Ch375Transport;
+using duo_input::u1::ch375::kDeviceLostUs;
+using duo_input::u1::ch375::kQuietRetriesBeforeTeardown;
 using duo_input::u1::ch375::kRecoverDelayUs;
 using duo_input::u1::ch375::testing::FakeCh375Chip;
 using duo_input::u1::ch375::testing::FakeDeviceSetup;
@@ -289,16 +291,34 @@ TEST_CASE(a_controller_that_goes_quiet_with_a_device_up_releases_it) {
     rig.count(Ch375EventKind::Ready);
 
     rig.chip.go_silent(true);
-    // Past kDeviceLostUs, which is a second: a polled endpoint answers even
-    // when it has nothing to say, so silence has to be long before it means
-    // the controller rather than the device.
-    rig.run(1500000);
+    // A second of silence buys a re-arm, not a teardown - a polled endpoint
+    // answers even when it has nothing to say, but one lost transaction is
+    // commoner than a vanished device and costs four bytes to recover. Only
+    // after kQuietRetriesBeforeTeardown of those is the device given up on,
+    // so the window here is that many seconds and a margin.
+    rig.run(kDeviceLostUs * (kQuietRetriesBeforeTeardown + 2));
 
     // This is the dangerous one. Nothing can be read from the device any more
     // and its disconnection can never be noticed, so a key held at that moment
     // would be held forever on the far side. It has to be declared gone.
     CHECK_EQ(rig.count(Ch375EventKind::Detached), 1);
     CHECK(static_cast<int>(rig.device.state()) != static_cast<int>(Ch375State::Ready));
+}
+
+TEST_CASE(a_moment_of_silence_re_arms_the_endpoint_instead_of_the_whole_bus) {
+    // Tearing the chip and the bus down re-enumerates the peripheral: its
+    // lights go out and come back, and everything held on it is released and
+    // re-acquired. Doing that for one lost transaction is a fault the operator
+    // can see, and on this bench it was the one they noticed.
+    Rig rig;
+    bring_up(rig);
+    rig.count(Ch375EventKind::Ready);
+
+    rig.chip.go_silent(true);
+    rig.run(kDeviceLostUs + 200000);
+
+    CHECK_EQ(rig.count(Ch375EventKind::Detached), 0);
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
 }
 
 TEST_CASE(a_device_unplugged_while_its_controller_recovers_leaves_nothing_claimed) {

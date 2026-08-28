@@ -160,6 +160,15 @@ inline constexpr std::uint32_t kReportPollUs = 8000;
 /// only after the device had already been given up on.
 inline constexpr std::uint32_t kTokenAnswerUs = 100000;
 
+/// How many times a quiet endpoint is re-armed before the device is given up
+/// on.
+///
+/// Each attempt costs a second of silence, so this is also how long a device
+/// that really has gone stays held: three seconds. Longer strands a
+/// peripheral's keys for longer; shorter re-enumerates a working mouse for a
+/// hiccup, which is what the operator sees.
+inline constexpr std::uint8_t kQuietRetriesBeforeTeardown = 3;
+
 /// How many refused mode commands before asking whether this side is the one
 /// at fault. High enough that a channel merely settling is not swept.
 inline constexpr std::uint16_t kRxSweepAfterFailures = 6;
@@ -277,6 +286,12 @@ public:
     /// How often the chip was found still at the rate this code raised it to.
     std::uint16_t chip_recovered_from_raised() const { return chip_recovered_from_raised_; }
 
+    /// How often a quiet endpoint was re-armed instead of torn down.
+    ///
+    /// Each teardown avoided is a peripheral that did not go dark and come
+    /// back, and a set of held keys that was not released and re-acquired.
+    std::uint16_t quiet_rearms() const { return quiet_rearms_; }
+
     std::uint8_t mode_reply() const { return mode_reply_; }
     bool mode_answered() const { return mode_answered_; }
     bool rx_swept() const { return rx_swept_; }
@@ -367,6 +382,8 @@ private:
     unsigned rx_sweep_hit_ = 0;
     std::uint16_t chip_not_back_yet_ = 0;
     std::uint16_t chip_recovered_from_raised_ = 0;
+    std::uint16_t quiet_rearms_ = 0;
+    std::uint8_t relights_ = 0;
     unsigned raised_baud_ = kCh375DefaultBaud;
     std::uint8_t mode_reply_ = 0;
     bool mode_answered_ = false;
