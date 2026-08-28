@@ -16,9 +16,22 @@
 //   tell the controller the same address, or it goes on calling the old one
 //   read the configuration descriptor, at the new address
 //   choose a configuration, which is what makes the endpoints work
+//   ask a boot-capable interface to use boot protocol
 //
-// It is longer than one command, and at the end the address and the endpoint
-// are known rather than assumed.
+// It is longer than one command, and at the end the address, the endpoint and
+// the report format are known rather than assumed.
+//
+// That last step is the one the controller cannot do at all: it has commands
+// for SET_ADDRESS, SET_CONFIGURATION and GET_DESCRIPTOR and for nothing else,
+// so SET_PROTOCOL is assembled as a setup packet and issued by hand. Without
+// it a device stays in its own report protocol and sends its native report -
+// which for the mouse on this bench means a Report ID in front of everything,
+// read as the buttons, with the buttons read as dx and dx as dy. A click on
+// every movement and a pointer that only goes up and down.
+//
+// A device is allowed to refuse it, and one that does is still brought up. It
+// says what it says in its own protocol; that is a mouse this firmware reads
+// badly, and better than no mouse at all.
 //
 // Nothing here waits without a deadline. A device that stops answering part
 // way through ends the attempt, not the loop: U1 services USB, the link to U2
@@ -70,9 +83,20 @@ private:
         SettingAddress,
         ReadingConfiguration,
         ChoosingConfiguration,
+        /// The SET_PROTOCOL setup packet has gone; its interrupt is awaited.
+        RequestingBootProtocol,
+        /// The status stage has gone. Only when it lands has the device acted.
+        FinishingBootProtocol,
     };
 
     SetupProgress fail(std::uint8_t status);
+    SetupProgress finish(std::uint8_t status);
+    /// Ask a boot-capable interface to switch, or finish without asking.
+    SetupProgress select_boot_protocol(std::uint32_t now_us);
+    /// True while the outcome of the protocol request is still outstanding.
+    bool choosing_protocol() const {
+        return step_ == Step::RequestingBootProtocol || step_ == Step::FinishingBootProtocol;
+    }
     void ask_for_descriptor(DescriptorType type, std::uint32_t now_us);
 
     Ch375Transport& transport_;

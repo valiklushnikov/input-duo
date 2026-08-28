@@ -149,6 +149,10 @@ inline constexpr std::uint8_t transaction(std::uint8_t endpoint, TokenPid pid) {
 inline constexpr std::uint8_t kToggleData0 = 0x80;
 inline constexpr std::uint8_t kToggleData1 = 0xC0;
 
+/// Where control transfers happen. Every device has this endpoint and it is
+/// never an interrupt endpoint, so an IN token here is a status stage.
+inline constexpr std::uint8_t kControlEndpoint = 0;
+
 /// DS2 1.3. SetRetry takes this byte first, then the retry policy.
 inline constexpr std::uint8_t kSetRetryPrefix = 0x25;
 /// DS2 1.2. GetDeviceRate takes this byte.

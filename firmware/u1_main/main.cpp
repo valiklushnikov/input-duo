@@ -517,6 +517,10 @@ const char* describe_setup_status(std::uint8_t status) {
             return "no reply to GET_STATUS";
         case 0xFD:
             return "no interrupt before the deadline";
+        case 0xFA:
+            return "up, but refused boot protocol";
+        case 0xF9:
+            return "up, but never answered the protocol request";
         case 0x14:
             return "success";
         case 0x15:
@@ -599,7 +603,7 @@ namespace {
             "  connect=%u disconnect=%u success=%u failure=%u impossible=%u\n"
             "  detach_disconnect=%u detach_lost=%u enum_failed=%u mode_failed=%u\n"
             "  setup attempts=%u last=0x%02X (%s) polls=%u\n"
-            "  found=%s endpoint=%u packet=%u boot=%s parse=%u\n"
+            "  found=%s endpoint=%u packet=%u boot=adv:%s sel:%s parse=%u\n"
             "  last report (%u bytes): %02X %02X %02X %02X\n"
             "  port=%u baud, refused_changes=%u\n"
             "  mode_refused setup=%u recover=%u  found_elsewhere=%u alive_refusing=%u\n"
@@ -627,7 +631,13 @@ namespace {
                        ? "mouse"
                        : "nothing"),
             setups[index]->interrupt_endpoint(), setups[index]->max_packet(),
+            // Two answers, not one. The first is only what the interface
+            // descriptor advertises; the second is whether SET_PROTOCOL
+            // actually landed. Printing the first as "boot=yes" was read
+            // as the second for weeks, while the mouse went on sending
+            // its own report format with an identifier in front of it.
             setups[index]->boot_protocol() ? "yes" : "no",
+            setups[index]->boot_protocol_selected() ? "yes" : "no",
             static_cast<unsigned>(setups[index]->last_parse_error()),
             tally.last_size, tally.last[0], tally.last[1], tally.last[2], tally.last[3],
             (index == 0 ? g_keyboard_port : g_mouse_port).baud(),

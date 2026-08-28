@@ -72,6 +72,20 @@ public:
 /// far below anything a person would notice.
 inline constexpr std::uint32_t kDefaultReplyTimeoutUs = 20000;
 
+/// The eight bytes of a USB setup packet, before they are laid out.
+///
+/// USB 2.0 section 9.3. The controller has commands of its own for three
+/// requests - SET_ADDRESS, SET_CONFIGURATION and GET_DESCRIPTOR - and nothing
+/// at all for the rest, so anything else is assembled here and issued as a
+/// transfer by hand.
+struct ControlRequest {
+    std::uint8_t request_type = 0;
+    std::uint8_t request = 0;
+    std::uint16_t value = 0;
+    std::uint16_t index = 0;
+    std::uint16_t length = 0;
+};
+
 class Ch375Transport {
 public:
     explicit Ch375Transport(ICh375Transport& io) : io_(io) {}
@@ -593,6 +607,58 @@ public:
     void set_configuration(std::uint8_t value) {
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::SetConfiguration));
         io_.write_data(value);
+    }
+
+    /// DS2 1.15. Begin a control transfer the chip has no command for.
+    ///
+    /// The setup packet goes into the endpoint buffer and then a SETUP token
+    /// carries it to endpoint zero. That order is the datasheet's own (DS2
+    /// 1.15: write the payload first, then issue the token); reversed, the
+    /// token goes out over whatever the buffer happened to hold last, which
+    /// on a device is a request nobody made.
+    ///
+    /// Nothing is read here. The chip answers with an interrupt, which the
+    /// caller is already reading once per pass, so this costs the shared loop
+    /// ten data bytes and no waiting at all.
+    ///
+    /// False means the packet was refused before the command byte went out,
+    /// so the chip is still in step and no token was issued over a stale
+    /// buffer.
+    bool begin_control_request(const ControlRequest& request) {
+        const std::uint8_t setup[] = {
+            request.request_type,
+            request.request,
+            static_cast<std::uint8_t>(request.value & 0xFF),
+            static_cast<std::uint8_t>(request.value >> 8),
+            static_cast<std::uint8_t>(request.index & 0xFF),
+            static_cast<std::uint8_t>(request.index >> 8),
+            static_cast<std::uint8_t>(request.length & 0xFF),
+            static_cast<std::uint8_t>(request.length >> 8),
+        };
+        if (!write_block(setup, sizeof(setup))) {
+            return false;
+        }
+        return issue_token(kControlEndpoint, TokenPid::Setup);
+    }
+
+    /// The status stage of a control transfer that carries no data.
+    ///
+    /// A request with no data stage still has one: the host asks for a packet
+    /// and the device answers an empty DATA1 (USB 2.0 8.5.3). It is not a
+    /// formality - a device applies the request when the transfer completes,
+    /// so a transfer left after its setup packet changes nothing and leaves
+    /// the device waiting to be finished.
+    ///
+    /// The toggle is always DATA1 for a status stage, and the chip does not
+    /// track it (DS2 1.6). Whatever the interrupt endpoint is expecting is
+    /// set again from scratch when the device is declared ready, so borrowing
+    /// the receiver here costs it nothing.
+    ///
+    /// Nothing is read: the answer is empty by definition, and the interrupt
+    /// that says it arrived is read by the caller.
+    void finish_control_request() {
+        set_receive_toggle(kToggleData1);
+        (void)issue_token(kControlEndpoint, TokenPid::In);
     }
 
     /// DS2 1.13. Ask the chip to configure the attached device by itself.

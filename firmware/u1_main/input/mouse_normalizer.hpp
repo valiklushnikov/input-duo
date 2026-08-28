@@ -28,7 +28,14 @@ public:
     /// Some mice put an identifier in front of every report.
     ///
     /// Reading that byte as the buttons puts a click on every movement, which
-    /// is exactly what the mouse on the bench would have produced.
+    /// is exactly what the mouse on the bench did produce.
+    ///
+    /// Nothing in the firmware calls this. Devices are asked to use boot
+    /// protocol while they are being brought up (see descriptor_setup.hpp),
+    /// and a boot report has no identifier in it - so the way out of the
+    /// identifier is not to read past it but to stop being sent it. This is
+    /// here for the device that refuses, and would be set from its report
+    /// descriptor, which is not fetched.
     void set_report_id(bool present) { report_id_ = present; }
 
     std::size_t apply(protocol::ByteView report, InputEvent* out, std::size_t capacity);

@@ -9,6 +9,18 @@ constexpr std::uint8_t kEndedRunning = 0xFF;
 constexpr std::uint8_t kEndedTimeout = 0xFD;
 constexpr std::uint8_t kEndedUnreadable = 0xFC;
 constexpr std::uint8_t kEndedUnsupported = 0xFB;
+/// The device answered the protocol request with something other than success
+/// - a STALL, usually, which is how a device says it does not do that.
+constexpr std::uint8_t kEndedProtocolRefused = 0xFA;
+/// Nothing came back from the protocol request at all.
+constexpr std::uint8_t kEndedProtocolSilent = 0xF9;
+
+/// HID 1.11 section 7.2.5. The controller has no command for this one.
+constexpr std::uint8_t kRequestSetProtocol = 0x0B;
+/// USB 2.0 9.3.1: host to device, class request, addressed to an interface.
+constexpr std::uint8_t kRequestTypeInterfaceOut = 0x21;
+/// HID 1.11 7.2.5: wValue 0 asks for boot protocol, 1 for report protocol.
+constexpr std::uint16_t kProtocolBoot = 0;
 
 /// A descriptor has to fit the controller's control buffer, which is 64 bytes
 /// (DS1 5.13). A longer one arrives cut short, and the parser refuses what
@@ -25,6 +37,7 @@ void DescriptorSetup::begin(std::uint32_t now_us) {
 
     capabilities_ = HidCapabilities{};
     last_parse_error_ = ParseError::None;
+    boot_protocol_selected_ = false;
     last_status_ = kEndedRunning;
     started_us_ = now_us;
     ++attempts_;
@@ -47,6 +60,45 @@ SetupProgress DescriptorSetup::fail(std::uint8_t status) {
     return SetupProgress::Failed;
 }
 
+/// End the attempt with a usable device, whatever the last step made of it.
+///
+/// The status byte is kept rather than flattened to success, because "it is
+/// up" and "it is up and still in its own report protocol" are different
+/// devices and only the byte says which.
+SetupProgress DescriptorSetup::finish(std::uint8_t status) {
+    step_ = Step::Idle;
+    last_status_ = status;
+    return SetupProgress::Done;
+}
+
+SetupProgress DescriptorSetup::select_boot_protocol(std::uint32_t now_us) {
+    if (!capabilities_.boot_protocol) {
+        // The interface does not declare the boot subclass, so there is no
+        // boot report behind it to select. Asking anyway spends a control
+        // transfer to be told no, and a device is free to answer worse than
+        // no.
+        return finish(static_cast<std::uint8_t>(InterruptStatus::Success));
+    }
+
+    ControlRequest request;
+    request.request_type = kRequestTypeInterfaceOut;
+    request.request = kRequestSetProtocol;
+    request.value = kProtocolBoot;
+    // The interface the parser chose, not zero. A composite device has
+    // several, and the one being read is often not the first.
+    request.index = capabilities_.interface_number;
+    request.length = 0;
+
+    if (!transport_.begin_control_request(request)) {
+        // Refused before anything went on the wire. The device is configured
+        // and usable; it is simply still speaking its own protocol.
+        return finish(kEndedProtocolRefused);
+    }
+    started_us_ = now_us;
+    step_ = Step::RequestingBootProtocol;
+    return SetupProgress::Busy;
+}
+
 SetupProgress DescriptorSetup::poll(std::uint32_t now_us, bool interrupted,
                                     InterruptStatus status) {
     if (step_ == Step::Idle) {
@@ -60,12 +112,27 @@ SetupProgress DescriptorSetup::poll(std::uint32_t now_us, bool interrupted,
         // minutes, and a deadline compared directly reads as no wait at all on
         // one side of the wrap and an hour on the other.
         if (now_us - started_us_ >= kSetupTimeoutUs) {
+            if (choosing_protocol()) {
+                // Every other step is something the device must do before it
+                // can be used. This one is a preference, so silence ends the
+                // request and not the device: starting over would re-enumerate
+                // a working mouse for ever, and it would go quiet at the same
+                // step every time.
+                return finish(kEndedProtocolSilent);
+            }
             return fail(kEndedTimeout);
         }
         return SetupProgress::Busy;
     }
 
     if (status != InterruptStatus::Success) {
+        if (choosing_protocol()) {
+            // A STALL here is a device saying it does not do that, which it is
+            // entitled to. Nothing was left half done: a refused SETUP has no
+            // status stage to send, and a control endpoint clears its own
+            // stall on the next setup packet (USB 2.0 8.5.3).
+            return finish(kEndedProtocolRefused);
+        }
         // The byte says which device response caused it - NAK, STALL, or
         // nothing at all - and the caller can report it. None of them makes
         // trying again pointless, so this is a failure, not a fault.
@@ -122,9 +189,22 @@ SetupProgress DescriptorSetup::poll(std::uint32_t now_us, bool interrupted,
         }
 
         case Step::ChoosingConfiguration:
-            step_ = Step::Idle;
-            last_status_ = static_cast<std::uint8_t>(InterruptStatus::Success);
-            return SetupProgress::Done;
+            return select_boot_protocol(now_us);
+
+        case Step::RequestingBootProtocol:
+            // The device took the setup packet. It has not acted on it yet:
+            // that happens when the transfer completes, which is the status
+            // stage and not this.
+            transport_.finish_control_request();
+            started_us_ = now_us;
+            step_ = Step::FinishingBootProtocol;
+            return SetupProgress::Busy;
+
+        case Step::FinishingBootProtocol:
+            // Now it is in boot protocol, which is the report format every
+            // normalizer here was written against.
+            boot_protocol_selected_ = true;
+            return finish(static_cast<std::uint8_t>(InterruptStatus::Success));
 
         case Step::Idle:
             break;
