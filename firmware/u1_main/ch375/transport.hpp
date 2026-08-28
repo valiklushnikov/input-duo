@@ -258,11 +258,18 @@ public:
     /// Try one rung of the speed ladder.
     ///
     /// One rung per call, not the whole ladder, because giving up on a rate
-    /// means resetting the chip and a chip takes about 40 ms to come back
-    /// (DS1 5.4). Waiting for that here would block the loop that everything
-    /// else on this board shares; the caller already has a reset cycle with
-    /// the wait built into it, so the next rung is simply tried on the next
-    /// pass through it.
+    /// can mean resetting the chip and a chip takes about 40 ms to come back
+    /// (DS1 5.4). Waiting for that here would block the loop everything else
+    /// on this board shares; the caller already has a reset cycle with the
+    /// wait built into it.
+    ///
+    /// Nothing is ever written at a rate this has not just proved. The chip
+    /// reads commands positionally - a command byte, then the data bytes that
+    /// command takes - so a byte it half-hears at the wrong rate is swallowed
+    /// as somebody's parameter and every byte after it is out of step. From
+    /// outside that is a chip which has stopped answering, and the only cure
+    /// is someone walking over to pull its power. Blindly resetting at a rate
+    /// the chip might not be using does exactly that, a hundred times an hour.
     ///
     /// Returns the rate settled on, which is ``slow`` if this rung did not
     /// hold.
@@ -272,12 +279,21 @@ public:
             return option.baud;
         }
 
-        // Giving up is the dangerous part. The chip may have moved to this
-        // rate and simply be unreadable here; dropping quietly back would
-        // leave something nothing can reach, because RESET_ALL sent at the old
-        // rate is not even heard. So it is told to reset while this side can
-        // still be heard, and only then does the port come back down.
-        reset_all();
+        // Go back down first and ask. If the chip answers here it never moved,
+        // which is the ordinary case - the command did not take - and there is
+        // nothing to undo. Sending it a reset would be the only damage done.
+        io_.set_baud(slow);
+        if (port_answers(1)) {
+            return slow;
+        }
+
+        // Silent at the old rate. Now the chip may really have moved, so look
+        // for it at the new one - and only if it answers there, where it can
+        // hear us, tell it to reset.
+        io_.set_baud(option.baud);
+        if (port_answers(1)) {
+            reset_all();
+        }
         io_.set_baud(slow);
         return slow;
     }

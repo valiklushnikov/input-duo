@@ -39,15 +39,20 @@ void Ch375Device::tick(std::uint32_t now_us) {
         // hand produces every eight - and the deficit never closes while the
         // hand keeps moving. A chip that will not change rate is left at the
         // default: slow is worse than fast and much better than nothing.
-        port_baud_ = transport_.try_speed(kBaudLadder[baud_rung_], kCh375DefaultBaud);
-        if (port_baud_ == kCh375DefaultBaud) {
-            ++baud_change_failures_;
-            // Down a rung, and the chip has just been reset - so the wait this
-            // loop already does before the next attempt is the wait that reset
-            // needs. The ladder is short and the bottom of it is the rate the
-            // chip came up at, so this settles rather than cycling.
-            if (baud_rung_ + 1 < kBaudLadderSize) {
-                ++baud_rung_;
+        // Only while there are rungs left to try. A channel that has been
+        // through the whole ladder is one this wiring cannot go faster on, and
+        // asking again every second - which is how often this loop recovers -
+        // is a hundred and eighty pointless attempts an hour on a link that
+        // works perfectly well at the rate it started at.
+        if (!baud_exhausted_) {
+            port_baud_ = transport_.try_speed(kBaudLadder[baud_rung_], kCh375DefaultBaud);
+            if (port_baud_ == kCh375DefaultBaud) {
+                ++baud_change_failures_;
+                if (baud_rung_ + 1 < kBaudLadderSize) {
+                    ++baud_rung_;
+                } else {
+                    baud_exhausted_ = true;
+                }
             }
         }
 
