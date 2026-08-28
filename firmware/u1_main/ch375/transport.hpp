@@ -143,26 +143,56 @@ public:
 
         std::uint8_t length = 0;
         if (!read_reply(length)) {
+            // Not even a length. Whatever the chip is doing, the next thing it
+            // sends is not an answer to anything asked yet.
+            drain_port();
             return false;
         }
         if (length > kMaxBlockSize || length > capacity) {
-            // Refused before a single byte is stored. A length past the chip's
-            // own maximum means the port is out of step rather than that a
-            // longer packet arrived, and a length past the caller's buffer is
-            // how a device on the far end of a wire writes into this one.
+            // A length past the chip's own maximum means the port is out of
+            // step rather than that a longer packet arrived, and a length past
+            // the caller's buffer is how a device on the far end of a wire
+            // writes into this one. Either way the bytes are refused - but the
+            // command has already gone, so the chip is going to send them
+            // regardless of what is decided here. Walking away does not stop
+            // them arriving; it makes them arrive later, as the answers to
+            // whatever is asked next, for ever.
+            drain_port();
             return false;
         }
 
         for (std::size_t index = 0; index < length; ++index) {
             std::uint8_t value = 0;
             if (!read_reply(value)) {
+                // The rest of the packet is still coming.
                 size = 0;
+                drain_port();
                 return false;
             }
             out[index] = value;
         }
         size = length;
         return true;
+    }
+
+    /// Read and throw away whatever is still on its way.
+    ///
+    /// Called when a read is abandoned part way through. The chip has already
+    /// been told to send something; that does not stop because this side
+    /// changed its mind. Left alone, those bytes are read as the reply to the
+    /// next command, and the one after that, and every one after that - a port
+    /// permanently one answer behind, which from outside is a controller that
+    /// has stopped making sense and only a power cycle appears to fix.
+    ///
+    /// Bounded twice over: by a byte count, and by the first read that finds
+    /// nothing, which is what the end of the traffic looks like.
+    void drain_port() {
+        for (std::size_t index = 0; index < kMaxBlockSize + 2; ++index) {
+            std::uint8_t discarded = 0;
+            if (!read_reply(discarded)) {
+                return;
+            }
+        }
     }
 
     /// DS1 5.14. Write a length-prefixed block to the host endpoint buffer.

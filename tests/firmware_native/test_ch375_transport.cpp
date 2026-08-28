@@ -514,3 +514,57 @@ TEST_CASE(flushing_writes_only_data_and_never_a_command) {
     // for, which is the very thing being cleared.
     CHECK_EQ(port.commands_written(), 0);
 }
+
+// ------------------------------------- abandoning a read part way through
+
+TEST_CASE(a_block_with_an_impossible_length_leaves_the_port_in_step) {
+    // The command has already been sent, so the chip is going to send those
+    // bytes whatever this side decides about the length. Walking away from
+    // them does not make them not arrive - it makes them arrive later, as the
+    // answers to whatever is asked next, for ever.
+    ScriptedCh375 port({expect_command(Ch375Command::ReadUsbData0), reply(0xFF),
+                        reply(0x11), reply(0x22), reply(0x33),
+                        expect_command(Ch375Command::CheckExist), expect_data(0xA5),
+                        reply(0x5A)});
+    Ch375Transport transport(port);
+
+    std::uint8_t buffer[64] = {};
+    std::size_t size = 0;
+    CHECK(!transport.read_block(buffer, sizeof(buffer), size));
+
+    // The next command must get its own answer, not the tail of the last one.
+    CHECK(transport.check_exist(0xA5));
+}
+
+TEST_CASE(a_block_that_stops_half_way_leaves_the_port_in_step) {
+    // Four bytes promised, one delivered before the reply timed out. The other
+    // three are still coming.
+    ScriptedCh375 port({expect_command(Ch375Command::ReadUsbData0), reply(0x04),
+                        reply(0xAA),
+                        // Late, but they arrive.
+                        reply(0xBB), reply(0xCC), reply(0xDD),
+                        expect_command(Ch375Command::CheckExist), expect_data(0xA5),
+                        reply(0x5A)});
+    Ch375Transport transport(port);
+
+    std::uint8_t buffer[2] = {};
+    std::size_t size = 0;
+    CHECK(!transport.read_block(buffer, sizeof(buffer), size));
+
+    CHECK(transport.check_exist(0xA5));
+}
+
+TEST_CASE(a_good_block_is_not_drained_of_anything) {
+    ScriptedCh375 port({expect_command(Ch375Command::ReadUsbData0), reply(0x02),
+                        reply(0xAA), reply(0xBB),
+                        expect_command(Ch375Command::CheckExist), expect_data(0xA5),
+                        reply(0x5A)});
+    Ch375Transport transport(port);
+
+    std::uint8_t buffer[64] = {};
+    std::size_t size = 0;
+    CHECK(transport.read_block(buffer, sizeof(buffer), size));
+    CHECK_EQ(size, 2u);
+    CHECK(transport.check_exist(0xA5));
+    CHECK(port.complete());
+}
