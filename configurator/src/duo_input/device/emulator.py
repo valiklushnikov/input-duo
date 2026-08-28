@@ -139,6 +139,11 @@ class U1Emulator(AbstractByteTransport):
         # Commands the real U1's Core 1 could not hand to Core 0. Nonzero means
         # what a computer is holding no longer matches what the operator did.
         self.dropped_commands = 0
+        # What the real U1's output runtime is doing about its queue right now:
+        # 0 no fault, 1 a queue that is refusing commands. It clears itself
+        # once a pass goes by with nothing refused, which is why it is separate
+        # from the cumulative count above.
+        self.runtime_fault = 0
         self._timeout_once = False
         self._disconnect_once = False
         self._bad_crc_response_once = False
@@ -580,6 +585,7 @@ class U1Emulator(AbstractByteTransport):
             )
             + struct.pack("<BH", self.endpoint_drops, self.endpoint_release_ms)
             + struct.pack("<I", self.dropped_commands)
+            + struct.pack("<B", self.runtime_fault)
         )
 
     def _handle_factory_reset_arm(self, payload: bytes) -> bytes:

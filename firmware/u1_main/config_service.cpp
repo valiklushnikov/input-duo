@@ -346,7 +346,14 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
     // and the queue would not take it, which means a key press, a release or
     // a macro step never reached the computer it was meant for.
     put_u32(out + 38, dropped_commands_);
-    return 42;
+
+    // One more byte, appended for the same reason as everything above it: a
+    // host that stops at byte 42 still reads what it knew. The count says
+    // input was lost at some point since boot; this says the output runtime is
+    // refusing commands *now*, which is the difference between a burst that
+    // has passed and one that is still going on.
+    out[42] = static_cast<std::uint8_t>(runtime_fault_);
+    return 43;
 #endif
 }
 

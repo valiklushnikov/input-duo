@@ -770,6 +770,33 @@ def test_diagnostics_carry_what_the_endpoint_saw_when_the_link_died() -> None:
     assert counters.endpoint_release_ms == 104
 
 
+def test_diagnostics_say_whether_the_output_queue_is_refusing_commands_now() -> None:
+    """``dropped_commands`` never goes down, so it cannot tell a burst that is
+    over from one still in progress. The fault byte beside it can: the firmware
+    clears it after a pass in which nothing was refused."""
+    import struct
+
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        struct.pack("<BIIIII", 0, 0, 0, 0, 0, 0)
+        + struct.pack("<BBIII", 1, 1, 900, 0, 0)
+        + struct.pack("<BH", 0, 0)
+        + struct.pack("<I", 12)
+        + struct.pack("<B", 1)
+    )
+
+    counters = parse_diagnostics(payload)
+
+    assert counters.dropped_commands == 12
+    assert counters.runtime_fault == 1
+
+    # And a firmware that stops before it is still a firmware this can read.
+    older = parse_diagnostics(payload[:-1])
+    assert older.dropped_commands == 12
+    assert older.runtime_fault is None
+
+
 def test_diagnostics_without_the_endpoint_report_are_still_readable() -> None:
     import struct
 

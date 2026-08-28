@@ -24,19 +24,33 @@ bool OutputRuntime::submit(const OutputCommand& command) {
         return true;
     }
     // Commands are being dropped, so what is held will no longer correspond to
-    // what anyone did. Recording the fault is how drain() knows to let go of
-    // everything rather than type half of it.
-    fault_ = runtime::RuntimeFault::OutputQueueFull;
+    // what anyone did. This runs on Core 1, which owns nothing here but this
+    // counter; drain() reads it on Core 0 and decides what to do about it.
+    refused_.fetch_add(1, std::memory_order_release);
     return false;
 }
 
 std::size_t OutputRuntime::drain(std::size_t budget) {
-    if (fault_ == runtime::RuntimeFault::OutputQueueFull) {
-        // Half a macro is worse than none of it, and a key whose release was
-        // the command that got dropped would repeat forever.
+    const std::uint32_t refused = refused_.load(std::memory_order_acquire);
+    if (refused != seen_refusals_) {
+        // Something was dropped since the last pass. Half a macro is worse
+        // than none of it, and a key whose release was the command that got
+        // dropped would repeat forever - so let go of everything and apply
+        // nothing this pass.
+        seen_refusals_ = refused;
+        fault_ = runtime::RuntimeFault::OutputQueueFull;
         queue_.clear();
         outputs_.release_all();
         return 0;
+    }
+
+    if (fault_ == runtime::RuntimeFault::OutputQueueFull) {
+        // A whole pass with nothing refused: the burst is over. Everything was
+        // released and the queue was emptied when the fault was raised, so
+        // there is no half-typed state left to be wrong about, and going on
+        // refusing input would leave both computers deaf to the operator's
+        // keyboard until the board was unplugged.
+        fault_ = runtime::RuntimeFault::None;
     }
 
     std::size_t applied = 0;

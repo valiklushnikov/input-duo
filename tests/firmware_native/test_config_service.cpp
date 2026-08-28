@@ -632,7 +632,23 @@ TEST_CASE(diagnostics_carry_every_counter_the_host_expects) {
     const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
 
     CHECK_EQ(error_of(reply), CdcError::Ok);
-    CHECK_EQ(reply.payload.size, 42u);
+    CHECK_EQ(reply.payload.size, 43u);
+}
+
+TEST_CASE(the_diagnostics_say_whether_the_output_queue_is_overflowing_now) {
+    Link link;
+    link.hello();
+
+    CHECK_EQ(link.send(CdcMessageType::GET_DIAGNOSTICS).payload.data[42], 0u);
+
+    link.service.set_runtime_fault(duo_input::runtime::RuntimeFault::OutputQueueFull);
+
+    // The counter beside it says input was lost at some point since boot. This
+    // says the output runtime is refusing commands right now - which is the
+    // difference between a burst that has passed and one still going on, and
+    // there is no other outward sign of either.
+    CHECK_EQ(link.send(CdcMessageType::GET_DIAGNOSTICS).payload.data[42],
+             static_cast<std::uint8_t>(duo_input::runtime::RuntimeFault::OutputQueueFull));
 }
 
 TEST_CASE(the_diagnostics_carry_what_the_other_core_could_not_hand_over) {

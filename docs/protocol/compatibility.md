@@ -63,7 +63,7 @@ Successful or shape-preserving direct payloads are:
 | `GET_ACTIVE_CONFIG_INFO`, `READ_CONFIG_BEGIN` | `generation:u32, length:u32, sha256:bytes[32]` |
 | `READ_CONFIG_CHUNK` | `offset:u32, bytes` |
 | `WRITE_CHUNK` | `accepted_next_offset:u32` |
-| `GET_DIAGNOSTICS` | five `u32`: bad CRC, disconnect, timeout, bad sequence, aborted staging; then the link state (`answering:u8, endpoint_usb:u8, frames_sent:u32, crc_errors:u32, echoed_frames:u32`), the endpoint report (`drops:u8, release_ms:u16`), and `dropped_commands:u32` |
+| `GET_DIAGNOSTICS` | five `u32`: bad CRC, disconnect, timeout, bad sequence, aborted staging; then the link state (`answering:u8, endpoint_usb:u8, frames_sent:u32, crc_errors:u32, echoed_frames:u32`), the endpoint report (`drops:u8, release_ms:u16`), `dropped_commands:u32`, and `runtime_fault:u8` |
 | `PING` | the request payload unchanged (at most 1023 bytes so the error prefix fits) |
 
 All other successful direct replies contain only `error=OK`. Malformed fixed-size requests
@@ -87,8 +87,12 @@ it increments its counter and clears capture and staging state. So do `HELLO` an
 everything the question was about, and in both cases a capture left running would go on
 swallowing the operator's input until its ten-second timeout.
 
-The three groups after the five counters in `GET_DIAGNOSTICS` were appended in that order and
+The four groups after the five counters in `GET_DIAGNOSTICS` were appended in that order and
 each is optional: a reply that stops after any group is still a valid reply, so a host reads
 what it recognises and leaves the rest. `dropped_commands` counts input the device produced
 and could not deliver - a nonzero value means what a computer is holding no longer matches
-what the operator did.
+what the operator did. `runtime_fault` says what the output runtime is doing about its queue
+at this instant: `0` no fault, `1` a queue that is refusing commands. It is not a latch. The
+runtime releases everything once when it notices the loss and resumes after a pass in which
+nothing was refused, so a host that reads `1` is looking at a burst still in progress, where
+a nonzero `dropped_commands` only says one happened at some point since boot.

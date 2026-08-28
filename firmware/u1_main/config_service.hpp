@@ -20,6 +20,7 @@
 #include "mapping/capture.hpp"
 #include "protocol/frame.hpp"
 #include "protocol/generated.hpp"
+#include "runtime/output_command.hpp"
 #include "storage/ab_store.hpp"
 
 namespace duo_input::u1 {
@@ -152,6 +153,15 @@ public:
     void set_dropped_commands(std::uint32_t dropped) { dropped_commands_ = dropped; }
     std::uint32_t dropped_commands() const { return dropped_commands_; }
 
+    /// What Core 0's output runtime last concluded about its queue.
+    ///
+    /// Published by the main loop for the same reason as the counter above.
+    /// The runtime clears the fault itself once the burst that caused it has
+    /// passed, so a host that sees this set is looking at a device that is
+    /// dropping input right now, not at a latch left over from boot.
+    void set_runtime_fault(runtime::RuntimeFault fault) { runtime_fault_ = fault; }
+    runtime::RuntimeFault runtime_fault() const { return runtime_fault_; }
+
     /// Whether a capture is running, as Core 1 last reported it.
     ///
     /// Published by the main loop rather than owned here, for the same reason
@@ -270,6 +280,7 @@ private:
 
     std::uint8_t active_profile_ = 1;
     std::uint32_t dropped_commands_ = 0;
+    runtime::RuntimeFault runtime_fault_ = runtime::RuntimeFault::None;
     bool capture_active_ = false;
     CaptureRequest capture_request_ = CaptureRequest::None;
     std::uint8_t requested_profile_ = 0;

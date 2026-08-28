@@ -279,6 +279,14 @@ TEST_CASE(a_command_that_overflows_the_queue_is_a_fault_not_a_wait) {
     for (std::size_t index = 0; index < kOutputQueueCapacity + 10; ++index) {
         runtime.submit(key(Route::Pc1, kA, true));
     }
+    // The producer runs on Core 1 and writes nothing here but its refusal
+    // count. The fault is Core 0's conclusion, reached in the drain.
+    CHECK_EQ(runtime.fault(), RuntimeFault::None);
+    // Ten over the constant, plus the one slot the ring always leaves empty
+    // to tell full from empty.
+    CHECK_EQ(runtime.refused_commands(), 11u);
+
+    runtime.drain();
 
     // Core 1 must never block waiting for Core 0, and Core 0 must never be
     // made to wait for the host. The only honest answer to a full queue is to
@@ -301,19 +309,42 @@ TEST_CASE(a_full_queue_releases_everything_rather_than_typing_half_of_it) {
     CHECK_EQ(runtime.snapshot(Target::Pc2).keyboard.key_count, 0u);
 }
 
-TEST_CASE(clearing_the_fault_lets_the_runtime_carry_on) {
+TEST_CASE(a_runtime_that_overflowed_and_drained_accepts_input_again) {
     OutputRuntime runtime;
     for (std::size_t index = 0; index < kOutputQueueCapacity + 10; ++index) {
         runtime.submit(key(Route::Pc1, kA, true));
     }
-    runtime.drain();
 
-    runtime.clear_fault();
-    CHECK_EQ(runtime.fault(), RuntimeFault::None);
+    // The pass that notices the loss lets go of everything and applies
+    // nothing. Nobody clears anything by hand: there is no operator inside
+    // the loop, and a fault only a configurator could clear is a board whose
+    // keyboard and mouse are dead on both computers until it is unplugged.
+    CHECK_EQ(runtime.drain(), 0u);
+    CHECK_EQ(runtime.fault(), RuntimeFault::OutputQueueFull);
 
+    // The burst is over - nothing was refused during that pass - so the next
+    // one resumes.
     CHECK(runtime.submit(key(Route::Pc1, kB, true)));
-    runtime.drain();
+    CHECK_EQ(runtime.drain(), 1u);
+    CHECK_EQ(runtime.fault(), RuntimeFault::None);
     CHECK(runtime.snapshot(Target::Pc1).keyboard.contains(kB));
+}
+
+TEST_CASE(a_fault_stands_while_the_queue_is_still_overflowing) {
+    OutputRuntime runtime;
+    for (std::size_t index = 0; index < kOutputQueueCapacity + 1; ++index) {
+        runtime.submit(key(Route::Pc1, kA, true));
+    }
+    CHECK_EQ(runtime.drain(), 0u);
+
+    // Still overflowing. Recovery is one pass with nothing refused, not one
+    // pass: a runtime that resumed here would apply half of the next burst.
+    for (std::size_t index = 0; index < kOutputQueueCapacity + 1; ++index) {
+        runtime.submit(key(Route::Pc1, kA, true));
+    }
+    CHECK_EQ(runtime.drain(), 0u);
+    CHECK_EQ(runtime.fault(), RuntimeFault::OutputQueueFull);
+    CHECK_EQ(runtime.snapshot(Target::Pc1).keyboard.key_count, 0u);
 }
 
 // -------------------------------------------------------------------- drain

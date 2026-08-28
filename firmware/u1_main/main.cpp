@@ -156,12 +156,14 @@ std::uint32_t g_worst_pass_us = 0;
 /// The definitions point into the step pool inside StoredProfiles, which this
 /// rewrites.
 ///
-/// Runs on Core 1 and nowhere else, and only after the scheduler has been
+/// Runs on Core 1 once that core is up, and only after the scheduler has been
 /// stopped and drained - by swap_profile, or by the release_all that starts
-/// adopt_configuration below. Nothing is mid-macro reading what this replaces,
-/// and no other core is inside these structures: Core 0 asks for a
-/// configuration change and waits to be told it happened rather than reaching
-/// in and making it.
+/// adopt_configuration below. Core 0 reaches it only through
+/// hand_configuration_to_core1's !core1_running() branch, which is before the
+/// second core exists and therefore has nobody to race. Nothing is mid-macro
+/// reading what this replaces, and no other core is inside these structures:
+/// once Core 1 is running, Core 0 asks for a configuration change and waits to
+/// be told it happened rather than reaching in and making it.
 void install_macros(std::uint8_t profile) {
     // Static: Core 1 has a two-kilobyte stack and the binding table sits below
     // this on the same path.
@@ -893,6 +895,14 @@ int main() {
             state.endpoint_release_ms = link.status().endpoint_release_ms;
             config.set_link_state(state);
         }
+
+        // Published every pass for the same reason, and after the drain that
+        // decides it: dropped_commands says input was lost at some point,
+        // this says the queue is overflowing right now. The runtime clears it
+        // itself once a pass goes by with nothing refused, so what the host
+        // reads is a live condition rather than a latch.
+        config.set_runtime_fault(g_outputs.fault());
+
         show_link(link.status().answered);
 
 

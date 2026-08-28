@@ -65,7 +65,13 @@ public:
 
     bool empty() const { return size() == 0; }
 
-    /// Throw everything away. Only safe when the producer is stopped.
+    /// Throw away everything the consumer can currently see.
+    ///
+    /// The consumer's call, and only the consumer's: it writes the index the
+    /// consumer already owns. The producer may be pushing at the same time,
+    /// and anything it pushes after the head read here survives - which is the
+    /// point, since the consumer is discarding what went before, not stopping
+    /// the other core.
     void clear() {
         tail_.store(head_.load(std::memory_order_acquire), std::memory_order_release);
     }

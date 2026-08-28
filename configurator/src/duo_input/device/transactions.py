@@ -34,6 +34,7 @@ _DIAGNOSTICS = struct.Struct("<BIIIII")
 _LINK_STATE = struct.Struct("<BBIII")
 _ENDPOINT_REPORT = struct.Struct("<BH")
 _DROPPED_COMMANDS = struct.Struct("<I")
+_RUNTIME_FAULT = struct.Struct("<B")
 _CHUNK_ACK = struct.Struct("<BI")
 _CAPTURE_EVENT = struct.Struct("<BBB")
 
@@ -141,6 +142,13 @@ class DeviceDiagnostics:
     # computer it was for, so what is held there no longer matches what the
     # operator did. There is no other outward sign of it.
     dropped_commands: int | None = None
+
+    # What U1's output runtime is doing about its queue at this instant. Zero
+    # is no fault; 1 is a queue that is refusing commands now. The counter
+    # above is cumulative and never goes down, so it cannot distinguish a burst
+    # that has passed from one that is still going on. ``None`` when the
+    # firmware predates the field.
+    runtime_fault: int | None = None
 
 
 @dataclass(frozen=True)
@@ -280,10 +288,16 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
         raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
     drops, release_ms = _ENDPOINT_REPORT.unpack(endpoint) if endpoint else (None, None)
 
-    dropped = rest[_LINK_STATE.size + _ENDPOINT_REPORT.size :]
+    tail = rest[_LINK_STATE.size + _ENDPOINT_REPORT.size :]
+    dropped = tail[: _DROPPED_COMMANDS.size]
     if dropped and len(dropped) != _DROPPED_COMMANDS.size:
         raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
     (dropped_commands,) = _DROPPED_COMMANDS.unpack(dropped) if dropped else (None,)
+
+    fault = tail[_DROPPED_COMMANDS.size :]
+    if fault and len(fault) != _RUNTIME_FAULT.size:
+        raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
+    (runtime_fault,) = _RUNTIME_FAULT.unpack(fault) if fault else (None,)
 
     return DeviceDiagnostics(
         bad_crc,
@@ -299,6 +313,7 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
         endpoint_drops=drops,
         endpoint_release_ms=release_ms,
         dropped_commands=dropped_commands,
+        runtime_fault=runtime_fault,
     )
 
 

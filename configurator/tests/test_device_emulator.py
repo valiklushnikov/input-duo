@@ -467,9 +467,11 @@ def test_diagnostics_count_crc_disconnect_timeout_bad_sequence_and_aborts(config
         + struct.pack("<IIIII", 1, 1, 1, 1, 1)
         + struct.pack("<BBIII", 1, 1, 0, 0, 0)
         + struct.pack("<BH", 0, 0)
-        # Commands U1's input core could not hand to its output core. Appended
-        # last, after everything an older host already knew how to read.
+        # Commands U1's input core could not hand to its output core, then
+        # what its output runtime is doing about that queue right now. Both
+        # appended after everything an older host already knew how to read.
         + struct.pack("<I", 0)
+        + struct.pack("<B", 0)
     )
 
 
