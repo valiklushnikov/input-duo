@@ -511,7 +511,7 @@ int main() {
             // Zeroed, because what is sent is measured from what was
             // written - and anything past that in an uninitialised
             // buffer goes out as part of the message.
-            char text[480] = {};
+            char text[900] = {};
             int used = 0;
             const char* names[2] = {"keyboard", "mouse"};
             for (int index = 0; index < 2 && used < static_cast<int>(sizeof(text)) - 1; ++index) {
@@ -527,6 +527,7 @@ int main() {
                     "  setup attempts=%u last=0x%02X (%s) polls=%u\n"
                     "  found=%s endpoint=%u packet=%u boot=%s parse=%u\n"
                     "  last report (%u bytes): %02X %02X %02X %02X\n"
+                    "  port=%u baud, refused_changes=%u\n"
                     "  slowest pass round the loop=%u us\n",
                     names[index], state < 7 ? kStates[state] : "?",
                     device.device_is_low_speed() ? "low" : "full", tally.attached, tally.detached,
@@ -549,7 +550,8 @@ int main() {
                     setups[index]->boot_protocol() ? "yes" : "no",
                     static_cast<unsigned>(setups[index]->last_parse_error()),
                     tally.last_size, tally.last[0], tally.last[1], tally.last[2], tally.last[3],
-                    worst_pass_us);
+                    (index == 0 ? keyboard_port : mouse_port).baud(),
+                    device.baud_change_failures(), worst_pass_us);
                 // snprintf answers with how much it *would* have written. Left
                 // unclamped, the next call is handed a negative amount of room
                 // and the total runs past the end of the buffer.

@@ -51,6 +51,10 @@ public:
     /// to make the change, during which it says nothing at either rate.
     bool set_baud(unsigned baud) override;
 
+    /// What rate this side is set to. Reported so that a port and a chip
+    /// that have drifted apart can be seen rather than guessed at.
+    unsigned baud() const { return baud_; }
+
     /// Change only the receiver rate while transmission remains at 9600.
     ///
     /// Bring-up uses this to ask the same known question at the documented

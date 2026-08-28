@@ -175,6 +175,14 @@ enum class DescriptorType : std::uint8_t {
     Configuration = 2,
 };
 
+/// The byte CHECK_EXIST is asked with when the port itself is in question.
+///
+/// Any value works - the chip answers the inverse of whatever it is given
+/// (DS1 5.5) - but one with alternating bits fails loudly on a port that is
+/// sampling at the wrong rate, where a byte of all ones or all zeroes can
+/// survive the mistake and look like an answer.
+inline constexpr std::uint8_t kPortProbeByte = 0xA5;
+
 /// The rate a CH375 comes up at, and returns to after RESET_ALL (DS1 5.2).
 inline constexpr unsigned kCh375DefaultBaud = 9600;
 

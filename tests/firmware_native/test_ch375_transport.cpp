@@ -340,3 +340,29 @@ TEST_CASE(a_chip_that_refuses_the_new_speed_is_not_treated_as_agreeing) {
 
     CHECK(!transport.set_baud_rate(0x03, 0xCC, 115200));
 }
+
+
+TEST_CASE(a_chip_whose_answer_was_lost_is_found_at_the_new_rate) {
+    // It did change rate; only its one-byte answer went missing. Dropping back
+    // to the old rate here would leave a chip that is working and unreachable,
+    // which costs somebody a trip to the board to pull its power.
+    ScriptedCh375 port({expect_command(Ch375Command::SetBaudRate), expect_data(0x03),
+                        expect_data(0xCC), expect_command(Ch375Command::CheckExist),
+                        expect_data(0xA5), reply(0x5A)});
+    Ch375Transport transport(port);
+
+    CHECK(transport.raise_speed(0x03, 0xCC, 115200, 9600));
+    CHECK_EQ(port.baud(), 115200u);
+    CHECK(port.complete());
+}
+
+TEST_CASE(a_chip_that_never_heard_the_command_is_found_at_the_old_rate) {
+    ScriptedCh375 port({expect_command(Ch375Command::SetBaudRate), expect_data(0x03),
+                        expect_data(0xCC), expect_command(Ch375Command::CheckExist),
+                        expect_data(0xA5), expect_command(Ch375Command::CheckExist),
+                        expect_data(0xA5), reply(0x5A)});
+    Ch375Transport transport(port);
+
+    CHECK(!transport.raise_speed(0x03, 0xCC, 115200, 9600));
+    CHECK_EQ(port.baud(), 9600u);
+}

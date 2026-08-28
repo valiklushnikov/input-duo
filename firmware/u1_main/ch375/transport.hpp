@@ -253,7 +253,21 @@ public:
         if (set_baud_rate(coefficient, constant, fast)) {
             return true;
         }
+
+        // No answer at the new rate has two opposite causes. The chip may
+        // never have heard the command, in which case it is still at the old
+        // rate; or it may have changed and had its one-byte answer lost, in
+        // which case it is at the new one. Guessing picks the wrong one half
+        // the time and leaves a chip that looks dead and is not - which costs
+        // somebody a trip to the board to pull its power.
+        //
+        // So ask. CHECK_EXIST is the one command that proves the port itself
+        // works, and it is safe to repeat.
+        if (check_exist(kPortProbeByte)) {
+            return true;
+        }
         io_.set_baud(slow);
+        (void)check_exist(kPortProbeByte);
         return false;
     }
 
