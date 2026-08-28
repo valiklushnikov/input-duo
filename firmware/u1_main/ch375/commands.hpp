@@ -184,6 +184,13 @@ struct BaudOption {
     unsigned baud;
 };
 
+/// How many filler bytes it takes to free a chip that has read noise.
+///
+/// Longer than any command's parameter list because the point is that nobody
+/// knows what it is waiting for. Sixty-four is a whole endpoint buffer and
+/// costs about seventy milliseconds at the rate the chip comes up at.
+inline constexpr std::size_t kWedgeFlushBytes = 64;
+
 /// How many refused mode commands before looking for the chip elsewhere.
 ///
 /// Not every time: the search writes to rates the chip may not be using, which

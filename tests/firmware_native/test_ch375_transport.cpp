@@ -480,3 +480,37 @@ TEST_CASE(a_chip_that_answers_nowhere_leaves_the_port_where_it_belongs) {
     CHECK(!transport.find_chip(9600));
     CHECK_EQ(port.baud(), 9600u);
 }
+
+// ------------------------------------------------ waking a wedged chip
+
+TEST_CASE(a_wedged_chip_is_flushed_with_more_than_any_command_can_want) {
+    ScriptedCh375 port({});
+    port.allow_unscripted();
+    Ch375Transport transport(port);
+
+    transport.flush_command_state();
+
+    // While U1 is being reflashed its pins go high impedance and the chip's
+    // receive line floats. Noise on a floating line is start bits, and the
+    // chip reads bytes out of it - positionally, so it ends up part way
+    // through a command, waiting for parameters that never come. Every
+    // command sent afterwards is swallowed as one of them, including the
+    // reset meant to fix it.
+    //
+    // Four filler bytes is what an ordinary reset sends, and it is enough for
+    // any command this firmware issues. It is not enough for a chip that has
+    // read noise: nobody knows what it thinks it is waiting for.
+    CHECK(port.data_bytes_written() >= 64);
+}
+
+TEST_CASE(flushing_writes_only_data_and_never_a_command) {
+    ScriptedCh375 port({});
+    port.allow_unscripted();
+    Ch375Transport transport(port);
+
+    transport.flush_command_state();
+
+    // A command byte here would be read as one of the parameters being waited
+    // for, which is the very thing being cleared.
+    CHECK_EQ(port.commands_written(), 0);
+}

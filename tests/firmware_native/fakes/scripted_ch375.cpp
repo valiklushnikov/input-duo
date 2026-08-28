@@ -29,6 +29,7 @@ void ScriptedCh375::note(const char* what, std::uint8_t value) {
 }
 
 void ScriptedCh375::write_command(std::uint8_t command) {
+    ++commands_written_;
     if (command == static_cast<std::uint8_t>(Ch375Command::ResetAll)) {
         reset_baud_.push_back(baud_);
     }
@@ -48,6 +49,7 @@ void ScriptedCh375::write_command(std::uint8_t command) {
 }
 
 void ScriptedCh375::write_data(std::uint8_t value) {
+    ++data_written_;
     if (unscripted_) {
         return;
     }

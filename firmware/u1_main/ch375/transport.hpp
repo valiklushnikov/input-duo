@@ -367,6 +367,30 @@ public:
     /// not mean the chip just powered on - a firmware update restarts the
     /// processor and leaves the controller exactly as the last run left it,
     /// including states it will not come out of by itself.
+    /// Feed the chip enough parameters to finish whatever it thinks it began.
+    ///
+    /// While U1 is reflashed or reset its pins go high impedance and the
+    /// chip's receive line floats. Noise on a floating line is start bits, and
+    /// the chip reads bytes out of it. It parses positionally - a command,
+    /// then that command's data bytes - so it ends up part way through
+    /// something, waiting for parameters that never come, and swallows every
+    /// command sent afterwards as one of them. Including the reset meant to
+    /// fix it, which is why only a power cycle has ever brought it back.
+    ///
+    /// Four bytes is enough for any command this firmware issues, and that is
+    /// what an ordinary reset sends. It is not enough for a chip that has read
+    /// noise, because nobody knows what it thinks it is waiting for. This is
+    /// generous instead: at the rate the chip comes up at it costs about
+    /// seventy milliseconds, paid once when a channel is already dead.
+    ///
+    /// Data bytes only. A command byte here would be read as one of the
+    /// parameters being waited for, which is the thing being cleared.
+    void flush_command_state() {
+        for (std::size_t index = 0; index < kWedgeFlushBytes; ++index) {
+            io_.write_data(0x00);
+        }
+    }
+
     void reset_all() {
         // Data bytes first, then the command.
         //

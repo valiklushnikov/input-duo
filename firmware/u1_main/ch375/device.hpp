@@ -230,6 +230,13 @@ public:
     std::uint16_t recover_mode_failures() const { return recover_mode_failures_; }
     std::uint16_t chip_found_elsewhere() const { return chip_found_elsewhere_; }
 
+    /// How often the chip answered CHECK_EXIST while refusing a mode command.
+    ///
+    /// A deaf chip and a chip that will not change mode look identical from
+    /// outside - both are a channel that does nothing - and they want
+    /// completely different repairs.
+    std::uint16_t alive_but_refusing() const { return alive_but_refusing_; }
+
     /// How often the chip would not move to the faster port rate.
     ///
     /// Nonzero means the link is running at 9600, where collecting one mouse
@@ -308,6 +315,7 @@ private:
     std::uint16_t setup_mode_failures_ = 0;
     std::uint16_t recover_mode_failures_ = 0;
     std::uint16_t chip_found_elsewhere_ = 0;
+    std::uint16_t alive_but_refusing_ = 0;
     unsigned port_baud_ = kCh375DefaultBaud;
     std::size_t baud_rung_ = 0;
     bool baud_exhausted_ = false;

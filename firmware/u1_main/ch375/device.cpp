@@ -23,6 +23,14 @@ void Ch375Device::tick(std::uint32_t now_us) {
             // Start from a chip that is definitely idle. Whatever state the
             // last run left it in - including ones it does not leave by itself
             // - is gone after this, and the wait is the price.
+            // A chip that has already refused once is not merely idle: it may
+            // be part way through a command it read out of the noise on a
+            // floating line while this board was being reflashed, in which
+            // case the reset below is swallowed as a parameter like everything
+            // else. Give it enough to finish whatever that was first.
+            if (setup_mode_failures_ != 0) {
+                transport_.flush_command_state();
+            }
             transport_.reset_all();
             transport_.drain_pending_status();
             chip_resetting_ = true;
@@ -64,6 +72,14 @@ void Ch375Device::tick(std::uint32_t now_us) {
             // board that has stopped running - and cost an evening of being
             // read as one.
             ++setup_mode_failures_;
+
+            // Does it answer anything at all? A chip that takes CHECK_EXIST
+            // and refuses a mode is a different fault from one that is deaf,
+            // and the two have looked identical from out here all along: both
+            // are just a channel that does nothing.
+            if (transport_.check_exist(kPortProbeByte)) {
+                ++alive_but_refusing_;
+            }
 
             // A chip that will not take a mode is often not deaf but
             // elsewhere: left at a rate this side abandoned, where nothing is
