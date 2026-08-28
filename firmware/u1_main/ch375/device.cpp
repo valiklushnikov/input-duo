@@ -47,6 +47,10 @@ void Ch375Device::tick(std::uint32_t now_us) {
             // and refuses a mode is a different fault from one that is deaf,
             // and the two have looked identical from out here all along: both
             // are just a channel that does nothing.
+            // What it answered, not merely that it refused.
+            mode_reply_ = transport_.last_status_reply();
+            mode_answered_ = transport_.last_status_answered();
+
             if (transport_.check_exist(kPortProbeByte)) {
                 ++alive_but_refusing_;
             }

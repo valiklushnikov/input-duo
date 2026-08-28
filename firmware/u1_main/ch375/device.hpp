@@ -256,6 +256,11 @@ public:
     /// else means it was talking the whole time and this side was listening
     /// at the wrong speed, which is a fault in here and not on the bench.
     unsigned rx_sweep_hit() const { return rx_sweep_hit_; }
+
+    /// The byte the chip answered the refused mode command with, and whether
+    /// it answered at all. Three different faults arrive as one refusal.
+    std::uint8_t mode_reply() const { return mode_reply_; }
+    bool mode_answered() const { return mode_answered_; }
     bool rx_swept() const { return rx_swept_; }
 
     /// How often the chip would not move to the faster port rate.
@@ -342,6 +347,8 @@ private:
     std::uint16_t alive_but_refusing_ = 0;
     bool rx_swept_ = false;
     unsigned rx_sweep_hit_ = 0;
+    std::uint8_t mode_reply_ = 0;
+    bool mode_answered_ = false;
     unsigned port_baud_ = kCh375DefaultBaud;
     std::size_t baud_rung_ = 0;
     bool baud_exhausted_ = false;

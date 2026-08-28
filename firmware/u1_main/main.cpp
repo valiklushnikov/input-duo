@@ -155,6 +155,26 @@ void configure_indicator() {
 
 
 #if DUO_CH375_PROBE
+/// Put a name to the byte a refused mode command came back with.
+///
+/// DS1 5.1 documents exactly two answers to a command that carries a
+/// status: 51H success and 5FH abort. Anything else is not a refusal at
+/// all - it is the port reading somebody else's byte, which is a different
+/// fault with a different repair.
+const char* describe_mode_reply(bool answered, std::uint8_t reply) {
+    if (!answered) {
+        return "no reply - the chip is not listening";
+    }
+    switch (reply) {
+        case 0x51:
+            return "success - refused for another reason";
+        case 0x5F:
+            return "abort - the chip refused the mode";
+        default:
+            return "undocumented - the port is out of step";
+    }
+}
+
 /// Put a name to the byte AUTO_SETUP ended on.
 ///
 /// DS1 5.12: bit 5 marks a failure and the low four bits carry what the device
@@ -529,7 +549,7 @@ int main() {
                     "  last report (%u bytes): %02X %02X %02X %02X\n"
                     "  port=%u baud, refused_changes=%u\n"
                     "  mode_refused setup=%u recover=%u  found_elsewhere=%u alive_refusing=%u\n"
-                    "  rx_sweep=%s hit=%u\n"
+                    "  mode_reply=%s 0x%02X (%s)\n"
                     "  slowest pass round the loop=%u us\n",
                     names[index], state < 7 ? kStates[state] : "?",
                     device.device_is_low_speed() ? "low" : "full", tally.attached, tally.detached,
@@ -556,8 +576,8 @@ int main() {
                     device.baud_change_failures(), device.setup_mode_failures(),
                     device.recover_mode_failures(), device.chip_found_elsewhere(),
                     device.alive_but_refusing(),
-                    device.rx_swept() ? "done" : "not run",
-                    device.rx_sweep_hit(),
+                    device.mode_answered() ? "answered" : "silent", device.mode_reply(),
+                    describe_mode_reply(device.mode_answered(), device.mode_reply()),
                     worst_pass_us);
                 // snprintf answers with how much it *would* have written. Left
                 // unclamped, the next call is handed a negative amount of room

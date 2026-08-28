@@ -108,6 +108,15 @@ public:
         return command_with_status(Ch375Command::SetUsbMode, static_cast<std::uint8_t>(mode));
     }
 
+    /// What the chip actually answered the last status-bearing command with,
+    /// and whether it answered at all.
+    ///
+    /// A chip that says 5FH is refusing; one that says nothing is not
+    /// listening; one that says some third byte has a port out of step. All
+    /// three arrive as false, and they want three different repairs.
+    std::uint8_t last_status_reply() const { return last_status_reply_; }
+    bool last_status_answered() const { return last_status_answered_; }
+
     /// DS2 1.3. Decide what happens when a device answers NAK.
     bool set_retry(std::uint8_t policy) {
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::SetRetry));
@@ -608,13 +617,24 @@ private:
 
         std::uint8_t answer = 0;
         if (!read_reply(answer)) {
+            last_status_reply_ = 0;
+            last_status_answered_ = false;
             return false;
         }
+        // Kept, because "it refused" and "it said 5FH" are different facts and
+        // only one of them can be acted on. A boolean here threw away the only
+        // byte that says which refusal this is, and left the choice between
+        // three repairs to guesswork.
+        last_status_reply_ = answer;
+        last_status_answered_ = true;
         // 51H and 5FH are the whole documented set. Anything else means the
         // port has lost step, and calling that success would let a
         // desynchronised chip pass for a working one.
         return answer == static_cast<std::uint8_t>(CommandStatus::Success);
     }
+
+    std::uint8_t last_status_reply_ = 0;
+    bool last_status_answered_ = false;
 
     ICh375Transport& io_;
     std::uint32_t reply_timeout_us_ = kDefaultReplyTimeoutUs;
