@@ -310,6 +310,29 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 // held forever otherwise: releasing a key nobody pressed is a
                 // nuisance, and holding one nobody can release is not.
                 ++detach_from_lost_;
+
+                // A rate that shook hands and then dropped the link is not a
+                // rate this channel has. Two CHECK_EXIST replies prove the
+                // divider; they say nothing about whether the wire holds up
+                // under seventeen hundred transactions, and on this bench it
+                // did not - it ran, then fell over, and every fall costs the
+                // operator a peripheral that goes dark and comes back.
+                //
+                // So the ladder is walked by what actually survives, not by
+                // what answers once. Down a rung on every collapse, and off
+                // the ladder entirely at the bottom: a link that keeps its
+                // speed and keeps dropping is worse than a slower one that
+                // does not.
+                if (raised_baud_ != kCh375DefaultBaud) {
+                    ++collapses_while_raised_;
+                    if (baud_rung_ + 1 < kBaudLadderSize) {
+                        ++baud_rung_;
+                    } else {
+                        baud_exhausted_ = true;
+                    }
+                    raised_baud_ = kCh375DefaultBaud;
+                }
+
                 handle_detach(now_us);
                 fail(now_us);
                 chip_ready_ = false;

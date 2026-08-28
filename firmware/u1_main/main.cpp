@@ -549,7 +549,8 @@ int main() {
                     "  last report (%u bytes): %02X %02X %02X %02X\n"
                     "  port=%u baud, refused_changes=%u\n"
                     "  mode_refused setup=%u recover=%u  found_elsewhere=%u alive_refusing=%u\n"
-                    "  not_back_yet=%u recovered_raised=%u quiet_rearms=%u  mode_reply=%s 0x%02X (%s)\n"
+                    "  not_back_yet=%u recovered_raised=%u quiet_rearms=%u collapses=%u\n"
+                    "  mode_reply=%s 0x%02X (%s)\n"
                     "  slowest pass round the loop=%u us\n",
                     names[index], state < 7 ? kStates[state] : "?",
                     device.device_is_low_speed() ? "low" : "full", tally.attached, tally.detached,
@@ -577,7 +578,7 @@ int main() {
                     device.recover_mode_failures(), device.chip_found_elsewhere(),
                     device.alive_but_refusing(),
                     device.chip_not_back_yet(), device.chip_recovered_from_raised(),
-                    device.quiet_rearms(),
+                    device.quiet_rearms(), device.collapses_while_raised(),
                     device.mode_answered() ? "answered" : "silent", device.mode_reply(),
                     describe_mode_reply(device.mode_answered(), device.mode_reply()),
                     worst_pass_us);
