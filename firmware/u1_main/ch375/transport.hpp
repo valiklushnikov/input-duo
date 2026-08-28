@@ -298,6 +298,50 @@ public:
         return slow;
     }
 
+    /// Find a chip that has stopped answering, and bring it home.
+    ///
+    /// A chip left at a rate this side abandoned answers nothing where it is
+    /// expected, and until now the only cure was somebody walking to the board
+    /// and pulling its power - which is what this project has been doing for
+    /// weeks. It is reachable; nobody was asking in the right place.
+    ///
+    /// Only CHECK_EXIST is used to look, because it is one command and one
+    /// data byte and it proves the port by construction (DS1 5.5). After a
+    /// rate that did not answer, four filler bytes go out to satisfy whatever
+    /// half-heard command the chip may be sitting on: it reads commands
+    /// positionally, so a swallowed parameter puts every later byte out of
+    /// step - which is how it got lost in the first place.
+    ///
+    /// Returns true if it was found, with the port back at ``home``.
+    bool find_chip(unsigned home) {
+        unsigned rates[1 + kBaudLadderSize];
+        rates[0] = home;
+        for (std::size_t index = 0; index < kBaudLadderSize; ++index) {
+            rates[index + 1] = kBaudLadder[index].baud;
+        }
+
+        for (std::size_t index = 0; index < 1 + kBaudLadderSize; ++index) {
+            if (!io_.set_baud(rates[index])) {
+                continue;
+            }
+            if (port_answers(kPortProofRounds)) {
+                if (rates[index] != home) {
+                    // Found somewhere it should not be. Tell it to reset while
+                    // it can still hear, then come home with it.
+                    reset_all();
+                    io_.set_baud(home);
+                }
+                return true;
+            }
+            for (int filler = 0; filler < 4; ++filler) {
+                io_.write_data(0x00);
+            }
+        }
+
+        io_.set_baud(home);
+        return false;
+    }
+
     /// DS1 5.10. Ask whether a device is attached, rather than waiting to be
     /// told.
     ///

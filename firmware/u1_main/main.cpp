@@ -528,6 +528,7 @@ int main() {
                     "  found=%s endpoint=%u packet=%u boot=%s parse=%u\n"
                     "  last report (%u bytes): %02X %02X %02X %02X\n"
                     "  port=%u baud, refused_changes=%u\n"
+                    "  mode_refused setup=%u recover=%u  chip_found_elsewhere=%u\n"
                     "  slowest pass round the loop=%u us\n",
                     names[index], state < 7 ? kStates[state] : "?",
                     device.device_is_low_speed() ? "low" : "full", tally.attached, tally.detached,
@@ -551,7 +552,9 @@ int main() {
                     static_cast<unsigned>(setups[index]->last_parse_error()),
                     tally.last_size, tally.last[0], tally.last[1], tally.last[2], tally.last[3],
                     (index == 0 ? keyboard_port : mouse_port).baud(),
-                    device.baud_change_failures(), worst_pass_us);
+                    device.baud_change_failures(), device.setup_mode_failures(),
+                    device.recover_mode_failures(), device.chip_found_elsewhere(),
+                    worst_pass_us);
                 // snprintf answers with how much it *would* have written. Left
                 // unclamped, the next call is handed a negative amount of room
                 // and the total runs past the end of the buffer.

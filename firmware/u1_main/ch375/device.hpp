@@ -220,6 +220,16 @@ public:
     std::uint16_t detach_from_lost() const { return detach_from_lost_; }
     std::uint16_t enumerate_failures() const { return enumerate_failures_; }
 
+    /// How often the two mode commands were refused, and how often the chip
+    /// turned out to be alive at some other rate.
+    ///
+    /// Both mode failures used to be silent. A channel could spin between them
+    /// for hours with every reading frozen, which is indistinguishable from a
+    /// board that has stopped running, and was read as one.
+    std::uint16_t setup_mode_failures() const { return setup_mode_failures_; }
+    std::uint16_t recover_mode_failures() const { return recover_mode_failures_; }
+    std::uint16_t chip_found_elsewhere() const { return chip_found_elsewhere_; }
+
     /// How often the chip would not move to the faster port rate.
     ///
     /// Nonzero means the link is running at 9600, where collecting one mouse
@@ -295,6 +305,9 @@ private:
     std::uint16_t detach_from_lost_ = 0;
     std::uint16_t enumerate_failures_ = 0;
     std::uint16_t baud_change_failures_ = 0;
+    std::uint16_t setup_mode_failures_ = 0;
+    std::uint16_t recover_mode_failures_ = 0;
+    std::uint16_t chip_found_elsewhere_ = 0;
     unsigned port_baud_ = kCh375DefaultBaud;
     std::size_t baud_rung_ = 0;
     bool baud_exhausted_ = false;

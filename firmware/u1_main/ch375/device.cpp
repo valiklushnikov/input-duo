@@ -59,6 +59,21 @@ void Ch375Device::tick(std::uint32_t now_us) {
         // Mode 5 is where DS1 5.9 says to wait: enabled, generating no frames,
         // watching for a device by itself.
         if (!transport_.set_usb_mode(UsbMode::HostNoSof)) {
+            // Counted. Without this the channel can spin here forever with
+            // every reading frozen, which looks from outside exactly like a
+            // board that has stopped running - and cost an evening of being
+            // read as one.
+            ++setup_mode_failures_;
+
+            // A chip that will not take a mode is often not deaf but
+            // elsewhere: left at a rate this side abandoned, where nothing is
+            // asking. Look for it before giving up, since the alternative is
+            // somebody walking to the board to pull its power.
+            if (setup_mode_failures_ % kLostChipSearchEvery == 0) {
+                if (transport_.find_chip(kCh375DefaultBaud)) {
+                    ++chip_found_elsewhere_;
+                }
+            }
             fail(now_us);
             return;
         }
@@ -262,6 +277,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 // Still unhappy. Wait out another delay rather than spinning,
                 // and go back through chip setup: a controller this broken may
                 // have lost its mode entirely.
+                ++recover_mode_failures_;
                 chip_ready_ = false;
                 entered_us_ = now_us;
                 return;

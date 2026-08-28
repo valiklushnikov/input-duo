@@ -81,6 +81,9 @@ public:
     /// Stand in for a port with a fixed rate.
     void refuse_baud_changes() { refuse_baud_ = true; }
 
+    /// Accept anything and answer nothing - a chip that is simply not there.
+    void allow_unscripted() { unscripted_ = true; }
+
     /// Was a chip reset sent while the port was at this rate?
     ///
     /// The question that matters when a rate is abandoned: a chip that moved
@@ -120,6 +123,7 @@ private:
     std::string violations_;
     unsigned baud_ = kScriptedDefaultBaud;
     bool refuse_baud_ = false;
+    bool unscripted_ = false;
     std::vector<unsigned> reset_baud_;
     int baud_changes_ = 0;
     bool int_asserted_ = false;

@@ -437,3 +437,46 @@ TEST_CASE(the_ladder_ends_at_a_rate_worth_having) {
         duo_input::u1::ch375::kBaudLadder[duo_input::u1::ch375::kBaudLadderSize - 1];
     CHECK(last.baud >= 20000u);
 }
+
+// --------------------------------------------------- finding a lost chip
+
+TEST_CASE(a_chip_at_the_default_rate_is_found_without_touching_anything) {
+    ScriptedCh375 port({expect_command(Ch375Command::CheckExist), expect_data(0xA5), reply(0x5A),
+                        expect_command(Ch375Command::CheckExist), expect_data(0x5A), reply(0xA5)});
+    Ch375Transport transport(port);
+
+    CHECK(transport.find_chip(9600));
+    CHECK_EQ(port.baud(), 9600u);
+    CHECK(!port.saw_reset_at(9600));
+    CHECK(port.complete());
+}
+
+TEST_CASE(a_chip_stranded_at_a_raised_rate_is_found_and_brought_back) {
+    // The whole point. A chip left at a rate this side abandoned answers
+    // nothing at the default, and today the only cure is somebody walking to
+    // the board to pull its power.
+    ScriptedCh375 port({// Nothing at the rate it should be at.
+                        expect_command(Ch375Command::CheckExist), expect_data(0xA5),
+                        // Satisfy whatever it half-heard before moving on.
+                        expect_data(0x00), expect_data(0x00), expect_data(0x00), expect_data(0x00),
+                        // There it is.
+                        expect_command(Ch375Command::CheckExist), expect_data(0xA5), reply(0x5A),
+                        expect_command(Ch375Command::CheckExist), expect_data(0x5A), reply(0xA5),
+                        // Reset it where it can hear, then come home.
+                        expect_data(0x00), expect_data(0x00), expect_data(0x00), expect_data(0x00),
+                        expect_command(Ch375Command::ResetAll)});
+    Ch375Transport transport(port);
+
+    CHECK(transport.find_chip(9600));
+    CHECK(port.saw_reset_at(115200));
+    CHECK_EQ(port.baud(), 9600u);
+}
+
+TEST_CASE(a_chip_that_answers_nowhere_leaves_the_port_where_it_belongs) {
+    ScriptedCh375 port({});
+    port.allow_unscripted();
+    Ch375Transport transport(port);
+
+    CHECK(!transport.find_chip(9600));
+    CHECK_EQ(port.baud(), 9600u);
+}

@@ -184,6 +184,14 @@ struct BaudOption {
     unsigned baud;
 };
 
+/// How many refused mode commands before looking for the chip elsewhere.
+///
+/// Not every time: the search writes to rates the chip may not be using, which
+/// is exactly what must not be done casually. But a channel that has refused
+/// this many in a row is already unreachable, and looking cannot make it more
+/// so.
+inline constexpr std::uint16_t kLostChipSearchEvery = 8;
+
 /// How many times a rate has to answer before it is believed.
 inline constexpr int kPortProofRounds = 2;
 

@@ -32,6 +32,9 @@ void ScriptedCh375::write_command(std::uint8_t command) {
     if (command == static_cast<std::uint8_t>(Ch375Command::ResetAll)) {
         reset_baud_.push_back(baud_);
     }
+    if (unscripted_) {
+        return;
+    }
     if (next_ >= script_.size()) {
         note("unexpected command past the end of the script:", command);
         return;
@@ -45,6 +48,9 @@ void ScriptedCh375::write_command(std::uint8_t command) {
 }
 
 void ScriptedCh375::write_data(std::uint8_t value) {
+    if (unscripted_) {
+        return;
+    }
     if (next_ >= script_.size()) {
         note("unexpected data past the end of the script:", value);
         return;
@@ -58,6 +64,12 @@ void ScriptedCh375::write_data(std::uint8_t value) {
 }
 
 bool ScriptedCh375::read_data(std::uint8_t& value) {
+    if (unscripted_) {
+        // A chip that is not there never answers, and time still passes -
+        // without which every wait for a reply here runs forever.
+        now_us_ += 100;
+        return false;
+    }
     if (next_ < script_.size() && script_[next_].kind == Step::Kind::Reply) {
         value = script_[next_].value;
         ++next_;
