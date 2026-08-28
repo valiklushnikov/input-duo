@@ -129,6 +129,7 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
             queue(pending_status_);
             // Reading the status is what clears the request - DS1 5.12.
             int_asserted_ = false;
+            token_pending_ = false;
             pending_status_ = 0;
             break;
 
@@ -228,10 +229,16 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
 
         case Ch375Command::IssueToken:
             // A real device answers a poll with an interrupt, whether or not
-            // it had anything to say.
+            // it had anything to say - but not instantly.
+            ++tokens_issued_;
             pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Success);
-            int_asserted_ = !silent_;
             expecting_data_ = false;
+            if (token_delay_us_ == 0) {
+                int_asserted_ = !silent_;
+            } else {
+                token_pending_ = true;
+                token_ready_us_ = now_us_ + token_delay_us_;
+            }
             break;
 
         case Ch375Command::SetRetry:
@@ -312,6 +319,10 @@ bool FakeCh375Chip::int_asserted() const {
     constexpr std::uint32_t kAutoSetupUs = 3000;
     if (auto_setup_running_ && now_us_ - auto_setup_at_us_ < kAutoSetupUs) {
         return false;
+    }
+    if (token_pending_) {
+        // The transaction is still running on the bus.
+        return !silent_ && static_cast<std::int32_t>(now_us_ - token_ready_us_) >= 0;
     }
     return int_asserted_;
 }

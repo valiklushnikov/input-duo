@@ -143,6 +143,15 @@ inline constexpr std::uint32_t kRecoverDelayUs = 1000000;
 /// host, and faster gains nothing a person can feel.
 inline constexpr std::uint32_t kReportPollUs = 8000;
 
+/// How long to wait for the answer to a token before assuming it was lost.
+///
+/// A USB interrupt transaction and the controller's work around it are well
+/// under a millisecond; this is generous by two orders of magnitude, because
+/// its only job is to stop a dropped interrupt from silencing the device for
+/// good. It has to stay well below kDeviceLostUs, or polling would resume
+/// only after the device had already been given up on.
+inline constexpr std::uint32_t kTokenAnswerUs = 100000;
+
 /// How long a working device may go without its controller answering.
 ///
 /// A controller that stops answering while a device is up is the dangerous
@@ -296,6 +305,9 @@ private:
     bool announced_ready_ = false;
     std::uint32_t entered_us_ = 0;
     std::uint32_t last_poll_us_ = 0;
+    /// A token has been issued and its interrupt has not arrived yet.
+    bool token_outstanding_ = false;
+    std::uint32_t token_at_us_ = 0;
     std::uint32_t last_connect_poll_us_ = 0;
     std::uint32_t last_answer_us_ = 0;
     std::uint8_t endpoint_ = 0;

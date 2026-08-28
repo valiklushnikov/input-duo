@@ -561,3 +561,53 @@ TEST_CASE(a_disconnect_while_the_bus_is_still_coming_up_is_not_an_unplug) {
 
     CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
 }
+
+// -------------------------------------------------- one token at a time
+
+TEST_CASE(a_second_token_waits_for_the_first_to_be_answered) {
+    // A controller runs a real USB transaction when it is given a token and
+    // raises its interrupt when that finishes. Firing the next one on a timer
+    // regardless means talking over an answer that has not arrived - on the
+    // bench, a hundred and twenty-five tokens produced seven interrupts.
+    Rig rig;
+    rig.chip.attach_device();
+    rig.run(300000);
+    rig.chip.answer_tokens_after(30000);
+    const int before = rig.chip.tokens_issued();
+
+    rig.run(300000);
+
+    // Three hundred milliseconds at thirty per answer is about ten tokens.
+    // On an eight-millisecond timer with no regard for the answer it is
+    // nearer forty.
+    const int issued = rig.chip.tokens_issued() - before;
+    CHECK(issued <= 14);
+}
+
+TEST_CASE(polling_still_happens_when_it_is_paced_by_the_answers) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.run(300000);
+    rig.chip.answer_tokens_after(30000);
+    const int before = rig.chip.tokens_issued();
+
+    rig.run(300000);
+
+    CHECK(rig.chip.tokens_issued() - before >= 4);
+}
+
+TEST_CASE(a_token_whose_answer_never_comes_does_not_stop_the_polling_forever) {
+    // Waiting for an answer cannot mean waiting for one that was lost. A
+    // controller that drops an interrupt would otherwise leave the device
+    // unpolled for good, which reads as a mouse that simply stopped.
+    Rig rig;
+    rig.chip.attach_device();
+    rig.run(300000);
+    // Long enough that no answer is ever ready inside this test.
+    rig.chip.answer_tokens_after(60000000);
+    const int before = rig.chip.tokens_issued();
+
+    rig.run(500000);
+
+    CHECK(rig.chip.tokens_issued() > before);
+}

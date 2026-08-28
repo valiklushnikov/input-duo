@@ -233,6 +233,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
             transport_.set_receive_toggle(kToggleData0);
             enter(Ch375State::Ready, now_us);
             last_answer_us_ = now_us;
+            token_outstanding_ = false;
             if (!announced_ready_) {
                 // Once per device, not once per attempt: a controller that
                 // needed three tries still produced one working keyboard, and
@@ -247,6 +248,9 @@ void Ch375Device::tick(std::uint32_t now_us) {
         case Ch375State::Ready: {
             if (interrupted) {
                 last_answer_us_ = now_us;
+                // The transaction this token started has finished, whatever it
+                // came to.
+                token_outstanding_ = false;
             } else if (now_us - last_answer_us_ >= kDeviceLostUs) {
                 // The controller has gone quiet with a device configured. Its
                 // reports cannot be read and its disconnection cannot be
@@ -275,7 +279,24 @@ void Ch375Device::tick(std::uint32_t now_us) {
             if (now_us - last_poll_us_ < kReportPollUs) {
                 return;
             }
+            // One token at a time. Giving the controller another before it has
+            // answered the last is talking over it: it is running a real USB
+            // transaction and raises its interrupt when that finishes, so a
+            // token fired on a timer regardless lands in the middle of one.
+            // On the bench that was a hundred and twenty-five tokens producing
+            // seven interrupts, and then a device declared lost for the
+            // silence they were causing.
+            //
+            // Unless the answer is simply not coming. Waiting for a lost
+            // interrupt for ever would leave the device unpolled for good,
+            // which looks like a mouse that stopped rather than a link that
+            // dropped one reply.
+            if (token_outstanding_ && now_us - token_at_us_ < kTokenAnswerUs) {
+                return;
+            }
             last_poll_us_ = now_us;
+            token_outstanding_ = true;
+            token_at_us_ = now_us;
             // Ask the device whether it has anything. The answer arrives as an
             // interrupt, which the next tick picks up - nothing waits here.
             ++polls_issued_;

@@ -181,6 +181,16 @@ public:
     /// Refuse everything after this many control transfers have succeeded.
     void stall_after(int transfers) { stall_after_ = transfers; }
 
+    /// How long this chip takes to answer a token.
+    ///
+    /// A real controller runs a USB transaction and raises its interrupt when
+    /// it is done; it is not instant, and a host that assumes it is will issue
+    /// the next token into a chip still working on the last one.
+    void answer_tokens_after(std::uint32_t micros) { token_delay_us_ = micros; }
+
+    /// How many IN tokens have been issued to this chip.
+    int tokens_issued() const { return tokens_issued_; }
+
     std::uint8_t device_address() const { return device_address_; }
     std::uint8_t host_address() const { return host_address_; }
     std::uint8_t configuration_value() const { return configuration_value_; }
@@ -269,6 +279,10 @@ private:
     std::uint8_t configuration_value_ = 0;
     bool order_ok_ = true;
     int stall_after_ = -1;
+    std::uint32_t token_delay_us_ = 0;
+    std::uint32_t token_ready_us_ = 0;
+    bool token_pending_ = false;
+    int tokens_issued_ = 0;
     int transfers_done_ = 0;
     /// What the next RD_USB_DATA0 will hand back.
     std::vector<std::uint8_t> pending_read_;
