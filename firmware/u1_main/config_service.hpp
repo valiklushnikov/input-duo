@@ -60,6 +60,12 @@ struct CdcDiagnostics {
     std::uint32_t timeout = 0;
     std::uint32_t bad_sequence = 0;
     std::uint32_t aborted_staging = 0;
+    /// How many times the host has asked for everything to be let go of.
+    ///
+    /// GET_STATUS carries this, not aborted_staging: a host watching the
+    /// safety command needs to know it landed, and the number of abandoned
+    /// writes is a different question that GET_DIAGNOSTICS already answers.
+    std::uint32_t release_all_count = 0;
 };
 
 /// Where a reply goes. The USB service supplies one.

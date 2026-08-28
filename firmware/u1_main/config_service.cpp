@@ -292,7 +292,11 @@ std::size_t ConfigService::status_payload(CdcError error, std::uint8_t* out) con
     out[1] = active_profile_;
     out[2] = capture_active_ ? 1 : 0;
     out[3] = store_.staging() ? 1 : 0;
-    put_u32(out + 4, diagnostics_.aborted_staging);
+    // release_all_count, which is what compatibility.md, the emulator and the
+    // host's DeviceStatus all say this field is. aborted_staging used to sit
+    // here: the same width, so nothing anywhere errored - the host simply read
+    // a different number under the right name.
+    put_u32(out + 4, diagnostics_.release_all_count);
     return 8;
 }
 
@@ -688,11 +692,23 @@ void ConfigService::dispatch(const CdcFrame& frame) {
         }
         case CdcMessageType::STOP_AND_RELEASE_ALL: {
             release_all_requested_ = true;
-            if (capture_active_) {
+            ++diagnostics_.release_all_count;
+            if (capture_active_ || capture_request_ == CaptureRequest::Begin) {
                 // The way out of anything, including a question the operator
                 // can no longer answer.
                 capture_active_ = false;
                 capture_request_ = CaptureRequest::Cancel;
+            }
+            if (store_.staging()) {
+                // The way out of anything includes a write nobody is going to
+                // finish. compatibility.md says this clears staging state and
+                // the emulator has always done so; the firmware did not, so a
+                // configurator that used the safety command to get unstuck was
+                // still answered Busy by hardware and Ok by the emulator the
+                // host's tests run against. Nothing is at risk: the staged
+                // slot has no header, so it is already nothing.
+                store_.abort();
+                ++diagnostics_.aborted_staging;
             }
             payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
             reply(frame.type, frame.sequence, payload, 1);

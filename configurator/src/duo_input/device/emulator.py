@@ -339,6 +339,15 @@ class U1Emulator(AbstractByteTransport):
             # keys. The firmware ends it here; so does this.
             self._capture_active = False
             self._capture_event = None
+            # And a write the previous owner abandoned. Closing a serial port
+            # does not unmount USB, so a configurator that quit mid-write
+            # leaves the transaction open; a new session cannot continue
+            # someone else's write, and leaving it standing means answering
+            # BUSY to every later WRITE_BEGIN until the device is unplugged.
+            # The firmware has always done this, and it is the recovery path a
+            # crashed configurator takes - so an emulator that answered BUSY
+            # here could never have caught a regression in it.
+            self._abort_staging()
             if not self._payload_shape_is_valid(frame):
                 return CdcMessageType.DEVICE_INFO, self._device_info_payload(
                     ErrorCode.INVALID_REQUEST, 0
@@ -596,11 +605,17 @@ class U1Emulator(AbstractByteTransport):
         return bytes((ErrorCode.OK,))
 
     def _handle_factory_reset_commit(self, payload: bytes) -> bytes:
-        if not self._factory_reset_armed:
-            return bytes((ErrorCode.BAD_STATE,))
+        # Confirmation first, then the arm - the order the firmware checks them
+        # in, and the order FACTORY_RESET_ARM already answers in. Somebody
+        # being at the device is the precondition; whether a previous request
+        # armed the reset is a detail of this session. Checked the other way
+        # round, a host that had done neither was told BAD_STATE here and
+        # PHYSICAL_CONFIRMATION_REQUIRED by hardware for the same request.
         if not self.physical_confirmation:
             self._factory_reset_armed = False
             return bytes((ErrorCode.PHYSICAL_CONFIRMATION_REQUIRED,))
+        if not self._factory_reset_armed:
+            return bytes((ErrorCode.BAD_STATE,))
         self._slots = {"A": _Slot(), "B": _Slot()}
         self._active_slot = None
         self._staging = None

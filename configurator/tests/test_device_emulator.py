@@ -379,6 +379,24 @@ def test_a_handshake_ends_the_capture_the_previous_session_left_running():
     assert emulator.feed(b"") == b""
 
 
+def test_a_handshake_aborts_a_write_the_previous_session_abandoned(config_b: bytes):
+    emulator = U1Emulator()
+    _hello(emulator, sequence=0xFFFF)
+    assert _error(_request(emulator, CdcMessageType.WRITE_BEGIN, struct.pack("<I", len(config_b)) + hashlib.sha256(config_b).digest(), sequence=0)) is ErrorCode.OK
+    assert emulator.staging_active
+
+    # A new owner of the session. Closing a serial port does not unmount USB,
+    # so the previous session's write is still open; a new session cannot
+    # continue someone else's write, and leaving it standing would answer
+    # Busy to every WRITE_BEGIN this session sends until the device is
+    # unplugged.
+    _hello(emulator, sequence=1)
+
+    assert not emulator.staging_active
+    # The slot is free again: this session can start its own write.
+    assert _error(_request(emulator, CdcMessageType.WRITE_BEGIN, struct.pack("<I", len(config_b)) + hashlib.sha256(config_b).digest())) is ErrorCode.OK
+
+
 def test_a_factory_reset_ends_a_running_capture():
     emulator = U1Emulator()
     emulator.physical_confirmation = True
@@ -436,6 +454,22 @@ def test_factory_reset_requires_confirmation_and_clears_slots_safely(config_a: b
     assert emulator.active_hash == b"\0" * 32
     assert emulator.active_generation == 0
     assert emulator.active_profile == 1
+
+
+def test_factory_reset_commit_checks_confirmation_before_arming(config_a: bytes):
+    emulator = U1Emulator()
+    emulator.install_active(config_a)
+    _hello(emulator)
+
+    # Neither armed nor confirmed. Whether someone is at the device is the
+    # precondition; whether an earlier request armed the reset is a detail of
+    # this session. The firmware checks confirmation first, so a host that
+    # has done neither must see PHYSICAL_CONFIRMATION_REQUIRED here, not
+    # BAD_STATE — the two disagreed on this order until now, so a
+    # configurator that crashed before either step got Ok's precondition
+    # message from hardware and a different one from this emulator.
+    assert _error(_request(emulator, CdcMessageType.FACTORY_RESET_COMMIT)) is ErrorCode.PHYSICAL_CONFIRMATION_REQUIRED
+    assert emulator.active_hash == hashlib.sha256(config_a).digest()
 
 
 def test_diagnostics_count_crc_disconnect_timeout_bad_sequence_and_aborts(config_b: bytes):
