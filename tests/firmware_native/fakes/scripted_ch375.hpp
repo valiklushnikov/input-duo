@@ -79,6 +79,14 @@ public:
         return true;
     }
 
+    /// The rate this chip is answering at, once it has been told to move.
+    ///
+    /// Set by a test to model a chip that took SET_BAUDRATE. A reply is only
+    /// readable when the receiver is at the rate the chip is speaking - which
+    /// is the whole difficulty of that command and was, until this existed,
+    /// the one thing none of its tests could see.
+    void answers_at(unsigned baud) { chip_baud_ = baud; }
+
     /// Stand in for a port with a fixed rate.
     void refuse_baud_changes() { refuse_baud_ = true; }
 
@@ -134,6 +142,7 @@ private:
     std::string violations_;
     unsigned baud_ = kScriptedDefaultBaud;
     unsigned rx_baud_ = kScriptedDefaultBaud;
+    unsigned chip_baud_ = 0;
     bool refuse_baud_ = false;
     bool unscripted_ = false;
     int data_written_ = 0;
@@ -252,6 +261,13 @@ public:
     /// reset_count would sit at zero however many times it was retried.
     std::uint32_t mode_set_count() const { return mode_set_count_; }
 
+    /// How many times the port has been probed for existence.
+    ///
+    /// The first thing a recovery attempt does, and the only thing it does
+    /// when the chip is answering nonsense - so it, not the mode command,
+    /// is what says an attempt happened at all.
+    std::uint32_t check_exist_count() const { return check_exist_count_; }
+
     std::uint32_t command_count() const { return command_count_; }
     void reset_command_count() { command_count_ = 0; }
 
@@ -303,6 +319,7 @@ private:
     std::uint32_t auto_setup_at_us_ = 0;
     std::uint32_t reset_count_ = 0;
     std::uint32_t mode_set_count_ = 0;
+    std::uint32_t check_exist_count_ = 0;
     std::uint32_t command_count_ = 0;
     std::uint32_t now_us_ = 1000;
 };

@@ -34,6 +34,20 @@ void Ch375Device::tick(std::uint32_t now_us) {
         // it before anything can be said at all.
         transport_.reset_port_speed(kCh375DefaultBaud);
 
+        // Nothing is said to the chip until it has said something first.
+        //
+        // CHECK_EXIST is one command and one data byte and it proves the port
+        // by construction (DS1 5.5), so it is the cheapest thing that can be
+        // wrong. A mode command sent to a controller that is still coming back
+        // from its reset is read as part of that restart, and then every byte
+        // after it is out of step - a chip that worked a second ago and now
+        // answers nothing at all.
+        if (!transport_.check_exist(kPortProbeByte)) {
+            ++chip_not_back_yet_;
+            fail(now_us);
+            return;
+        }
+
         // Mode 5 is where DS1 5.9 says to wait: enabled, generating no frames,
         // watching for a device by itself.
         if (!transport_.set_usb_mode(UsbMode::HostNoSof)) {

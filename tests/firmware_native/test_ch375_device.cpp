@@ -246,11 +246,29 @@ TEST_CASE(a_retry_does_start_once_the_wait_is_over) {
     rig.chip.answer_garbage(true);
     rig.chip.attach_device();
     rig.run(300000);
-    const std::uint32_t attempts = rig.chip.mode_set_count();
+    // Counted by the probe, not by the mode command. A chip answering nonsense
+    // never gets as far as a mode command now - that is the point of asking
+    // first - so the mode count would say no attempt was made when one was.
+    const std::uint32_t attempts = rig.chip.check_exist_count();
 
     rig.run(kRecoverDelayUs + 100000);
 
-    CHECK(rig.chip.mode_set_count() > attempts);
+    CHECK(rig.chip.check_exist_count() > attempts);
+}
+
+TEST_CASE(a_chip_answering_nonsense_is_never_sent_a_mode_command) {
+    // The command that wedges a controller for good is one it half-hears
+    // while it is out of step: CH375 reads commands positionally, so a
+    // swallowed byte takes the next command with it. A port that cannot pass
+    // CHECK_EXIST has nothing to say worth risking that on.
+    Rig rig;
+    rig.chip.answer_garbage(true);
+    rig.chip.attach_device();
+
+    rig.run(500000);
+
+    CHECK_EQ(rig.chip.mode_set_count(), 0u);
+    CHECK(rig.chip.check_exist_count() > 0u);
 }
 
 TEST_CASE(a_chip_that_recovers_reaches_ready_after_the_wait) {

@@ -105,6 +105,14 @@ inline constexpr std::uint32_t kBusResetHoldUs = 20000;
 
 /// How long the chip needs after being told to reset itself.
 ///
+/// Four times the datasheet's figure, because the datasheet's figure was not
+/// enough for the module on this bench. The chip worked until the first
+/// RESET_ALL and answered nothing ever after - not refusing, silent - which
+/// is what talking to a controller still coming back looks like: it reads the
+/// command as part of its own restart and every byte after that is out of
+/// step. Waiting costs a quarter second on a path that already waits a full
+/// one; getting it wrong costs a walk to the board.
+///
 /// DS1 5.4 gives about 40 ms, during which it answers nothing at all. Asking
 /// it anything sooner reads as a chip that is not there.
 inline constexpr std::uint32_t kChipResetUs = 60000;
@@ -259,6 +267,13 @@ public:
 
     /// The byte the chip answered the refused mode command with, and whether
     /// it answered at all. Three different faults arrive as one refusal.
+    /// How often the chip had not finished resetting when it was asked.
+    ///
+    /// A number that climbs while the channel eventually works means the wait
+    /// is merely optimistic. One that climbs while nothing works means the
+    /// chip is not coming back at all, which is a different fault.
+    std::uint16_t chip_not_back_yet() const { return chip_not_back_yet_; }
+
     std::uint8_t mode_reply() const { return mode_reply_; }
     bool mode_answered() const { return mode_answered_; }
     bool rx_swept() const { return rx_swept_; }
@@ -347,6 +362,7 @@ private:
     std::uint16_t alive_but_refusing_ = 0;
     bool rx_swept_ = false;
     unsigned rx_sweep_hit_ = 0;
+    std::uint16_t chip_not_back_yet_ = 0;
     std::uint8_t mode_reply_ = 0;
     bool mode_answered_ = false;
     unsigned port_baud_ = kCh375DefaultBaud;

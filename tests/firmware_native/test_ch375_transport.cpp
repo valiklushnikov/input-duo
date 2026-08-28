@@ -345,16 +345,37 @@ TEST_CASE(a_chip_that_refuses_the_new_speed_is_not_treated_as_agreeing) {
 
 // ------------------------------------------------------- the rate ladder
 
-TEST_CASE(a_rate_that_answers_twice_is_kept) {
+TEST_CASE(the_chips_acknowledgement_is_read_at_the_rate_it_is_sent_at) {
+    // The command that moves the chip is answered by a chip that has already
+    // moved: 51H arrives within microseconds of the last stop bit, at the new
+    // rate. A receiver still set to the old one cannot read it, so the change
+    // reports failure on a chip that took it - and everything sent afterwards
+    // goes out at a rate it is no longer listening at, where half-heard bytes
+    // are parsed as opcodes.
     ScriptedCh375 port({expect_command(Ch375Command::SetBaudRate), expect_data(0x03),
                         expect_data(0xCC), reply(0x51),
                         expect_command(Ch375Command::CheckExist), expect_data(0xA5), reply(0x5A),
                         expect_command(Ch375Command::CheckExist), expect_data(0x5A), reply(0xA5)});
+    port.answers_at(115200);
     Ch375Transport transport(port);
     const BaudOption rung{0x03, 0xCC, 115200};
 
     CHECK_EQ(transport.try_speed(rung, 9600), 115200u);
     CHECK(port.complete());
+}
+
+TEST_CASE(the_transmitter_moves_only_once_the_answer_is_in) {
+    ScriptedCh375 port({expect_command(Ch375Command::SetBaudRate), expect_data(0x03),
+                        expect_data(0xCC), reply(0x51)});
+    port.answers_at(115200);
+    Ch375Transport transport(port);
+
+    CHECK(transport.set_baud_rate(0x03, 0xCC, 115200));
+
+    // Both ends end up together. The last frame of the command itself was sent
+    // at the old rate and had to finish at it.
+    CHECK_EQ(port.baud(), 115200u);
+    CHECK_EQ(port.rx_baud(), 115200u);
 }
 
 TEST_CASE(one_good_answer_is_not_enough_to_keep_a_rate) {
@@ -363,25 +384,21 @@ TEST_CASE(one_good_answer_is_not_enough_to_keep_a_rate) {
     ScriptedCh375 port({expect_command(Ch375Command::SetBaudRate), expect_data(0x03),
                         expect_data(0xCC), reply(0x51),
                         expect_command(Ch375Command::CheckExist), expect_data(0xA5), reply(0x5A),
-                        expect_command(Ch375Command::CheckExist), expect_data(0x5A), reply(0x00),
-                        // Back down, and it is there after all.
-                        expect_command(Ch375Command::CheckExist), expect_data(0xA5), reply(0x5A)});
+                        expect_command(Ch375Command::CheckExist), expect_data(0x5A), reply(0x00)});
+    port.answers_at(115200);
     Ch375Transport transport(port);
     const BaudOption rung{0x03, 0xCC, 115200};
 
     CHECK_EQ(transport.try_speed(rung, 9600), 9600u);
     CHECK_EQ(port.baud(), 9600u);
-    CHECK(port.complete());
 }
 
-TEST_CASE(a_chip_that_never_moved_is_not_reset_for_it) {
-    // The command did not take, which is the ordinary failure. The chip is
-    // exactly where it was and there is nothing to undo - and a reset sent to
-    // find that out is the one thing that could break it.
+TEST_CASE(a_failed_rate_change_writes_nothing_to_find_out_why) {
+    // Writing at a rate the chip may not be using is the one operation that
+    // turns a controller which was about to come good into one that answers
+    // nothing at all. Not knowing why is cheaper than that.
     ScriptedCh375 port({expect_command(Ch375Command::SetBaudRate), expect_data(0x03),
-                        expect_data(0xCC),
-                        // Back at the rate it started at, and there it is.
-                        expect_command(Ch375Command::CheckExist), expect_data(0xA5), reply(0x5A)});
+                        expect_data(0xCC)});
     Ch375Transport transport(port);
     const BaudOption rung{0x03, 0xCC, 115200};
 
@@ -391,51 +408,17 @@ TEST_CASE(a_chip_that_never_moved_is_not_reset_for_it) {
     CHECK(port.complete());
 }
 
-TEST_CASE(a_chip_that_did_move_is_reset_where_it_can_hear_it) {
-    // Silent at the old rate and answering at the new one: it really did move,
-    // and this is the only case where a reset is both needed and safe.
+TEST_CASE(a_refused_change_puts_both_ends_back_together) {
     ScriptedCh375 port({expect_command(Ch375Command::SetBaudRate), expect_data(0x03),
-                        expect_data(0xCC), reply(0x51),
-                        expect_command(Ch375Command::CheckExist), expect_data(0xA5), reply(0x5A),
-                        expect_command(Ch375Command::CheckExist), expect_data(0x5A), reply(0x00),
-                        // Nothing at the old rate.
-                        expect_command(Ch375Command::CheckExist), expect_data(0xA5),
-                        // But it is up there.
-                        expect_command(Ch375Command::CheckExist), expect_data(0xA5), reply(0x5A),
-                        expect_data(0x00), expect_data(0x00), expect_data(0x00), expect_data(0x00),
-                        expect_command(Ch375Command::ResetAll)});
+                        expect_data(0xCC)});
     Ch375Transport transport(port);
-    const BaudOption rung{0x03, 0xCC, 115200};
 
-    transport.try_speed(rung, 9600);
+    CHECK(!transport.set_baud_rate(0x03, 0xCC, 115200));
 
-    CHECK(port.saw_reset_at(115200));
+    // A receiver left at the new rate while the transmitter is at the old one
+    // is a port that can talk and not listen.
     CHECK_EQ(port.baud(), 9600u);
-}
-
-TEST_CASE(a_chip_silent_at_both_rates_is_written_to_no_further) {
-    // Nothing answers anywhere. Whatever is wrong, sending more commands into
-    // it cannot help and a half-heard one can leave it worse.
-    ScriptedCh375 port({expect_command(Ch375Command::SetBaudRate), expect_data(0x03),
-                        expect_data(0xCC),
-                        expect_command(Ch375Command::CheckExist), expect_data(0xA5),
-                        expect_command(Ch375Command::CheckExist), expect_data(0xA5)});
-    Ch375Transport transport(port);
-    const BaudOption rung{0x03, 0xCC, 115200};
-
-    CHECK_EQ(transport.try_speed(rung, 9600), 9600u);
-    CHECK(!port.saw_reset_at(115200));
-    CHECK(port.complete());
-}
-
-TEST_CASE(the_ladder_ends_at_a_rate_worth_having) {
-    // The bottom rung still has to be fast enough to matter: at 9600 one
-    // mouse report costs seventeen milliseconds and a moving hand produces
-    // one every eight.
-    CHECK(duo_input::u1::ch375::kBaudLadderSize > 0u);
-    const BaudOption& last =
-        duo_input::u1::ch375::kBaudLadder[duo_input::u1::ch375::kBaudLadderSize - 1];
-    CHECK(last.baud >= 20000u);
+    CHECK_EQ(port.rx_baud(), 9600u);
 }
 
 // --------------------------------------------------- finding a lost chip

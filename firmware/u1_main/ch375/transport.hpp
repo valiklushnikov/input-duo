@@ -268,15 +268,38 @@ public:
         io_.write_data(coefficient);
         io_.write_data(constant);
 
-        if (!io_.set_baud(baud)) {
+        // The receiver moves now; the transmitter waits until the answer is in.
+        //
+        // They are separate state machines with separate dividers, and that
+        // separation is the only thing that makes this command readable at
+        // all. The chip answers 51H within microseconds of the last stop bit,
+        // at the new rate. Moving both ends together means waiting for the
+        // transmitter's tail before touching the divider - by which time the
+        // answer has already come and gone against a receiver still set to the
+        // old rate. Every rate change then reports failure on a chip that
+        // moved, and the next command goes out at a rate it is no longer
+        // listening at: bytes it half-hears are parsed as opcodes, and the
+        // reachable ones include this very command and ENTER_SLEEP. That is
+        // how asking for more speed produced a controller only a power cycle
+        // could revive.
+        //
+        // The transmitter is still shifting its last frame at the old rate
+        // while this happens, which is correct: that frame was sent at the old
+        // rate and must finish at it.
+        if (!io_.set_rx_baud(baud)) {
             return false;
         }
 
         std::uint8_t answer = 0;
-        if (!read_reply(answer)) {
+        if (!read_reply(answer) || answer != static_cast<std::uint8_t>(CommandStatus::Success)) {
+            // It did not take, or was not heard. Put the receiver back where
+            // the transmitter still is, so both ends agree again.
+            io_.set_rx_baud(kCh375DefaultBaud);
             return false;
         }
-        return answer == static_cast<std::uint8_t>(CommandStatus::Success);
+
+        // Confirmed. Now the transmitter follows.
+        return io_.set_baud(baud);
     }
 
     /// Put this side back to the rate a chip comes up at.
@@ -326,21 +349,19 @@ public:
             return option.baud;
         }
 
-        // Go back down first and ask. If the chip answers here it never moved,
-        // which is the ordinary case - the command did not take - and there is
-        // nothing to undo. Sending it a reset would be the only damage done.
-        io_.set_baud(slow);
-        if (port_answers(1)) {
-            return slow;
-        }
-
-        // Silent at the old rate. Now the chip may really have moved, so look
-        // for it at the new one - and only if it answers there, where it can
-        // hear us, tell it to reset.
-        io_.set_baud(option.baud);
-        if (port_answers(1)) {
-            reset_all();
-        }
+        // Nothing is written to find out what went wrong.
+        //
+        // The old version probed at two rates and could send RESET_ALL at one
+        // of them, which meant writing at a rate the chip might not be using -
+        // the single operation that turns a controller which was about to come
+        // good into one that answers nothing at all. It also sent that reset
+        // with no wait, and the caller then wrote thirty more frames into the
+        // chip's forty-millisecond restart.
+        //
+        // Both ends go back to the rate they started at and this side stays
+        // quiet. If the chip really did move and its answer was lost, the next
+        // recovery cycle finds it silent and waits, which is recoverable. A
+        // barrage of half-heard opcodes is not.
         io_.set_baud(slow);
         return slow;
     }

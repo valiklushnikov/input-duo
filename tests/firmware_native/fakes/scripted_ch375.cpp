@@ -66,6 +66,12 @@ void ScriptedCh375::write_data(std::uint8_t value) {
 }
 
 bool ScriptedCh375::read_data(std::uint8_t& value) {
+    if (chip_baud_ != 0 && rx_baud_ != chip_baud_) {
+        // The chip is speaking at one rate and this side is listening at
+        // another. Nothing readable comes of that.
+        now_us_ += 100;
+        return false;
+    }
     if (unscripted_) {
         // A chip that is not there never answers, and time still passes -
         // without which every wait for a reply here runs forever.
@@ -100,6 +106,9 @@ void FakeCh375Chip::queue(std::uint8_t value) {
 }
 
 void FakeCh375Chip::write_command(std::uint8_t command) {
+    if (command == static_cast<std::uint8_t>(Ch375Command::CheckExist)) {
+        ++check_exist_count_;
+    }
     ++command_count_;
     pending_command_ = command;
     expecting_data_ = false;
