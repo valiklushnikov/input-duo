@@ -385,3 +385,29 @@ if(MSVC)
 endif()
 
 add_test(NAME input_pipeline COMMAND duo_input_pipeline_test)
+
+add_executable(duo_stored_profiles_test
+    test_main.cpp
+    test_stored_profiles.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/config_profiles.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/core1_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/macros/scheduler.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/capture.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/engine.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/routes.cpp
+)
+
+target_link_libraries(duo_stored_profiles_test PRIVATE duo_common)
+target_include_directories(duo_stored_profiles_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_compile_definitions(duo_stored_profiles_test PRIVATE
+    DUO_TEST_VECTOR_DIR="${CMAKE_SOURCE_DIR}/tests/vectors"
+)
+
+if(MSVC)
+    target_compile_options(duo_stored_profiles_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME stored_profiles COMMAND duo_stored_profiles_test)
