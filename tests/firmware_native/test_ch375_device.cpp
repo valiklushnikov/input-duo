@@ -27,6 +27,7 @@ using duo_input::u1::ch375::kDeviceLostUs;
 using duo_input::u1::ch375::kQuietRetriesBeforeTeardown;
 using duo_input::u1::ch375::kRecoverDelayUs;
 using duo_input::u1::ch375::kRetryReportNak;
+using duo_input::u1::ch375::kRetryWaitOutNak;
 using duo_input::u1::ch375::kPresenceRecheckUs;
 using duo_input::u1::ch375::kReportPollUs;
 using duo_input::u1::ch375::PendingReply;
@@ -854,6 +855,58 @@ struct LiveRig {
 /// block read of the first descriptor, and a block read is the one path in
 /// this transport still allowed to wait - see the link hardening report.
 constexpr int kStallPoints = 6;
+
+// ------------------------------------------------- what a NAK means, and when
+
+TEST_CASE(a_device_that_naks_its_control_transfers_still_enumerates) {
+    // The mouse channel on 2026-08-29 13:13, with the idle teardown cured on
+    // the other one: fifty-five setup attempts, every one ending 0x2A - the
+    // device answering NAK - and boot protocol advertised but never selected.
+    //
+    // A NAK to a control transfer is a device saying "busy, ask again", and
+    // the asking is the chip's to do. Handed to the MCU instead, the first one
+    // ends the attempt, and the attempt after it meets the same answer.
+    LiveRig rig;
+    rig.chip.serve_boot_mouse();
+    run_for(rig, 200000, 100);
+    // More than any number of attempts could get through one at a time, which
+    // is a device still settling for longer than this side is willing to
+    // start over.
+    rig.chip.nak_control_transfers(1000);
+    rig.chip.attach_device();
+
+    run_for(rig, 3000000, 100);
+
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+}
+
+TEST_CASE(the_policy_while_a_device_is_being_configured_waits_a_nak_out) {
+    // The phase decides the policy. Everything on the wire here is a control
+    // transfer, where a NAK is "ask again" - so the chip is the one that asks.
+    // A working mode puts the policy back to the chip's own default, so this
+    // is only true if it was set again after the last of them.
+    LiveRig rig;
+    rig.chip.serve_boot_mouse();
+    run_for(rig, 200000, 100);
+    rig.chip.attach_device();
+
+    bool reached = false;
+    std::uint8_t policy = 0;
+    bool set_after_mode = false;
+    for (int pass = 0; pass < 20000 && !reached; ++pass) {
+        rig.device.tick(rig.chip.now_us());
+        if (rig.device.state() == Ch375State::Enumerating) {
+            reached = true;
+            policy = rig.chip.retry_policy();
+            set_after_mode = rig.chip.retry_set_after_last_mode();
+        }
+        rig.chip.advance(100);
+    }
+
+    CHECK(reached);
+    CHECK(set_after_mode);
+    CHECK_EQ(policy, kRetryWaitOutNak);
+}
 
 TEST_CASE(a_status_the_chip_is_holding_at_bring_up_does_not_hold_the_loop) {
     // Chip setup throws away a status the chip is already holding, because a

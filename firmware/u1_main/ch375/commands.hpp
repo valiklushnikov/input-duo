@@ -166,6 +166,17 @@ inline constexpr std::uint8_t kGetDeviceRatePrefix = 0x07;
 /// link. Report the NAK instead and let the caller decide.
 inline constexpr std::uint8_t kRetryReportNak = 0x0F;
 
+/// The same fifteen timeout retries, with a NAK waited out instead.
+///
+/// Bits 11 retry a NAK for roughly 200 ms to 2 s rather than for ever, which
+/// is what the chip's own default does. On a control transfer a NAK means
+/// "busy, ask again" and the asking is the chip's to do: a device that NAKs
+/// while it settles is enumerated by a host that waits, and refused by one
+/// that reads the first NAK as an answer. Bounded rather than for ever so
+/// that a device which never comes good cannot hold the chip in one
+/// transaction indefinitely.
+inline constexpr std::uint8_t kRetryWaitOutNak = 0xCF;
+
 /// DS2 1.1. What the bus runs at. Full speed is the default after any change
 /// of working mode, which is why a low-speed device has to be told again.
 enum class UsbSpeed : std::uint8_t {

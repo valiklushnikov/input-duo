@@ -400,7 +400,7 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
                 // failure status, or retried on the bus until the device has
                 // something - and under the second the transaction never
                 // finishes, so no interrupt is ever raised.
-                if ((retry_policy_ & 0x80) != 0) {
+                if (retries_naks()) {
                     break;
                 }
                 pending_status_ =
@@ -432,6 +432,9 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
 
         case Ch375Command::GetDescriptor: {
             expecting_data_ = false;
+            if (control_transfer_naks()) {
+                break;
+            }
             if (value == 1) {
                 // A device descriptor. Only its shape matters here.
                 pending_read_ = {18,   0x01, 0x10, 0x01, 0, 0, 0, 8,
@@ -456,6 +459,9 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
 
         case Ch375Command::SetAddress:
             expecting_data_ = false;
+            if (control_transfer_naks()) {
+                break;
+            }
             if (!read_device_descriptor_) {
                 order_ok_ = false;
             }
@@ -470,6 +476,9 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
 
         case Ch375Command::SetConfiguration:
             expecting_data_ = false;
+            if (control_transfer_naks()) {
+                break;
+            }
             if (!read_configuration_) {
                 order_ok_ = false;
             }
@@ -655,10 +664,33 @@ void FakeCh375Chip::finish_transfer(bool stalled) {
     int_asserted_ = !silent_;
 }
 
+bool FakeCh375Chip::control_transfer_naks() {
+    if (control_naks_ <= 0) {
+        return false;
+    }
+    if (retries_naks()) {
+        // The chip asks again itself, on the bus, without telling anyone - so
+        // every NAK the device still had in it is spent inside this one
+        // transaction, and what the MCU sees is a transfer that completed.
+        control_naks_ = 0;
+        return false;
+    }
+    --control_naks_;
+    pending_read_.clear();
+    // Bit 5 marks a failure and 1010 is a NAK (DS1 5.12). This is the byte the
+    // mouse channel reported fifty-five times over.
+    pending_status_ = static_cast<std::uint8_t>(0x20 | kResponseNak);
+    int_asserted_ = !silent_;
+    return true;
+}
+
 void FakeCh375Chip::begin_control_transfer() {
     setup_packets_.push_back(outbound_block_);
     control_pending_ = false;
 
+    if (control_transfer_naks()) {
+        return;
+    }
     if (ignore_setup_) {
         // Nothing comes back at all. No data, no interrupt, no clue - which
         // is the case a bounded wait exists for.

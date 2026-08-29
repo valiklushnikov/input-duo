@@ -253,6 +253,16 @@ public:
     /// Refuse everything after this many control transfers have succeeded.
     void stall_after(int transfers) { stall_after_ = transfers; }
 
+    /// Make the device answer NAK this many times before it is ready to talk.
+    ///
+    /// A NAK to a control transfer is a device saying "busy, ask again". Who
+    /// asks again is the retry policy's business (DS2 1.3): a chip told to
+    /// retry asks on the bus, so every one of these is consumed inside the one
+    /// transaction the MCU asked for and the MCU sees a transfer that took a
+    /// little longer. A chip told to report hands the first one to the MCU,
+    /// and the transfer it belonged to is over.
+    void nak_control_transfers(int transfers) { control_naks_ = transfers; }
+
     /// How long this chip takes to answer a token.
     ///
     /// A real controller runs a USB transaction and raises its interrupt when
@@ -508,8 +518,17 @@ private:
     bool refuse_setup_ = false;
     bool ignore_setup_ = false;
     bool boot_protocol_ = false;
+    int control_naks_ = 0;
     void begin_control_transfer();
     void finish_control_stage();
+    /// DS2 1.3: bit 7 is what chooses between retrying a NAK on the bus and
+    /// handing it to the MCU as a failure status.
+    bool retries_naks() const { return (retry_policy_ & 0x80) != 0; }
+    /// Take one control transfer's worth of the device's settling NAKs.
+    ///
+    /// True when the MCU has to be told about it, which is when the transfer
+    /// it belonged to is over.
+    bool control_transfer_naks();
     UsbSpeed bus_speed_ = UsbSpeed::Full12Mbps;
     bool speed_after_mode_ = false;
     /// AUTO_SETUP is several control transfers, so its answer is not instant.
