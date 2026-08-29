@@ -60,7 +60,7 @@ public:
     std::uint8_t interrupt_endpoint() const override { return capabilities_.endpoint; }
 
     DeviceKind kind() const { return capabilities_.kind; }
-    std::uint16_t max_packet() const { return capabilities_.max_packet; }
+    std::uint16_t max_packet() const override { return capabilities_.max_packet; }
     /// Does the interface descriptor *advertise* boot support?
     ///
     /// Only that. It says nothing about which protocol the device is actually

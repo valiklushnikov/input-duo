@@ -179,6 +179,14 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
 
         case Ch375Command::ReadUsbData0:
         case Ch375Command::ReadUsbData:
+            if (block_reads_break_at_ != 0 && port_baud_ >= block_reads_break_at_) {
+                // The chip sends the block; nothing readable comes back. The
+                // caller sees the length byte never arrive, which is what the
+                // bench saw at 115200 and 62500 while CHECK_EXIST answered
+                // perfectly at both. What is waiting stays waiting: this side
+                // could not decode it, and the chip does not know that.
+                break;
+            }
             if (!pending_read_.empty()) {
                 // A control transfer's answer, waiting to be collected.
                 queue(static_cast<std::uint8_t>(pending_read_.size()));
@@ -505,6 +513,21 @@ SetupProgress FakeDeviceSetup::poll(std::uint32_t now_us, bool interrupted,
     // would not survive meeting one.
     if (now_us - started_us_ < 5000) {
         return SetupProgress::Busy;
+    }
+    if (transport_ != nullptr) {
+        std::uint8_t buffer[kMaxBlockSize];
+        std::size_t size = 0;
+        if (!transport_->read_block(buffer, sizeof(buffer), size)) {
+            // A descriptor that cannot be read is a device that cannot be
+            // configured, which is what the real setup reports as unreadable.
+            // Tried again until the step's own deadline, because one lost
+            // block is not the same as a rate that carries none.
+            if (now_us - started_us_ >= kSetupTimeoutUs) {
+                running_ = false;
+                return SetupProgress::Failed;
+            }
+            return SetupProgress::Busy;
+        }
     }
     running_ = false;
     return SetupProgress::Done;

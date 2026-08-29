@@ -253,6 +253,19 @@ public:
         return true;
     }
 
+    /// How many length-prefixed block reads have completed, and how many have
+    /// failed.
+    ///
+    /// The ladder is driven by these, because two CHECK_EXIST replies prove a
+    /// divider and not a link. Measured by the port's real rate:
+    ///
+    ///     byRate(9600/37500/62500/115200):  ok=0/1/0/0   fail=0/0/24/24
+    ///
+    /// CHECK_EXIST answered at every one of those rates. A rung is only good
+    /// once a block read has finished on it.
+    std::uint32_t block_reads_ok() const { return block_reads_ok_; }
+    std::uint32_t block_reads_failed() const { return block_reads_failed_; }
+
     /// DS2 1.8. Read a length-prefixed block from the endpoint buffer.
     ///
     /// A length of zero is a success: a polled endpoint with nothing to say
@@ -266,6 +279,7 @@ public:
         if (!read_reply(length)) {
             // Not even a length. Whatever the chip is doing, the next thing it
             // sends is not an answer to anything asked yet.
+            ++block_reads_failed_;
             drain_port();
             return false;
         }
@@ -278,6 +292,7 @@ public:
             // regardless of what is decided here. Walking away does not stop
             // them arriving; it makes them arrive later, as the answers to
             // whatever is asked next, for ever.
+            ++block_reads_failed_;
             drain_port();
             return false;
         }
@@ -287,12 +302,18 @@ public:
             if (!read_reply(value)) {
                 // The rest of the packet is still coming.
                 size = 0;
+                ++block_reads_failed_;
                 drain_port();
                 return false;
             }
             out[index] = value;
         }
         size = length;
+        // A length of zero counts: the exchange completed, which is the thing
+        // a broken rate cannot do. An idle endpoint answers that constantly,
+        // and calling it unproven would make a working link look like a rate
+        // that never carried anything.
+        ++block_reads_ok_;
         return true;
     }
 
@@ -403,15 +424,25 @@ public:
         }
 
         // Confirmed. Now the transmitter follows.
-        return io_.set_baud(baud);
+        return set_port_baud(baud);
     }
+
+    /// The rate this side is transmitting at.
+    ///
+    /// One place knows, and everything that changes the rate goes through the
+    /// one setter below. A second copy kept elsewhere is exactly what drifted:
+    /// the device believed it was talking at 37500 while reset_port_speed had
+    /// put the port back to 9600, which is the state this file's own note
+    /// warns about - a byte half-heard at the wrong rate is swallowed as some
+    /// command's parameter, and every byte after it is out of step.
+    unsigned port_baud() const { return port_baud_; }
 
     /// Put this side back to the rate a chip comes up at.
     ///
     /// RESET_ALL returns the chip to 9600 whatever it was doing before, so a
     /// port left at the raised rate is talking to something that is no longer
     /// listening at it.
-    bool reset_port_speed(unsigned default_baud) { return io_.set_baud(default_baud); }
+    bool reset_port_speed(unsigned default_baud) { return set_port_baud(default_baud); }
 
     /// Does the port work well enough to be trusted at this rate?
     ///
@@ -466,7 +497,7 @@ public:
         // quiet. If the chip really did move and its answer was lost, the next
         // recovery cycle finds it silent and waits, which is recoverable. A
         // barrage of half-heard opcodes is not.
-        io_.set_baud(slow);
+        set_port_baud(slow);
         return slow;
     }
 
@@ -485,7 +516,7 @@ public:
     /// Returns the rate the answer read correctly at, or zero.
     unsigned sweep_rx(const unsigned* rates, std::size_t count, unsigned tx_baud) {
         for (std::size_t index = 0; index < count; ++index) {
-            io_.set_baud(tx_baud);
+            set_port_baud(tx_baud);
             drain_port();
 
             io_.write_command(static_cast<std::uint8_t>(Ch375Command::CheckExist));
@@ -498,12 +529,12 @@ public:
             std::uint8_t answer = 0;
             if (read_reply(answer) &&
                 answer == static_cast<std::uint8_t>(~kPortProbeByte)) {
-                io_.set_baud(tx_baud);
+                set_port_baud(tx_baud);
                 return rates[index];
             }
         }
 
-        io_.set_baud(tx_baud);
+        set_port_baud(tx_baud);
         return 0;
     }
 
@@ -548,11 +579,11 @@ public:
         switch (search_step_) {
             case SearchStep::Rate: {
                 if (search_index_ >= 1 + kBaudLadderSize) {
-                    io_.set_baud(search_home_);
+                    set_port_baud(search_home_);
                     search_step_ = SearchStep::Done;
                     return SearchProgress::NotFound;
                 }
-                if (!io_.set_baud(search_rate(search_index_))) {
+                if (!set_port_baud(search_rate(search_index_))) {
                     // A port with a fixed rate cannot be asked at another one.
                     ++search_index_;
                     return SearchProgress::Waiting;
@@ -583,7 +614,7 @@ public:
                         // Found somewhere it should not be. Tell it to reset
                         // while it can still hear, then come home with it.
                         reset_all();
-                        io_.set_baud(search_home_);
+                        set_port_baud(search_home_);
                     }
                     search_step_ = SearchStep::Done;
                     return SearchProgress::Found;
@@ -872,6 +903,18 @@ private:
     std::uint8_t last_status_reply_ = 0;
     bool last_status_answered_ = false;
 
+    /// Move this side's transmit rate, and remember where it went.
+    ///
+    /// The only route to io_.set_baud. A rate change that skipped this would
+    /// leave port_baud() describing a port that has moved on without it.
+    bool set_port_baud(unsigned baud) {
+        if (!io_.set_baud(baud)) {
+            return false;
+        }
+        port_baud_ = baud;
+        return true;
+    }
+
     /// Where a search across the rates has got to.
     enum class SearchStep : std::uint8_t { Rate, Probe, Done };
 
@@ -887,6 +930,10 @@ private:
     int search_round_ = 0;
     std::uint8_t search_probe_ = kPortProbeByte;
     unsigned search_found_at_ = 0;
+
+    std::uint32_t block_reads_ok_ = 0;
+    std::uint32_t block_reads_failed_ = 0;
+    unsigned port_baud_ = kCh375DefaultBaud;
 
     /// A CHECK_EXIST that has been asked and not yet answered.
     bool presence_pending_ = false;

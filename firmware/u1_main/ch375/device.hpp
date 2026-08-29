@@ -120,6 +120,13 @@ public:
 
     /// Which endpoint the device's reports arrive on. Valid after Done.
     virtual std::uint8_t interrupt_endpoint() const = 0;
+
+    /// How big this device's reports are, once its descriptors have said.
+    ///
+    /// Zero until then, and the port rate has to be decided while they are
+    /// still being fetched - so a caller falls back to the largest boot report
+    /// this firmware routes rather than treating zero as a small packet.
+    virtual std::uint16_t max_packet() const { return 0; }
 };
 
 /// How long the USB bus is held in reset before the device is configured.
@@ -176,6 +183,51 @@ inline constexpr std::uint32_t kRecoverDelayUs = 1000000;
 /// A USB interrupt endpoint on a keyboard is polled about every 8 ms by a real
 /// host, and faster gains nothing a person can feel.
 inline constexpr std::uint32_t kReportPollUs = 8000;
+
+/// A CH375 serial frame is eleven bits.
+///
+/// Eight data bits, a start bit, a stop bit, and the ninth data bit that marks
+/// a command from a data byte (DS1 6.2.2). That ninth bit is why this port is
+/// built out of PIO and not the RP2040's UART, and it is why a byte costs
+/// eleven bit times rather than ten.
+inline constexpr unsigned kSerialFrameBits = 11;
+
+/// Frames spent collecting one report, besides the report itself.
+///
+/// GET_STATUS and its answer, RD_USB_DATA0 and its length byte, SET_ENDPOINT6
+/// and its argument, ISSUE_TOKEN and its argument. Eight - which with a
+/// seven-byte mouse report makes the fifteen bytes the transport's own note
+/// names, and 17.2 ms of them at 9600.
+inline constexpr std::size_t kReportOverheadFrames = 8;
+
+/// The largest boot report this firmware routes: a keyboard's eight bytes.
+///
+/// Stood in for a device that has not said yet, because the port rate is
+/// decided while the descriptors are still being fetched.
+inline constexpr std::size_t kAssumedPacketBytes = 8;
+
+/// The slowest port rate that can carry one report per poll interval.
+///
+/// Derived rather than chosen. At 9600 a seven-byte mouse report costs fifteen
+/// frames of eleven bits - 165 bits, 17.2 ms - against the 8 ms a moving hand
+/// produces one in, so the deficit never closes while the hand keeps moving
+/// and the peripheral is torn down for a silence this side is causing. That
+/// was measured, and so was the other end of it: block reads complete at 37500
+/// and nowhere above.
+constexpr unsigned report_rate_floor(std::size_t packet_bytes, std::uint32_t poll_us) {
+    const std::uint64_t bits =
+        static_cast<std::uint64_t>(packet_bytes + kReportOverheadFrames) * kSerialFrameBits;
+    return static_cast<unsigned>(bits * 1000000u / poll_us);
+}
+
+/// How many block reads may fail in a row on one rate before the ladder steps
+/// down.
+///
+/// A rate that cannot fetch a descriptor cannot run a device, and the ordinary
+/// collapse path never sees it: that one only fires for a device that reached
+/// Ready, which a rate this broken never does. Twelve is what the diagnostic
+/// build on the bench used to walk 115200 and 62500 and settle on 37500.
+inline constexpr std::uint16_t kBlockFailsBeforeStepDown = 12;
 
 /// How long to wait for the answer to a token before assuming it was lost.
 ///
@@ -376,6 +428,12 @@ private:
     /// of the state machine may run in.
     bool bring_chip_up(std::uint32_t now_us);
 
+    /// Down a rung, but never below a rate that can carry this device.
+    void step_ladder_down();
+
+    /// The slowest rung this channel's device can actually be run at.
+    std::size_t slowest_usable_rung() const;
+
     void enter(Ch375State state, std::uint32_t now_us);
     void publish(Ch375EventKind kind);
     void publish_report(const std::uint8_t* data, std::size_t size);
@@ -434,11 +492,12 @@ private:
     unsigned raised_baud_ = kCh375DefaultBaud;
     std::uint8_t mode_reply_ = 0;
     bool mode_answered_ = false;
-    unsigned port_baud_ = kCh375DefaultBaud;
     std::size_t baud_rung_ = 0;
     bool baud_exhausted_ = false;
     std::uint16_t mode_failures_ = 0;
     std::uint16_t polls_issued_ = 0;
+    /// Block reads that have failed in a row on the rate now in use.
+    std::uint16_t block_read_failures_ = 0;
     /// Which data packet the next IN transaction should expect. Alternates on
     /// every one that succeeds; the chip does not track it.
     bool expect_data1_ = false;

@@ -24,6 +24,7 @@ using duo_input::u1::ch375::Ch375Transport;
 using duo_input::u1::ch375::kDeviceLostUs;
 using duo_input::u1::ch375::kQuietRetriesBeforeTeardown;
 using duo_input::u1::ch375::kRecoverDelayUs;
+using duo_input::u1::ch375::kReportPollUs;
 using duo_input::u1::ch375::testing::FakeCh375Chip;
 using duo_input::u1::ch375::testing::FakeDeviceSetup;
 
@@ -35,6 +36,11 @@ struct Rig {
     FakeDeviceSetup setup;
     Ch375Transport transport{chip};
     Ch375Device device{transport, setup};
+
+    /// Configuring a device reads blocks over the port, and whether those
+    /// complete is what proves a rate. Wired here rather than per test, so
+    /// every lifecycle test runs against a setup that actually uses the wire.
+    Rig() { setup.reads_descriptors_through(transport); }
 
     /// Run the machine for a while, letting time pass between ticks.
     void run(std::uint32_t duration_us, std::uint32_t step_us = 100) {
@@ -748,4 +754,119 @@ TEST_CASE(searching_every_rate_for_a_lost_chip_still_fits_inside_a_tick) {
     const std::uint32_t worst = rig.worst_tick(20000);
 
     CHECK(worst < 500u);
+}
+
+// ----------------------------------------------- what proves a rate
+
+TEST_CASE(a_rate_that_cannot_finish_a_block_read_is_stepped_down_from) {
+    // Measured on the bench, keyed on the port's real rate:
+    //
+    //     byRate(9600/37500/62500/115200):  ok=0/1/0/0   fail=0/0/24/24
+    //
+    // 115200 and 62500 answer CHECK_EXIST perfectly and fail every block read,
+    // framing errors accumulating; 37500 carries them and the mouse enumerated
+    // and reported there. Two CHECK_EXIST replies prove a divider, not a link.
+    //
+    // And the trap closed from the other side: the ladder only ever stepped
+    // down from a device that had reached Ready, which a rate too broken to
+    // fetch a descriptor never does. So the channel sat at 115200 for ever.
+    Rig rig;
+    rig.chip.break_block_reads_at_or_above(62500);
+    rig.chip.attach_device();
+
+    rig.run(60 * kRecoverDelayUs, 1000);
+
+    // Measured with this test: the channel walks 115200 -> 62500 -> 37500 in
+    // four failed enumerations and comes up there. Before the step-down
+    // existed it stayed at 115200 for the whole run.
+    CHECK_EQ(rig.chip.port_baud(), 37500u);
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+}
+
+TEST_CASE(a_rate_that_carries_its_block_reads_is_left_alone) {
+    // The step-down is on repeated failure, not on any failure: a working
+    // channel must keep the fastest rung it has.
+    Rig rig;
+    rig.chip.attach_device();
+
+    rig.run(20 * kRecoverDelayUs, 1000);
+
+    CHECK_EQ(rig.chip.port_baud(), 115200u);
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+}
+
+// ------------------------------------------------- the ladder has a floor
+
+TEST_CASE(the_floor_is_derived_from_what_one_report_costs_on_the_wire) {
+    // Collecting one report costs the packet plus eight frames: GET_STATUS and
+    // its answer, RD_USB_DATA0 and its length byte, SET_ENDPOINT6 and its
+    // argument, ISSUE_TOKEN and its argument. A CH375 serial frame is eleven
+    // bits, the ninth data bit marking a command from a data byte (DS1 6.2.2).
+    // So a seven-byte mouse report is fifteen frames, 165 bits - the fifteen
+    // bytes the transport's own note names, and 17.2 ms at 9600 against the
+    // 8 ms a moving hand produces one in.
+    CHECK_EQ(duo_input::u1::ch375::report_rate_floor(7, kReportPollUs), 20625u);
+    // 9600 is below it and 37500 is the slowest rung above it, which is the
+    // rung the bench measured block reads completing on.
+    CHECK(9600u < duo_input::u1::ch375::report_rate_floor(7, kReportPollUs));
+    CHECK(37500u > duo_input::u1::ch375::report_rate_floor(8, kReportPollUs));
+}
+
+TEST_CASE(a_channel_with_a_device_up_never_rests_below_that_floor) {
+    // The ladder used to step down on every collapse and, at the bottom, set
+    // baud_exhausted_ and park the port at 9600 for good. On the bench that is
+    // exactly what happened - col=3, then baud=9600 - and at 9600 the channel
+    // provably cannot carry a moving mouse, so it collapsed harder, which
+    // stepped the ladder down again. Self-reinforcing, and only a restart of
+    // U1 ever cleared it.
+    Rig rig;
+    rig.chip.attach_device();
+    rig.run(300000);
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+
+    // The device stops answering its endpoint. Every rung now collapses.
+    rig.chip.answer_tokens_after(60000000);
+
+    unsigned slowest_while_up = 0xFFFFFFFFu;
+    for (int index = 0; index < 60000; ++index) {
+        rig.device.tick(rig.chip.now_us());
+        if (rig.device.state() == Ch375State::Ready &&
+            rig.chip.port_baud() < slowest_while_up) {
+            slowest_while_up = rig.chip.port_baud();
+        }
+        rig.chip.advance(1000);
+    }
+
+    CHECK(rig.device.collapses_while_raised() >= 3u);
+    CHECK(slowest_while_up >= 37500u);
+}
+
+// ------------------------------ one rate, not two ideas about one rate
+
+TEST_CASE(the_port_and_the_rate_this_side_believes_in_never_disagree) {
+    // reset_port_speed drops the port back to 9600 on every chip re-setup, and
+    // it used to do that without moving the device's own copy of the rate. So
+    // the device could believe it was talking at 37500 while the receiver was
+    // clocked for 9600 - which is precisely the state the transport's own note
+    // warns about: a byte half-heard at the wrong rate is swallowed as some
+    // command's parameter, and every byte after it is out of step. That is the
+    // mechanism behind "the chip stopped answering".
+    //
+    // There is now one place that knows, so the two cannot come apart.
+    Rig rig;
+    rig.chip.attach_device();
+
+    bool ever_disagreed = false;
+    for (int index = 0; index < 40000; ++index) {
+        rig.device.tick(rig.chip.now_us());
+        if (rig.transport.port_baud() != rig.chip.port_baud()) {
+            ever_disagreed = true;
+        }
+        rig.chip.advance(500);
+    }
+
+    CHECK(!ever_disagreed);
+    // And the run really did move the rate around, so agreeing is a finding
+    // rather than the two never having been asked to differ.
+    CHECK(rig.chip.port_baud() > 9600u);
 }

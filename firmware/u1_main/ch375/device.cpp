@@ -71,6 +71,13 @@ void Ch375Device::tick(std::uint32_t now_us) {
             }
             if (connected) {
                 publish(Ch375EventKind::Attached);
+                // A device to carry means the ladder is worth trying again.
+                // Exhausting it says the chip refused every rung once, which
+                // is a fact about a moment; resting at 9600 with a device on
+                // the bus is a channel that provably cannot work, because one
+                // report costs more time there than the hand takes to produce
+                // the next.
+                baud_exhausted_ = false;
                 // Asked here, in mode 5, because DS2 1.2 says that is the only
                 // mode the question is valid in - and the answer decides how
                 // the bus has to run from now on.
@@ -124,7 +131,39 @@ void Ch375Device::tick(std::uint32_t now_us) {
             return;
 
         case Ch375State::Enumerating: {
+            // A rung is proved by the traffic it has to carry, not by two
+            // CHECK_EXIST replies. Measured by the port's real rate:
+            //
+            //     byRate(9600/37500/62500/115200):  ok=0/1/0/0  fail=0/0/24/24
+            //
+            // CHECK_EXIST answered at 115200 and 62500 and every block read
+            // there failed, so the device stayed attached and never reached
+            // Ready - and the ladder's only step-down runs from a device that
+            // did reach Ready. That is why a channel sat at 115200 for ever.
+            const std::uint32_t reads_ok = transport_.block_reads_ok();
+            const std::uint32_t reads_failed = transport_.block_reads_failed();
             const SetupProgress progress = setup_.poll(now_us, interrupted, status);
+            if (transport_.block_reads_ok() != reads_ok) {
+                // The rate carried what it has to carry.
+                block_read_failures_ = 0;
+            } else if (transport_.block_reads_failed() != reads_failed) {
+                block_read_failures_ = static_cast<std::uint16_t>(
+                    block_read_failures_ + (transport_.block_reads_failed() - reads_failed));
+                if (block_read_failures_ >= kBlockFailsBeforeStepDown) {
+                    block_read_failures_ = 0;
+                    step_ladder_down();
+                    // The rate is chosen during chip setup and nowhere else,
+                    // so the new rung only takes effect by going back through
+                    // it.
+                    chip_ready_ = false;
+                    bring_up_ = ChipBringUp::Idle;
+                    raised_baud_ = kCh375DefaultBaud;
+                    ++enumerate_failures_;
+                    handle_detach(now_us);
+                    fail(now_us);
+                    return;
+                }
+            }
             if (progress == SetupProgress::Busy) {
                 return;
             }
@@ -141,6 +180,9 @@ void Ch375Device::tick(std::uint32_t now_us) {
             // producing nothing at all.
             expect_data1_ = false;
             transport_.set_receive_toggle(kToggleData0);
+            // A device that got this far fetched every descriptor over this
+            // rate, so the rung is proved.
+            block_read_failures_ = 0;
             enter(Ch375State::Ready, now_us);
             last_answer_us_ = now_us;
             token_outstanding_ = false;
@@ -207,11 +249,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 // does not.
                 if (raised_baud_ != kCh375DefaultBaud) {
                     ++collapses_while_raised_;
-                    if (baud_rung_ + 1 < kBaudLadderSize) {
-                        ++baud_rung_;
-                    } else {
-                        baud_exhausted_ = true;
-                    }
+                    step_ladder_down();
                     // raised_baud_ is deliberately left alone. The chip may be
                     // stranded at it right now - that is what a collapse looks
                     // like from here - and this is the only record of where it
@@ -446,14 +484,18 @@ bool Ch375Device::bring_chip_up(std::uint32_t now_us) {
     // has just accepted a mode command is not in that state, and is the only
     // kind worth asking.
     if (!baud_exhausted_) {
-        port_baud_ = transport_.try_speed(kBaudLadder[baud_rung_], kCh375DefaultBaud);
         // Remembered, because it is the only other place the chip can be.
-        raised_baud_ = port_baud_;
-        if (port_baud_ == kCh375DefaultBaud) {
+        raised_baud_ = transport_.try_speed(kBaudLadder[baud_rung_], kCh375DefaultBaud);
+        // A rung that has not carried a block read has not been proved by
+        // anything that matters yet.
+        block_read_failures_ = 0;
+        if (raised_baud_ == kCh375DefaultBaud) {
             ++baud_change_failures_;
             if (baud_rung_ + 1 < kBaudLadderSize) {
                 ++baud_rung_;
             } else {
+                // The chip refused every rung. Nothing here can make it move,
+                // and 9600 is what is left.
                 baud_exhausted_ = true;
             }
         }
@@ -496,6 +538,40 @@ void Ch375Device::handle_detach(std::uint32_t now_us) {
     if (had_device) {
         publish(Ch375EventKind::Detached);
     }
+}
+
+std::size_t Ch375Device::slowest_usable_rung() const {
+    const std::size_t packet = setup_.max_packet() != 0
+                                   ? static_cast<std::size_t>(setup_.max_packet())
+                                   : kAssumedPacketBytes;
+    const unsigned floor = report_rate_floor(packet, kReportPollUs);
+    // Fastest first, so the last rung still at or above the floor is the
+    // slowest usable one. Rung zero if none of them clears it, which keeps a
+    // channel on the fastest rate there is rather than the slowest.
+    std::size_t slowest = 0;
+    for (std::size_t index = 0; index < kBaudLadderSize; ++index) {
+        if (kBaudLadder[index].baud >= floor) {
+            slowest = index;
+        }
+    }
+    return slowest;
+}
+
+void Ch375Device::step_ladder_down() {
+    const std::size_t slowest = slowest_usable_rung();
+    if (baud_rung_ < slowest) {
+        ++baud_rung_;
+        return;
+    }
+    // The bottom of the usable band, and there is nowhere below it to go.
+    //
+    // The old rule stepped down on every collapse and, at the bottom, set
+    // baud_exhausted_ and left the port at 9600 for good. On the bench that is
+    // exactly what happened - three collapses, then baud=9600 - and its
+    // premise is false for this device: the slower rate does not drop less, it
+    // cannot carry the traffic at all, so it collapses harder, which stepped
+    // the ladder down again. Collapse, slower, more collapse, 9600 for ever.
+    baud_rung_ = slowest;
 }
 
 void Ch375Device::fail(std::uint32_t now_us) {

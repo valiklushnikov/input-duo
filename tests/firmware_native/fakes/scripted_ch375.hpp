@@ -306,6 +306,14 @@ public:
     /// SET_BAUDRATE is the only other thing that moves it.
     unsigned chip_baud() const { return chip_baud_; }
 
+    /// Fail every block read while the port is at or above this rate.
+    ///
+    /// The bench's own reading: at 115200 and 62500 CHECK_EXIST answers fine
+    /// and every multi-byte read fails with framing errors, while 37500
+    /// carries them. Nothing decodable arrives, which is what a receiver
+    /// sampling a rate the wiring cannot hold produces.
+    void break_block_reads_at_or_above(unsigned baud) { block_reads_break_at_ = baud; }
+
     /// Leave the chip at a rate this side is not using.
     ///
     /// The state a reflash of U1 leaves behind: the processor restarts at
@@ -367,6 +375,9 @@ private:
     /// looked right.
     bool chip_hears() const { return port_baud_ == chip_baud_; }
     bool chip_is_audible() const { return port_rx_baud_ == chip_baud_; }
+
+    /// At or above this rate no block read produces anything readable.
+    unsigned block_reads_break_at_ = 0;
 
     unsigned chip_baud_ = kScriptedDefaultBaud;
     unsigned port_baud_ = kScriptedDefaultBaud;
@@ -436,10 +447,21 @@ public:
 
     void always_fail(bool failing) { failing_ = failing; }
 
+    /// Fetch a block the way real setup fetches descriptors.
+    ///
+    /// Configuring a device is control transfers whose answers come back as
+    /// length-prefixed blocks, and whether those complete is the only thing
+    /// that proves a port rate: on the bench CHECK_EXIST answered at 115200
+    /// and 62500 while every block read there failed. A fake that never read
+    /// one would let a rate that cannot carry a descriptor look like a rate
+    /// that works, which is the defect being modelled.
+    void reads_descriptors_through(Ch375Transport& transport) { transport_ = &transport; }
+
     /// Has anyone asked this to start yet?
     bool was_begun() const { return begun_; }
 
 private:
+    Ch375Transport* transport_ = nullptr;
     std::uint32_t started_us_ = 0;
     bool running_ = false;
     bool failing_ = false;
