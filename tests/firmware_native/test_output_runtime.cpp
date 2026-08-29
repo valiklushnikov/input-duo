@@ -122,8 +122,13 @@ TEST_CASE(the_ring_wraps_without_losing_anything) {
 
 TEST_CASE(draining_a_full_queue_makes_room_again) {
     SpscQueue<int, 4> queue;
-    while (queue.push(0)) {
+    // Bounded rather than "until it refuses": a mutation that stops the ring
+    // ever filling turns an unbounded loop into a hang, and a hang under ctest
+    // is a 1500-second timeout instead of a red in a hundredth of a second.
+    // The bound is generous and the check below is what fails if it is wrong.
+    for (int attempt = 0; attempt < 8 && queue.push(0); ++attempt) {
     }
+    CHECK_EQ(queue.size(), 3u);
 
     int value = 0;
     CHECK(queue.pop(value));

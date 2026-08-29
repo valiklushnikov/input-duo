@@ -42,8 +42,17 @@ bool OutputRuntime::touches_keyboard(const OutputCommand& command) {
             return true;
         default:
             // Movement, buttons and a consumer tap say nothing about which
-            // keys are down, so nothing here has to wait for a keyboard
-            // report - and the pointer must never wait for typing.
+            // keys are down, so none of them has to wait for a keyboard
+            // report of its own.
+            //
+            // They can still wait behind one. The drain stops at the first
+            // keyboard command it may not apply and leaves the rest queued in
+            // order, so movement sitting behind a blocked keystroke waits with
+            // it: one pass of Core 0 in the ordinary case, and at most
+            // kPublishGraceMs once, when a computer has stopped answering and
+            // has to be set aside. Bounded, and the alternative - reordering
+            // the queue so the pointer overtakes - would deliver a click
+            // before the keystroke that was typed ahead of it.
             return false;
     }
 }

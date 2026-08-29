@@ -385,3 +385,158 @@ TEST_CASE(all_five_buttons_are_allowed) {
 
     CHECK_EQ(manager.snapshot(Target::Pc1).mouse.buttons, 0b00011111u);
 }
+
+// -------------------------------------------------------------- publication
+//
+// This class holds a state and not a queue of reports, so a state replaced
+// before anyone was told about it is gone: no report was built from it and
+// nothing remembers it existed. That is how a macro loses letters, and how it
+// loses a release - which strands a key on a computer nobody is watching. The
+// flag below is what lets the drain pace itself against the senders, and it
+// is owned here, so it is tested here.
+
+TEST_CASE(a_manager_that_holds_nothing_owes_nobody_a_report) {
+    HidStateManager manager;
+
+    // Silence is a true account of an empty state. Starting owed would make
+    // the first keystroke of every boot wait for a report of nothing.
+    CHECK_FALSE(manager.keyboard_unreported(Target::Pc1));
+    CHECK_FALSE(manager.keyboard_unreported(Target::Pc2));
+}
+
+TEST_CASE(a_press_leaves_its_computer_owed_the_new_state) {
+    HidStateManager manager;
+
+    manager.physical_key(Target::Pc1, kA, true);
+
+    CHECK(manager.keyboard_unreported(Target::Pc1));
+    // And only that computer. A key that went to PC1 says nothing about what
+    // PC2 is holding, and marking PC2 owed would make it pace PC1's typing.
+    CHECK_FALSE(manager.keyboard_unreported(Target::Pc2));
+}
+
+TEST_CASE(a_release_leaves_its_computer_owed_the_new_state) {
+    HidStateManager manager;
+    manager.physical_key(Target::Pc1, kA, true);
+    manager.keyboard_reported(Target::Pc1);
+
+    manager.physical_key(Target::Pc1, kA, false);
+
+    // The dangerous direction. A press that is never published is a letter
+    // nobody typed; a release that is never published is a key held down on a
+    // computer the operator may not be looking at.
+    CHECK(manager.keyboard_unreported(Target::Pc1));
+}
+
+TEST_CASE(a_modifier_is_a_keyboard_change_like_any_other) {
+    HidStateManager manager;
+
+    manager.physical_modifiers(Target::Pc2, 0x02, true);
+
+    CHECK(manager.keyboard_unreported(Target::Pc2));
+}
+
+TEST_CASE(the_sender_saying_so_is_what_clears_the_debt) {
+    HidStateManager manager;
+    manager.physical_key(Target::Pc1, kA, true);
+
+    manager.keyboard_reported(Target::Pc1);
+
+    CHECK_FALSE(manager.keyboard_unreported(Target::Pc1));
+}
+
+TEST_CASE(one_computer_answering_does_not_answer_for_the_other) {
+    HidStateManager manager;
+    manager.physical_key(Target::Pc1, kA, true);
+    manager.physical_key(Target::Pc2, kA, true);
+
+    manager.keyboard_reported(Target::Pc1);
+
+    // Two computers, two answers. Clearing both here is how a state moves on
+    // while one of them has still never seen it.
+    CHECK_FALSE(manager.keyboard_unreported(Target::Pc1));
+    CHECK(manager.keyboard_unreported(Target::Pc2));
+}
+
+TEST_CASE(a_second_owner_joining_a_held_key_changes_no_report) {
+    HidStateManager manager;
+    manager.physical_key(Target::Pc1, kA, true);
+    manager.keyboard_reported(Target::Pc1);
+
+    // The key is already down; a macro taking a share of it costs no report
+    // slot and the far computer would see nothing new. Marking it owed would
+    // pause the drain for a report identical to the last one.
+    manager.macro_key(1, Target::Pc1, kA, true);
+
+    CHECK_FALSE(manager.keyboard_unreported(Target::Pc1));
+}
+
+TEST_CASE(a_key_the_report_had_no_room_for_leaves_nothing_owed) {
+    HidStateManager manager;
+    const std::uint8_t usages[] = {0x04, 0x05, 0x06, 0x07, 0x08, 0x09};
+    for (std::uint8_t usage : usages) {
+        manager.physical_key(Target::Pc1, usage, true);
+    }
+    manager.keyboard_reported(Target::Pc1);
+
+    CHECK_EQ(manager.physical_key(Target::Pc1, 0x0A, true), HidResult::KeyCapacity);
+
+    // Refused, so nothing was recorded and no report would differ. A debt
+    // here would be a wait for a state that does not exist.
+    CHECK_FALSE(manager.keyboard_unreported(Target::Pc1));
+}
+
+TEST_CASE(mouse_movement_owes_the_keyboard_nothing) {
+    HidStateManager manager;
+
+    manager.mouse_delta(Target::Pc1, 5, -3, 0, 0);
+    manager.set_mouse_buttons(Target::Pc1, 0x01);
+
+    // The pointer must never wait for typing, and it must not make typing
+    // wait either. Neither says anything about which keys are down.
+    CHECK_FALSE(manager.keyboard_unreported(Target::Pc1));
+}
+
+TEST_CASE(letting_go_of_everything_is_the_state_that_most_needs_publishing) {
+    HidStateManager manager;
+    manager.physical_key(Target::Pc1, kA, true);
+    manager.physical_key(Target::Pc2, kB, true);
+    manager.keyboard_reported(Target::Pc1);
+    manager.keyboard_reported(Target::Pc2);
+
+    manager.release_all();
+
+    // STOP AND RELEASE ALL, a lost link, a reset. If this one is replaced
+    // before it goes out, a key stays down on a computer with nothing left
+    // driving it.
+    CHECK(manager.keyboard_unreported(Target::Pc1));
+    CHECK(manager.keyboard_unreported(Target::Pc2));
+}
+
+TEST_CASE(releasing_one_computer_leaves_the_other_answer_standing) {
+    HidStateManager manager;
+    manager.physical_key(Target::Pc1, kA, true);
+    manager.physical_key(Target::Pc2, kB, true);
+    manager.keyboard_reported(Target::Pc1);
+    manager.keyboard_reported(Target::Pc2);
+
+    manager.release_target(Target::Pc1);
+
+    CHECK(manager.keyboard_unreported(Target::Pc1));
+    CHECK_FALSE(manager.keyboard_unreported(Target::Pc2));
+}
+
+TEST_CASE(a_macro_ending_is_announced_even_if_it_was_holding_nothing) {
+    HidStateManager manager;
+    manager.physical_key(Target::Pc1, kA, true);
+    manager.keyboard_reported(Target::Pc1);
+    manager.keyboard_reported(Target::Pc2);
+
+    manager.release_macro(7);
+
+    // Announced rather than worked out. The sender answers a state it already
+    // has by saying so, which costs one comparison; deciding here what
+    // actually moved costs a scan of every usage on both computers.
+    CHECK(manager.keyboard_unreported(Target::Pc1));
+    CHECK(manager.keyboard_unreported(Target::Pc2));
+}
