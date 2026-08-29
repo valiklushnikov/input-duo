@@ -681,12 +681,6 @@ bool Ch375Device::poll_interrupt(InterruptStatus& status) {
             return true;
         }
         ++status_reads_failed_;
-        if (state_ == Ch375State::Ready) {
-            // A controller that will not answer the status of a device that is
-            // up is not answering at all, and the device's own polls cannot
-            // even be issued past it.
-            ++failed_polls_;
-        }
         return false;
     }
 

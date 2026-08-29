@@ -410,6 +410,22 @@ TEST_CASE(the_policy_that_makes_an_idle_endpoint_answer_survives_the_bus_reset) 
     CHECK_EQ(rig.chip.retry_policy(), kRetryReportNak);
 }
 
+TEST_CASE(a_controller_that_raises_an_interrupt_and_never_says_why_releases_it) {
+    // Measured on hardware at 2026-08-29 11:31: INT held asserted and every
+    // status read going unanswered. Nothing can be read from the device in
+    // that state, so a key held at that moment would be held forever on the
+    // far side, and the polls that would notice cannot even be collected.
+    Rig rig;
+    bring_up(rig);
+    rig.count(Ch375EventKind::Ready);
+
+    rig.chip.hold_interrupt_unanswered(true);
+    rig.run(kDeviceLostUs * (kQuietRetriesBeforeTeardown + 2));
+
+    CHECK_EQ(rig.count(Ch375EventKind::Detached), 1);
+    CHECK(static_cast<int>(rig.device.state()) != static_cast<int>(Ch375State::Ready));
+}
+
 TEST_CASE(a_channel_that_was_not_ticked_does_not_give_up_its_device) {
     // Silence that this side never asked a question in is not evidence about
     // the device. Core 1 services two channels, the link and the watchdog on
@@ -420,8 +436,12 @@ TEST_CASE(a_channel_that_was_not_ticked_does_not_give_up_its_device) {
     bring_up(rig);
     rig.count(Ch375EventKind::Ready);
 
-    rig.chip.advance(kDeviceLostUs * 5);
-    rig.device.tick(rig.chip.now_us());
+    // Enough starved stretches to spend every re-arm and reach the teardown,
+    // if a stretch nobody asked a question in counted as one.
+    for (int gap = 0; gap <= kQuietRetriesBeforeTeardown; ++gap) {
+        rig.chip.advance(kDeviceLostUs * 5);
+        rig.device.tick(rig.chip.now_us());
+    }
 
     CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
     CHECK_EQ(rig.count(Ch375EventKind::Detached), 0);
