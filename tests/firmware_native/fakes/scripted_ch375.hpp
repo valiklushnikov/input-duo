@@ -343,6 +343,21 @@ public:
     /// Stop answering at all, as a chip with a broken port would.
     void go_silent(bool silent) { silent_ = silent; }
 
+    /// Answer this many more commands and then stop answering at all.
+    ///
+    /// The state the hardware was measured in at 2026-08-29 12:06: a channel
+    /// that attached and never reached Ready, so the chip was answering when
+    /// the device arrived and had stopped by the time the bring-up sequence
+    /// was through. A chip that is deaf from the start never gets that far,
+    /// which is why go_silent alone cannot reach the stretch between attach
+    /// and Ready.
+    ///
+    /// It goes deaf at a command boundary, never in the middle of a reply
+    /// already begun: a controller that has lost sync stops responding to
+    /// commands, and a reply cut in half is a framing error, which is a
+    /// different fault with a different knob (break_block_reads_at_or_above).
+    void go_silent_after(int commands) { deaf_countdown_ = commands; }
+
     /// Drop the answer to the next few CHECK_EXISTs, and nothing else.
     ///
     /// One byte lost on a wire, rather than a chip that has stopped being a
@@ -435,6 +450,8 @@ private:
 
     bool garbage_ = false;
     bool silent_ = false;
+    /// Commands left to answer before this chip goes deaf. Negative is never.
+    int deaf_countdown_ = -1;
     bool hold_int_unanswered_ = false;
     int missed_check_exists_ = 0;
     bool saw_bus_reset_ = false;

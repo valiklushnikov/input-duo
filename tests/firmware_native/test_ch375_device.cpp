@@ -12,6 +12,7 @@
 // Ready when reports can be read; RecoverWait after a failure, counting down
 // to another attempt; Fault only when retrying has stopped being worth it.
 
+#include "ch375/descriptor_setup.hpp"
 #include "ch375/device.hpp"
 #include "fakes/scripted_ch375.hpp"
 #include "test_support.hpp"
@@ -21,6 +22,7 @@ using duo_input::u1::ch375::Ch375Event;
 using duo_input::u1::ch375::Ch375EventKind;
 using duo_input::u1::ch375::Ch375State;
 using duo_input::u1::ch375::Ch375Transport;
+using duo_input::u1::ch375::DescriptorSetup;
 using duo_input::u1::ch375::kDeviceLostUs;
 using duo_input::u1::ch375::kQuietRetriesBeforeTeardown;
 using duo_input::u1::ch375::kRecoverDelayUs;
@@ -31,6 +33,37 @@ using duo_input::u1::ch375::testing::FakeCh375Chip;
 using duo_input::u1::ch375::testing::FakeDeviceSetup;
 
 namespace {
+
+/// Run a rig for a while, letting time pass between ticks.
+template <typename R>
+void run_for(R& rig, std::uint32_t duration_us, std::uint32_t step_us) {
+    const std::uint32_t until = rig.chip.now_us() + duration_us;
+    while (static_cast<std::int32_t>(rig.chip.now_us() - until) < 0) {
+        rig.device.tick(rig.chip.now_us());
+        rig.chip.advance(step_us);
+    }
+    rig.device.tick(rig.chip.now_us());
+}
+
+/// The longest a single tick took, measured on the fake's own clock.
+///
+/// That clock moves only when the code under test polls a port with nothing on
+/// it, so this measures the one thing that matters here: time spent waiting for
+/// a chip, which Core 1 takes out of the other channel's poll window.
+template <typename R>
+std::uint32_t worst_tick_of(R& rig, int ticks, std::uint32_t step_us) {
+    std::uint32_t worst = 0;
+    for (int index = 0; index < ticks; ++index) {
+        const std::uint32_t before = rig.chip.now_us();
+        rig.device.tick(rig.chip.now_us());
+        const std::uint32_t spent = rig.chip.now_us() - before;
+        if (spent > worst) {
+            worst = spent;
+        }
+        rig.chip.advance(step_us);
+    }
+    return worst;
+}
 
 /// A chip, a transport and a device, wired together the way firmware does.
 struct Rig {
@@ -46,32 +79,12 @@ struct Rig {
 
     /// Run the machine for a while, letting time pass between ticks.
     void run(std::uint32_t duration_us, std::uint32_t step_us = 100) {
-        const std::uint32_t until = chip.now_us() + duration_us;
-        while (static_cast<std::int32_t>(chip.now_us() - until) < 0) {
-            device.tick(chip.now_us());
-            chip.advance(step_us);
-        }
-        device.tick(chip.now_us());
+        run_for(*this, duration_us, step_us);
     }
 
     /// The longest a single tick took, measured on the fake's own clock.
-    ///
-    /// That clock moves only when the code under test polls a port with
-    /// nothing on it, so this measures the one thing that matters here: time
-    /// spent waiting for a chip, which Core 1 takes out of the other
-    /// channel's poll window.
     std::uint32_t worst_tick(int ticks, std::uint32_t step_us = 1000) {
-        std::uint32_t worst = 0;
-        for (int index = 0; index < ticks; ++index) {
-            const std::uint32_t before = chip.now_us();
-            device.tick(chip.now_us());
-            const std::uint32_t spent = chip.now_us() - before;
-            if (spent > worst) {
-                worst = spent;
-            }
-            chip.advance(step_us);
-        }
-        return worst;
+        return worst_tick_of(*this, ticks, step_us);
     }
 
     /// Take every event the device has produced, keeping the last of a kind.
@@ -726,6 +739,88 @@ TEST_CASE(a_chip_that_holds_its_interrupt_and_answers_nothing_costs_the_loop_not
 
     // Measured with this test: 20 000 us before the change, one poll of an
     // empty port after it.
+    CHECK(worst < 500u);
+}
+
+/// A live rig: the real DescriptorSetup rather than the fake one.
+///
+/// The stretch measured below runs through enumeration, and what enumeration
+/// puts on the wire is the whole question. FakeDeviceSetup reads a block on
+/// every poll whether or not the chip has just answered an interrupt, which no
+/// real setup does: DescriptorSetup reads one only when the status it was
+/// handed says a transfer completed. Measuring the budget against the fake
+/// would measure the fake.
+struct LiveRig {
+    FakeCh375Chip chip;
+    Ch375Transport transport{chip};
+    DescriptorSetup setup{transport};
+    Ch375Device device{transport, setup};
+};
+
+/// How many commands of the bring-up the chip is allowed to answer before it
+/// goes deaf, one scenario per value.
+///
+/// Zero is a chip that stops the instant the device arrives. Six carries it
+/// through GET_DEVICE_RATE, both halves of the bus reset and into
+/// enumeration, which is the whole of the stretch the hardware is stuck in.
+/// It stops there because the next command that expects an answer is the
+/// block read of the first descriptor, and a block read is the one path in
+/// this transport still allowed to wait - see the link hardening report.
+constexpr int kStallPoints = 6;
+
+TEST_CASE(no_tick_between_a_device_attaching_and_it_working_stalls_the_other_channel) {
+    // Measured on hardware at 2026-08-29 12:06, with the deferred status read
+    // on the board: the worst pass round Core 1's loop was still 20 170 us -
+    // one whole kDefaultReplyTimeoutUs - on a channel sitting at attached=1,
+    // ready=0. That is the stretch between a device arriving and it being
+    // usable, and it is exactly the stretch whose commands were left
+    // blocking: GET_DEVICE_RATE on the attach, and SET_USB_MODE at each step
+    // of the bus reset and of the recovery that follows a failed one.
+    //
+    // Neither existing budget test can reach it. One drives a chip that is
+    // deaf from the start, which never gets a device as far as attaching; the
+    // other holds INT and answers no status, which stops the tick above these
+    // states entirely. So a 20 ms path survived both.
+    //
+    // The chip here answers its own bring-up, answers a device arriving, and
+    // then stops - at each command boundary in turn, because which command it
+    // stops at decides which of these paths is the one left waiting.
+    std::uint32_t worst = 0;
+    bool saw_resetting = false;
+    bool saw_host_mode = false;
+    bool saw_enumerating = false;
+
+    for (int answered = 0; answered <= kStallPoints; ++answered) {
+        LiveRig rig;
+        rig.chip.serve_boot_mouse();
+        run_for(rig, 200000, 100);
+        rig.chip.attach_device();
+        rig.chip.go_silent_after(answered);
+
+        // Long enough to cover enumeration's own deadline and a full
+        // kRecoverDelayUs after it, so the recovery path's mode command is
+        // measured too.
+        for (int pass = 0; pass < 2500; ++pass) {
+            const std::uint32_t before = rig.chip.now_us();
+            rig.device.tick(rig.chip.now_us());
+            const std::uint32_t spent = rig.chip.now_us() - before;
+            if (spent > worst) {
+                worst = spent;
+            }
+            saw_resetting = saw_resetting || rig.device.state() == Ch375State::Resetting;
+            saw_host_mode = saw_host_mode || rig.device.state() == Ch375State::HostMode;
+            saw_enumerating = saw_enumerating || rig.device.state() == Ch375State::Enumerating;
+            rig.chip.advance(1000);
+        }
+    }
+
+    // The walk actually happened. Without these the budget could be met by a
+    // machine that never left Absent.
+    CHECK(saw_resetting);
+    CHECK(saw_host_mode);
+    CHECK(saw_enumerating);
+    // Measured with this test before the conversion: 20 000 us, one whole
+    // reply timeout inside one tick.
     CHECK(worst < 500u);
 }
 

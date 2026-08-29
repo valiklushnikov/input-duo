@@ -226,6 +226,8 @@ add_executable(duo_ch375_device_test
     test_ch375_device.cpp
     fakes/scripted_ch375.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/device.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/descriptor_setup.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/hid_parser.cpp
 )
 
 target_link_libraries(duo_ch375_device_test PRIVATE duo_common)

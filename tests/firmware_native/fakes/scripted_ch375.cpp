@@ -123,6 +123,17 @@ bool FakeCh375Chip::set_rx_baud(unsigned baud) {
 }
 
 void FakeCh375Chip::write_command(std::uint8_t command) {
+    if (deaf_countdown_ >= 0) {
+        // Counted at the command boundary, so a reply already begun is never
+        // cut in half - a chip that has lost sync stops responding to
+        // commands, it does not truncate a block it is part way through
+        // sending.
+        if (deaf_countdown_ == 0) {
+            silent_ = true;
+        } else {
+            --deaf_countdown_;
+        }
+    }
     if (command == static_cast<std::uint8_t>(Ch375Command::CheckExist)) {
         ++check_exist_count_;
     }
