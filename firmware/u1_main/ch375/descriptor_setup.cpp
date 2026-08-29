@@ -14,6 +14,22 @@ constexpr std::uint8_t kEndedUnsupported = 0xFB;
 constexpr std::uint8_t kEndedProtocolRefused = 0xFA;
 /// Nothing came back from the protocol request at all.
 constexpr std::uint8_t kEndedProtocolSilent = 0xF9;
+/// Why a device is on boot protocol rather than its own. Not failures - each
+/// of these is a device that works, without a wheel.
+/// The interface declared no report descriptor at all.
+constexpr std::uint8_t kNoReportDescriptor = 0xF8;
+/// It declared one longer than there is room to collect.
+constexpr std::uint8_t kReportDescriptorTooLong = 0xF7;
+/// The device refused the request, or the chip would not carry it.
+constexpr std::uint8_t kReportDescriptorRefused = 0xF6;
+/// The bytes arrived and did not describe a mouse this firmware can read.
+constexpr std::uint8_t kReportDescriptorUnusable = 0xF5;
+/// A packet was asked for and could not be collected off the chip.
+constexpr std::uint8_t kReportDescriptorUnreadable = 0xF4;
+/// The device has gone silent on this request too many times to keep asking.
+constexpr std::uint8_t kReportDescriptorGivenUp = 0xF3;
+/// The device was read through its own report descriptor. Not boot.
+constexpr std::uint8_t kReportDescriptorUsed = 0xF2;
 
 /// HID 1.11 section 7.2.5. The controller has no command for this one.
 constexpr std::uint8_t kRequestSetProtocol = 0x0B;
@@ -21,6 +37,21 @@ constexpr std::uint8_t kRequestSetProtocol = 0x0B;
 constexpr std::uint8_t kRequestTypeInterfaceOut = 0x21;
 /// HID 1.11 7.2.5: wValue 0 asks for boot protocol, 1 for report protocol.
 constexpr std::uint16_t kProtocolBoot = 0;
+
+/// USB 2.0 9.4.3. The controller's own GET_DESCRIPTOR command only knows the
+/// device and configuration descriptors (DS2 1.11), so this one is assembled
+/// as a setup packet like SET_PROTOCOL is.
+constexpr std::uint8_t kRequestGetDescriptor = 0x06;
+/// USB 2.0 9.3.1: device to host, standard request, addressed to an interface.
+/// The recipient matters - a report descriptor belongs to an interface, and
+/// asked of the device a composite has no way to know which one is meant.
+constexpr std::uint8_t kRequestTypeInterfaceIn = 0x81;
+/// HID 1.11 7.1.1. wValue is the type in the high byte and the index in the
+/// low one, and there is only ever one report descriptor per interface.
+constexpr std::uint16_t kDescriptorReport = 0x2200;
+
+/// Where bMaxPacketSize0 sits in a device descriptor (USB 2.0 9.6.1).
+constexpr std::size_t kMaxPacketSizeOffset = 7;
 
 /// A descriptor has to fit the controller's control buffer, which is 64 bytes
 /// (DS1 5.13). A longer one arrives cut short, and the parser refuses what
@@ -42,6 +73,17 @@ void DescriptorSetup::begin(std::uint32_t now_us) {
     capabilities_ = HidCapabilities{};
     last_parse_error_ = ParseError::None;
     boot_protocol_selected_ = false;
+    // A layout belongs to the device that declared it. Kept across an attempt
+    // it would be applied to whatever is plugged in next, which is a mouse
+    // read at another mouse's offsets.
+    mouse_layout_ = boot_mouse_layout();
+    have_mouse_layout_ = false;
+    report_error_ = ReportDescriptorError::None;
+    report_status_ = 0;
+    control_packet_ = 8;
+    report_wanted_ = 0;
+    report_received_ = 0;
+    report_toggle_data1_ = true;
     last_status_ = kEndedRunning;
     started_us_ = now_us;
     ++attempts_;
@@ -72,7 +114,134 @@ SetupProgress DescriptorSetup::fail(std::uint8_t status) {
 SetupProgress DescriptorSetup::finish(std::uint8_t status) {
     step_ = Step::Idle;
     last_status_ = status;
+    // Whatever the device did about its report descriptor, it is up. The next
+    // device to arrive on this channel gets the full three tries again.
+    report_silences_ = 0;
     return SetupProgress::Done;
+}
+
+/// Ask the mouse where it keeps its fields, or take the path already working.
+///
+/// Only a mouse. A boot keyboard's report is fixed by HID 1.11 Appendix B.1 -
+/// modifiers, a reserved byte, six key slots - which is what
+/// KeyboardNormalizer is written against and what the captured traces in
+/// tests/vectors replay. There is no wheel to recover on a keyboard and
+/// nothing to gain by reading its descriptor, so it keeps boot protocol.
+SetupProgress DescriptorSetup::request_report_descriptor(std::uint32_t now_us) {
+    if (capabilities_.kind != DeviceKind::Mouse) {
+        return select_boot_protocol(now_us);
+    }
+    if (report_silences_ >= kReportDescriptorAttempts) {
+        // Asked and unanswered every time. Asking again would reset the bus
+        // again, for ever, on a device that works.
+        report_status_ = kReportDescriptorGivenUp;
+        return select_boot_protocol(now_us);
+    }
+
+    const std::uint16_t length = capabilities_.report_descriptor_length;
+    if (length == 0) {
+        // The interface named no report descriptor. HID requires one, and a
+        // device is under no obligation to be correct.
+        report_status_ = kNoReportDescriptor;
+        return select_boot_protocol(now_us);
+    }
+    if (length > kMaxReportDescriptorBytes) {
+        // Refused by name rather than collected in part. Half a descriptor
+        // parses as a different device, and a different device is the wrong
+        // offsets on every report it will ever send.
+        report_status_ = kReportDescriptorTooLong;
+        return select_boot_protocol(now_us);
+    }
+
+    ControlRequest request;
+    request.request_type = kRequestTypeInterfaceIn;
+    request.request = kRequestGetDescriptor;
+    request.value = kDescriptorReport;
+    // The interface the parser chose. A composite has several and only one of
+    // them is the mouse.
+    request.index = capabilities_.interface_number;
+    request.length = length;
+
+    if (!transport_.begin_control_request(request)) {
+        // Refused before anything went on the wire, so nothing is outstanding.
+        report_status_ = kReportDescriptorRefused;
+        return select_boot_protocol(now_us);
+    }
+    report_wanted_ = length;
+    report_received_ = 0;
+    // A control transfer's data stage starts at DATA1 and alternates
+    // (USB 2.0 8.6). The chip tracks neither toggle, so both are set by hand.
+    report_toggle_data1_ = true;
+    started_us_ = now_us;
+    step_ = Step::RequestingReportDescriptor;
+    return SetupProgress::Busy;
+}
+
+/// Take one packet off the chip, then ask for the next or end the transfer.
+SetupProgress DescriptorSetup::collect_report_descriptor(std::uint32_t now_us) {
+    std::uint8_t packet[kDescriptorBuffer];
+    std::size_t size = 0;
+    if (!transport_.read_block(packet, sizeof(packet), size)) {
+        // read_block has already drained what the chip was sending. Walking
+        // away without that would leave those bytes to be read as the answer
+        // to the next command, and the one after it, for ever.
+        return abandon_report_descriptor(now_us, kReportDescriptorUnreadable);
+    }
+
+    const std::size_t room = kMaxReportDescriptorBytes - report_received_;
+    const std::size_t keep = size < room ? size : room;
+    for (std::size_t index = 0; index < keep; ++index) {
+        report_buffer_[report_received_ + index] = packet[index];
+    }
+    report_received_ = static_cast<std::uint16_t>(report_received_ + keep);
+    report_toggle_data1_ = !report_toggle_data1_;
+
+    // A packet shorter than the endpoint's maximum is the end of the data,
+    // whatever the device promised in wLength (USB 2.0 8.5.3.2). So is having
+    // collected everything that was asked for. Either way the next thing is
+    // the status stage and not another IN.
+    const bool short_packet = size < control_packet_;
+    if (!short_packet && report_received_ < report_wanted_ && keep == size) {
+        transport_.request_control_data(report_toggle_data1_);
+        started_us_ = now_us;
+        return SetupProgress::Busy;
+    }
+
+    if (!transport_.finish_control_read()) {
+        // The empty packet was refused before its token went out, so nothing
+        // is outstanding and the bytes in hand are still good.
+        return apply_report_descriptor(now_us);
+    }
+    started_us_ = now_us;
+    step_ = Step::FinishingReportDescriptor;
+    return SetupProgress::Busy;
+}
+
+/// Read what arrived, and keep it only if all of it can be named in bytes.
+SetupProgress DescriptorSetup::apply_report_descriptor(std::uint32_t now_us) {
+    MouseReportLayout layout = boot_mouse_layout();
+    report_error_ = parse_mouse_report_descriptor(
+        protocol::ByteView{report_buffer_, report_received_}, layout);
+    if (report_error_ != ReportDescriptorError::None) {
+        // A descriptor that does not add up, a mouse with a twelve-bit axis,
+        // a device that is not a pointer at all. Each of them is a device this
+        // firmware can still route on boot protocol's fixed report.
+        return abandon_report_descriptor(now_us, kReportDescriptorUnusable);
+    }
+
+    mouse_layout_ = layout;
+    have_mouse_layout_ = true;
+    // And no SET_PROTOCOL. Boot protocol's report is three bytes and has no
+    // wheel in it, so asking for it now would throw away the very thing this
+    // step went and fetched.
+    return finish(kReportDescriptorUsed);
+}
+
+SetupProgress DescriptorSetup::abandon_report_descriptor(std::uint32_t now_us,
+                                                        std::uint8_t status) {
+    report_status_ = status;
+    report_received_ = 0;
+    return select_boot_protocol(now_us);
 }
 
 SetupProgress DescriptorSetup::select_boot_protocol(std::uint32_t now_us) {
@@ -116,6 +285,21 @@ SetupProgress DescriptorSetup::poll(std::uint32_t now_us, bool interrupted,
         // minutes, and a deadline compared directly reads as no wait at all on
         // one side of the wrap and an hour on the other.
         if (now_us - started_us_ >= kSetupTimeoutUs) {
+            if (fetching_report_descriptor()) {
+                // Silence, and silence alone, is not recoverable in place: a
+                // token was issued and never answered, so the chip may still
+                // complete it and raise its interrupt - and that interrupt
+                // would be read as the answer to whatever is asked next.
+                // Ending the attempt is what gets ABORT_NAK issued and the bus
+                // reset before anything else is said (device.cpp, Enumerating).
+                //
+                // Counted, so a device that is silent every time stops being
+                // asked and comes up on boot rather than re-enumerating for
+                // ever.
+                ++report_silences_;
+                report_status_ = kReportDescriptorRefused;
+                return fail(kEndedTimeout);
+            }
             if (choosing_protocol()) {
                 // Every other step is something the device must do before it
                 // can be used. This one is a preference, so silence ends the
@@ -130,6 +314,14 @@ SetupProgress DescriptorSetup::poll(std::uint32_t now_us, bool interrupted,
     }
 
     if (status != InterruptStatus::Success) {
+        if (fetching_report_descriptor()) {
+            // A STALL is a device saying it will not answer that, which it is
+            // entitled to. Unlike a timeout it is an answer: the interrupt has
+            // been read and nothing is left outstanding, so the next control
+            // transfer can go out safely - and the next one is the request for
+            // boot protocol, which is where such a device belongs.
+            return abandon_report_descriptor(now_us, kReportDescriptorRefused);
+        }
         if (choosing_protocol()) {
             // A STALL here is a device saying it does not do that, which it is
             // entitled to. Nothing was left half done: a refused SETUP has no
@@ -150,8 +342,18 @@ SetupProgress DescriptorSetup::poll(std::uint32_t now_us, bool interrupted,
             if (!transport_.read_block(buffer, sizeof(buffer), size) || size < 8) {
                 return fail(kEndedUnreadable);
             }
-            // Nothing inside it is needed to go on. What it establishes is
-            // that the device answered on address zero, which means it is
+            // One field is worth keeping: how much endpoint zero carries in a
+            // single packet (USB 2.0 9.6.1). A report descriptor is longer
+            // than that on most mice, so it arrives in several, and knowing
+            // the size is what says which packet is the last one. Only the
+            // four legal values are believed; anything else would either end
+            // the transfer early or ask for a packet that never comes.
+            const std::uint8_t declared = buffer[kMaxPacketSizeOffset];
+            if (declared == 8 || declared == 16 || declared == 32 || declared == 64) {
+                control_packet_ = declared;
+            }
+            // Nothing else inside it is needed to go on. What it establishes
+            // is that the device answered on address zero, which means it is
             // listening and can be moved somewhere of its own.
             transport_.set_address(kAssignedAddress);
             started_us_ = now_us;
@@ -193,7 +395,26 @@ SetupProgress DescriptorSetup::poll(std::uint32_t now_us, bool interrupted,
         }
 
         case Step::ChoosingConfiguration:
-            return select_boot_protocol(now_us);
+            return request_report_descriptor(now_us);
+
+        case Step::RequestingReportDescriptor:
+            // The device took the setup packet. None of the descriptor has
+            // arrived yet - that is the data stage, one IN transaction at a
+            // time, each one a tick of its own so that a hundred-byte
+            // descriptor never becomes a spin on a core that owes the other
+            // channel a poll every eight milliseconds.
+            transport_.request_control_data(report_toggle_data1_);
+            started_us_ = now_us;
+            step_ = Step::ReadingReportDescriptor;
+            return SetupProgress::Busy;
+
+        case Step::ReadingReportDescriptor:
+            return collect_report_descriptor(now_us);
+
+        case Step::FinishingReportDescriptor:
+            // The transfer is closed. Whatever the status stage came to, the
+            // bytes are already in hand.
+            return apply_report_descriptor(now_us);
 
         case Step::RequestingBootProtocol:
             // The device took the setup packet. It has not acted on it yet:

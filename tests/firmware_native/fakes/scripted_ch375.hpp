@@ -212,6 +212,55 @@ public:
     /// does not exist.
     void serve_mouse_without_boot();
 
+    /// A mouse that declares a HID report descriptor and will hand it over.
+    ///
+    /// The other serve_ helpers deliberately declare none: they were written
+    /// before anything fetched one, and a device that names no report
+    /// descriptor is exactly the fallback case. This one names it, sizes the
+    /// HID record to it, and answers the request for it.
+    void serve_mouse_with_report_descriptor(const std::vector<std::uint8_t>& descriptor,
+                                            bool boot_subclass);
+
+    /// A composite whose first HID interface is consumer controls and whose
+    /// second is the mouse, both declaring report descriptors.
+    ///
+    /// wIndex is an interface number and a composite has several. Sent to the
+    /// wrong one, the request fetches somebody else's descriptor - or nothing.
+    void serve_composite_mouse_with_report_descriptor(
+        const std::vector<std::uint8_t>& descriptor);
+
+    /// A boot keyboard that declares a report descriptor and will hand it
+    /// over. Nothing should ever ask it for one.
+    void serve_keyboard_with_report_descriptor(const std::vector<std::uint8_t>& descriptor);
+
+    /// What endpoint zero carries in one packet (USB 2.0 9.6.1).
+    ///
+    /// Eight on a low-speed mouse, which is most of them - so a fifty-byte
+    /// report descriptor arrives in seven transactions and not one. The
+    /// default here is eight for that reason.
+    void set_control_packet_size(std::uint8_t bytes) { control_packet_ = bytes; }
+
+    /// Refuse the report-descriptor request with a STALL, as a device that
+    /// does not implement it does. Every other request is still answered.
+    void refuse_report_descriptor(bool refusing) { refuse_report_descriptor_ = refusing; }
+
+    /// Answer the report-descriptor request with nothing at all.
+    ///
+    /// No data and no interrupt: a token issued and never completed, which is
+    /// the one failure that cannot be recovered from without resetting the bus.
+    void ignore_report_descriptor(bool ignoring) { ignore_report_descriptor_ = ignoring; }
+
+    /// How many times the report descriptor has been asked for, and how many
+    /// bytes the last request asked for.
+    int report_descriptor_requests() const { return report_descriptor_requests_; }
+    std::uint16_t report_descriptor_asked_for() const { return report_descriptor_asked_; }
+    /// How many IN transactions its data stage took.
+    int report_descriptor_packets() const { return report_descriptor_packets_; }
+    /// Was the transfer closed with an empty packet the host sent?
+    int control_read_status_stages() const { return control_read_status_stages_; }
+    /// The transmitter's data toggle, as it was last set (DS2 1.7).
+    std::uint8_t transmit_toggle() const { return transmit_toggle_; }
+
     // --- control transfers the chip has no dedicated command for ------------
     //
     // SET_ADDRESS, SET_CONFIG and GET_DESCR are commands of their own; every
@@ -548,12 +597,30 @@ private:
     int control_status_stages_ = 0;
     bool refuse_setup_ = false;
     bool ignore_setup_ = false;
+    std::vector<std::uint8_t> report_descriptor_;
+    /// What is left of the report descriptor's data stage, and where it is up
+    /// to. A control read is one SETUP and then as many INs as it takes.
+    std::size_t control_read_at_ = 0;
+    std::size_t control_read_total_ = 0;
+    bool control_read_open_ = false;
+    /// Which packet the device is sending next in a control read's data stage.
+    bool control_read_data1_ = true;
+    std::uint8_t receive_toggle_ = 0;
+    std::uint8_t control_packet_ = 8;
+    bool refuse_report_descriptor_ = false;
+    bool ignore_report_descriptor_ = false;
+    int report_descriptor_requests_ = 0;
+    std::uint16_t report_descriptor_asked_ = 0;
+    int report_descriptor_packets_ = 0;
+    int control_read_status_stages_ = 0;
+    std::uint8_t transmit_toggle_ = 0;
     bool boot_protocol_ = false;
     int control_naks_ = 0;
     bool hold_control_nak_retry_ = false;
     bool nak_retry_in_progress_ = false;
     std::uint32_t abort_nak_count_ = 0;
     void begin_control_transfer();
+    void serve_control_read_packet();
     void finish_control_stage();
     /// DS2 1.3: bit 7 is what chooses between retrying a NAK on the bus and
     /// handing it to the MCU as a failure status.

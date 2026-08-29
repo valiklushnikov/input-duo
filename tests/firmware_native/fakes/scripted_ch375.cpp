@@ -271,6 +271,7 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
         case Ch375Command::SetRetry:
         case Ch375Command::SetUsbAddress:
         case Ch375Command::SetEndpoint6:
+        case Ch375Command::SetEndpoint7:
         case Ch375Command::IssueToken:
             expecting_data_ = true;
             break;
@@ -389,9 +390,19 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
             break;
 
         case Ch375Command::SetEndpoint6:
-            // The receiver's data toggle, set by hand (DS2 1.6). Recorded
-            // rather than acted on: what the tests are about is that it is set
-            // at all before a transaction that depends on it.
+            // The receiver's data toggle, set by hand (DS2 1.6). Acted on for
+            // a control read and recorded otherwise: a data stage whose toggle
+            // does not match what the device is sending gets nothing back at
+            // all - no data, no error, no interrupt - which is the failure
+            // that looked like a hundred and twenty empty polls on the bench.
+            receive_toggle_ = value;
+            expecting_data_ = false;
+            break;
+
+        case Ch375Command::SetEndpoint7:
+            // The transmitter's (DS2 1.7). The status stage of a control read
+            // is an empty DATA1, and a host that does not say so sends DATA0.
+            transmit_toggle_ = value;
             expecting_data_ = false;
             break;
 
@@ -406,10 +417,25 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
                 begin_control_transfer();
                 break;
             }
-            // Endpoint zero is never an interrupt endpoint, so an IN token
-            // there is the status stage of a control transfer and nothing
-            // else.
+            // An IN at endpoint zero is either the data stage of a transfer
+            // that reads, or the status stage of one that does not. Which it
+            // is depends on whether a read is open and still has bytes left.
             if (endpoint == 0 && pid == TokenPid::In) {
+                if (control_read_open_ && control_read_at_ < control_read_total_) {
+                    serve_control_read_packet();
+                } else {
+                    finish_control_stage();
+                }
+                break;
+            }
+            // An OUT at endpoint zero is the status stage of a transfer that
+            // read data: the host acknowledges with an empty packet rather
+            // than asking for one (USB 2.0 8.5.3).
+            if (endpoint == 0 && pid == TokenPid::Out) {
+                if (control_read_open_) {
+                    ++control_read_status_stages_;
+                    control_read_open_ = false;
+                }
                 finish_control_stage();
                 break;
             }
@@ -461,7 +487,7 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
             }
             if (value == 1) {
                 // A device descriptor. Only its shape matters here.
-                pending_read_ = {18,   0x01, 0x10, 0x01, 0, 0, 0, 8,
+                pending_read_ = {18,   0x01, 0x10, 0x01, 0, 0, 0, control_packet_,
                                  0x34, 0x12, 0x78, 0x56, 0, 1, 0, 0, 0, 1};
                 read_device_descriptor_ = true;
             } else if (value == 2) {
@@ -655,6 +681,20 @@ std::vector<std::uint8_t> interface_record(std::uint8_t number, std::uint8_t cls
     return {9, 0x04, number, 0, endpoints, cls, subclass, protocol, 0};
 }
 
+/// HID 1.11 6.2.1. The record that says how long the report descriptor is,
+/// and the only place that number exists.
+std::vector<std::uint8_t> hid_record(std::uint16_t report_length) {
+    return {9,
+            0x21,
+            0x11,
+            0x01,
+            0,
+            1,
+            0x22,
+            static_cast<std::uint8_t>(report_length & 0xFF),
+            static_cast<std::uint8_t>(report_length >> 8)};
+}
+
 std::vector<std::uint8_t> endpoint_record(std::uint8_t address, std::uint16_t max_packet) {
     return {7, 0x05, address, 0x03, static_cast<std::uint8_t>(max_packet & 0xFF),
             static_cast<std::uint8_t>(max_packet >> 8), 10};
@@ -671,6 +711,12 @@ constexpr std::uint8_t kRequestTypeInterfaceOut = 0x21;
 /// HID 1.11 7.2.5. Written out here rather than taken from the firmware, so
 /// that a test cannot agree with a wrong constant by sharing it.
 constexpr std::uint8_t kRequestSetProtocol = 0x0B;
+/// USB 2.0 9.3.1: device to host, standard request, to an interface.
+constexpr std::uint8_t kRequestTypeInterfaceIn = 0x81;
+/// USB 2.0 9.4.3 and HID 1.11 7.1.1: GET_DESCRIPTOR of a report descriptor,
+/// whose type is the high byte of wValue.
+constexpr std::uint8_t kRequestGetDescriptor = 0x06;
+constexpr std::uint8_t kDescriptorReport = 0x22;
 
 }  // namespace
 
@@ -716,6 +762,43 @@ bool FakeCh375Chip::control_transfer_naks() {
 void FakeCh375Chip::begin_control_transfer() {
     setup_packets_.push_back(outbound_block_);
     control_pending_ = false;
+    // A new setup packet ends whatever transfer was open. That is the real
+    // rule (USB 2.0 8.5.3) and it is also what keeps an abandoned read from
+    // leaking its remaining bytes into the next request's answer.
+    control_read_open_ = false;
+    control_read_at_ = 0;
+    control_read_total_ = 0;
+
+    const bool is_report_descriptor_read =
+        outbound_block_.size() == kSetupPacketSize &&
+        outbound_block_[0] == kRequestTypeInterfaceIn &&
+        outbound_block_[1] == kRequestGetDescriptor && outbound_block_[3] == kDescriptorReport;
+    if (is_report_descriptor_read) {
+        ++report_descriptor_requests_;
+        report_descriptor_asked_ = static_cast<std::uint16_t>(
+            outbound_block_[6] | (static_cast<std::uint16_t>(outbound_block_[7]) << 8));
+        if (ignore_report_descriptor_) {
+            // No data, no interrupt, no clue. Only a deadline ends this.
+            pending_read_.clear();
+            return;
+        }
+        if (refuse_report_descriptor_) {
+            pending_read_.clear();
+            pending_status_ = 0x2E;
+            int_asserted_ = !silent_;
+            return;
+        }
+        control_read_total_ = report_descriptor_.size() < report_descriptor_asked_
+                                  ? report_descriptor_.size()
+                                  : report_descriptor_asked_;
+        control_read_open_ = true;
+        control_read_data1_ = true;
+        // The setup packet's own interrupt carries no data with it; the bytes
+        // come back one IN transaction at a time after this.
+        pending_read_.clear();
+        finish_transfer(false);
+        return;
+    }
 
     if (control_transfer_naks()) {
         return;
@@ -737,6 +820,26 @@ void FakeCh375Chip::begin_control_transfer() {
 
     control_pending_ = outbound_block_.size() == kSetupPacketSize;
     finish_transfer(false);
+}
+
+void FakeCh375Chip::serve_control_read_packet() {
+    // A control read's data stage starts at DATA1 and alternates (USB 2.0
+    // 8.6). A host that asks with the wrong one is asking for a packet the
+    // device is not sending, and the transaction simply never completes.
+    const std::uint8_t expected = control_read_data1_ ? kToggleData1 : kToggleData0;
+    if (receive_toggle_ != expected) {
+        return;
+    }
+    control_read_data1_ = !control_read_data1_;
+    const std::size_t left = control_read_total_ - control_read_at_;
+    const std::size_t take = left < control_packet_ ? left : control_packet_;
+    pending_read_.assign(report_descriptor_.begin() + static_cast<std::ptrdiff_t>(control_read_at_),
+                         report_descriptor_.begin() +
+                             static_cast<std::ptrdiff_t>(control_read_at_ + take));
+    control_read_at_ += take;
+    ++report_descriptor_packets_;
+    pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Success);
+    int_asserted_ = !silent_;
 }
 
 void FakeCh375Chip::finish_control_stage() {
@@ -784,6 +887,45 @@ void FakeCh375Chip::serve_mouse_without_boot() {
     // Subclass 0: the mouse protocol, but no boot report behind it.
     append(body, interface_record(0, 0x03, 0x00, 0x02, 1));
     append(body, endpoint_record(0x82, 4));
+    configuration_ = configuration_header(9 + body.size(), 1);
+    append(configuration_, body);
+}
+
+void FakeCh375Chip::serve_mouse_with_report_descriptor(
+    const std::vector<std::uint8_t>& descriptor, bool boot_subclass) {
+    report_descriptor_ = descriptor;
+    std::vector<std::uint8_t> body;
+    append(body, interface_record(0, 0x03, boot_subclass ? 0x01 : 0x00, 0x02, 1));
+    append(body, hid_record(static_cast<std::uint16_t>(descriptor.size())));
+    append(body, endpoint_record(0x82, 8));
+    configuration_ = configuration_header(9 + body.size(), 1);
+    append(configuration_, body);
+}
+
+void FakeCh375Chip::serve_composite_mouse_with_report_descriptor(
+    const std::vector<std::uint8_t>& descriptor) {
+    report_descriptor_ = descriptor;
+    std::vector<std::uint8_t> body;
+    // Consumer controls first, with a report descriptor of its own length, so
+    // that a request sent to interface zero would look plausible rather than
+    // failing outright.
+    append(body, interface_record(0, 0x03, 0x00, 0x00, 1));
+    append(body, hid_record(25));
+    append(body, endpoint_record(0x83, 4));
+    append(body, interface_record(1, 0x03, 0x00, 0x02, 1));
+    append(body, hid_record(static_cast<std::uint16_t>(descriptor.size())));
+    append(body, endpoint_record(0x82, 8));
+    configuration_ = configuration_header(9 + body.size(), 2);
+    append(configuration_, body);
+}
+
+void FakeCh375Chip::serve_keyboard_with_report_descriptor(
+    const std::vector<std::uint8_t>& descriptor) {
+    report_descriptor_ = descriptor;
+    std::vector<std::uint8_t> body;
+    append(body, interface_record(0, 0x03, 0x01, 0x01, 1));
+    append(body, hid_record(static_cast<std::uint16_t>(descriptor.size())));
+    append(body, endpoint_record(0x81, 8));
     configuration_ = configuration_header(9 + body.size(), 1);
     append(configuration_, body);
 }

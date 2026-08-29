@@ -524,6 +524,15 @@ public:
         io_.write_data(mode);
     }
 
+    /// DS2 1.7. Tell the transmitter which data packet to send next.
+    ///
+    /// The other half of set_receive_toggle, and needed for the same reason:
+    /// the chip tracks neither. kToggleData0 sends DATA0, kToggleData1 DATA1.
+    void set_transmit_toggle(std::uint8_t mode) {
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::SetEndpoint7));
+        io_.write_data(mode);
+    }
+
     /// DS2 1.15. Issue a token; the interrupt that follows carries the result.
     bool issue_token(std::uint8_t endpoint, TokenPid pid) {
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::IssueToken));
@@ -915,6 +924,40 @@ public:
             return false;
         }
         return issue_token(kControlEndpoint, TokenPid::Setup);
+    }
+
+    /// Ask for the next packet of a control transfer's data stage.
+    ///
+    /// A control read is one SETUP and then as many IN transactions as the
+    /// answer takes, each at most the endpoint's own maximum - eight bytes on
+    /// a low-speed mouse, which is most of them. The toggle starts at DATA1
+    /// and alternates (USB 2.0 8.6), and the chip does not track it (DS2 1.6),
+    /// so the caller says which one this packet is.
+    ///
+    /// Nothing is read here. The chip answers with an interrupt and the bytes
+    /// are then collected with read_block, which is what keeps a multi-packet
+    /// descriptor to one transaction per tick instead of a spin.
+    void request_control_data(bool expect_data1) {
+        set_receive_toggle(expect_data1 ? kToggleData1 : kToggleData0);
+        (void)issue_token(kControlEndpoint, TokenPid::In);
+    }
+
+    /// The status stage of a control transfer that carried data *in*.
+    ///
+    /// The other direction from finish_control_request: a transfer that read
+    /// data is acknowledged by the host sending an empty packet, not by asking
+    /// for one (USB 2.0 8.5.3). It is always DATA1, and the transmitter's
+    /// toggle is set by hand too (DS2 1.7).
+    ///
+    /// False means the empty block was refused before the token went out, so
+    /// the chip is still in step.
+    bool finish_control_read() {
+        set_transmit_toggle(kToggleData1);
+        const std::uint8_t nothing = 0;
+        if (!write_block(&nothing, 0)) {
+            return false;
+        }
+        return issue_token(kControlEndpoint, TokenPid::Out);
     }
 
     /// The status stage of a control transfer that carries no data.
