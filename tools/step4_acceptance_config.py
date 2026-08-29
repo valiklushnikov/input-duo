@@ -1,4 +1,19 @@
-"""Build and deploy the configuration Task 7 Step 4 is accepted against.
+"""Build and deploy the configurations the hardware acceptances are run against.
+
+Two configurations live here, chosen with ``--config``:
+
+``step4``
+    The Task 7 Step 4 acceptance configuration, described below. This is the
+    default, and the one already written to a board.
+
+``toggle``
+    The roadmap's Task 3 Step 3 evidence: a thousand physical route toggles,
+    performed by the device rather than by a person's forefinger. See
+    :data:`TOGGLE_CYCLES` for the arithmetic.
+
+They share everything below the project itself - the round-trip check, the
+backup, the write and the read-back - because a configuration that was built
+by one path and deployed by another has not been tested by either.
 
 Step 4 still owes three criteria on hardware:
 
@@ -23,10 +38,12 @@ a backup taken afterwards is not a backup.
 
 Usage::
 
-    python tools/step4_acceptance_config.py describe
-    python tools/step4_acceptance_config.py build --output PATH.bin
+    python tools/step4_acceptance_config.py describe [--config step4|toggle]
+    python tools/step4_acceptance_config.py build --output PATH.bin \\
+        [--config step4|toggle]
     python tools/step4_acceptance_config.py deploy --package PATH.bin \\
-        --backup-dir hardware-backups [--port COMn]
+        --backup-dir hardware-backups [--config step4|toggle] [--port COMn]
+    python tools/step4_acceptance_config.py diagnostics [--port COMn]
 """
 
 from __future__ import annotations
@@ -52,12 +69,17 @@ from duo_input.generated.protocol import (  # noqa: E402
     ActionKind,
     BindingMode,
     KeyboardRoute,
+    MACRO_STEPS_PER_MACRO,
     MacroStepType,
     MouseRoute,
     PROFILES,
     TargetMode,
     TextLayout,
     TriggerKind,
+)
+from duo_input.ui.models.macro_steps import (  # noqa: E402
+    set_keyboard_route_step,
+    text_step,
 )
 from duo_input.ui.models.project_session import (  # noqa: E402
     AddBinding,
@@ -138,12 +160,13 @@ def macro_plans(profile_id: int) -> tuple[MacroPlan, ...]:
     )
 
 
-def _navigation_bindings() -> tuple[tuple[Trigger, Action], ...]:
+def _profile_and_route_bindings() -> list[tuple[Trigger, Action]]:
     """Triggers every profile carries, so no profile is a dead end.
 
     Every profile binds the same keys to the same meanings. A profile that
     could be reached but not left would strand the acceptance on whichever one
-    the operator pressed last.
+    the operator pressed last. Both configurations start from these, because
+    an operator who has learned one keyboard should not have to learn another.
     """
     bindings: list[tuple[Trigger, Action]] = []
     for index in range(PROFILES):
@@ -169,22 +192,37 @@ def _navigation_bindings() -> tuple[tuple[Trigger, Action], ...]:
         (Trigger(TriggerKind.KEYBOARD_USAGE, _F12), Action(ActionKind.TOGGLE_MOUSE_ROUTE)),
         (Trigger(TriggerKind.MOUSE_BUTTON, 4), Action(ActionKind.TOGGLE_MOUSE_ROUTE)),
     ]
+    return bindings
+
+
+def _macro_bindings(
+    assignments: tuple[tuple[int, int], ...]
+) -> list[tuple[Trigger, Action]]:
+    """Bind each usage to the macro it runs."""
+    return [
+        (Trigger(TriggerKind.KEYBOARD_USAGE, usage), Action(ActionKind.RUN_MACRO, macro_id))
+        for usage, macro_id in assignments
+    ]
+
+
+def _navigation_bindings() -> tuple[tuple[Trigger, Action], ...]:
+    """The Step 4 acceptance's own trigger set."""
+    bindings = _profile_and_route_bindings()
     # The navigation cluster is the primary way to run a macro; the arrow keys
     # repeat it, because a keyboard without Insert/Home/PageUp is common enough
     # that discovering it during the acceptance would cost a whole pass.
-    for usage, macro_id in (
-        (_INSERT, MACRO_IDENT),
-        (_HOME, MACRO_TARGET),
-        (_PAGE_UP, MACRO_REPEAT),
-        (_DELETE, MACRO_BURST),
-        (_UP, MACRO_IDENT),
-        (_LEFT, MACRO_TARGET),
-        (_RIGHT, MACRO_REPEAT),
-        (_DOWN, MACRO_BURST),
-    ):
-        bindings.append(
-            (Trigger(TriggerKind.KEYBOARD_USAGE, usage), Action(ActionKind.RUN_MACRO, macro_id))
+    bindings += _macro_bindings(
+        (
+            (_INSERT, MACRO_IDENT),
+            (_HOME, MACRO_TARGET),
+            (_PAGE_UP, MACRO_REPEAT),
+            (_DELETE, MACRO_BURST),
+            (_UP, MACRO_IDENT),
+            (_LEFT, MACRO_TARGET),
+            (_RIGHT, MACRO_REPEAT),
+            (_DOWN, MACRO_BURST),
         )
+    )
     return tuple(bindings)
 
 
@@ -214,11 +252,150 @@ def build_session() -> ProjectSession:
 
 def build_package() -> bytes:
     """Compile the acceptance project to the package a write would send."""
-    session = build_session()
+    return _compile(build_session(), "the acceptance project")
+
+
+def _compile(session: ProjectSession, what: str) -> bytes:
     issues = session.issues
     if issues:  # pragma: no cover - a defect here, not an operator error
-        raise ValueError(f"the acceptance project does not validate: {issues}")
+        raise ValueError(f"{what} does not validate: {issues}")
     return compile_project_to_binary(session.project)
+
+
+#: What ``build_package`` produced when the toggle configuration was added.
+#:
+#: The Step 4 acceptance ran on hardware against these exact bytes. Anything
+#: that moves them invalidates a passed acceptance, so the acceptance suite
+#: compares against this rather than trusting that a refactor was harmless.
+S4_PACKAGE_SHA256 = "2f64e548dbad3f46b96c0f6e6336a9e229815834686cd86b37bd3468307cfcaa"
+
+
+# ------------------------------------------------ the route-toggle configuration
+#
+# The roadmap asks for a thousand physical route toggles. Nobody presses a key
+# a thousand times and stays attentive, and an inattentive operator is not an
+# observer, so the toggling is device-driven: one macro performs as many route
+# changes as a macro is allowed steps for, and the operator supplies the
+# starts.
+#
+# The arithmetic, in full, because "about a thousand" is not evidence:
+#
+#     a macro holds 64 steps                          (MACRO_STEPS_PER_MACRO)
+#     one cycle is a route change and one character   2 steps
+#     so one run is                                   32 route changes
+#     32 runs is                                      1024 route changes
+#
+# 1024 >= 1000, from 32 deliberate keypresses rather than a thousand. That is
+# the honest number: the roadmap's thousand is reached, and it is reached in
+# runs of 32, so a run that goes missing costs 32 toggles and is visible in the
+# character count rather than being silently absorbed.
+#
+# Why a character after every route change: it is the load. A route change on
+# its own queues almost nothing, and a queue that is never pressed cannot
+# refuse a command. It is also the only outward evidence - every character
+# goes to both computers, so each ends with exactly 32 per run, and a shortfall
+# is the sign that a start was refused or a command was dropped.
+
+#: Route changes one run of the toggle macro performs.
+TOGGLE_CYCLES = MACRO_STEPS_PER_MACRO // 2
+
+#: What each cycle types. One character, so the count is the toggle count.
+TOGGLE_CHARACTER = "a"
+
+#: How many times the operator starts the macro.
+TOGGLE_RUNS = 32
+
+MACRO_TOGGLE = 1
+MACRO_MARK = 2
+MACRO_HOME = 3
+
+#: Bracketing text, so the operator can find the run in a scrolled editor.
+MARK_TEXT = "[MARK]\n"
+
+
+def toggle_route_changes() -> int:
+    """Route changes the whole procedure performs, if no run is lost."""
+    return TOGGLE_CYCLES * TOGGLE_RUNS
+
+
+def toggle_characters_per_computer() -> int:
+    """Characters each computer must end with, if nothing is dropped."""
+    return TOGGLE_CYCLES * TOGGLE_RUNS
+
+
+def toggle_steps() -> tuple[MacroStep, ...]:
+    """One route change and one character, over and over, to the last step.
+
+    The route alternates every cycle, because setting the route it is already
+    on changes nothing and releases nothing - the count would be a fiction.
+    It starts on PC2 and so ends on PC1, which leaves the device reachable
+    from the near computer and makes every run start where the last one did.
+    """
+    steps: list[MacroStep] = []
+    for cycle in range(TOGGLE_CYCLES):
+        route = KeyboardRoute.PC2 if cycle % 2 == 0 else KeyboardRoute.PC1
+        steps.append(set_keyboard_route_step(route))
+        steps.append(text_step(TOGGLE_CHARACTER))
+    return tuple(steps)
+
+
+def _toggle_macro_plans() -> tuple[tuple[int, str, TargetMode, tuple[MacroStep, ...]], ...]:
+    """The three macros of a toggle profile, in the order they are stored."""
+    return (
+        # TargetMode.BOTH and not INHERIT. A macro's route is fixed when it is
+        # enqueued: its SET_KEYBOARD_ROUTE steps move where the *operator's*
+        # keys go, not where the rest of its own text goes. Under INHERIT every
+        # character of a run would land on one computer, and which one would
+        # depend on where the previous run happened to finish. BOTH makes the
+        # count the same on each computer and therefore countable at all.
+        (MACRO_TOGGLE, f"TOGGLE-{TOGGLE_CYCLES}", TargetMode.BOTH, toggle_steps()),
+        (MACRO_MARK, "MARK", TargetMode.BOTH, (text_step(MARK_TEXT),)),
+        (
+            MACRO_HOME,
+            "HOME",
+            TargetMode.BOTH,
+            (set_keyboard_route_step(KeyboardRoute.PC1), text_step("\n")),
+        ),
+    )
+
+
+def _toggle_bindings() -> tuple[tuple[Trigger, Action], ...]:
+    """The toggle configuration's trigger set."""
+    bindings = _profile_and_route_bindings()
+    bindings += _macro_bindings(
+        (
+            (_INSERT, MACRO_TOGGLE),
+            (_HOME, MACRO_MARK),
+            (_PAGE_UP, MACRO_HOME),
+            (_UP, MACRO_TOGGLE),
+            (_LEFT, MACRO_MARK),
+            (_RIGHT, MACRO_HOME),
+        )
+    )
+    return tuple(bindings)
+
+
+def build_toggle_session() -> ProjectSession:
+    """The toggle project, built the way the GUI builds one."""
+    session = ProjectSession.new().apply(SetActiveProfile(1))
+    for profile_id in range(1, PROFILES + 1):
+        session = session.apply(RenameProfile(profile_id, f"Toggle {profile_id}"))
+        for macro_id, name, target, steps in _toggle_macro_plans():
+            session = session.apply(AddMacro(profile_id, name, target))
+            macro = session.project.profiles[profile_id - 1].macros[-1]
+            if macro.id != macro_id:  # pragma: no cover - guards a renumbering
+                raise AssertionError(f"macro {name} was given id {macro.id}")
+            session = session.apply(SetMacroSteps(profile_id, macro.uuid, steps))
+        for trigger, action in _toggle_bindings():
+            session = session.apply(
+                AddBinding(profile_id, Binding(trigger, BindingMode.REPLACE, action))
+            )
+    return session
+
+
+def build_toggle_package() -> bytes:
+    """Compile the toggle project to the package a write would send."""
+    return _compile(build_toggle_session(), "the toggle project")
 
 
 # ---------------------------------------------------- offline verification
@@ -237,7 +414,7 @@ class FieldCheck:
         return self.written == self.read_back
 
 
-def verify_round_trip(package: bytes) -> tuple[FieldCheck, ...]:
+def verify_round_trip(package: bytes, expected=None) -> tuple[FieldCheck, ...]:
     """Compare every field of ``package`` against the project it came from.
 
     The package is decoded by :func:`decode_device_config`, which is the
@@ -245,8 +422,12 @@ def verify_round_trip(package: bytes) -> tuple[FieldCheck, ...]:
     field is compared against the project the compiler was handed. A comparison
     of two hashes would say only that something round-tripped; this says which
     field did.
+
+    ``expected`` is the project the package should hold; the Step 4 acceptance
+    project when it is not given.
     """
-    expected = build_session().project
+    if expected is None:
+        expected = build_session().project
     decoded = decode_device_config(package)
     checks: list[FieldCheck] = [
         FieldCheck(
@@ -394,6 +575,155 @@ def describe(package: bytes) -> str:
     return "\n".join(lines)
 
 
+def describe_toggle(package: bytes) -> str:
+    """The toggle configuration, and the arithmetic the operator follows."""
+    config = decode_device_config(package)
+    routes = [
+        KeyboardRoute(step.payload[0]).name
+        for macro in config.profiles[0].macros
+        if macro.id == MACRO_TOGGLE
+        for step in macro.steps
+        if MacroStepType(step.type) == MacroStepType.SET_KEYBOARD_ROUTE
+    ]
+    lines = [
+        f"package: {len(package)} bytes, sha256 {hashlib.sha256(package).hexdigest()}",
+        f"active profile at boot: {config.active_profile_id}",
+        f"profiles: {len(config.profiles)}",
+        "",
+        "one run of TOGGLE (Insert, or Up):",
+        f"    macro steps          {MACRO_STEPS_PER_MACRO}"
+        f"  (the whole budget; 2 per cycle)",
+        f"    route changes        {TOGGLE_CYCLES}",
+        f"    characters typed     {TOGGLE_CYCLES} to BOTH computers",
+        f"    route order          {routes[0]} .. {routes[-1]}, alternating",
+        "",
+        "the whole procedure:",
+        f"    runs                 {TOGGLE_RUNS}",
+        f"    route changes        {TOGGLE_CYCLES} x {TOGGLE_RUNS}"
+        f" = {toggle_route_changes()}   (>= 1000)",
+        f"    characters expected  {toggle_characters_per_computer()} on EACH computer",
+        "",
+        "MARK (Home, or Left) brackets a run; HOME (PageUp, or Right) puts the",
+        "keyboard back on PC1 if a run is interrupted.",
+        "",
+    ]
+    for profile in config.profiles:
+        lines.append(
+            f"profile {profile.id} {profile.name!r} "
+            f"kbd={KeyboardRoute(profile.keyboard_route).name} "
+            f"mouse={MouseRoute(profile.mouse_route).name} "
+            f"bindings={len(profile.bindings)} macros={len(profile.macros)} "
+            f"steps={[len(macro.steps) for macro in profile.macros]}"
+        )
+    return "\n".join(lines + ["", toggle_operator_script()])
+
+
+def toggle_operator_script() -> str:
+    """What the person at the bench does, in the order they do it.
+
+    Kept here rather than in a document so that it cannot disagree with the
+    numbers above it: both are rendered from the same constants.
+    """
+    expected = toggle_characters_per_computer()
+    return "\n".join(
+        [
+            "operator script",
+            "---------------",
+            "  0. Open a text editor on BOTH computers and put the cursor in it.",
+            "     Read the counters first:",
+            "         python tools/step4_acceptance_config.py diagnostics",
+            "     Write down dropped_commands and runtime_fault.",
+            "  1. Press Home once. [MARK] appears on both computers. This is the",
+            "     line the count starts after.",
+            "  2. Hold Left Shift down with the other hand. It is the key that",
+            "     must not be left stranded. The first route change of a run",
+            "     releases it on the computer being left behind and forgets it -",
+            "     which is correct: a key held on a computer you can no longer",
+            "     reach is worse than one that was let go. So let go of Shift and",
+            "     take hold of it again between presses, and each run exercises",
+            "     that release instead of only the first one doing so.",
+            f"  3. Press Insert {TOGGLE_RUNS} times, about one press per second,",
+            "     re-gripping Left Shift between presses as step 2 says.",
+            f"     Each press types {TOGGLE_CYCLES} characters on each computer and",
+            f"     changes the keyboard route {TOGGLE_CYCLES} times. Wait for the",
+            "     characters of one press to appear before making the next: the",
+            "     device queues at most four starts and silently refuses a fifth.",
+            "     Expect about a minute.",
+            "  4. Let go of Left Shift. Press Home again to close the run.",
+            "  5. On EACH computer, count the characters between the two [MARK]",
+            f"     lines. There must be exactly {expected}.",
+            "  6. Type `abc` on each computer, by hand.",
+            "  7. Read the counters again:",
+            "         python tools/step4_acceptance_config.py diagnostics",
+            "",
+            "what a pass looks like",
+            f"  - {expected} characters on each computer, so"
+            f" {toggle_route_changes()} route changes happened",
+            "  - dropped_commands unchanged from step 0",
+            "  - runtime_fault 0",
+            "  - step 6 typed `abc`, lower case, on both computers",
+            "",
+            "what a failure looks like, and which is which",
+            "  - dropped_commands went up: a press, a release or a macro step",
+            "    never reached the computer it was for. FAIL.",
+            "  - runtime_fault is 1: the output queue is refusing commands right",
+            "    now. FAIL.",
+            "  - step 6 typed `ABC`: Left Shift is stranded on that computer -",
+            "    a route change released it there and nothing put it back. FAIL.",
+            "  - step 6 typed nothing on one computer: something is holding that",
+            "    link. FAIL.",
+            f"  - fewer than {expected} characters but dropped_commands unchanged:",
+            "    a macro start was refused because Insert was pressed while four",
+            "    runs were already queued. NOT a firmware failure - the toggle",
+            "    count is short, so repeat step 1-5 more slowly.",
+        ]
+    )
+
+
+# ------------------------------------------------------ the two configurations
+
+
+@dataclass(frozen=True)
+class Configuration:
+    """One configuration, and everything the CLI needs to handle it."""
+
+    name: str
+    build_session: "callable"
+    describe: "callable"
+    backup_label: str
+    backup_reason: str
+
+    def build_package(self) -> bytes:
+        return _compile(self.build_session(), f"the {self.name} project")
+
+    def round_trip(self, package: bytes) -> tuple[FieldCheck, ...]:
+        return verify_round_trip(package, expected=self.build_session().project)
+
+
+CONFIGURATIONS = {
+    "step4": Configuration(
+        name="step4",
+        build_session=build_session,
+        describe=describe,
+        backup_label="before-step4-acceptance",
+        backup_reason=(
+            "Captured before the Task 7 Step 4 acceptance configuration "
+            "(eight self-naming profiles and the /target KYPKYMA macro) was written."
+        ),
+    ),
+    "toggle": Configuration(
+        name="toggle",
+        build_session=build_toggle_session,
+        describe=describe_toggle,
+        backup_label="before-route-toggle",
+        backup_reason=(
+            "Captured before the route-toggle configuration "
+            "(a macro that changes the keyboard route 32 times per run) was written."
+        ),
+    ),
+}
+
+
 # ------------------------------------------------------------------ backup
 
 
@@ -536,8 +866,12 @@ def deploy(link, package: bytes, *, timeout_ms: int = 5000, step_timeout_ms: int
 # --------------------------------------------------------------------- CLI
 
 
-def _report_round_trip(package: bytes) -> int:
-    checks = verify_round_trip(package)
+def _selected(args: argparse.Namespace) -> Configuration:
+    return CONFIGURATIONS[getattr(args, "config", "step4")]
+
+
+def _report_round_trip(package: bytes, configuration: Configuration) -> int:
+    checks = configuration.round_trip(package)
     bad = [check for check in checks if not check.matches]
     print(f"round-trip fields compared: {len(checks)}")
     for check in bad:
@@ -550,13 +884,15 @@ def _report_round_trip(package: bytes) -> int:
 
 
 def _cmd_describe(args: argparse.Namespace) -> int:
-    print(describe(build_package()))
+    configuration = _selected(args)
+    print(configuration.describe(configuration.build_package()))
     return 0
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
-    package = build_package()
-    status = _report_round_trip(package)
+    configuration = _selected(args)
+    package = configuration.build_package()
+    status = _report_round_trip(package, configuration)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(package)
@@ -572,17 +908,17 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
     from duo_input.device.qt_transport import QSerialPortTransport
 
     application = QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
+    configuration = _selected(args)
     if args.restore_from:
         package = package_from_backup(Path(args.restore_from).read_text(encoding="utf-8"))
         label = "before-restore"
         reason = f"Captured before restoring {Path(args.restore_from).name}."
     else:
-        package = Path(args.package).read_bytes() if args.package else build_package()
-        label = "before-step4-acceptance"
-        reason = (
-            "Captured before the Task 7 Step 4 acceptance configuration "
-            "(eight self-naming profiles and the /target KYPKYMA macro) was written."
+        package = (
+            Path(args.package).read_bytes() if args.package else configuration.build_package()
         )
+        label = configuration.backup_label
+        reason = configuration.backup_reason
 
     candidates = {candidate.port_name: candidate.serial_number for candidate in find_u1_ports()}
     port_name = args.port
@@ -625,28 +961,92 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
         return 1
     print("read-back: identical to what was written")
     assert application is not None  # kept alive for the whole exchange
-    if package != build_package():
+    if package != configuration.build_package():
         # A restored package is somebody else's configuration; the field
         # comparison only means anything against the one this module builds.
         return 0
-    return _report_round_trip(result.read_back_package)
+    return _report_round_trip(result.read_back_package, configuration)
+
+
+def _cmd_diagnostics(args: argparse.Namespace) -> int:
+    """Read the device's counters, before and after a run.
+
+    ``dropped_commands`` is cumulative and never goes down, so it is read
+    before and after and the difference is what matters. ``runtime_fault``
+    says what the output queue is doing at this instant, which the cumulative
+    counter cannot: a burst that has passed and one that is still going on
+    look the same to it.
+    """
+    from PySide6.QtCore import QCoreApplication
+
+    from duo_input.device.discovery import find_u1_ports
+    from duo_input.device.qt_transport import QSerialPortTransport
+    from duo_input.device.service import DeviceService
+
+    application = QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
+    candidates = {candidate.port_name: candidate.serial_number for candidate in find_u1_ports()}
+    port_name = args.port
+    if port_name is None:
+        if not candidates:
+            print("no U1 found on the bus", file=sys.stderr)
+            return 2
+        port_name = next(iter(candidates))
+    print(f"port: {port_name} ({candidates.get(port_name, 'unknown')})")
+
+    service = DeviceService(timeout_ms=5000)
+    try:
+        _await(
+            service,
+            lambda: service.connect_device(QSerialPortTransport(port_name)),
+            120000,
+            "connect_device",
+        )
+        counters = _await(service, service.get_diagnostics, 120000, "get_diagnostics")
+    except DeployError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    finally:
+        service.disconnect_device()
+    assert application is not None  # kept alive for the whole exchange
+
+    for field, value in sorted(vars(counters).items()):
+        print(f"{field:<22} {value}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
 
-    commands.add_parser("describe", help="print what the configuration holds").set_defaults(
-        handler=_cmd_describe
+    def add_config_option(command: argparse.ArgumentParser) -> None:
+        command.add_argument(
+            "--config",
+            choices=sorted(CONFIGURATIONS),
+            default="step4",
+            help="which configuration to work with (default: step4)",
+        )
+
+    describe_command = commands.add_parser(
+        "describe", help="print what the configuration holds"
     )
+    add_config_option(describe_command)
+    describe_command.set_defaults(handler=_cmd_describe)
 
     build = commands.add_parser("build", help="compile the package to a file")
     build.add_argument("--output", required=True, help="where to write the .bin")
+    add_config_option(build)
     build.set_defaults(handler=_cmd_build)
+
+    diagnostics = commands.add_parser(
+        "diagnostics", help="read the device's counters, including dropped_commands"
+    )
+    diagnostics.add_argument("--port", default=None, help="serial port; discovered if omitted")
+    diagnostics.set_defaults(handler=_cmd_diagnostics)
 
     deploy_command = commands.add_parser(
         "deploy", help="back up, write and read back over a serial port"
     )
+    add_config_option(deploy_command)
     deploy_command.add_argument("--port", default=None, help="serial port; discovered if omitted")
     deploy_command.add_argument("--package", default=None, help="package to write; built if omitted")
     deploy_command.add_argument(
