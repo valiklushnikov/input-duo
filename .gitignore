@@ -7,3 +7,10 @@ __pycache__/
 configurator/dist/
 configurator/.venv-build/
 *.egg-info/
+
+# Device configurations pulled off a board during acceptance: bench state,
+# not source. Restoring one needs the file, not its history.
+hardware-backups/
+
+# Scratch trees agents copy out for mutation testing.
+.test-tmp/
