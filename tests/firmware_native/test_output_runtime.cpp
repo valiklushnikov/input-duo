@@ -34,6 +34,24 @@ OutputCommand key(Route route, std::uint8_t usage, bool pressed) {
     return command;
 }
 
+OutputCommand movement(Route route, std::int32_t dx) {
+    OutputCommand command;
+    command.kind = CommandKind::MouseDelta;
+    command.route = route;
+    command.delta_x = dx;
+    return command;
+}
+
+/// Both computers say they have the keyboard state now held.
+///
+/// On the board this is said by UsbService::publish and SpiMaster::poll, each
+/// on the pass that told its own computer. Here it stands for a pass in which
+/// both got through.
+void both_computers_told(OutputRuntime& runtime) {
+    runtime.keyboard_reported(Target::Pc1);
+    runtime.keyboard_reported(Target::Pc2);
+}
+
 }  // namespace
 
 // -------------------------------------------------------------------- queue
@@ -286,7 +304,7 @@ TEST_CASE(a_command_that_overflows_the_queue_is_a_fault_not_a_wait) {
     // to tell full from empty.
     CHECK_EQ(runtime.refused_commands(), 11u);
 
-    runtime.drain();
+    runtime.drain(0);
 
     // Core 1 must never block waiting for Core 0, and Core 0 must never be
     // made to wait for the host. The only honest answer to a full queue is to
@@ -301,7 +319,7 @@ TEST_CASE(a_full_queue_releases_everything_rather_than_typing_half_of_it) {
     for (std::size_t index = 0; index < kOutputQueueCapacity + 10; ++index) {
         runtime.submit(key(Route::Pc1, kB, true));
     }
-    runtime.drain();
+    runtime.drain(0);
 
     // Commands were lost, so what is held no longer corresponds to anything
     // anyone did. Half a macro is worse than none of it.
@@ -319,13 +337,16 @@ TEST_CASE(a_runtime_that_overflowed_and_drained_accepts_input_again) {
     // nothing. Nobody clears anything by hand: there is no operator inside
     // the loop, and a fault only a configurator could clear is a board whose
     // keyboard and mouse are dead on both computers until it is unplugged.
-    CHECK_EQ(runtime.drain(), 0u);
+    CHECK_EQ(runtime.drain(0), 0u);
     CHECK_EQ(runtime.fault(), RuntimeFault::OutputQueueFull);
 
     // The burst is over - nothing was refused during that pass - so the next
-    // one resumes.
+    // one resumes. The pass that raised the fault let go of everything, and
+    // that release is a keyboard state like any other: both computers hear it
+    // before anything else is applied.
+    both_computers_told(runtime);
     CHECK(runtime.submit(key(Route::Pc1, kB, true)));
-    CHECK_EQ(runtime.drain(), 1u);
+    CHECK_EQ(runtime.drain(0), 1u);
     CHECK_EQ(runtime.fault(), RuntimeFault::None);
     CHECK(runtime.snapshot(Target::Pc1).keyboard.contains(kB));
 }
@@ -335,14 +356,14 @@ TEST_CASE(a_fault_stands_while_the_queue_is_still_overflowing) {
     for (std::size_t index = 0; index < kOutputQueueCapacity + 1; ++index) {
         runtime.submit(key(Route::Pc1, kA, true));
     }
-    CHECK_EQ(runtime.drain(), 0u);
+    CHECK_EQ(runtime.drain(0), 0u);
 
     // Still overflowing. Recovery is one pass with nothing refused, not one
     // pass: a runtime that resumed here would apply half of the next burst.
     for (std::size_t index = 0; index < kOutputQueueCapacity + 1; ++index) {
         runtime.submit(key(Route::Pc1, kA, true));
     }
-    CHECK_EQ(runtime.drain(), 0u);
+    CHECK_EQ(runtime.drain(0), 0u);
     CHECK_EQ(runtime.fault(), RuntimeFault::OutputQueueFull);
     CHECK_EQ(runtime.snapshot(Target::Pc1).keyboard.key_count, 0u);
 }
@@ -355,7 +376,15 @@ TEST_CASE(draining_applies_everything_that_was_submitted_in_order) {
     runtime.submit(key(Route::Pc1, kB, true));
     runtime.submit(key(Route::Pc1, kA, false));
 
-    const std::size_t applied = runtime.drain();
+    // One keyboard state to a pass, because this holds a state and not a queue
+    // of reports: a second change applied before the first was published would
+    // erase a state nobody was ever told about. So the queue comes out in
+    // order, one pass at a time, as each state is acknowledged.
+    std::size_t applied = 0;
+    for (int pass = 0; pass < 3; ++pass) {
+        applied += runtime.drain(static_cast<std::uint32_t>(pass));
+        both_computers_told(runtime);
+    }
 
     CHECK_EQ(applied, 3u);
     CHECK_FALSE(runtime.snapshot(Target::Pc1).keyboard.contains(kA));
@@ -365,19 +394,122 @@ TEST_CASE(draining_applies_everything_that_was_submitted_in_order) {
 TEST_CASE(draining_an_empty_queue_does_nothing) {
     OutputRuntime runtime;
 
-    CHECK_EQ(runtime.drain(), 0u);
+    CHECK_EQ(runtime.drain(0), 0u);
     CHECK_EQ(runtime.fault(), RuntimeFault::None);
 }
 
 TEST_CASE(a_drain_is_bounded_so_core_zero_still_reaches_usb) {
     OutputRuntime runtime;
+    // Movement, so what stops this is the bound and not the publication
+    // interlock: the pointer is a delta and is never held back for a report.
     for (std::size_t index = 0; index < 100; ++index) {
-        runtime.submit(key(Route::Pc1, kA, index % 2 == 0));
+        runtime.submit(movement(Route::Pc1, 1));
     }
 
-    const std::size_t applied = runtime.drain(16);
+    const std::size_t applied = runtime.drain(0, 16);
 
     // Core 0 has a millisecond of USB to service. Draining without a bound
     // would let a burst of input starve the thing the input is for.
     CHECK_EQ(applied, 16u);
+}
+
+// -------------------------------------------------------------- publication
+//
+// This runtime holds a state, not a queue of reports. A state replaced before
+// anyone was told about it is a keystroke that never happened - or a release
+// that never happened, which leaves a key down on a computer the operator may
+// not be watching. So the keyboard state moves on only when every computer has
+// said it has the one now held.
+
+TEST_CASE(a_second_keyboard_state_waits_until_both_computers_have_the_first) {
+    OutputRuntime runtime;
+    runtime.submit(key(Route::Both, kA, true));
+    runtime.submit(key(Route::Both, kA, false));
+
+    CHECK_EQ(runtime.drain(0), 1u);
+    CHECK(runtime.snapshot(Target::Pc1).keyboard.contains(kA));
+
+    // Neither computer has been told. Applying the release now would leave the
+    // state exactly as it was before the press, and the keystroke would never
+    // have existed as far as either host is concerned.
+    CHECK_EQ(runtime.drain(0), 0u);
+    CHECK(runtime.snapshot(Target::Pc1).keyboard.contains(kA));
+
+    // One of them is not enough - the other is still owed the press.
+    runtime.keyboard_reported(Target::Pc1);
+    CHECK_EQ(runtime.drain(0), 0u);
+    CHECK(runtime.snapshot(Target::Pc2).keyboard.contains(kA));
+
+    runtime.keyboard_reported(Target::Pc2);
+    CHECK_EQ(runtime.drain(0), 1u);
+    CHECK_FALSE(runtime.snapshot(Target::Pc1).keyboard.contains(kA));
+    CHECK_FALSE(runtime.snapshot(Target::Pc2).keyboard.contains(kA));
+}
+
+TEST_CASE(the_pointer_is_never_held_back_by_an_unpublished_keyboard_state) {
+    OutputRuntime runtime;
+    runtime.submit(key(Route::Pc1, kA, true));
+    CHECK_EQ(runtime.drain(0), 1u);
+
+    // Nobody has acknowledged the press, and the mouse does not care: movement
+    // says nothing about which keys are down, and a pointer that stuttered
+    // every time somebody typed would be the worse fault by far.
+    runtime.submit(movement(Route::Pc1, 5));
+    CHECK_EQ(runtime.drain(0), 1u);
+    CHECK_EQ(runtime.snapshot(Target::Pc1).mouse.delta_x, 5);
+}
+
+TEST_CASE(a_computer_that_stops_answering_does_not_stop_the_other_one) {
+    OutputRuntime runtime;
+    runtime.submit(key(Route::Both, kA, true));
+    runtime.submit(key(Route::Both, kA, false));
+    CHECK_EQ(runtime.drain(1000), 1u);
+
+    // PC1 keeps up. PC2 says nothing at all - a severed link, or a slave that
+    // has stopped answering - and the whole grace goes by.
+    runtime.keyboard_reported(Target::Pc1);
+    CHECK_EQ(runtime.drain(1000), 0u);
+    CHECK_EQ(runtime.drain(1000 + duo_input::u1::kPublishGraceMs - 1), 0u);
+
+    // Long enough. PC1 is receiving input and must not be made deaf by PC2.
+    CHECK_EQ(runtime.drain(1000 + duo_input::u1::kPublishGraceMs), 1u);
+}
+
+TEST_CASE(a_computer_set_aside_for_silence_is_not_waited_for_again) {
+    OutputRuntime runtime;
+    runtime.submit(key(Route::Both, kA, true));
+    CHECK_EQ(runtime.drain(1000), 1u);
+
+    // PC1 keeps up, PC2 says nothing, and the grace runs out once.
+    runtime.keyboard_reported(Target::Pc1);
+    runtime.submit(key(Route::Both, kA, false));
+    CHECK_EQ(runtime.drain(1000), 0u);
+    CHECK_EQ(runtime.drain(1000 + duo_input::u1::kPublishGraceMs), 1u);
+
+    // PC2 has been set aside. From here PC1 alone paces the drain, with no
+    // second pause: a dead link costs one, not one per keystroke.
+    runtime.keyboard_reported(Target::Pc1);
+    runtime.submit(key(Route::Both, kB, true));
+    CHECK_EQ(runtime.drain(1000 + duo_input::u1::kPublishGraceMs), 1u);
+    CHECK(runtime.snapshot(Target::Pc1).keyboard.contains(kB));
+}
+
+TEST_CASE(a_computer_that_answers_again_is_waited_for_again) {
+    OutputRuntime runtime;
+    runtime.submit(key(Route::Both, kA, true));
+    CHECK_EQ(runtime.drain(1000), 1u);
+    runtime.keyboard_reported(Target::Pc1);
+    runtime.submit(key(Route::Both, kA, false));
+    CHECK_EQ(runtime.drain(1000), 0u);
+    CHECK_EQ(runtime.drain(1000 + duo_input::u1::kPublishGraceMs), 1u);
+
+    // PC2 comes back. Being set aside is not permanent - a link that recovers
+    // is a computer somebody is looking at again - so it is owed the next
+    // state like anyone else, and the one after it waits for it.
+    both_computers_told(runtime);
+    runtime.submit(key(Route::Both, kB, true));
+    runtime.submit(key(Route::Both, kB, false));
+    CHECK_EQ(runtime.drain(2000), 1u);
+    CHECK_EQ(runtime.drain(2000), 0u);
+    CHECK(runtime.snapshot(Target::Pc2).keyboard.contains(kB));
 }

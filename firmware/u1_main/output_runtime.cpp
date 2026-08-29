@@ -30,7 +30,61 @@ bool OutputRuntime::submit(const OutputCommand& command) {
     return false;
 }
 
-std::size_t OutputRuntime::drain(std::size_t budget) {
+bool OutputRuntime::touches_keyboard(const OutputCommand& command) {
+    switch (command.kind) {
+        case CommandKind::KeyPress:
+        case CommandKind::KeyRelease:
+        case CommandKind::ModifiersPress:
+        case CommandKind::ModifiersRelease:
+        case CommandKind::ReleaseMacro:
+        case CommandKind::ReleaseRoute:
+        case CommandKind::ReleaseAll:
+            return true;
+        default:
+            // Movement, buttons and a consumer tap say nothing about which
+            // keys are down, so nothing here has to wait for a keyboard
+            // report - and the pointer must never wait for typing.
+            return false;
+    }
+}
+
+bool OutputRuntime::may_change_keyboard(std::uint32_t now_ms) {
+    bool owed = false;
+    for (std::size_t index = 0; index < hid::kTargetCount; ++index) {
+        if (outputs_.keyboard_unreported(static_cast<hid::Target>(index)) &&
+            !stalled_[index]) {
+            owed = true;
+        }
+    }
+    if (!owed) {
+        waiting_ = false;
+        return true;
+    }
+
+    if (!waiting_) {
+        waiting_ = true;
+        waiting_since_ms_ = now_ms;
+        return false;
+    }
+    if (static_cast<std::int32_t>(now_ms - waiting_since_ms_) <
+        static_cast<std::int32_t>(kPublishGraceMs)) {
+        return false;
+    }
+
+    // Long enough. Whoever has still not answered is not listening - an
+    // unplugged host, a severed link - and a computer that is receiving
+    // nothing must not be able to stop the one that is. Set it aside until it
+    // answers again, so this costs one pause and not one per keystroke.
+    for (std::size_t index = 0; index < hid::kTargetCount; ++index) {
+        if (outputs_.keyboard_unreported(static_cast<hid::Target>(index))) {
+            stalled_[index] = true;
+        }
+    }
+    waiting_ = false;
+    return true;
+}
+
+std::size_t OutputRuntime::drain(std::uint32_t now_ms, std::size_t budget) {
     const std::uint32_t refused = refused_.load(std::memory_order_acquire);
     if (refused != seen_refusals_) {
         // Something was dropped since the last pass. Half a macro is worse
@@ -55,7 +109,15 @@ std::size_t OutputRuntime::drain(std::size_t budget) {
 
     std::size_t applied = 0;
     OutputCommand command;
-    while (applied < budget && queue_.pop(command)) {
+    while (applied < budget && queue_.peek(command)) {
+        if (touches_keyboard(command) && !may_change_keyboard(now_ms)) {
+            // The state now held has not reached both computers yet, and
+            // replacing it would be replacing something nobody ever saw. It
+            // waits in the queue - which is also what stops the other core
+            // running ahead, since it emits only into an empty queue.
+            break;
+        }
+        queue_.pop(command);
         process(command);
         ++applied;
     }
@@ -135,6 +197,12 @@ hid::TargetSnapshot OutputRuntime::snapshot(hid::Target target) const {
 
 hid::TargetSnapshot OutputRuntime::take_snapshot(hid::Target target) {
     return outputs_.take_snapshot(target);
+}
+
+void OutputRuntime::keyboard_reported(hid::Target target) {
+    outputs_.keyboard_reported(target);
+    // It answered, so it is listening after all.
+    stalled_[static_cast<std::size_t>(target)] = false;
 }
 
 void OutputRuntime::release_all() {

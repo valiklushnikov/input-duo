@@ -12,6 +12,7 @@
 // owner, one per macro. No allocation, no growth, and a bounded amount of work
 // per call - this runs on Core 0 between USB polls.
 
+#include <cstddef>
 #include <cstdint>
 
 #include "hid/types.hpp"
@@ -75,6 +76,32 @@ public:
     /// movement the second time, which is correct.
     TargetSnapshot take_snapshot(Target target);
 
+    // --- publication ---------------------------------------------------------
+    //
+    // This class holds a state, not a queue of reports, so a state that is
+    // replaced before anyone was told about it is gone: no report was ever
+    // built from it and nothing remembers it existed. That is how a macro
+    // loses letters, and how it loses a release - which strands a key on a
+    // computer nobody is watching. Whoever advances the state therefore has to
+    // be able to ask whether the last one got out, and the only parties that
+    // know are the ones that send.
+
+    /// Has ``target`` still to be told the keyboard state held here?
+    ///
+    /// True from the moment a press or a release changes what the report would
+    /// say, until whoever sends to that computer says it has gone out.
+    bool keyboard_unreported(Target target) const {
+        return keyboard_unreported_[static_cast<std::size_t>(target)];
+    }
+
+    /// Record that ``target`` now knows the keyboard state held here.
+    ///
+    /// Said by the sender, on the two occasions that make it true: a report
+    /// that actually left, and a state the far side already had.
+    void keyboard_reported(Target target) {
+        keyboard_unreported_[static_cast<std::size_t>(target)] = false;
+    }
+
 private:
     /// One bit per owner: bit 0 is the operator, bits 1..32 are macros.
     using OwnerMask = std::uint64_t;
@@ -103,7 +130,16 @@ private:
     KeyboardSnapshot keyboard_of(const TargetState& target) const;
     MouseSnapshot mouse_of(const TargetState& target) const;
 
+    void keyboard_changed(Target target) {
+        keyboard_unreported_[static_cast<std::size_t>(target)] = true;
+    }
+
     TargetState targets_[kTargetCount];
+
+    /// One per computer: the keyboard state changed and nobody has said it
+    /// reached that computer yet. Starts false - nothing is held at boot, and
+    /// silence is a true account of it.
+    bool keyboard_unreported_[kTargetCount] = {};
 };
 
 }  // namespace duo_input::hid

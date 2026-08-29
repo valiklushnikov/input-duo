@@ -37,6 +37,12 @@ public:
     template <typename StateSource>
     bool publish(StateSource& source) {
         if (!mounted()) {
+            // Nothing can be told to a host that is not there. Saying so is
+            // not a formality: the source holds one state, not a queue of
+            // reports, and it waits for every computer before moving on - so
+            // an absent PC1 that never answered would stop PC2 being typed to
+            // as well.
+            source.keyboard_reported(hid::Target::Pc1);
             return false;
         }
 
@@ -49,8 +55,21 @@ public:
             if (send_keyboard(current.keyboard)) {
                 last_keyboard_ = current.keyboard;
                 keyboard_valid_ = true;
+                // PC1 has it. Until this is said the source holds the state,
+                // because a state replaced before it was reported is a
+                // keystroke the host never saw - or a release it never saw,
+                // which leaves a key down on a computer nobody is watching.
+                source.keyboard_reported(hid::Target::Pc1);
                 sent = true;
             }
+            // An endpoint that was busy has cost the report a frame, not the
+            // state: nothing is acknowledged, so the state stays put and the
+            // next pass tries again with the same one.
+        } else {
+            // Already knows. That is the other way of being up to date, and it
+            // has to be said too, or an unchanged state would look unpublished
+            // for as long as the grace lasts.
+            source.keyboard_reported(hid::Target::Pc1);
         }
 
         // Movement is a delta, so "unchanged" is not a reason to stay quiet.

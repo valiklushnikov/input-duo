@@ -76,7 +76,10 @@ struct Board {
         for (int index = 0; index < kCore1PassesPerCore0Pass; ++index) {
             core1.tick(now_ms);
         }
-        outputs.drain();
+        // The clock the drain needs is the one that decides how long it may
+        // wait for a computer that has stopped answering; publish is what
+        // answers for PC1.
+        outputs.drain(now_ms);
         usb.publish(outputs);
         ++now_ms;
     }

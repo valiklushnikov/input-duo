@@ -116,8 +116,17 @@ public:
     template <typename StateSource>
     bool poll(std::uint32_t now_ms, StateSource& source) {
         bool consumed_mouse = false;
-        const bool sent =
-            poll_snapshot(now_ms, source.snapshot(hid::Target::Pc2), consumed_mouse);
+        bool told_keyboard = false;
+        const bool sent = poll_snapshot(now_ms, source.snapshot(hid::Target::Pc2),
+                                        consumed_mouse, told_keyboard);
+        if (told_keyboard) {
+            // PC2 has the keyboard state now held - either a frame carrying it
+            // went out, or it already had it. Until this is said the source
+            // holds that state rather than advancing past it, because a state
+            // replaced before it was sent is a keystroke PC2 never receives,
+            // or a release it never receives.
+            source.keyboard_reported(hid::Target::Pc2);
+        }
         if (consumed_mouse) {
             // Only here, and only because a mouse frame actually went out.
             // Movement is a delta and cannot be asked for twice.
@@ -156,9 +165,12 @@ private:
     ///
     /// ``consumed_mouse`` says whether PC2 was actually told about the
     /// movement, which is the only condition under which the caller may
-    /// consume it.
+    /// consume it. ``told_keyboard`` says whether PC2 now has the keyboard
+    /// state it was shown - a frame that went out, or a state it already had -
+    /// which is the only condition under which the caller may let that state
+    /// move on.
     bool poll_snapshot(std::uint32_t now_ms, const hid::TargetSnapshot& pc2,
-                       bool& consumed_mouse);
+                       bool& consumed_mouse, bool& told_keyboard);
 
     bool send(protocol::SpiMessageType type, protocol::ByteView payload,
               std::uint32_t now_ms);

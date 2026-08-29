@@ -56,6 +56,22 @@ public:
         return true;
     }
 
+    /// Look at the oldest item without taking it. Returns false when empty.
+    ///
+    /// The consumer's call, like pop: it reads the index the consumer owns.
+    /// What it is for is a consumer that has to decide whether it may apply
+    /// the next item *before* committing to having taken it - popping first
+    /// and putting it back is not available here, because the producer may
+    /// have written into that slot by then.
+    bool peek(T& item) const {
+        const std::size_t tail = tail_.load(std::memory_order_relaxed);
+        if (tail == head_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        item = slots_[tail];
+        return true;
+    }
+
     /// How many items are waiting. A snapshot; it may already be stale.
     std::size_t size() const {
         const std::size_t head = head_.load(std::memory_order_acquire);

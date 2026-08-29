@@ -69,12 +69,17 @@ HidResult HidStateManager::hold_key(Target target, std::uint8_t usage, OwnerMask
     OwnerMask& owners = current.key_owners[usage];
 
     if (!pressed) {
+        const bool was_down = owners != 0;
         owners &= ~owner;
+        if (was_down && owners == 0) {
+            keyboard_changed(target);
+        }
         return HidResult::Ok;
     }
     if (owners != 0) {
         // Already down. A second owner joining costs no report slot, so the
-        // six-key limit does not apply here.
+        // six-key limit does not apply here - and changes nothing the far
+        // computer would see, so nobody has to be told about it.
         owners |= owner;
         return HidResult::Ok;
     }
@@ -93,6 +98,7 @@ HidResult HidStateManager::hold_key(Target target, std::uint8_t usage, OwnerMask
     }
 
     owners |= owner;
+    keyboard_changed(target);
     return HidResult::Ok;
 }
 
@@ -103,10 +109,14 @@ void HidStateManager::hold_modifiers(Target target, std::uint8_t modifiers, Owne
         if ((modifiers & (1u << bit)) == 0) {
             continue;
         }
+        const bool was_held = current.modifier_owners[bit] != 0;
         if (pressed) {
             current.modifier_owners[bit] |= owner;
         } else {
             current.modifier_owners[bit] &= ~owner;
+        }
+        if (was_held != (current.modifier_owners[bit] != 0)) {
+            keyboard_changed(target);
         }
     }
 }
@@ -143,13 +153,18 @@ HidResult HidStateManager::release_macro(std::uint8_t owner) {
         return HidResult::BadOwner;
     }
     const OwnerMask bit = macro_bit(owner);
-    for (TargetState& current : targets_) {
+    for (std::size_t index = 0; index < kTargetCount; ++index) {
+        TargetState& current = targets_[index];
         for (std::size_t usage = 0; usage <= kMaxUsage; ++usage) {
             current.key_owners[usage] &= ~bit;
         }
         for (OwnerMask& owners : current.modifier_owners) {
             owners &= ~bit;
         }
+        // Announced even when the macro held nothing: the sender answers a
+        // state it already knows by saying so, which costs one comparison and
+        // spares this from having to work out what actually moved.
+        keyboard_changed(static_cast<Target>(index));
     }
     return HidResult::Ok;
 }
@@ -177,11 +192,13 @@ void HidStateManager::mouse_delta(Target target, std::int32_t dx, std::int32_t d
 
 void HidStateManager::release_target(Target target) {
     state(target) = TargetState{};
+    keyboard_changed(target);
 }
 
 void HidStateManager::release_all() {
-    for (TargetState& current : targets_) {
-        current = TargetState{};
+    for (std::size_t index = 0; index < kTargetCount; ++index) {
+        targets_[index] = TargetState{};
+        keyboard_changed(static_cast<Target>(index));
     }
 }
 

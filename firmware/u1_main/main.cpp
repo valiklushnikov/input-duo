@@ -893,8 +893,11 @@ int main() {
         // be built on a desktop.
         duo_input::u1::pump_core_bridge(config, g_runtime);
 
-        // Bounded, so a burst of input cannot starve the USB it is for.
-        g_outputs.drain();
+        // Bounded, so a burst of input cannot starve the USB it is for - and
+        // held at the keyboard state that has not reached both computers yet,
+        // which is why it needs the clock. The publish and the poll below are
+        // what release it.
+        g_outputs.drain(now_ms);
 
         usb.publish(g_outputs);
 

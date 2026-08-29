@@ -35,8 +35,9 @@ bool moved(const hid::MouseSnapshot& mouse) {
 }  // namespace
 
 bool SpiMaster::poll_snapshot(std::uint32_t now_ms, const hid::TargetSnapshot& pc2,
-                              bool& consumed_mouse) {
+                              bool& consumed_mouse, bool& told_keyboard) {
     consumed_mouse = false;
+    told_keyboard = false;
 
     std::uint8_t payload[link::kKeyboardStateSize > link::kMouseDeltaSize
                              ? link::kKeyboardStateSize
@@ -51,11 +52,17 @@ bool SpiMaster::poll_snapshot(std::uint32_t now_ms, const hid::TargetSnapshot& p
                  protocol::ByteView{payload, written}, now_ms)) {
             last_keyboard_ = pc2.keyboard;
             keyboard_valid_ = true;
+            told_keyboard = true;
             // Returning here is what makes the caller's timing matter: this
             // pass has said nothing about the movement, so the movement must
             // still be there on the next one.
             return true;
         }
+        // The transfer did not go out. PC2 still does not know, and saying
+        // nothing here is what makes the caller hold the state until it does.
+    } else {
+        // PC2 already has this one, which is the other way of being told.
+        told_keyboard = true;
     }
 
     if (moved(pc2.mouse) || pc2.mouse.buttons != last_buttons_) {
