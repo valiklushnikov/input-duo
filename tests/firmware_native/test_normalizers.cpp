@@ -13,6 +13,7 @@
 // remembered to be holding. Releasing a key nobody pressed is a nuisance;
 // holding one nobody can release is not.
 
+#include "ch375/report_descriptor.hpp"
 #include "input/keyboard_normalizer.hpp"
 #include "input/mouse_normalizer.hpp"
 #include "test_support.hpp"
@@ -24,6 +25,9 @@ using duo_input::u1::input::InputEventKind;
 using duo_input::u1::input::KeyboardNormalizer;
 using duo_input::u1::input::kMaxEventsPerReport;
 using duo_input::u1::input::MouseNormalizer;
+using duo_input::u1::ch375::boot_mouse_layout;
+using duo_input::u1::ch375::MouseReportLayout;
+using duo_input::u1::ch375::ReportField;
 
 namespace {
 
@@ -48,6 +52,19 @@ std::vector<std::uint8_t> mouse(std::uint8_t buttons, std::int8_t dx, std::int8_
 
 duo_input::protocol::ByteView view(const std::vector<std::uint8_t>& bytes) {
     return duo_input::protocol::ByteView{bytes.data(), bytes.size()};
+}
+
+/// A layout shaped like a boot report with an identifier bolted on the front.
+///
+/// The shape the bench's mouse sends in its own protocol: identifier, buttons,
+/// dX, dY, wheel. It stands in for what a descriptor would have said, so that
+/// the two tests written against the old `set_report_id(true)` go on asking
+/// the same question of the thing that replaced it.
+MouseReportLayout identified_boot_shaped_layout() {
+    MouseReportLayout layout = boot_mouse_layout();
+    layout.report_id = true;
+    layout.report_id_value = 1;
+    return layout;
 }
 
 struct Collected {
@@ -336,7 +353,7 @@ TEST_CASE(moving_and_clicking_at_once_produces_both) {
 
 TEST_CASE(a_report_that_leads_with_an_identifier_is_read_past_it) {
     MouseNormalizer normalizer;
-    normalizer.set_report_id(true);
+    normalizer.set_layout(identified_boot_shaped_layout());
     Collected out;
 
     // What the mouse on the bench actually sends: seven bytes beginning with
@@ -351,7 +368,7 @@ TEST_CASE(a_report_that_leads_with_an_identifier_is_read_past_it) {
 
 TEST_CASE(the_movement_in_an_identified_report_is_taken_from_behind_the_buttons) {
     MouseNormalizer normalizer;
-    normalizer.set_report_id(true);
+    normalizer.set_layout(identified_boot_shaped_layout());
     Collected out;
 
     // Seven bytes from the bench: identifier, buttons, then the movement.
@@ -415,4 +432,220 @@ TEST_CASE(a_disconnect_does_not_invent_a_final_movement) {
     // undo - and a pointer that jumps when a cable is pulled is worse than one
     // that stops.
     CHECK_EQ(out.count, 0u);
+}
+
+// ================================================= a layout from a descriptor
+//
+// SYNTHETIC, all of it. The corpus in tests/vectors/hid_reports holds boot
+// reports only, because boot protocol is the only thing any device on this
+// bench has ever been asked for. These layouts are written to the shape a
+// descriptor declares; only a mouse can confirm them.
+
+namespace {
+
+/// What a high-resolution mouse's descriptor declares, once parsed.
+///
+/// Identifier, one button byte, sixteen-bit X and Y, one wheel byte: the
+/// seven-byte report the bench's mouse sends when nobody forces boot on it.
+MouseReportLayout report_id_wheel_layout() {
+    MouseReportLayout layout;
+    layout.report_id = true;
+    layout.report_id_value = 1;
+    layout.buttons = ReportField{true, 0, 1};
+    layout.x = ReportField{true, 1, 2};
+    layout.y = ReportField{true, 3, 2};
+    layout.wheel = ReportField{true, 5, 1};
+    layout.minimum_body_bytes = 5;
+    return layout;
+}
+
+/// The same mouse without an identifier: buttons, X, Y, wheel, pan.
+MouseReportLayout unprefixed_wheel_layout() {
+    MouseReportLayout layout;
+    layout.buttons = ReportField{true, 0, 1};
+    layout.x = ReportField{true, 1, 1};
+    layout.y = ReportField{true, 2, 1};
+    layout.wheel = ReportField{true, 3, 1};
+    layout.pan = ReportField{true, 4, 1};
+    layout.minimum_body_bytes = 3;
+    return layout;
+}
+
+}  // namespace
+
+TEST_CASE(a_wheel_behind_a_report_id_turns_the_right_way) {
+    MouseNormalizer normalizer;
+    normalizer.set_layout(report_id_wheel_layout());
+    Collected out;
+
+    // Identifier, no buttons, no movement, one notch away from the user.
+    // 0xFF is minus one; read unsigned it scrolls two hundred and fifty five.
+    const std::vector<std::uint8_t> report{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 1u);
+    CHECK_EQ(out.events[0].kind, InputEventKind::Wheel);
+    CHECK_EQ(out.events[0].wheel, -1);
+}
+
+TEST_CASE(a_wheel_behind_a_report_id_turns_the_other_way_too) {
+    MouseNormalizer normalizer;
+    normalizer.set_layout(report_id_wheel_layout());
+    Collected out;
+
+    const std::vector<std::uint8_t> report{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    // Both signs, because a wheel read at the wrong offset in a report that is
+    // otherwise zeroes produces nothing at all, and nothing looks like
+    // agreement.
+    CHECK_EQ(out.count, 1u);
+    CHECK_EQ(out.events[0].kind, InputEventKind::Wheel);
+    CHECK_EQ(out.events[0].wheel, 1);
+}
+
+TEST_CASE(buttons_and_axes_still_land_when_the_layout_has_a_report_id) {
+    MouseNormalizer normalizer;
+    normalizer.set_layout(report_id_wheel_layout());
+    Collected out;
+
+    // Identifier 1, the middle button down, X = -10 and Y = +79 as sixteen-bit
+    // little-endian values, and no wheel. Read one byte out, or read the axes
+    // a byte wide, and every one of these lands somewhere else.
+    const std::vector<std::uint8_t> report{0x01, 0x04, 0xF6, 0xFF, 0x4F, 0x00, 0x00};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 2u);
+    CHECK(out.has(InputEventKind::MouseButtonDown, 2));
+    CHECK_EQ(out.count_of(InputEventKind::MouseMove), 1);
+    CHECK_EQ(out.count_of(InputEventKind::Wheel), 0);
+    for (std::size_t index = 0; index < out.count; ++index) {
+        if (out.events[index].kind == InputEventKind::MouseMove) {
+            CHECK_EQ(out.events[index].x, static_cast<std::int16_t>(-10));
+            CHECK_EQ(out.events[index].y, static_cast<std::int16_t>(79));
+        }
+    }
+}
+
+TEST_CASE(a_report_carrying_another_collections_identifier_is_not_movement) {
+    MouseNormalizer normalizer;
+    normalizer.set_layout(report_id_wheel_layout());
+    Collected out;
+
+    // A device with media keys on it sends those down the same endpoint under
+    // an identifier of their own. Read as a mouse report they are a click and
+    // a jump across the screen.
+    const std::vector<std::uint8_t> report{0x02, 0x01, 0x20, 0x00, 0x20, 0x00, 0x01};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 0u);
+}
+
+TEST_CASE(a_wheel_at_the_unprefixed_offsets_turns_the_right_way) {
+    MouseNormalizer normalizer;
+    normalizer.set_layout(unprefixed_wheel_layout());
+    Collected out;
+
+    const std::vector<std::uint8_t> report{0x00, 0x00, 0x00, 0xFF, 0x00};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 1u);
+    CHECK_EQ(out.events[0].kind, InputEventKind::Wheel);
+    CHECK_EQ(out.events[0].wheel, -1);
+    CHECK_EQ(out.events[0].pan, 0);
+}
+
+TEST_CASE(buttons_axes_and_pan_land_when_the_layout_has_no_report_id) {
+    MouseNormalizer normalizer;
+    normalizer.set_layout(unprefixed_wheel_layout());
+    Collected out;
+
+    // Button 1 down, -10 across, +79 down, no wheel, tilted right.
+    const std::vector<std::uint8_t> report{0x01, 0xF6, 0x4F, 0x00, 0x01};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 3u);
+    CHECK(out.has(InputEventKind::MouseButtonDown, 0));
+    for (std::size_t index = 0; index < out.count; ++index) {
+        if (out.events[index].kind == InputEventKind::MouseMove) {
+            CHECK_EQ(out.events[index].x, static_cast<std::int16_t>(-10));
+            CHECK_EQ(out.events[index].y, static_cast<std::int16_t>(79));
+        }
+        if (out.events[index].kind == InputEventKind::Wheel) {
+            CHECK_EQ(out.events[index].wheel, 0);
+            CHECK_EQ(out.events[index].pan, 1);
+        }
+    }
+}
+
+TEST_CASE(a_normalizer_nobody_configured_reads_a_boot_report) {
+    MouseNormalizer normalizer;
+    Collected out;
+
+    // The fallback, and the only layout this firmware could be sure of before
+    // any descriptor was fetched. A device whose descriptor cannot be read
+    // arrives here and has to go on working exactly as it did.
+    out.count =
+        normalizer.apply(view(mouse(0x01, -10, 79, -2)), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 3u);
+    CHECK(out.has(InputEventKind::MouseButtonDown, 0));
+    CHECK_EQ(out.count_of(InputEventKind::MouseMove), 1);
+    CHECK_EQ(out.count_of(InputEventKind::Wheel), 1);
+}
+
+TEST_CASE(a_report_shorter_than_the_layout_needs_is_ignored) {
+    MouseNormalizer normalizer;
+    normalizer.set_layout(report_id_wheel_layout());
+    Collected out;
+
+    // Four bytes of a seven-byte report. The axes are sixteen bits and only
+    // half of X arrived; reading what did arrive is movement nobody made.
+    const std::vector<std::uint8_t> report{0x01, 0x00, 0xF6, 0xFF};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 0u);
+}
+
+TEST_CASE(a_sixteen_bit_axis_carries_more_than_a_byte_could) {
+    MouseNormalizer normalizer;
+    normalizer.set_layout(report_id_wheel_layout());
+    Collected out;
+
+    // X = +300 and Y = -300, which is what a high-resolution mouse produces
+    // from an ordinary flick of the wrist and what sixteen-bit axes exist for.
+    // Read a byte wide they are +44 and -44: still movement, still the right
+    // sign, and a third of the distance. Every axis value in the other tests
+    // fits in a byte, so only this one can tell the two apart.
+    const std::vector<std::uint8_t> report{0x01, 0x00, 0x2C, 0x01, 0xD4, 0xFE, 0x00};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 1u);
+    CHECK_EQ(out.events[0].kind, InputEventKind::MouseMove);
+    CHECK_EQ(out.events[0].x, static_cast<std::int16_t>(300));
+    CHECK_EQ(out.events[0].y, static_cast<std::int16_t>(-300));
+}
+
+TEST_CASE(the_buttons_are_read_where_the_layout_puts_them) {
+    MouseNormalizer normalizer;
+    // A descriptor is free to declare the axes first and the buttons after
+    // them, and the parser reports whatever it found. Every other layout here
+    // puts the buttons at offset zero, so nothing else would notice a reader
+    // that assumed it.
+    MouseReportLayout layout;
+    layout.x = ReportField{true, 0, 1};
+    layout.y = ReportField{true, 1, 1};
+    layout.buttons = ReportField{true, 2, 1};
+    layout.wheel = ReportField{true, 3, 1};
+    layout.minimum_body_bytes = 3;
+    normalizer.set_layout(layout);
+    Collected out;
+
+    // No movement, the right button down at the third byte. Read at offset
+    // zero the buttons are zero and the movement is a click's worth of jump.
+    const std::vector<std::uint8_t> report{0x00, 0x00, 0x02, 0x00};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 1u);
+    CHECK(out.has(InputEventKind::MouseButtonDown, 1));
 }
