@@ -568,6 +568,9 @@ private:
     bool connect_probe_running_ = false;
     InterruptStatus probed_connect_ = InterruptStatus::Disconnect;
     std::uint32_t last_answer_us_ = 0;
+    /// Polls of the configured device that the controller did not answer as a
+    /// device that is present.
+    std::uint16_t failed_polls_ = 0;
     std::uint8_t endpoint_ = 0;
     Ch375State detach_state_ = Ch375State::Absent;
     std::uint8_t last_status_ = 0;

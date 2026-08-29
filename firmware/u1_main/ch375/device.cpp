@@ -267,6 +267,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
             enter(Ch375State::Ready, now_us);
             last_answer_us_ = now_us;
             token_outstanding_ = false;
+            failed_polls_ = 0;
             relights_ = 0;
             if (!announced_ready_) {
                 // Once per device, not once per attempt: a controller that
@@ -281,11 +282,29 @@ void Ch375Device::tick(std::uint32_t now_us) {
 
         case Ch375State::Ready: {
             if (interrupted) {
-                last_answer_us_ = now_us;
                 // The transaction this token started has finished, whatever it
                 // came to.
                 token_outstanding_ = false;
-            } else if (now_us - last_answer_us_ >= kDeviceLostUs) {
+                // Whether it finished as evidence that the device is still
+                // there is a different question. A NAK is a device answering
+                // that it has nothing to say, which every HID device does
+                // between the keys and the movements, and a keyboard nobody is
+                // typing on answers nothing else for hours.
+                if (status == InterruptStatus::Success ||
+                    (is_failure(status) && failure_response(status) == kResponseNak)) {
+                    last_answer_us_ = now_us;
+                    failed_polls_ = 0;
+                } else {
+                    ++failed_polls_;
+                }
+            }
+            // A second without that evidence, and at least one poll that
+            // actually failed in it. Both, because an absence of data is not
+            // an absence of device: the polls have to have been issued and
+            // gone unanswered, or this fires for a channel whose ticks went to
+            // the other one's recovery and for a device that was answering the
+            // whole time.
+            if (now_us - last_answer_us_ >= kDeviceLostUs && failed_polls_ > 0) {
                 // Quiet for a second with a device configured. That is not the
                 // same as the device being gone - the controller has said
                 // nothing about a disconnection - and the two have been
@@ -308,6 +327,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
                     transport_.set_receive_toggle(kToggleData0);
                     token_outstanding_ = false;
                     last_answer_us_ = now_us;
+                    failed_polls_ = 0;
                     return;
                 }
 
@@ -380,6 +400,11 @@ void Ch375Device::tick(std::uint32_t now_us) {
             // dropped one reply.
             if (token_outstanding_ && now_us - token_at_us_ < kTokenAnswerUs) {
                 return;
+            }
+            if (token_outstanding_) {
+                // Asked, and the controller never came back. That is a poll
+                // that failed rather than a device with nothing to say.
+                ++failed_polls_;
             }
             last_poll_us_ = now_us;
             token_outstanding_ = true;
@@ -656,6 +681,12 @@ bool Ch375Device::poll_interrupt(InterruptStatus& status) {
             return true;
         }
         ++status_reads_failed_;
+        if (state_ == Ch375State::Ready) {
+            // A controller that will not answer the status of a device that is
+            // up is not answering at all, and the device's own polls cannot
+            // even be issued past it.
+            ++failed_polls_;
+        }
         return false;
     }
 
@@ -742,6 +773,7 @@ void Ch375Device::finish_pending_command(std::uint32_t now_us) {
                 // 12 Mbps (DS2 1.1).
                 transport_.set_usb_speed(device_is_low_speed_ ? UsbSpeed::Low1_5Mbps
                                                               : UsbSpeed::Full12Mbps);
+                transport_.set_retry(kRetryReportNak);
             }
             enter(skip_bus_reset_ ? Ch375State::HostMode : Ch375State::Resetting, now_us);
             return;
@@ -757,6 +789,14 @@ void Ch375Device::finish_pending_command(std::uint32_t now_us) {
             // says nothing as gone.
             transport_.set_usb_speed(device_is_low_speed_ ? UsbSpeed::Low1_5Mbps
                                                           : UsbSpeed::Full12Mbps);
+            // And with it the retry policy, for the same reason and on the
+            // same evidence: the one set during chip setup is three working
+            // modes ago by the time this device is polled, and on the default
+            // the chip retries a NAK on the bus instead of reporting it - so a
+            // poll of an endpoint with nothing to say never finishes and never
+            // raises an interrupt. That was forty polls, eight interrupts and
+            // a keyboard declared lost for being idle.
+            transport_.set_retry(kRetryReportNak);
             enter(Ch375State::HostMode, now_us);
             return;
 
