@@ -815,13 +815,29 @@ TEST_CASE(a_chip_that_answers_nowhere_is_not_hunted_for_every_second) {
     // half-hears a byte swallows the next command as its parameter. So it is
     // not the first thing tried - only what is left after several probes at
     // the rate the chip should have come back to have gone unanswered.
+    //
+    // This is the only remaining guard on that constraint: the two recover_from
+    // tests that used to hold it went with recover_from. It has to be a chip
+    // the search would find, and it has to look at the wire. Against a chip
+    // that answers nowhere - which is what this used to use - the search finds
+    // nothing at any rate, so the counters read zero whether the guard exists
+    // or not, and the test held either way.
     Rig rig;
-    rig.chip.go_silent(true);
+    rig.chip.strand_at(115200);
 
     rig.run(2 * kRecoverDelayUs, 1000);
 
+    // Two recovery cycles against a guard of three, and nothing has been
+    // written anywhere but the rate the chip is supposed to have come back to.
+    CHECK(!rig.chip.wrote_commands_away_from(9600u));
     CHECK_EQ(rig.device.chip_found_elsewhere(), 0u);
     CHECK_EQ(rig.device.chip_found_at(), 0u);
+
+    // And a delay is all it is: given the third cycle, the search runs and
+    // finds the chip where this side left it.
+    rig.run(6 * kRecoverDelayUs, 1000);
+
+    CHECK_EQ(rig.device.chip_found_at(), 115200u);
 }
 
 TEST_CASE(searching_every_rate_for_a_lost_chip_still_fits_inside_a_tick) {
@@ -995,10 +1011,23 @@ TEST_CASE(a_channel_whose_chip_is_well_is_not_set_up_again_for_nothing) {
 }
 
 TEST_CASE(re_proving_the_chip_does_not_cost_the_other_channel_its_poll_window) {
+    // Against a healthy chip this measured nothing: the re-check is answered
+    // immediately, so asking and waiting costs the same as asking and leaving,
+    // and the test held whichever the code did.
+    //
+    // The chip that makes the difference visible is the one the re-check
+    // exists for - a module whose 5 V was cycled under a running U1, back at
+    // 9600 and deaf at the rate this side raised it to. Every question put to
+    // that chip costs a whole reply timeout if it is waited for, and Core 1
+    // takes that out of the other channel's 8 ms poll window.
     Rig rig;
     rig.run(300000);
+    CHECK(rig.chip.port_baud() > 9600u);
+    rig.chip.power_cycle();
 
     const std::uint32_t worst = rig.worst_tick(20000);
 
+    // Measured with this test: 20 000 us with the blocking check_exist, and
+    // one poll of an empty port with the deferred probe.
     CHECK(worst < 500u);
 }

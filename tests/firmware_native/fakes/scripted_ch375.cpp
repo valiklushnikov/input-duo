@@ -127,6 +127,7 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
         ++check_exist_count_;
     }
     ++command_count_;
+    command_bauds_.push_back(port_baud_);
 
     if (!chip_hears()) {
         // Counted above and then dropped: the command was written, which is

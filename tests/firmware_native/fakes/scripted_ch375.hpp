@@ -357,6 +357,27 @@ public:
     /// reset_count would sit at zero however many times it was retried.
     std::uint32_t mode_set_count() const { return mode_set_count_; }
 
+    /// Was a command byte ever written at a rate other than this one?
+    ///
+    /// The standing constraint this whole recovery path lives under: never
+    /// write a command at a port rate that has not just been proved. The chip
+    /// reads commands positionally, so a byte it half-hears at the wrong rate
+    /// is swallowed as somebody's parameter and every byte after it is out of
+    /// step - which is a chip that has stopped answering, and on this board
+    /// there is no reset line to bring it back.
+    ///
+    /// Counters about what a search found cannot hold that constraint: a chip
+    /// that answers nowhere makes them read zero whether the guard exists or
+    /// not. This looks at the wire instead.
+    bool wrote_commands_away_from(unsigned baud) const {
+        for (unsigned at : command_bauds_) {
+            if (at != baud) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// How many times the port has been probed for existence.
     ///
     /// The first thing a recovery attempt does, and the only thing it does
@@ -449,6 +470,8 @@ private:
     std::uint32_t mode_set_count_ = 0;
     std::uint32_t check_exist_count_ = 0;
     std::uint32_t command_count_ = 0;
+    /// The port rate every command byte was written at, in order.
+    std::vector<unsigned> command_bauds_;
     std::uint32_t now_us_ = 1000;
 };
 
