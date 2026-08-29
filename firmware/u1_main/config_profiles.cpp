@@ -107,6 +107,17 @@ std::size_t StoredProfiles::bindings_for(std::uint8_t profile_id, mapping::Bindi
     return written;
 }
 
+bool StoredProfiles::routes_for(std::uint8_t profile_id, config::KeyboardRoute& keyboard,
+                                config::MouseRoute& mouse) const {
+    config::ProfileView profile;
+    if (!find_profile(profile_id, profile)) {
+        return false;
+    }
+    keyboard = profile.keyboard_route();
+    mouse = profile.mouse_route();
+    return true;
+}
+
 std::size_t StoredProfiles::macros_for(std::uint8_t profile_id, macros::MacroDefinition* out,
                                        std::size_t capacity) {
     for (std::size_t index = 0; index < capacity; ++index) {

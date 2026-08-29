@@ -62,6 +62,15 @@ struct NoProfiles final : IProfileSource {
         (void)out;
         return 0;
     }
+
+    /// No profile, so no stored routes, so the runtime keeps the ones it has.
+    bool routes_for(std::uint8_t profile, duo_input::config::KeyboardRoute& keyboard,
+                    duo_input::config::MouseRoute& mouse) const override {
+        (void)profile;
+        (void)keyboard;
+        (void)mouse;
+        return false;
+    }
 };
 
 /// Core 1's only reach into the output, as main.cpp defines it.

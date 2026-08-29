@@ -391,7 +391,7 @@ bool Core1Runtime::take_profile_ack(std::uint8_t& profile, bool& requested_by_ho
     return true;
 }
 
-void Core1Runtime::set_profile_now(std::uint8_t profile) {
+void Core1Runtime::set_profile_now(std::uint8_t profile, std::uint32_t now_ms) {
     // Static, and measured rather than guessed at. A hundred and twenty-eight
     // bindings is a kilobyte, and Core 1's whole stack is two - with the swap
     // that calls this already carrying the macro drain and the release beneath
@@ -399,6 +399,35 @@ void Core1Runtime::set_profile_now(std::uint8_t profile) {
     static mapping::Binding bindings[mapping::kMaxBindings];
     const std::size_t count = profiles_.bindings_for(profile, bindings);
     engine_.set_bindings(bindings, count);
+
+    // Spec section 11: a profile stores the routes it starts in, and this is
+    // the one place a profile becomes the active one - the boot path, a
+    // configuration write, and swap_profile all arrive here. Every one of them
+    // has let go of everything first, which is what spec section 10.3 asks of
+    // a route change; the outcomes below are applied rather than discarded
+    // because "there is nothing left to release" is a claim about four callers
+    // and not about this function.
+    //
+    // A source with no such profile leaves the routes alone. Moving to a
+    // route no configuration named would send the operator's keys to a
+    // computer nobody chose.
+    //
+    // Only a route that actually moves is set. The engine releases the
+    // computer being left behind whether or not the route changed, and a
+    // profile whose stored routes match the current ones has left nothing
+    // behind - a release for it would be a command the far side has to act on
+    // for no reason, on every profile change and at every boot.
+    config::KeyboardRoute keyboard = engine_.keyboard_route();
+    config::MouseRoute mouse = engine_.mouse_route();
+    if (profiles_.routes_for(profile, keyboard, mouse)) {
+        if (keyboard != engine_.keyboard_route()) {
+            apply(engine_.set_keyboard_route(keyboard), now_ms);
+        }
+        if (mouse != engine_.mouse_route()) {
+            apply(engine_.set_mouse_route(mouse), now_ms);
+        }
+    }
+
     active_profile_.store(profile, std::memory_order_release);
 }
 
@@ -417,7 +446,7 @@ void Core1Runtime::swap_profile(std::uint8_t profile, std::uint32_t now_ms,
     apply(engine_.release_everything(), now_ms);
     buttons_ = 0;
 
-    set_profile_now(profile);
+    set_profile_now(profile, now_ms);
 
     profile_ack_mailbox_.store(
         static_cast<std::uint16_t>(kProfileMailboxOccupied |

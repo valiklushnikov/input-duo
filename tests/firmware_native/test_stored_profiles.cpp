@@ -6,6 +6,7 @@
 // agrees with itself and with nothing else.
 
 #include "config_profiles.hpp"
+#include "protocol/crc.hpp"
 #include "test_support.hpp"
 
 #include <cstdio>
@@ -14,6 +15,8 @@
 
 using duo_input::config::ActionKind;
 using duo_input::config::BindingMode;
+using duo_input::config::KeyboardRoute;
+using duo_input::config::MouseRoute;
 using duo_input::config::MacroStepType;
 using duo_input::config::TriggerKind;
 using duo_input::protocol::ByteView;
@@ -45,6 +48,33 @@ struct Loaded {
     StoredProfiles profiles;
 
     Loaded() { profiles.load(ByteView{blob.data(), blob.size()}); }
+};
+
+/// The vector stores every profile as starting on PC1, which is also what a
+/// fresh Routes holds - so reading it proves nothing about whether the bytes
+/// were read at all. This moves profile 1 off the default and repairs the
+/// header CRC, exactly as a hand-edited project file would arrive.
+struct Rerouted {
+    std::vector<std::uint8_t> blob = read_vector("valid_full.bin");
+    StoredProfiles profiles;
+
+    Rerouted() {
+        const std::size_t descriptor = duo_input::config::CONFIG_HEADER_SIZE;
+        blob[descriptor + 1U] = static_cast<std::uint8_t>(KeyboardRoute::BOTH);
+        blob[descriptor + 2U] = static_cast<std::uint8_t>(MouseRoute::PC2);
+        // The header's own CRC field reads as zero while the CRC is computed.
+        blob[12] = 0;
+        blob[13] = 0;
+        blob[14] = 0;
+        blob[15] = 0;
+        const std::uint32_t crc =
+            duo_input::protocol::crc32_ieee(ByteView{blob.data(), blob.size()});
+        blob[12] = static_cast<std::uint8_t>(crc);
+        blob[13] = static_cast<std::uint8_t>(crc >> 8);
+        blob[14] = static_cast<std::uint8_t>(crc >> 16);
+        blob[15] = static_cast<std::uint8_t>(crc >> 24);
+        profiles.load(ByteView{blob.data(), blob.size()});
+    }
 };
 
 }  // namespace
@@ -277,4 +307,40 @@ TEST_CASE(a_profile_that_is_not_there_yields_nothing) {
     Binding bindings[kMaxBindings];
 
     CHECK_EQ(loaded.profiles.bindings_for(200, bindings), 0u);
+}
+
+TEST_CASE(a_profile_carries_the_routes_it_is_stored_as_starting_in) {
+    Rerouted rerouted;
+    CHECK(rerouted.profiles.loaded());
+
+    KeyboardRoute keyboard = KeyboardRoute::PC1;
+    MouseRoute mouse = MouseRoute::PC1;
+    CHECK(rerouted.profiles.routes_for(1, keyboard, mouse));
+
+    // Two separate bytes one after the other in the descriptor, and reading
+    // them the wrong way round is the kind of mistake nothing else would
+    // catch: BOTH is not a mouse route and PC2 is a valid keyboard one.
+    CHECK_EQ(static_cast<int>(keyboard), static_cast<int>(KeyboardRoute::BOTH));
+    CHECK_EQ(static_cast<int>(mouse), static_cast<int>(MouseRoute::PC2));
+}
+
+TEST_CASE(the_other_profiles_routes_are_their_own) {
+    Rerouted rerouted;
+
+    KeyboardRoute keyboard = KeyboardRoute::BOTH;
+    MouseRoute mouse = MouseRoute::PC2;
+    CHECK(rerouted.profiles.routes_for(2, keyboard, mouse));
+
+    CHECK_EQ(static_cast<int>(keyboard), static_cast<int>(KeyboardRoute::PC1));
+    CHECK_EQ(static_cast<int>(mouse), static_cast<int>(MouseRoute::PC1));
+}
+
+TEST_CASE(a_profile_that_is_not_there_has_no_routes_to_give) {
+    Loaded loaded;
+
+    KeyboardRoute keyboard = KeyboardRoute::PC1;
+    MouseRoute mouse = MouseRoute::PC1;
+
+    // Not a route of its own invention: the runtime keeps the one it has.
+    CHECK_FALSE(loaded.profiles.routes_for(200, keyboard, mouse));
 }

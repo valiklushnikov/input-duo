@@ -120,12 +120,32 @@ struct TwoProfiles final : IProfileSource {
     std::vector<Binding> profile_zero;
     std::vector<Binding> profile_one;
 
+    /// Spec section 11: each profile stores the routes it starts in. Left at
+    /// PC1/PC1 - what a fresh Routes holds - unless a test says otherwise, so
+    /// nothing here moves a route without asking for it.
+    duo_input::config::KeyboardRoute keyboard_zero = duo_input::config::KeyboardRoute::PC1;
+    duo_input::config::MouseRoute mouse_zero = duo_input::config::MouseRoute::PC1;
+    duo_input::config::KeyboardRoute keyboard_one = duo_input::config::KeyboardRoute::PC1;
+    duo_input::config::MouseRoute mouse_one = duo_input::config::MouseRoute::PC1;
+    /// Whether this source has the profile at all.
+    bool has_routes = true;
+
     std::size_t bindings_for(std::uint8_t profile, Binding* out) const override {
         const std::vector<Binding>& source = profile == 0 ? profile_zero : profile_one;
         for (std::size_t index = 0; index < source.size(); ++index) {
             out[index] = source[index];
         }
         return source.size();
+    }
+
+    bool routes_for(std::uint8_t profile, duo_input::config::KeyboardRoute& keyboard,
+                    duo_input::config::MouseRoute& mouse) const override {
+        if (!has_routes) {
+            return false;
+        }
+        keyboard = profile == 0 ? keyboard_zero : keyboard_one;
+        mouse = profile == 0 ? mouse_zero : mouse_one;
+        return true;
     }
 };
 
@@ -557,6 +577,82 @@ TEST_CASE(an_acknowledgement_is_reported_once) {
     runtime.take_profile_ack(acknowledged);
 
     CHECK(!runtime.take_profile_ack(acknowledged));
+}
+
+TEST_CASE(a_profile_starts_in_the_routes_it_was_stored_with) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    profiles.keyboard_one = duo_input::config::KeyboardRoute::PC2;
+    profiles.mouse_one = duo_input::config::MouseRoute::PC2;
+    Core1Runtime runtime(sink, profiles);
+    runtime.request_profile(1);
+
+    runtime.tick(1000);
+
+    // Spec section 11 stores a starting KeyboardRoute and a starting
+    // MouseRoute in every profile. A profile that becomes active and leaves
+    // the routes wherever the last one happened to put them is not the profile
+    // the operator configured - and there is no other way to reach those two
+    // fields, so a hand-edited project would carry them and nothing would ever
+    // read them.
+    sink.commands.clear();
+    runtime.handle_input(key(InputEventKind::KeyDown, 0x04), 1001);
+    runtime.handle_input(motion(3, 0), 1001);
+
+    CHECK_EQ(sink.count_of(CommandKind::KeyPress), 1);
+    CHECK_EQ(sink.count_of(CommandKind::MouseDelta), 1);
+    if (sink.commands.size() < 2) {
+        return;
+    }
+    CHECK_EQ(static_cast<int>(sink.commands[0].route),
+             static_cast<int>(duo_input::runtime::Route::Pc2));
+    CHECK_EQ(static_cast<int>(sink.commands[1].route),
+             static_cast<int>(duo_input::runtime::Route::Pc2));
+}
+
+TEST_CASE(the_profile_loaded_at_startup_starts_in_its_routes_too) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    profiles.keyboard_one = duo_input::config::KeyboardRoute::BOTH;
+    Core1Runtime runtime(sink, profiles);
+
+    // The boot path: main reads the configuration's own active profile and
+    // installs it directly, outside the handshake. A device that powers up in
+    // profile 3 has to power up in profile 3's routes as well, which is the
+    // case the acceptance exercised across a power cycle.
+    runtime.set_profile_now(1);
+
+    sink.commands.clear();
+    runtime.handle_input(key(InputEventKind::KeyDown, 0x04), 1001);
+
+    CHECK_EQ(sink.count_of(CommandKind::KeyPress), 1);
+    if (sink.commands.empty()) {
+        return;
+    }
+    CHECK_EQ(static_cast<int>(sink.commands[0].route),
+             static_cast<int>(duo_input::runtime::Route::Both));
+}
+
+TEST_CASE(a_source_that_has_no_such_profile_leaves_the_routes_where_they_are) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    profiles.keyboard_one = duo_input::config::KeyboardRoute::PC2;
+    profiles.has_routes = false;
+    Core1Runtime runtime(sink, profiles);
+
+    runtime.request_profile(1);
+    runtime.tick(1000);
+
+    // Nothing stored means nothing to apply. Moving to a made-up route here
+    // would send the operator's keys to a computer no configuration named.
+    sink.commands.clear();
+    runtime.handle_input(key(InputEventKind::KeyDown, 0x04), 1001);
+    CHECK_EQ(sink.count_of(CommandKind::KeyPress), 1);
+    if (sink.commands.empty()) {
+        return;
+    }
+    CHECK_EQ(static_cast<int>(sink.commands[0].route),
+             static_cast<int>(duo_input::runtime::Route::Pc1));
 }
 
 TEST_CASE(swapping_profiles_releases_both_computers) {

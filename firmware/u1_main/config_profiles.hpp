@@ -57,6 +57,13 @@ public:
     /// numbering from the editor to the far side.
     std::size_t bindings_for(std::uint8_t profile_id, mapping::Binding* out) const override;
 
+    /// The routes the profile is stored as starting in.
+    ///
+    /// Read straight out of the descriptor; the validator has already refused
+    /// any value that is not a route, so whatever is here is one.
+    bool routes_for(std::uint8_t profile_id, config::KeyboardRoute& keyboard,
+                    config::MouseRoute& mouse) const override;
+
     /// Compile a profile's macros, indexed by slot.
     ///
     /// The slot is what a binding's RUN_MACRO parameter names after loading.

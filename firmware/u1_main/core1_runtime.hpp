@@ -65,6 +65,16 @@ public:
     virtual ~IProfileSource() = default;
     /// Writes up to ``kMaxBindings`` into ``out`` and returns how many.
     virtual std::size_t bindings_for(std::uint8_t profile, mapping::Binding* out) const = 0;
+
+    /// The routes a profile starts in - spec section 11 stores both per
+    /// profile, and a profile that becomes active starts in them.
+    ///
+    /// Returns false when the source has no such profile, which leaves the
+    /// current routes alone. Pure rather than defaulted: a source that
+    /// silently answered "no routes" would put back exactly the defect this
+    /// exists to remove, and it would be invisible.
+    virtual bool routes_for(std::uint8_t profile, config::KeyboardRoute& keyboard,
+                            config::MouseRoute& mouse) const = 0;
 };
 
 class Core1Runtime {
@@ -124,8 +134,13 @@ public:
         return active_profile_.load(std::memory_order_acquire);
     }
 
-    /// Load a profile's bindings directly, outside the handshake. Startup.
-    void set_profile_now(std::uint8_t profile);
+    /// Install a profile directly, outside the handshake. Startup.
+    ///
+    /// Its bindings and the routes it is stored as starting in. ``now_ms`` is
+    /// only used to timestamp anything the route change has to release, and
+    /// every caller has already let go of everything, so the boot path's zero
+    /// costs nothing.
+    void set_profile_now(std::uint8_t profile, std::uint32_t now_ms = 0);
 
     // --- macros
 

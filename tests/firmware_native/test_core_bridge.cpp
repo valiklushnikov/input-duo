@@ -122,6 +122,15 @@ struct TwoProfiles final : IProfileSource {
         }
         return source.size();
     }
+
+    /// These profiles carry no stored routes; the bridge does not read them.
+    bool routes_for(std::uint8_t profile, duo_input::config::KeyboardRoute& keyboard,
+                    duo_input::config::MouseRoute& mouse) const override {
+        (void)profile;
+        (void)keyboard;
+        (void)mouse;
+        return false;
+    }
 };
 
 /// One conversation over CDC, driven the way the configurator drives it.
