@@ -301,7 +301,12 @@ private:
     LinkState link_state_{};
 
 #if DUO_SPI_DEBUG || DUO_CH375_PROBE
-    std::uint8_t link_debug_[900] = {};
+    // One byte short of what a CDC reply can carry, because the payload leads
+    // with an error code (diagnostics_payload). The probe build's report is
+    // two devices' worth of text and 900 was not enough for both once the
+    // report-descriptor line joined it - and a report that runs out of room
+    // stops mid-device, which is a diagnostic that lies by omission.
+    std::uint8_t link_debug_[protocol::ProtocolLimits::CDC_MAX_PAYLOAD - 1] = {};
     std::size_t link_debug_size_ = 0;
 #endif
 };

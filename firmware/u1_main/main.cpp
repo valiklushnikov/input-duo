@@ -522,6 +522,20 @@ const char* describe_setup_status(std::uint8_t status) {
             return "up, but refused boot protocol";
         case 0xF9:
             return "up, but never answered the protocol request";
+        case 0xF8:
+            return "boot: the interface declared no report descriptor";
+        case 0xF7:
+            return "boot: its report descriptor is longer than there is room for";
+        case 0xF6:
+            return "boot: it refused to hand over its report descriptor";
+        case 0xF5:
+            return "boot: its report descriptor could not be read as a mouse";
+        case 0xF4:
+            return "boot: a packet of its report descriptor could not be collected";
+        case 0xF3:
+            return "boot: silent on the descriptor request too many times to keep asking";
+        case 0xF2:
+            return "read through its own report descriptor";
         case 0x14:
             return "success";
         case 0x15:
@@ -590,7 +604,10 @@ namespace {
     // Zeroed, because what is sent is measured from what was
     // written - and anything past that in an uninitialised
     // buffer goes out as part of the message.
-    static char text[900] = {};
+    // Wider than it was: the report-descriptor line is the only place the
+    // wheel's fate is visible, and a report that runs out of room stops at
+    // whichever device happened to be printed first.
+    static char text[1023] = {};
     int used = 0;
     const char* names[2] = {"keyboard", "mouse"};
     for (int index = 0; index < 2 && used < static_cast<int>(sizeof(text)) - 1; ++index) {
@@ -605,6 +622,7 @@ namespace {
             "  detach_disconnect=%u detach_lost=%u enum_failed=%u mode_failed=%u\n"
             "  setup attempts=%u last=0x%02X (%s) polls=%u\n"
             "  found=%s endpoint=%u packet=%u boot=adv:%s sel:%s parse=%u\n"
+            "  layout=%s rd=0x%02X bytes=%u id=%s/%u  b@%u x@%u/%u y@%u/%u w@%u p@%u min=%u\n"
             "  last report (%u bytes): %02X %02X %02X %02X\n"
             "  port=%u baud, refused_changes=%u\n"
             "  mode_refused setup=%u recover=%u  found_elsewhere=%u alive_refusing=%u\n"
@@ -642,6 +660,20 @@ namespace {
             setups[index]->boot_protocol() ? "yes" : "no",
             setups[index]->boot_protocol_selected() ? "yes" : "no",
             static_cast<unsigned>(setups[index]->last_parse_error()),
+            // Where the wheel is, or why there is not one. "layout=own" with
+            // a wheel offset inside the reported size is the whole repair;
+            // "layout=boot" plus the rd= byte says which way it fell back.
+            setups[index]->has_mouse_layout() ? "own" : "boot",
+            setups[index]->last_report_descriptor_status(),
+            setups[index]->report_descriptor_bytes(),
+            setups[index]->mouse_layout().report_id ? "yes" : "no",
+            setups[index]->mouse_layout().report_id_value,
+            setups[index]->mouse_layout().buttons.offset,
+            setups[index]->mouse_layout().x.offset, setups[index]->mouse_layout().x.bytes,
+            setups[index]->mouse_layout().y.offset, setups[index]->mouse_layout().y.bytes,
+            setups[index]->mouse_layout().wheel.offset,
+            setups[index]->mouse_layout().pan.offset,
+            setups[index]->mouse_layout().minimum_body_bytes,
             tally.last_size, tally.last[0], tally.last[1], tally.last[2], tally.last[3],
             (index == 0 ? g_keyboard_port : g_mouse_port).baud(),
             device.baud_change_failures(), device.setup_mode_failures(),
