@@ -130,6 +130,22 @@ behaviour, not speculation.
   The release image has no counter or status field for it, so in the field this
   failure looks like a peripheral that types the wrong thing rather than like
   one that was not understood.
+- **Boot protocol costs the scroll wheel on every mouse.** The boot-protocol
+  mouse report is three bytes — buttons, dX, dY — and there is no wheel byte in
+  it, so a mouse asked for boot protocol cannot scroll at all. This was seen on
+  hardware before it was understood: the operator reported the wheel dead, and
+  every one of the 59 distinct reports captured in
+  `tests/vectors/hid_reports/mouse_boot_reports.json` is three bytes long, with
+  the fourth byte of the capture record — the record's own padding — zero. The
+  normalizer reads a wheel when the report is long enough to carry one; in this
+  mode no report ever is, and `tests/firmware_native/test_trace_replay.cpp`
+  asserts that the whole corpus produces no wheel event. `SET_PROTOCOL` is
+  asked for precisely because boot protocol makes the layout knowable, so the
+  wheel is what that knowledge currently costs, on every mouse, not only on
+  awkward ones. The repair is the one the Report ID limit above also needs:
+  read the HID report descriptor and run the device in its own protocol instead
+  of forcing boot. One change buys back the wheel and the devices that lead
+  their reports with a Report ID.
 - **Three kinds of device are refused up front, each by the name of its
   reason.** A hub, as `ParseError::NoUsableInterface`: U1 does not promise to
   route through one, and enumerating it so that it appears to work until
