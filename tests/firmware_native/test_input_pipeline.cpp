@@ -14,7 +14,10 @@
 using duo_input::protocol::ByteView;
 using duo_input::u1::ch375::Ch375Event;
 using duo_input::u1::ch375::Ch375EventKind;
+using duo_input::u1::ch375::boot_mouse_layout;
 using duo_input::u1::ch375::DeviceKind;
+using duo_input::u1::ch375::MouseReportLayout;
+using duo_input::u1::ch375::ReportField;
 using duo_input::u1::input::IInputHandler;
 using duo_input::u1::input::InputEvent;
 using duo_input::u1::input::InputEventKind;
@@ -82,9 +85,10 @@ constexpr std::uint8_t kMouseLeftAndRight[] = {0x01, 0x05, 0xFB};
 TEST_CASE(a_keyboard_report_becomes_a_keypress) {
     Recorder recorder;
     InputPipeline pipeline(recorder);
-    pipeline.on_event(ready_event(), DeviceKind::Keyboard, 1000);
+    pipeline.on_event(ready_event(), DeviceKind::Keyboard, boot_mouse_layout(), 1000);
 
-    pipeline.on_event(report_event(kKeyA, sizeof(kKeyA)), DeviceKind::Keyboard, 1000);
+    pipeline.on_event(report_event(kKeyA, sizeof(kKeyA)), DeviceKind::Keyboard,
+                      boot_mouse_layout(), 1000);
 
     CHECK_EQ(recorder.of(InputEventKind::KeyDown, 0x04), 1);
 }
@@ -92,10 +96,10 @@ TEST_CASE(a_keyboard_report_becomes_a_keypress) {
 TEST_CASE(a_mouse_report_becomes_motion_and_a_button) {
     Recorder recorder;
     InputPipeline pipeline(recorder);
-    pipeline.on_event(ready_event(), DeviceKind::Mouse, 1000);
+    pipeline.on_event(ready_event(), DeviceKind::Mouse, boot_mouse_layout(), 1000);
 
     pipeline.on_event(report_event(kMouseLeftAndRight, sizeof(kMouseLeftAndRight)),
-                      DeviceKind::Mouse, 1000);
+                      DeviceKind::Mouse, boot_mouse_layout(), 1000);
 
     CHECK_EQ(recorder.count(InputEventKind::MouseButtonDown), 1);
     CHECK_EQ(recorder.count(InputEventKind::MouseMove), 1);
@@ -105,7 +109,8 @@ TEST_CASE(a_report_from_a_device_nobody_identified_is_dropped) {
     Recorder recorder;
     InputPipeline pipeline(recorder);
 
-    pipeline.on_event(report_event(kKeyA, sizeof(kKeyA)), DeviceKind::Unknown, 1000);
+    pipeline.on_event(report_event(kKeyA, sizeof(kKeyA)), DeviceKind::Unknown,
+                      boot_mouse_layout(), 1000);
 
     // Guessing at the layout would put arbitrary keystrokes on somebody's
     // computer. Counted, so that a device this firmware cannot read is
@@ -117,10 +122,11 @@ TEST_CASE(a_report_from_a_device_nobody_identified_is_dropped) {
 TEST_CASE(pulling_the_cable_releases_the_key_that_was_held) {
     Recorder recorder;
     InputPipeline pipeline(recorder);
-    pipeline.on_event(ready_event(), DeviceKind::Keyboard, 1000);
-    pipeline.on_event(report_event(kKeyA, sizeof(kKeyA)), DeviceKind::Keyboard, 1000);
+    pipeline.on_event(ready_event(), DeviceKind::Keyboard, boot_mouse_layout(), 1000);
+    pipeline.on_event(report_event(kKeyA, sizeof(kKeyA)), DeviceKind::Keyboard,
+                      boot_mouse_layout(), 1000);
 
-    pipeline.on_event(detached_event(), DeviceKind::Keyboard, 1100);
+    pipeline.on_event(detached_event(), DeviceKind::Keyboard, boot_mouse_layout(), 1100);
 
     // No release will ever arrive from a device that is gone, and the far
     // computer has no way to work that out for itself.
@@ -130,11 +136,11 @@ TEST_CASE(pulling_the_cable_releases_the_key_that_was_held) {
 TEST_CASE(pulling_the_cable_releases_the_button_that_was_held) {
     Recorder recorder;
     InputPipeline pipeline(recorder);
-    pipeline.on_event(ready_event(), DeviceKind::Mouse, 1000);
+    pipeline.on_event(ready_event(), DeviceKind::Mouse, boot_mouse_layout(), 1000);
     pipeline.on_event(report_event(kMouseLeftAndRight, sizeof(kMouseLeftAndRight)),
-                      DeviceKind::Mouse, 1000);
+                      DeviceKind::Mouse, boot_mouse_layout(), 1000);
 
-    pipeline.on_event(detached_event(), DeviceKind::Mouse, 1100);
+    pipeline.on_event(detached_event(), DeviceKind::Mouse, boot_mouse_layout(), 1100);
 
     CHECK_EQ(recorder.count(InputEventKind::MouseButtonUp), 1);
 }
@@ -142,11 +148,13 @@ TEST_CASE(pulling_the_cable_releases_the_button_that_was_held) {
 TEST_CASE(a_key_already_released_is_not_released_again_by_a_disconnect) {
     Recorder recorder;
     InputPipeline pipeline(recorder);
-    pipeline.on_event(ready_event(), DeviceKind::Keyboard, 1000);
-    pipeline.on_event(report_event(kKeyA, sizeof(kKeyA)), DeviceKind::Keyboard, 1000);
-    pipeline.on_event(report_event(kNoKeys, sizeof(kNoKeys)), DeviceKind::Keyboard, 1010);
+    pipeline.on_event(ready_event(), DeviceKind::Keyboard, boot_mouse_layout(), 1000);
+    pipeline.on_event(report_event(kKeyA, sizeof(kKeyA)), DeviceKind::Keyboard,
+                      boot_mouse_layout(), 1000);
+    pipeline.on_event(report_event(kNoKeys, sizeof(kNoKeys)), DeviceKind::Keyboard,
+                      boot_mouse_layout(), 1010);
 
-    pipeline.on_event(detached_event(), DeviceKind::Keyboard, 1100);
+    pipeline.on_event(detached_event(), DeviceKind::Keyboard, boot_mouse_layout(), 1100);
 
     CHECK_EQ(recorder.of(InputEventKind::KeyUp, 0x04), 1);
 }
@@ -154,12 +162,13 @@ TEST_CASE(a_key_already_released_is_not_released_again_by_a_disconnect) {
 TEST_CASE(a_controller_fault_releases_what_was_held_too) {
     Recorder recorder;
     InputPipeline pipeline(recorder);
-    pipeline.on_event(ready_event(), DeviceKind::Keyboard, 1000);
-    pipeline.on_event(report_event(kKeyA, sizeof(kKeyA)), DeviceKind::Keyboard, 1000);
+    pipeline.on_event(ready_event(), DeviceKind::Keyboard, boot_mouse_layout(), 1000);
+    pipeline.on_event(report_event(kKeyA, sizeof(kKeyA)), DeviceKind::Keyboard,
+                      boot_mouse_layout(), 1000);
 
     Ch375Event fault;
     fault.kind = Ch375EventKind::Fault;
-    pipeline.on_event(fault, DeviceKind::Keyboard, 1100);
+    pipeline.on_event(fault, DeviceKind::Keyboard, boot_mouse_layout(), 1100);
 
     // A controller that gave up leaves the same keys held as a cable pulled
     // out of the socket, and the far computer cannot tell the two apart.
@@ -169,13 +178,14 @@ TEST_CASE(a_controller_fault_releases_what_was_held_too) {
 TEST_CASE(a_report_after_a_disconnect_is_not_read_as_the_old_device) {
     Recorder recorder;
     InputPipeline pipeline(recorder);
-    pipeline.on_event(ready_event(), DeviceKind::Keyboard, 1000);
-    pipeline.on_event(detached_event(), DeviceKind::Keyboard, 1100);
+    pipeline.on_event(ready_event(), DeviceKind::Keyboard, boot_mouse_layout(), 1000);
+    pipeline.on_event(detached_event(), DeviceKind::Keyboard, boot_mouse_layout(), 1100);
     recorder.events.clear();
 
     // A report the old device's layout would have accepted: if the pipeline
     // still believed a keyboard were attached, this would type.
-    pipeline.on_event(report_event(kKeyA, sizeof(kKeyA)), DeviceKind::Keyboard, 1200);
+    pipeline.on_event(report_event(kKeyA, sizeof(kKeyA)), DeviceKind::Keyboard,
+                      boot_mouse_layout(), 1200);
 
     // Whatever turns up next is not necessarily what was there before, and
     // one device's report read with another's layout is arbitrary input.
@@ -189,7 +199,109 @@ TEST_CASE(a_device_attaching_is_not_input) {
 
     Ch375Event attached;
     attached.kind = Ch375EventKind::Attached;
-    pipeline.on_event(attached, DeviceKind::Unknown, 1000);
+    pipeline.on_event(attached, DeviceKind::Unknown, boot_mouse_layout(), 1000);
 
     CHECK_EQ(recorder.events.size(), 0u);
+}
+
+// ============================================= the layout the device declared
+//
+// A mouse read through its own report descriptor sends a report that is not a
+// boot report: an identifier in front, sixteen-bit axes, a wheel. The layout
+// arrives with Ready, which is the moment the device has been identified and
+// the moment before its first report.
+//
+// SYNTHETIC. Nothing on this bench has ever been asked for its report
+// descriptor, so these layouts are written to the shape one declares.
+
+namespace {
+
+/// Identifier, buttons, sixteen-bit X and Y, wheel: a seven-byte report.
+MouseReportLayout report_id_wheel_layout() {
+    MouseReportLayout layout;
+    layout.report_id = true;
+    layout.report_id_value = 1;
+    layout.buttons = ReportField{true, 0, 1};
+    layout.x = ReportField{true, 1, 2};
+    layout.y = ReportField{true, 3, 2};
+    layout.wheel = ReportField{true, 5, 1};
+    layout.minimum_body_bytes = 5;
+    return layout;
+}
+
+/// Buttons, X, Y, wheel - the seven-byte report above without its identifier.
+constexpr std::uint8_t kIdentifiedWheelUp[] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+constexpr std::uint8_t kIdentifiedMove[] = {0x01, 0x00, 0xF6, 0xFF, 0x4F, 0x00, 0x00};
+
+}  // namespace
+
+TEST_CASE(a_mouse_is_read_through_the_layout_it_was_declared_with) {
+    Recorder recorder;
+    InputPipeline pipeline(recorder);
+    pipeline.on_event(ready_event(), DeviceKind::Mouse, report_id_wheel_layout(), 1000);
+
+    pipeline.on_event(report_event(kIdentifiedWheelUp, sizeof(kIdentifiedWheelUp)),
+                      DeviceKind::Mouse, report_id_wheel_layout(), 1000);
+
+    // Under the boot layout this report is a left click, movement of zero, and
+    // no wheel at all - which is the pointer this firmware shipped.
+    CHECK_EQ(recorder.count(InputEventKind::Wheel), 1);
+    CHECK_EQ(recorder.count(InputEventKind::MouseButtonDown), 0);
+    CHECK_EQ(recorder.events.front().wheel, 1);
+}
+
+TEST_CASE(movement_in_a_declared_layout_reaches_the_handler_intact) {
+    Recorder recorder;
+    InputPipeline pipeline(recorder);
+    pipeline.on_event(ready_event(), DeviceKind::Mouse, report_id_wheel_layout(), 1000);
+
+    pipeline.on_event(report_event(kIdentifiedMove, sizeof(kIdentifiedMove)),
+                      DeviceKind::Mouse, report_id_wheel_layout(), 1000);
+
+    CHECK_EQ(recorder.count(InputEventKind::MouseMove), 1);
+    CHECK_EQ(recorder.count(InputEventKind::MouseButtonDown), 0);
+    CHECK_EQ(recorder.events.front().x, static_cast<std::int16_t>(-10));
+    CHECK_EQ(recorder.events.front().y, static_cast<std::int16_t>(79));
+}
+
+TEST_CASE(a_layout_that_never_arrived_leaves_the_boot_reader_in_place) {
+    Recorder recorder;
+    InputPipeline pipeline(recorder);
+    // What a device whose descriptor could not be fetched comes up as.
+    pipeline.on_event(ready_event(), DeviceKind::Mouse, boot_mouse_layout(), 1000);
+
+    pipeline.on_event(report_event(kMouseLeftAndRight, sizeof(kMouseLeftAndRight)),
+                      DeviceKind::Mouse, boot_mouse_layout(), 1000);
+
+    CHECK_EQ(recorder.count(InputEventKind::MouseButtonDown), 1);
+    CHECK_EQ(recorder.count(InputEventKind::MouseMove), 1);
+}
+
+TEST_CASE(a_second_device_is_read_through_its_own_layout) {
+    Recorder recorder;
+    InputPipeline pipeline(recorder);
+    pipeline.on_event(ready_event(), DeviceKind::Mouse, report_id_wheel_layout(), 1000);
+    pipeline.on_event(detached_event(), DeviceKind::Mouse, report_id_wheel_layout(), 1100);
+
+    // A boot mouse plugged in after one that described itself. Kept, the first
+    // layout drops every report whose leading byte is not 1 - which is all of
+    // this one's.
+    pipeline.on_event(ready_event(), DeviceKind::Mouse, boot_mouse_layout(), 1200);
+    pipeline.on_event(report_event(kMouseLeftAndRight, sizeof(kMouseLeftAndRight)),
+                      DeviceKind::Mouse, boot_mouse_layout(), 1200);
+
+    CHECK_EQ(recorder.count(InputEventKind::MouseMove), 1);
+}
+
+TEST_CASE(a_keyboard_is_not_touched_by_a_mouse_layout) {
+    Recorder recorder;
+    InputPipeline pipeline(recorder);
+    // The layout travels with every event whatever the device is, because one
+    // pipeline serves either kind. A keyboard must not notice.
+    pipeline.on_event(ready_event(), DeviceKind::Keyboard, report_id_wheel_layout(), 1000);
+
+    pipeline.on_event(report_event(kKeyA, sizeof(kKeyA)), DeviceKind::Keyboard,
+                      report_id_wheel_layout(), 1000);
+
+    CHECK_EQ(recorder.of(InputEventKind::KeyDown, 0x04), 1);
 }

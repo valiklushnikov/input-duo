@@ -18,6 +18,7 @@
 
 #include "ch375/device.hpp"
 #include "ch375/hid_parser.hpp"
+#include "ch375/report_descriptor.hpp"
 #include "input/events.hpp"
 #include "input/keyboard_normalizer.hpp"
 #include "input/mouse_normalizer.hpp"
@@ -35,8 +36,13 @@ class InputPipeline {
 public:
     explicit InputPipeline(IInputHandler& handler) : handler_(handler) {}
 
-    /// What this device turned out to be. Told once it has been configured.
-    void set_kind(ch375::DeviceKind kind);
+    /// What this device turned out to be, and where it keeps its fields.
+    ///
+    /// Told once, when the device has been configured. The layout is the one
+    /// its report descriptor declared, or boot protocol's for a device that
+    /// would not give one up - see ch375/descriptor_setup.hpp. It is ignored
+    /// for a keyboard, whose boot report is fixed by the specification.
+    void set_kind(ch375::DeviceKind kind, const ch375::MouseReportLayout& mouse_layout);
 
     /// A report arrived from the device.
     void on_report(protocol::ByteView report, std::uint32_t now_ms);
@@ -45,7 +51,8 @@ public:
     void on_detached(std::uint32_t now_ms);
 
     /// Turn one controller event into whatever it means.
-    void on_event(const ch375::Ch375Event& event, ch375::DeviceKind kind, std::uint32_t now_ms);
+    void on_event(const ch375::Ch375Event& event, ch375::DeviceKind kind,
+                  const ch375::MouseReportLayout& mouse_layout, std::uint32_t now_ms);
 
     ch375::DeviceKind kind() const { return kind_; }
     /// How many reports were dropped because the pipeline did not know what

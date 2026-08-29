@@ -364,7 +364,8 @@ void core1_entry() {
                 // A detach synthesises the releases the peripheral never sent,
                 // which is the only thing standing between a yanked cable and
                 // a computer that types until it is rebooted.
-                pipelines[index]->on_event(event, setups[index]->kind(), now_ms);
+                pipelines[index]->on_event(event, setups[index]->kind(),
+                                           setups[index]->mouse_layout(), now_ms);
             }
         }
 

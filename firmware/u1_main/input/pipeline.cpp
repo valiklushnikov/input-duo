@@ -2,7 +2,14 @@
 
 namespace duo_input::u1::input {
 
-void InputPipeline::set_kind(ch375::DeviceKind kind) { kind_ = kind; }
+void InputPipeline::set_kind(ch375::DeviceKind kind,
+                             const ch375::MouseReportLayout& mouse_layout) {
+    kind_ = kind;
+    // Set on every Ready, not only when a descriptor was read: a device that
+    // would not describe itself hands over boot protocol's layout, and setting
+    // it is what stops the mouse before it from being read into this one.
+    mouse_.set_layout(mouse_layout);
+}
 
 void InputPipeline::emit(const InputEvent* events, std::size_t count, std::uint32_t now_ms) {
     for (std::size_t index = 0; index < count; ++index) {
@@ -52,11 +59,13 @@ void InputPipeline::on_detached(std::uint32_t now_ms) {
 }
 
 void InputPipeline::on_event(const ch375::Ch375Event& event, ch375::DeviceKind kind,
+                             const ch375::MouseReportLayout& mouse_layout,
                              std::uint32_t now_ms) {
     switch (event.kind) {
         case ch375::Ch375EventKind::Ready:
-            // What it is becomes known only once it has been configured.
-            set_kind(kind);
+            // What it is - and how it is read - becomes known only once it
+            // has been configured.
+            set_kind(kind, mouse_layout);
             return;
 
         case ch375::Ch375EventKind::Report:
