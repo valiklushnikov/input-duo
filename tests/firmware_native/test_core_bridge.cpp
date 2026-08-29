@@ -200,22 +200,53 @@ struct StandInRuntime {
     int begins = 0;
     int cancels = 0;
 
+    /// One shot: Core 1 finishes the capture between Core 0's two reads.
+    ///
+    /// Set it and the first of `capture_active`/`take_capture_event` to be
+    /// called - whichever the code under test calls first - answers from
+    /// before the capture ended, and the second answers from after it. That
+    /// is the interleaving the module exists for: Core 1's store of the
+    /// trigger and its store of "no longer capturing" both land inside Core
+    /// 0's pair of loads. Staging it against the reads rather than against a
+    /// pass is the only way one thread can produce it.
+    bool finishes_between_the_reads = false;
+
     void request_capture_begin() { ++begins; }
     void request_capture_cancel() { ++cancels; }
-    bool capture_active() const { return active; }
+
+    bool capture_active() {
+        const bool answer = active;
+        let_core_one_finish();
+        return answer;
+    }
 
     bool take_capture_event(CapturedTrigger& out) {
-        if (!has_event) {
+        const bool ready = has_event;
+        const CapturedTrigger answer = trigger;
+        let_core_one_finish();
+        if (!ready) {
             return false;
         }
         has_event = false;
-        out = trigger;
+        out = answer;
         return true;
     }
 
     void request_profile(std::uint8_t) {}
     bool take_profile_ack(std::uint8_t&, bool&) { return false; }
     std::uint32_t dropped_commands() const { return 0; }
+
+private:
+    /// The trigger is stored first and the capture is ended second, which is
+    /// the order CaptureController::handle writes them in.
+    void let_core_one_finish() {
+        if (!finishes_between_the_reads) {
+            return;
+        }
+        finishes_between_the_reads = false;
+        has_event = true;
+        active = false;
+    }
 };
 
 }  // namespace
@@ -291,6 +322,40 @@ TEST_CASE(a_capture_that_ended_between_the_two_reads_is_still_answered) {
         return;
     }
     CHECK(link.decode_last().type == CdcMessageType::CAPTURE_EVENT);
+}
+
+TEST_CASE(the_state_is_read_before_the_answer_is_taken) {
+    Link link;
+    link.hello();
+    link.send(CdcMessageType::CAPTURE_BEGIN);
+
+    // The capture is running and nobody has pressed anything yet. Core 1
+    // finishes it - stores the trigger, then stores that it is over - between
+    // Core 0's read of the state and Core 0's take of the event.
+    StandInRuntime runtime;
+    runtime.active = true;
+    runtime.has_event = false;
+    runtime.finishes_between_the_reads = true;
+    runtime.trigger.kind = TriggerKind::KEYBOARD_USAGE;
+    runtime.trigger.code = 0x1A;
+    runtime.trigger.modifiers = 0;
+
+    link.replies.clear();
+    pump_core_bridge(link.service, runtime);
+
+    // Reading the state first means a state that says "still running", and the
+    // take that follows finds the answer. Taking first finds nothing, and the
+    // state read after it says "not running" - so the pass publishes an ended
+    // capture and emits no event, the answer is refused on the next pass for
+    // want of a capture to answer, and the configurator waits out its ten
+    // seconds while the operator has already pressed the key.
+    CHECK_EQ(link.replies.count(), 1u);
+    if (link.replies.count() != 1) {
+        return;
+    }
+    const CdcFrame event = link.decode_last();
+    CHECK(event.type == CdcMessageType::CAPTURE_EVENT);
+    CHECK_EQ(event.payload.data[1], 0x1Au);
 }
 
 TEST_CASE(the_host_asking_to_end_a_capture_reaches_the_other_core) {
