@@ -8,6 +8,7 @@ namespace duo_input::u1 {
 using ch375::Ch375Command;
 using ch375::CommandStatus;
 using ch375::InterruptStatus;
+using ch375::ReplyProgress;
 using ch375::UsbMode;
 
 bool driven_high_against_a_pull_down(unsigned pin) {
@@ -154,7 +155,18 @@ Ch375ProbeResult probe_ch375(ch375::PioCh375Transport& port, ch375::Ch375Transpo
 
     // DS1 5.9. Host mode, generating frames - a device that is never sent one
     // stops answering.
-    result.host_mode_ok = commands.set_usb_mode(UsbMode::HostWithSof);
+    // Asked and then waited for, deliberately. The transport's status commands
+    // became tick-spanning so a stalled channel cannot hold Core 1's loop, but
+    // this probe runs once before that loop exists and has no tick to be
+    // spanned across, so it drives the same deferred exchange to completion
+    // itself. The bound is the transport's own reply deadline.
+    commands.begin_set_usb_mode(UsbMode::HostWithSof);
+    ReplyProgress mode_progress = ReplyProgress::Waiting;
+    while (mode_progress == ReplyProgress::Waiting) {
+        mode_progress = commands.poll_command_status();
+    }
+    result.host_mode_ok = mode_progress == ReplyProgress::Answered &&
+                          commands.command_status_succeeded();
     result.host_mode_reply =
         result.host_mode_ok ? static_cast<std::uint8_t>(CommandStatus::Success) : 0;
     sleep_ms(20);
