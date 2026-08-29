@@ -1,0 +1,541 @@
+{
+  "device_class": "wired boot-protocol mouse",
+  "interface": "interrupt IN endpoint 1, 7-byte packets, reports arrive 3 bytes",
+  "protocol": "boot protocol, selected by SET_PROTOCOL and confirmed. The boot report is buttons/dX/dY and carries no wheel, which is why the wheel does not work in this mode.",
+  "note": "Captured from a real device through the probe build's diagnostics. Byte 0 is the button bitmap, bytes 1-2 are signed X and Y deltas.",
+  "captured": "2026-08-29",
+  "distinct_reports": 59,
+  "reports": [
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        253,
+        255,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        1,
+        254,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        254,
+        0,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        210,
+        16,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        255,
+        242,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        29,
+        44,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        229,
+        7,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        0,
+        252,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        0,
+        255,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        254,
+        5,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        25,
+        247,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        6,
+        252,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        1,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        252,
+        10,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        255,
+        2,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        254,
+        254,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        0,
+        254,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        1,
+        255,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        3,
+        0,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        238,
+        247,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        253,
+        249,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        238,
+        24,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        14,
+        254,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        1,
+        2,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        0,
+        253,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        255,
+        254,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        249,
+        253,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        2,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        254,
+        1,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        255,
+        253,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        4,
+        254,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        2,
+        0,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        252,
+        3,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        255,
+        0,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        1,
+        0,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        16,
+        2,
+        1,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        13,
+        240,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        4,
+        12,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        226,
+        235,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        21,
+        7,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        229,
+        15,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        215,
+        2,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        250,
+        249,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        26,
+        15,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        253,
+        247,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        247,
+        4,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        21,
+        243,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        2,
+        254,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        246,
+        255,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        2,
+        251,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        3,
+        252,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        3,
+        248,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        2,
+        255,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        236,
+        1,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        251,
+        0,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        244,
+        2,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        249,
+        1,
+        0
+      ]
+    },
+    {
+      "size": 3,
+      "bytes": [
+        0,
+        16,
+        249,
+        0
+      ]
+    }
+  ]
+}

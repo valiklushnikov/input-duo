@@ -1,0 +1,244 @@
+{
+  "device_class": "wired boot-protocol keyboard",
+  "interface": "interrupt IN endpoint 1, 8-byte packets",
+  "protocol": "boot protocol, selected by SET_PROTOCOL and confirmed",
+  "note": "Captured from a real device through the probe build's diagnostics, which report a packet's size and its first four bytes. Bytes past the fourth were not observed and are not asserted. Byte 0 is the modifier bitmap, byte 1 is reserved, bytes 2-3 are the first two key usages.",
+  "captured": "2026-08-29",
+  "distinct_reports": 26,
+  "reports": [
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        68,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        40,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        10,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        11,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        5,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        7,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        23,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        17,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        2,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        21,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        44,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        2,
+        0,
+        17,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        30,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        32,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        34,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        35,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        36,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        66,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        31,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        67,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        9,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        37,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        2,
+        0,
+        5,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        42,
+        0
+      ]
+    },
+    {
+      "size": 8,
+      "bytes": [
+        0,
+        0,
+        28,
+        23
+      ]
+    }
+  ]
+}
