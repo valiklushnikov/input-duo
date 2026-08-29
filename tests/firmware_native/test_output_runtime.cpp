@@ -494,6 +494,47 @@ TEST_CASE(a_computer_set_aside_for_silence_is_not_waited_for_again) {
     CHECK(runtime.snapshot(Target::Pc1).keyboard.contains(kB));
 }
 
+TEST_CASE(the_pass_that_let_go_of_everything_does_not_leave_a_wait_running) {
+    OutputRuntime runtime;
+    runtime.submit(key(Route::Both, kA, true));
+    runtime.submit(key(Route::Both, kB, true));
+
+    // One state to a pass. The second command starts a wait at t=1000 that
+    // nobody answers.
+    CHECK_EQ(runtime.drain(1000), 1u);
+
+    // Core 1 floods the queue. The pass that notices lets go of everything and
+    // applies nothing - and the release it just made is a keyboard state that
+    // neither computer has been told about either.
+    for (std::size_t index = 0; index < kOutputQueueCapacity + 10; ++index) {
+        runtime.submit(key(Route::Pc1, kA, true));
+    }
+    CHECK_EQ(runtime.drain(1000), 0u);
+    CHECK_EQ(runtime.fault(), RuntimeFault::OutputQueueFull);
+
+    // The burst is over and the operator types again. The wait that was
+    // running before the fault belonged to a state that no longer exists, so
+    // this is a fresh one: nobody has acknowledged the release, and the grace
+    // has to be measured from here.
+    //
+    // Carried over, the old wait is already expired the moment it is looked
+    // at - so both computers are set aside as silent when neither has been
+    // silent for a millisecond, and everything queued applies in one unpaced
+    // drain. Presses collapse against their own releases and the keystrokes
+    // are never seen by either host.
+    runtime.submit(key(Route::Both, kA, true));
+    runtime.submit(key(Route::Both, kA, false));
+    CHECK_EQ(runtime.drain(1000 + duo_input::u1::kPublishGraceMs), 0u);
+
+    // And the pacing is intact rather than merely delayed: once both computers
+    // acknowledge, the press applies and the release that follows it waits its
+    // own turn. Under the carried-over wait both were already applied above,
+    // so the press and its release have cancelled and nothing is held.
+    both_computers_told(runtime);
+    CHECK_EQ(runtime.drain(1000 + duo_input::u1::kPublishGraceMs), 1u);
+    CHECK(runtime.snapshot(Target::Pc1).keyboard.contains(kA));
+}
+
 TEST_CASE(a_computer_that_answers_again_is_waited_for_again) {
     OutputRuntime runtime;
     runtime.submit(key(Route::Both, kA, true));

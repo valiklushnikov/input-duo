@@ -95,6 +95,15 @@ std::size_t OutputRuntime::drain(std::uint32_t now_ms, std::size_t budget) {
         fault_ = runtime::RuntimeFault::OutputQueueFull;
         queue_.clear();
         outputs_.release_all();
+        // The wait that was running belonged to a state this pass has just
+        // thrown away, and its clock started before the release. Left standing
+        // it is already expired when the next keyboard command looks at it, so
+        // both computers are set aside as silent without either having been
+        // silent, and the whole budget applies in one unpaced drain - presses
+        // collapsing against their own releases. The release just made is
+        // itself a state nobody has been told about, and waiting for it starts
+        // here.
+        waiting_ = false;
         return 0;
     }
 
