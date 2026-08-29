@@ -423,10 +423,31 @@ bool Ch375Device::bring_chip_up(std::uint32_t now_us) {
             // last run left it in - including ones it does not leave by itself
             // - is gone after this, and the wait is the price.
             transport_.reset_all();
-            transport_.drain_pending_status();
-            bring_up_ = ChipBringUp::Resetting;
             chip_reset_at_us_ = now_us;
+            // A status the chip is already holding is asked for now and
+            // thrown away when it arrives. Left standing it would be
+            // delivered as the answer to the next question, which is how a
+            // device that has already gone gets configured.
+            //
+            // The wait for it runs inside the chip's own restart, which is
+            // 60 ms this has to sit out anyway, so nothing is lost by
+            // collecting it on a later tick - and a chip holding its line
+            // down and answering nothing no longer costs the other channel
+            // 20 ms of it.
+            bring_up_ = transport_.begin_status_drain() ? ChipBringUp::Draining
+                                                        : ChipBringUp::Resetting;
             return false;
+
+        case ChipBringUp::Draining: {
+            InterruptStatus discarded = InterruptStatus::Success;
+            if (transport_.poll_status_read(discarded) == ReplyProgress::Waiting) {
+                return false;
+            }
+            // Whatever it was, it belonged to whatever the chip was doing
+            // before the reset. Answered or timed out, the port is free again.
+            bring_up_ = ChipBringUp::Resetting;
+            return false;
+        }
 
         case ChipBringUp::Resetting:
             if (now_us - chip_reset_at_us_ < kChipResetUs) {

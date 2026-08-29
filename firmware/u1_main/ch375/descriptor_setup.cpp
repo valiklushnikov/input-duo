@@ -30,11 +30,15 @@ constexpr std::size_t kDescriptorBuffer = kMaxBlockSize;
 }  // namespace
 
 void DescriptorSetup::begin(std::uint32_t now_us) {
-    // Anything the chip is still holding belongs to the device that was here
-    // before. Read as this one's answer it would configure a device that has
-    // already gone.
-    transport_.drain_pending_status();
-
+    // Nothing is read here, and in particular no status.
+    //
+    // A status the chip is holding belongs to whatever happened before this
+    // device was reset, and reading it as this one's answer would configure a
+    // device that has already gone - but the reader is the caller above, not
+    // this. There is exactly one, which is why poll() is handed a status
+    // rather than fetching one. This used to read it too, which made two
+    // readers of the same byte and cost a whole reply timeout on a chip that
+    // held its line down and answered nothing.
     capabilities_ = HidCapabilities{};
     last_parse_error_ = ParseError::None;
     boot_protocol_selected_ = false;

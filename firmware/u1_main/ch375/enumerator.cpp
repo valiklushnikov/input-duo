@@ -9,10 +9,12 @@ constexpr std::uint8_t kAssumedInterruptEndpoint = 1;
 }  // namespace
 
 void AutoSetupEnumerator::begin(std::uint32_t now_us) {
-    // Anything still queued belongs to the device that was here before. Read
-    // as this one's answer it would configure a device that is already gone.
-    transport_.drain_pending_status();
-
+    // Nothing is read here, and in particular no status.
+    //
+    // A status still queued belongs to the device that was here before, and
+    // reading it as this one's answer would configure a device that is already
+    // gone - but the reader is the caller above, not this. There is exactly
+    // one, which is why poll() is handed a status rather than fetching one.
     transport_.auto_setup();
     started_us_ = now_us;
     running_ = true;

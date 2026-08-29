@@ -768,6 +768,24 @@ struct LiveRig {
 /// this transport still allowed to wait - see the link hardening report.
 constexpr int kStallPoints = 6;
 
+TEST_CASE(a_status_the_chip_is_holding_at_bring_up_does_not_hold_the_loop) {
+    // Chip setup throws away a status the chip is already holding, because a
+    // status left standing is delivered as the answer to the next question -
+    // which is how a device that has already gone gets configured. Reading it
+    // used to block, once per bring-up, and a chip that holds its interrupt
+    // line down and answers nothing is exactly the chip a bring-up is being
+    // run for.
+    //
+    // A sick channel brings up once a second, so this was paid that often.
+    Rig rig;
+    rig.chip.hold_interrupt_unanswered(true);
+
+    const std::uint32_t worst = rig.worst_tick(3000, 1000);
+
+    // Measured with this test before the change: 20 000 us.
+    CHECK(worst < 500u);
+}
+
 TEST_CASE(the_rate_a_device_answered_with_is_a_fact_the_channel_holds) {
     // DS2 1.2 can only be asked in mode 5, so it is asked once, on the attach,
     // and everything after it runs on the answer.

@@ -83,13 +83,11 @@ public:
 /// which is what ReplyProgress below is for. As the bound on read_reply it is
 /// a spin, and the whole of it is taken out of the other channel.
 ///
-/// Read as a spin by, at the time of writing: set_usb_mode (five call sites),
-/// get_device_rate on every attach, drain_pending_status at every bring-up,
-/// check_exist and port_answers inside try_speed, the check_exist in the
-/// mode-refused branch, and read_block with the drain_port behind it - which
-/// on a rate that cannot carry a block costs two of these in one tick. Those
-/// are the ticks that can still blow the budget; the list is kept in the link
-/// hardening report and is not empty.
+/// Read as a spin by, at the time of writing: check_exist and port_answers
+/// inside try_speed, the check_exist in the mode-refused branch, and read_block
+/// with the drain_port behind it - which on a rate that cannot carry a block
+/// costs two of these in one tick. Those are the ticks that can still blow the
+/// budget; the list is kept in the link hardening report.
 inline constexpr std::uint32_t kDefaultReplyTimeoutUs = 20000;
 
 /// What has become of a reply that is being waited for across ticks.
@@ -1017,16 +1015,27 @@ public:
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::AutoSetup));
     }
 
-    /// Read and discard a status the chip is already holding.
+    /// Ask for a status the chip is already holding, so it can be thrown away.
     ///
     /// Left standing it would be delivered as the answer to the next question
     /// asked, which is how a device that has already gone gets configured.
-    void drain_pending_status() {
+    ///
+    /// Asked and left, like the rest. The blocking form ran once per bring-up
+    /// and spent a whole reply timeout whenever the chip was holding its
+    /// interrupt line down and not answering - which is the state a chip is in
+    /// when a bring-up is what the channel is doing, and a sick channel brings
+    /// up once a second.
+    ///
+    /// False when the line is not asserted and nothing was asked: reading a
+    /// status the chip is not offering consumes one that belongs to nothing.
+    /// True means a question is on the wire and its answer - which the caller
+    /// throws away - has to be collected with poll_status_read.
+    bool begin_status_drain() {
         if (!io_.int_asserted()) {
-            return;
+            return false;
         }
-        InterruptStatus discarded = InterruptStatus::Success;
-        (void)get_status(discarded);
+        begin_status_read();
+        return true;
     }
 
     /// Is the chip asking for attention right now?

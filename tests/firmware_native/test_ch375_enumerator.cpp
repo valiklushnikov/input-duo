@@ -17,6 +17,8 @@
 
 using duo_input::u1::ch375::AutoSetupEnumerator;
 using duo_input::u1::ch375::Ch375Transport;
+using duo_input::u1::ch375::InterruptStatus;
+using duo_input::u1::ch375::ReplyProgress;
 using duo_input::u1::ch375::kSetupTimeoutUs;
 using duo_input::u1::ch375::SetupProgress;
 using duo_input::u1::ch375::testing::FakeCh375Chip;
@@ -27,6 +29,22 @@ struct Rig {
     FakeCh375Chip chip;
     Ch375Transport transport{chip};
     AutoSetupEnumerator enumerator{transport};
+
+    /// Start setup the way the device machine does.
+    ///
+    /// With any status the chip is already holding read first: there is
+    /// exactly one reader of the interrupt status and it is the caller above
+    /// this, not the setup itself. Two readers means each takes the byte the
+    /// other was waiting for.
+    void begin(std::uint32_t now_us) {
+        if (transport.interrupt_pending()) {
+            transport.begin_status_read();
+            InterruptStatus held = InterruptStatus::Success;
+            while (transport.poll_status_read(held) == ReplyProgress::Waiting) {
+            }
+        }
+        enumerator.begin(now_us);
+    }
 
     /// Poll until it stops saying Busy, or until far past any real deadline.
     SetupProgress settle() {
@@ -55,7 +73,7 @@ TEST_CASE(a_device_that_configures_is_reported_done) {
     Rig rig;
     rig.chip.attach_device();
 
-    rig.enumerator.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
 
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
 }
@@ -64,7 +82,7 @@ TEST_CASE(the_chip_is_asked_to_configure_the_device) {
     Rig rig;
     rig.chip.attach_device();
 
-    rig.enumerator.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     rig.settle();
 
     CHECK(rig.chip.saw_auto_setup());
@@ -73,7 +91,7 @@ TEST_CASE(the_chip_is_asked_to_configure_the_device) {
 TEST_CASE(configuring_takes_more_than_one_pass) {
     Rig rig;
     rig.chip.attach_device();
-    rig.enumerator.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
 
     // Several control transfers happen inside that one command. A caller that
     // only worked when it finished instantly would not survive meeting a real
@@ -88,7 +106,7 @@ TEST_CASE(a_chip_that_refuses_is_a_failure_not_a_wait) {
     rig.chip.attach_device();
     rig.chip.fail_auto_setup(true);
 
-    rig.enumerator.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
 
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Failed));
 }
@@ -98,7 +116,7 @@ TEST_CASE(a_chip_that_never_answers_gives_up) {
     rig.chip.attach_device();
     rig.chip.go_silent(true);
 
-    rig.enumerator.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
 
     // The assertion is as much that this test finishes as that it fails.
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Failed));
@@ -110,7 +128,7 @@ TEST_CASE(giving_up_takes_the_time_it_says_it_does) {
     rig.chip.go_silent(true);
     const std::uint32_t started = rig.chip.now_us();
 
-    rig.enumerator.begin(started);
+    rig.begin(started);
     rig.settle();
 
     CHECK(rig.chip.now_us() - started >= kSetupTimeoutUs);
@@ -138,11 +156,11 @@ TEST_CASE(a_second_attempt_starts_over) {
     Rig rig;
     rig.chip.attach_device();
     rig.chip.fail_auto_setup(true);
-    rig.enumerator.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     rig.settle();
 
     rig.chip.fail_auto_setup(false);
-    rig.enumerator.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
 
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
 }
@@ -150,7 +168,7 @@ TEST_CASE(a_second_attempt_starts_over) {
 TEST_CASE(the_endpoint_is_the_one_ordinary_devices_use) {
     Rig rig;
     rig.chip.attach_device();
-    rig.enumerator.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     rig.settle();
 
     // Assumed, not discovered - AUTO_SETUP does not report it. Nearly every

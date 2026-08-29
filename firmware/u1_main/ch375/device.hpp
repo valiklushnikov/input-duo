@@ -51,6 +51,9 @@ enum class Ch375State : std::uint8_t {
 enum class ChipBringUp : std::uint8_t {
     /// Nothing started. The next tick sends RESET_ALL.
     Idle,
+    /// RESET_ALL has gone, and a status the chip was holding has been asked
+    /// for so that it can be thrown away rather than answer a later question.
+    Draining,
     /// RESET_ALL has gone; the chip needs about 40 ms before it hears anything.
     Resetting,
     /// CHECK_EXIST has been asked at the home rate and not yet answered.

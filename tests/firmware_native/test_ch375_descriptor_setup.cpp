@@ -24,6 +24,7 @@
 #include <vector>
 
 using duo_input::u1::ch375::Ch375Transport;
+using duo_input::u1::ch375::ReplyProgress;
 using duo_input::u1::ch375::DescriptorSetup;
 using duo_input::u1::ch375::DeviceKind;
 using duo_input::u1::ch375::InterruptStatus;
@@ -37,6 +38,22 @@ struct Rig {
     FakeCh375Chip chip;
     Ch375Transport transport{chip};
     DescriptorSetup setup{transport};
+
+    /// Start setup the way the device machine does.
+    ///
+    /// With any status the chip is already holding read first: there is
+    /// exactly one reader of the interrupt status and it is the caller above
+    /// this, not the setup itself. Two readers means each takes the byte the
+    /// other was waiting for.
+    void begin(std::uint32_t now_us) {
+        if (transport.interrupt_pending()) {
+            transport.begin_status_read();
+            InterruptStatus held = InterruptStatus::Success;
+            while (transport.poll_status_read(held) == ReplyProgress::Waiting) {
+            }
+        }
+        setup.begin(now_us);
+    }
 
     /// Drive it the way the device machine does: read the status once, above,
     /// and hand it down.
@@ -66,7 +83,7 @@ TEST_CASE(a_mouse_is_brought_up) {
     rig.chip.attach_device();
     rig.chip.serve_boot_mouse();
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
 
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
 }
@@ -76,7 +93,7 @@ TEST_CASE(the_endpoint_comes_from_the_descriptor_not_from_a_guess) {
     rig.chip.attach_device();
     rig.chip.serve_boot_mouse();  // declares endpoint 2
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     rig.settle();
 
     CHECK_EQ(rig.setup.interrupt_endpoint(), 2u);
@@ -88,7 +105,7 @@ TEST_CASE(a_keyboard_on_a_composite_device_is_found) {
     rig.chip.attach_device();
     rig.chip.serve_composite_keyboard();  // consumer interface first, keyboard second
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     rig.settle();
 
     CHECK_EQ(static_cast<int>(rig.setup.kind()), static_cast<int>(DeviceKind::Keyboard));
@@ -102,7 +119,7 @@ TEST_CASE(the_device_is_given_an_address_that_is_not_zero) {
     rig.chip.attach_device();
     rig.chip.serve_boot_mouse();
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     rig.settle();
 
     // Everything talks on address zero until told otherwise, and only one
@@ -115,7 +132,7 @@ TEST_CASE(the_controller_is_told_the_same_address_as_the_device) {
     rig.chip.attach_device();
     rig.chip.serve_boot_mouse();
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     rig.settle();
 
     // DS2 1.5. Miss this and the device has moved while the host goes on
@@ -129,7 +146,7 @@ TEST_CASE(the_configuration_is_selected) {
     rig.chip.attach_device();
     rig.chip.serve_boot_mouse();
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     rig.settle();
 
     // A device that is addressed but unconfigured has no working endpoints.
@@ -141,7 +158,7 @@ TEST_CASE(the_steps_happen_in_the_order_they_have_to) {
     rig.chip.attach_device();
     rig.chip.serve_boot_mouse();
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     rig.settle();
 
     // The device descriptor has to be read before the address is changed, the
@@ -157,7 +174,7 @@ TEST_CASE(a_device_this_firmware_cannot_route_is_refused) {
     rig.chip.attach_device();
     rig.chip.serve_hub();
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
 
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Failed));
 }
@@ -168,7 +185,7 @@ TEST_CASE(a_device_that_stops_answering_ends_the_attempt) {
     rig.chip.serve_boot_mouse();
     rig.chip.go_silent(true);
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
 
     // That this test finishes is as much the assertion as what it returns.
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Failed));
@@ -180,7 +197,7 @@ TEST_CASE(a_step_the_device_refuses_ends_the_attempt) {
     rig.chip.serve_boot_mouse();
     rig.chip.stall_after(2);  // answers the first two transfers, then refuses
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
 
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Failed));
 }
@@ -196,11 +213,11 @@ TEST_CASE(a_second_attempt_starts_from_the_beginning) {
     Rig rig;
     rig.chip.attach_device();
     rig.chip.serve_hub();
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     rig.settle();
 
     rig.chip.serve_boot_mouse();
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
 
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
     CHECK_EQ(rig.setup.interrupt_endpoint(), 2u);
@@ -210,11 +227,11 @@ TEST_CASE(each_attempt_gives_the_device_a_fresh_address) {
     Rig rig;
     rig.chip.attach_device();
     rig.chip.serve_boot_mouse();
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     rig.settle();
     const std::uint8_t first = rig.chip.device_address();
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     rig.settle();
 
     // A device that was reset kept nothing, so reusing the address is fine -
@@ -276,7 +293,7 @@ TEST_CASE(a_device_that_advertises_boot_support_is_asked_to_use_it) {
     rig.chip.attach_device();
     rig.chip.serve_boot_mouse();
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
 
     // One request, and it has to be the right one: SET_PROTOCOL, host to
@@ -296,7 +313,7 @@ TEST_CASE(the_protocol_request_names_the_interface_that_was_chosen) {
     // The keyboard is the second interface; the first is consumer controls.
     rig.chip.serve_composite_keyboard();
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     rig.settle();
 
     // wIndex is an interface number, and a composite device has several. Sent
@@ -312,7 +329,7 @@ TEST_CASE(the_device_is_actually_left_in_boot_protocol) {
     rig.chip.attach_device();
     rig.chip.serve_boot_mouse();
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     rig.settle();
 
     // A control transfer that stops after its setup packet changes nothing on
@@ -327,7 +344,7 @@ TEST_CASE(an_interface_that_does_not_advertise_boot_is_not_asked_to_switch) {
     rig.chip.attach_device();
     rig.chip.serve_mouse_without_boot();
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
 
     // There is no boot report behind an interface that does not declare the
     // subclass, so asking for one is asking for something that does not exist.
@@ -342,7 +359,7 @@ TEST_CASE(a_device_that_refuses_the_protocol_request_is_still_brought_up) {
     rig.chip.serve_boot_mouse();
     rig.chip.refuse_setup_requests(true);
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
 
     // It refused one request, not the whole enumeration. A mouse that will not
     // switch protocol is worse than one that will and better than none at all.
@@ -357,7 +374,7 @@ TEST_CASE(a_device_that_never_answers_the_protocol_request_is_still_brought_up) 
     rig.chip.serve_boot_mouse();
     rig.chip.ignore_setup_requests(true);
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
 
     // That this test finishes is as much the assertion as what it returns: a
     // request nobody answers must end on a deadline, not hold the channel.
@@ -397,7 +414,7 @@ TEST_CASE(the_report_a_mouse_sends_after_setup_is_movement_and_not_a_click) {
     rig.chip.attach_device();
     rig.chip.serve_boot_mouse();
 
-    rig.setup.begin(rig.chip.now_us());
+    rig.begin(rig.chip.now_us());
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
 
     // The movement from the bench: 0xF6 is -10 across, 0x4F is +79 down. The
