@@ -162,6 +162,24 @@ endif()
 
 add_test(NAME config_service COMMAND duo_config_service_test)
 
+add_executable(duo_capture_test
+    test_main.cpp
+    test_capture.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/capture.cpp
+)
+
+target_link_libraries(duo_capture_test PRIVATE duo_common)
+target_include_directories(duo_capture_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+if(MSVC)
+    target_compile_options(duo_capture_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME capture COMMAND duo_capture_test)
+
 add_executable(duo_core_bridge_test
     test_main.cpp
     test_core_bridge.cpp
