@@ -307,6 +307,16 @@ TEST_CASE(nothing_at_all_is_refused_rather_than_read) {
     CHECK_EQ(static_cast<int>(
                  parse_mouse_report_descriptor(duo_input::protocol::ByteView{nullptr, 0}, layout)),
              static_cast<int>(ReportDescriptorError::Truncated));
+
+    // A pointer that is not null and no bytes behind it. The two arrive by
+    // different routes - a fetch nobody started, and a fetch that completed
+    // with nothing in it - and both are a descriptor that was never read.
+    // Only the first of them used to be checked here, so the length half of
+    // the guard was never exercised at all.
+    const std::uint8_t nothing = 0;
+    CHECK_EQ(static_cast<int>(
+                 parse_mouse_report_descriptor(duo_input::protocol::ByteView{&nothing, 0}, layout)),
+             static_cast<int>(ReportDescriptorError::Truncated));
 }
 
 TEST_CASE(a_field_that_does_not_start_on_a_byte_is_refused) {
@@ -394,4 +404,108 @@ TEST_CASE(a_descriptor_of_nothing_but_collection_openers_still_terminates) {
 
     CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(bytes), layout)),
              static_cast<int>(ReportDescriptorError::NoMouseReport));
+}
+
+// ------------------------------------------------- what the item sizes mean
+
+TEST_CASE(a_four_byte_usage_item_carries_its_own_page) {
+    // HID 1.11 6.2.2.2: a stored size of three means *four* data bytes. A walk
+    // that takes it for three loses step at the first one and reads the rest
+    // of the descriptor as garbage - and the four-byte Usage item is not an
+    // exotic case, it is how a device names a usage on a page other than the
+    // global one. Here AC Pan (Consumer page 0x0C, usage 0x0238) is declared
+    // that way instead of by switching the global page.
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x01,                    // Usage Page (Generic Desktop)
+        0x09, 0x02,                    // Usage (Mouse)
+        0xA1, 0x01,                    // Collection (Application)
+        0x05, 0x09,                    //   Usage Page (Button)
+        0x19, 0x01,                    //   Usage Minimum (Button 1)
+        0x29, 0x08,                    //   Usage Maximum (Button 8)
+        0x95, 0x08,                    //   Report Count (8)
+        0x75, 0x01,                    //   Report Size (1)
+        0x81, 0x02,                    //   Input (Data,Var,Abs)
+        0x05, 0x01,                    //   Usage Page (Generic Desktop)
+        0x09, 0x30,                    //   Usage (X)
+        0x09, 0x31,                    //   Usage (Y)
+        0x09, 0x38,                    //   Usage (Wheel)
+        0x0B, 0x38, 0x02, 0x0C, 0x00,  //   Usage (Consumer page, AC Pan) - four bytes
+        0x75, 0x08,                    //   Report Size (8)
+        0x95, 0x04,                    //   Report Count (4)
+        0x81, 0x06,                    //   Input (Data,Var,Rel)
+        0xC0,                          // End Collection
+    };
+    MouseReportLayout layout;
+
+    CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::None));
+    CHECK_EQ(layout.x.offset, std::uint8_t{1});
+    CHECK_EQ(layout.wheel.offset, std::uint8_t{3});
+    CHECK(layout.pan.present);
+    CHECK_EQ(layout.pan.offset, std::uint8_t{4});
+}
+
+namespace {
+
+/// Axes twelve bits wide, both of them starting on a byte.
+///
+/// The existing twelve-bit test packs them back to back, which puts Y at bit
+/// twenty - so it is refused for not starting on a byte, and the width check
+/// behind it is never reached. Four bits of padding between them moves Y to
+/// bit twenty-four, and then only the width can refuse this.
+std::vector<std::uint8_t> byte_aligned_twelve_bit_axes() {
+    return {
+        0x05, 0x01,        // Usage Page (Generic Desktop)
+        0x09, 0x02,        // Usage (Mouse)
+        0xA1, 0x01,        // Collection (Application)
+        0x05, 0x09,        //   Usage Page (Button)
+        0x19, 0x01,        //   Usage Minimum (Button 1)
+        0x29, 0x08,        //   Usage Maximum (Button 8)
+        0x95, 0x08,        //   Report Count (8)
+        0x75, 0x01,        //   Report Size (1)
+        0x81, 0x02,        //   Input (Data,Var,Abs)   buttons, bits 0-7
+        0x05, 0x01,        //   Usage Page (Generic Desktop)
+        0x09, 0x30,        //   Usage (X)
+        0x75, 0x0C,        //   Report Size (12)
+        0x95, 0x01,        //   Report Count (1)
+        0x81, 0x06,        //   Input (Data,Var,Rel)   X at bit 8
+        0x75, 0x04,        //   Report Size (4)
+        0x95, 0x01,        //   Report Count (1)
+        0x81, 0x03,        //   Input (Cnst,Var,Abs)   padding, bits 20-23
+        0x09, 0x31,        //   Usage (Y)
+        0x75, 0x0C,        //   Report Size (12)
+        0x95, 0x01,        //   Report Count (1)
+        0x81, 0x06,        //   Input (Data,Var,Rel)   Y at bit 24
+        0xC0,              // End Collection
+    };
+}
+
+}  // namespace
+
+TEST_CASE(a_twelve_bit_axis_on_a_byte_boundary_is_still_refused) {
+    const std::vector<std::uint8_t> bytes = byte_aligned_twelve_bit_axes();
+    MouseReportLayout layout;
+
+    // Nothing here can read a twelve-bit field, and rounding it down to one
+    // byte throws away the top four bits of every movement.
+    CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+}
+
+TEST_CASE(a_layout_refused_at_the_last_step_still_leaves_the_caller_its_own) {
+    // The other test of this refuses at the first step, where nothing has been
+    // built yet. This one gets all the way to the end - a real pointer, with
+    // fields that cannot be named in bytes - which is the only path where a
+    // finished layout exists and could be written out by mistake.
+    MouseReportLayout layout = boot_mouse_layout();
+    const std::vector<std::uint8_t> bytes = byte_aligned_twelve_bit_axes();
+
+    CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+
+    CHECK_FALSE(layout.report_id);
+    CHECK_EQ(layout.buttons.offset, std::uint8_t{0});
+    CHECK_EQ(layout.x.offset, std::uint8_t{1});
+    CHECK_EQ(layout.y.offset, std::uint8_t{2});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{3});
 }
