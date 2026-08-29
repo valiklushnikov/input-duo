@@ -83,11 +83,13 @@ public:
 /// which is what ReplyProgress below is for. As the bound on read_reply it is
 /// a spin, and the whole of it is taken out of the other channel.
 ///
-/// Read as a spin by, at the time of writing: check_exist and port_answers
-/// inside try_speed, the check_exist in the mode-refused branch, and read_block
-/// with the drain_port behind it - which on a rate that cannot carry a block
-/// costs two of these in one tick. Those are the ticks that can still blow the
-/// budget; the list is kept in the link hardening report.
+/// Read as a spin by, at the time of writing: check_exist; set_baud_rate's
+/// acknowledgement and both port_answers probes inside try_speed; the
+/// check_exist in the mode-refused branch; and read_block with the drain_port
+/// behind it. A successful try_speed therefore contains three such waits plus
+/// the physical port's rate-change sleeps: about 67 ms measured in one device
+/// tick, not less than the other channel's 8 ms poll period. These are bounded
+/// recovery/attach costs, not latency-safe steady-state operations.
 inline constexpr std::uint32_t kDefaultReplyTimeoutUs = 20000;
 
 /// What has become of a reply that is being waited for across ticks.
@@ -159,9 +161,6 @@ struct ControlRequest {
 class Ch375Transport {
 public:
     explicit Ch375Transport(ICh375Transport& io) : io_(io) {}
-
-    std::uint32_t reply_timeout_us() const { return reply_timeout_us_; }
-    void set_reply_timeout_us(std::uint32_t micros) { reply_timeout_us_ = micros; }
 
     /// Start CHECK_EXIST without supplying its data byte.
     ///
@@ -396,29 +395,20 @@ public:
         return true;  // DS2 1.3 documents no reply.
     }
 
+    /// DS1 5.11. Stop a USB transaction the chip is still retrying.
+    ///
+    /// The bounded NAK policy can outlive the firmware's setup deadline. A
+    /// recovery command sent into that interval is not a replacement for the
+    /// token still on the bus; ABORT_NAK is the command that makes it one.
+    void abort_nak() {
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::AbortNak));
+    }
+
     /// DS2 1.5. Tell the chip which device address it is talking to.
     bool set_usb_address(std::uint8_t address) {
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::SetUsbAddress));
         io_.write_data(address);
         return true;  // DS2 1.5 documents no reply.
-    }
-
-    /// DS1 5.12. Read the interrupt status and clear the request.
-    ///
-    /// Any byte is carried through, including ones this code does not
-    /// recognise: the failure statuses are a 32-value range that encodes which
-    /// PID the device answered with, and that byte is the only evidence of why
-    /// a transaction failed.
-    bool get_status(InterruptStatus& status) {
-        abandon_reply();
-        io_.write_command(static_cast<std::uint8_t>(Ch375Command::GetStatus));
-
-        std::uint8_t answer = 0;
-        if (!read_reply(answer)) {
-            return false;
-        }
-        status = static_cast<InterruptStatus>(answer);
-        return true;
     }
 
     /// How many length-prefixed block reads have completed, and how many have
@@ -671,43 +661,6 @@ public:
         return slow;
     }
 
-    /// Ask the same question at the usual rate and listen at several others.
-    ///
-    /// A silent chip and a receiver sampling in the wrong place are the same
-    /// thing from outside: a channel that answers nothing. One is a wire or a
-    /// module and the other is this side's own timing, and telling them apart
-    /// is the difference between somebody rewiring a board that is fine and
-    /// somebody fixing the code.
-    ///
-    /// CHECK_EXIST is what is asked, because its answer is the bitwise inverse
-    /// of the byte it was given (DS1 5.5) - so a reply that arrives is either
-    /// right or obviously not, with nothing in between to be hopeful about.
-    ///
-    /// Returns the rate the answer read correctly at, or zero.
-    unsigned sweep_rx(const unsigned* rates, std::size_t count, unsigned tx_baud) {
-        for (std::size_t index = 0; index < count; ++index) {
-            set_port_baud(tx_baud);
-            drain_port();
-
-            io_.write_command(static_cast<std::uint8_t>(Ch375Command::CheckExist));
-            io_.write_data(kPortProbeByte);
-            // The two transmitted frames take longer than the chip needs to
-            // start answering, so the receiver is at the candidate rate before
-            // the first bit of the reply arrives.
-            io_.set_rx_baud(rates[index]);
-
-            std::uint8_t answer = 0;
-            if (read_reply(answer) &&
-                answer == static_cast<std::uint8_t>(~kPortProbeByte)) {
-                set_port_baud(tx_baud);
-                return rates[index];
-            }
-        }
-
-        set_port_baud(tx_baud);
-        return 0;
-    }
-
     /// Look for a chip that has stopped answering, one step per tick.
     ///
     /// A chip left at a rate this side abandoned answers nothing where it is
@@ -848,30 +801,6 @@ public:
     /// not mean the chip just powered on - a firmware update restarts the
     /// processor and leaves the controller exactly as the last run left it,
     /// including states it will not come out of by itself.
-    /// Feed the chip enough parameters to finish whatever it thinks it began.
-    ///
-    /// While U1 is reflashed or reset its pins go high impedance and the
-    /// chip's receive line floats. Noise on a floating line is start bits, and
-    /// the chip reads bytes out of it. It parses positionally - a command,
-    /// then that command's data bytes - so it ends up part way through
-    /// something, waiting for parameters that never come, and swallows every
-    /// command sent afterwards as one of them. Including the reset meant to
-    /// fix it, which is why only a power cycle has ever brought it back.
-    ///
-    /// Four bytes is enough for any command this firmware issues, and that is
-    /// what an ordinary reset sends. It is not enough for a chip that has read
-    /// noise, because nobody knows what it thinks it is waiting for. This is
-    /// generous instead: at the rate the chip comes up at it costs about
-    /// seventy milliseconds, paid once when a channel is already dead.
-    ///
-    /// Data bytes only. A command byte here would be read as one of the
-    /// parameters being waited for, which is the thing being cleared.
-    void flush_command_state() {
-        for (std::size_t index = 0; index < kWedgeFlushBytes; ++index) {
-            io_.write_data(0x00);
-        }
-    }
-
     void reset_all() {
         // Data bytes first, then the command.
         //
@@ -1046,23 +975,6 @@ public:
 
     std::uint32_t now_us() const { return io_.now_us(); }
 
-    /// Wait for the chip's interrupt line, but not past ``deadline_us``.
-    bool wait_for_interrupt(std::uint32_t deadline_us) {
-        while (true) {
-            if (io_.int_asserted()) {
-                return true;
-            }
-            if (expired(deadline_us)) {
-                return false;
-            }
-            // Reading drives the fake's clock and drains anything stale on
-            // real hardware. The value is deliberately discarded: an interrupt
-            // is what is being waited for, not a byte.
-            std::uint8_t discarded = 0;
-            (void)io_.read_data(discarded);
-        }
-    }
-
 private:
     /// Has ``deadline_us`` passed?
     ///
@@ -1114,32 +1026,6 @@ private:
                 return false;
             }
         }
-    }
-
-    bool command_with_status(Ch375Command command, std::uint8_t argument) {
-        // Whatever was outstanding is not this command's answer. Left there it
-        // would be read as one, and the chip's own reply would then be read as
-        // the answer to the command after that, and so on for ever.
-        abandon_reply();
-        io_.write_command(static_cast<std::uint8_t>(command));
-        io_.write_data(argument);
-
-        std::uint8_t answer = 0;
-        if (!read_reply(answer)) {
-            last_status_reply_ = 0;
-            last_status_answered_ = false;
-            return false;
-        }
-        // Kept, because "it refused" and "it said 5FH" are different facts and
-        // only one of them can be acted on. A boolean here threw away the only
-        // byte that says which refusal this is, and left the choice between
-        // three repairs to guesswork.
-        last_status_reply_ = answer;
-        last_status_answered_ = true;
-        // 51H and 5FH are the whole documented set. Anything else means the
-        // port has lost step, and calling that success would let a
-        // desynchronised chip pass for a working one.
-        return answer == static_cast<std::uint8_t>(CommandStatus::Success);
     }
 
     std::uint8_t last_status_reply_ = 0;

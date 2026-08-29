@@ -344,6 +344,11 @@ public:
         : transport_(transport), setup_(setup) {}
 
     /// Do a bounded piece of work.
+    ///
+    /// Bounded means finite, not guaranteed below the endpoint's 8 ms poll
+    /// period. The successful rate-negotiation step still spends about 67 ms
+    /// synchronously on hardware; it runs during attach/recovery rather than
+    /// in the established Ready polling path.
     void tick(std::uint32_t now_us);
 
     Ch375State state() const { return state_; }
@@ -485,15 +490,6 @@ public:
     /// Take the oldest event, if there is one.
     bool take_event(Ch375Event& event);
 
-    /// Bring-up only: skip the USB bus reset when bringing a device up.
-    ///
-    /// The datasheet's sequence is mode 7 then mode 6 (DS1 5.9), and that is
-    /// what this does by default. But on the bench a device is reported gone
-    /// exactly once per reset and never comes back, so being able to leave the
-    /// reset out is what separates "the reset is killing it" from "it was
-    /// leaving anyway".
-    void skip_bus_reset(bool skipping) { skip_bus_reset_ = skipping; }
-
     /// Configure the attached device again from scratch.
     ///
     /// Does nothing when there is no device: there would be nothing to
@@ -540,7 +536,6 @@ private:
     ChipBringUp bring_up_ = ChipBringUp::Idle;
     PendingCommand pending_command_ = PendingCommand::None;
     std::uint32_t chip_reset_at_us_ = 0;
-    bool skip_bus_reset_ = false;
     /// What the attached device turned out to be, asked while still in the
     /// mode where the question is valid.
     bool device_is_low_speed_ = false;

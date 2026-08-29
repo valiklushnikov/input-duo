@@ -62,7 +62,8 @@ struct Rig {
             bool interrupted = false;
             InterruptStatus status = InterruptStatus::Success;
             if (transport.interrupt_pending()) {
-                interrupted = transport.get_status(status);
+                transport.begin_status_read();
+                interrupted = transport.poll_status_read(status) == ReplyProgress::Answered;
             }
             const SetupProgress progress = setup.poll(chip.now_us(), interrupted, status);
             if (progress != SetupProgress::Busy) {

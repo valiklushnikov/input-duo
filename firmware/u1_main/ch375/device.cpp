@@ -250,6 +250,12 @@ void Ch375Device::tick(std::uint32_t now_us) {
             }
             if (progress == SetupProgress::Failed) {
                 ++enumerate_failures_;
+                // SET_RETRY may still have the chip repeating the failed
+                // control transfer after our setup deadline. End that exact
+                // transaction before recovery sends a mode command; do not do
+                // this from generic fail(), which is also reached when the
+                // serial rate has not been proved safe for any command.
+                transport_.abort_nak();
                 fail(now_us);
                 return;
             }
@@ -338,6 +344,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
                     ++quiet_rearms_;
                     expect_data1_ = false;
                     transport_.set_receive_toggle(kToggleData0);
+                    transport_.set_retry(kRetryReportNak);
                     token_outstanding_ = false;
                     last_answer_us_ = now_us;
                     failed_polls_ = 0;
@@ -636,6 +643,13 @@ bool Ch375Device::finish_chip_setup(std::uint32_t now_us) {
     // Only now is the rate raised - after the chip has proved it is alive by
     // taking a mode command.
     //
+    // This is still synchronous. On hardware a successful try_speed costs
+    // about 67 ms in this tick: one SET_BAUD_RATE answer, two CHECK_EXIST
+    // proofs and the port's mandated rate-change sleeps. The Resetting step
+    // also paid about 3.5 ms to return the local port to 9600. This is bounded
+    // attach/recovery work, but it does exceed the other channel's 8 ms poll
+    // period; do not describe this state machine as latency-safe per tick.
+    //
     // At 9600 one mouse report costs fifteen bytes of eleven bits each:
     // seventeen milliseconds for something a moving hand produces every eight.
     // The deficit never closes while the hand keeps moving, and the peripheral
@@ -750,8 +764,7 @@ void Ch375Device::finish_pending_command(std::uint32_t now_us) {
         device_rate_known_ = true;
         // DS1 5.9: mode 7 first, then mode 6. Mode 7 holds the bus in reset
         // and keeps holding it, so it is a step, not a state to rest in.
-        const UsbMode next = skip_bus_reset_ ? UsbMode::HostWithSof : UsbMode::HostReset;
-        transport_.begin_set_usb_mode(next);
+        transport_.begin_set_usb_mode(UsbMode::HostReset);
         pending_command_ = PendingCommand::AttachMode;
         return;
     }
@@ -776,15 +789,7 @@ void Ch375Device::finish_pending_command(std::uint32_t now_us) {
                 fail(now_us);
                 return;
             }
-            if (skip_bus_reset_) {
-                // No reset to come, so the speed is set here. After the mode
-                // and never before: a working mode puts the bus back to
-                // 12 Mbps (DS2 1.1).
-                transport_.set_usb_speed(device_is_low_speed_ ? UsbSpeed::Low1_5Mbps
-                                                              : UsbSpeed::Full12Mbps);
-                transport_.set_retry(kRetryWaitOutNak);
-            }
-            enter(skip_bus_reset_ ? Ch375State::HostMode : Ch375State::Resetting, now_us);
+            enter(Ch375State::Resetting, now_us);
             return;
 
         case PendingCommand::ResetDone:

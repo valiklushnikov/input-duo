@@ -21,6 +21,7 @@ using duo_input::u1::ch375::BaudOption;
 using duo_input::u1::ch375::Ch375Transport;
 using duo_input::u1::ch375::CommandStatus;
 using duo_input::u1::ch375::InterruptStatus;
+using duo_input::u1::ch375::kDefaultReplyTimeoutUs;
 using duo_input::u1::ch375::ReplyProgress;
 using duo_input::u1::ch375::SearchProgress;
 using duo_input::u1::ch375::UsbMode;
@@ -68,7 +69,7 @@ TEST_CASE(check_exist_gives_up_when_nothing_answers) {
 
     // No reply is scripted. This must return, not spin.
     CHECK(!transport.check_exist(0xA5));
-    CHECK(io.elapsed_us() >= transport.reply_timeout_us());
+    CHECK(io.elapsed_us() >= kDefaultReplyTimeoutUs);
 }
 
 TEST_CASE(check_exist_probes_with_the_byte_it_was_given) {
@@ -144,7 +145,7 @@ TEST_CASE(a_mode_command_that_is_not_answered_is_never_read_as_taken) {
     // told to come back - it is not kept here.
     CHECK_EQ(static_cast<int>(transport.poll_command_status()),
              static_cast<int>(ReplyProgress::Waiting));
-    CHECK(io.elapsed_us() < transport.reply_timeout_us());
+    CHECK(io.elapsed_us() < kDefaultReplyTimeoutUs);
 
     ReplyProgress progress = ReplyProgress::Waiting;
     for (int pass = 0; pass < 100000 && progress == ReplyProgress::Waiting; ++pass) {
@@ -153,40 +154,6 @@ TEST_CASE(a_mode_command_that_is_not_answered_is_never_read_as_taken) {
     CHECK_EQ(static_cast<int>(progress), static_cast<int>(ReplyProgress::TimedOut));
     CHECK(!transport.command_status_succeeded());
     CHECK(!transport.last_status_answered());
-}
-
-// --------------------------------------------------------------- get_status
-
-TEST_CASE(the_interrupt_status_is_read_back_verbatim) {
-    ScriptedCh375 io({expect_command(Ch375Command::GetStatus),
-                      reply(static_cast<std::uint8_t>(InterruptStatus::Connect))});
-    Ch375Transport transport(io);
-
-    InterruptStatus status = InterruptStatus::Success;
-    CHECK(transport.get_status(status));
-    CHECK_EQ(static_cast<std::uint8_t>(status),
-             static_cast<std::uint8_t>(InterruptStatus::Connect));
-    CHECK(io.complete());
-}
-
-TEST_CASE(an_unrecognised_interrupt_status_is_still_returned) {
-    // The failure statuses are a range, not a list - 20H to 3FH encode which
-    // PID the device answered with. Refusing to carry an unknown byte would
-    // throw away the only evidence of why a transaction failed.
-    ScriptedCh375 io({expect_command(Ch375Command::GetStatus), reply(0x2A)});
-    Ch375Transport transport(io);
-
-    InterruptStatus status = InterruptStatus::Success;
-    CHECK(transport.get_status(status));
-    CHECK_EQ(static_cast<std::uint8_t>(status), 0x2Au);
-}
-
-TEST_CASE(get_status_gives_up_when_nothing_answers) {
-    ScriptedCh375 io({expect_command(Ch375Command::GetStatus)});
-    Ch375Transport transport(io);
-
-    InterruptStatus status = InterruptStatus::Success;
-    CHECK(!transport.get_status(status));
 }
 
 // ------------------------------------------------------------------ reading
@@ -313,34 +280,6 @@ TEST_CASE(the_interrupt_line_is_readable_and_starts_idle) {
     CHECK(!io.int_asserted());
     io.assert_int(true);
     CHECK(io.int_asserted());
-}
-
-TEST_CASE(waiting_for_an_interrupt_gives_up_at_the_deadline) {
-    ScriptedCh375 io({});
-    Ch375Transport transport(io);
-
-    CHECK(!transport.wait_for_interrupt(io.now_us() + 1000));
-    CHECK(io.elapsed_us() >= 1000u);
-}
-
-TEST_CASE(waiting_for_an_interrupt_already_asserted_returns_at_once) {
-    ScriptedCh375 io({});
-    io.assert_int(true);
-    Ch375Transport transport(io);
-
-    CHECK(transport.wait_for_interrupt(io.now_us() + 1000));
-    CHECK_EQ(io.elapsed_us(), 0u);
-}
-
-TEST_CASE(a_deadline_that_has_already_passed_does_not_wait_at_all) {
-    // The caller computes deadlines from a clock that keeps running. One that
-    // is already behind must not be read as an enormous wait, which is what
-    // unsigned arithmetic does to a naive comparison.
-    ScriptedCh375 io({});
-    io.advance(5000);
-    Ch375Transport transport(io);
-
-    CHECK(!transport.wait_for_interrupt(io.now_us() - 1000));
 }
 
 // ------------------------------------------------------------- port speed
@@ -537,40 +476,6 @@ TEST_CASE(a_chip_that_answers_nowhere_leaves_the_port_where_it_belongs) {
     CHECK_EQ(port.baud(), 9600u);
 }
 
-// ------------------------------------------------ waking a wedged chip
-
-TEST_CASE(a_wedged_chip_is_flushed_with_more_than_any_command_can_want) {
-    ScriptedCh375 port({});
-    port.allow_unscripted();
-    Ch375Transport transport(port);
-
-    transport.flush_command_state();
-
-    // While U1 is being reflashed its pins go high impedance and the chip's
-    // receive line floats. Noise on a floating line is start bits, and the
-    // chip reads bytes out of it - positionally, so it ends up part way
-    // through a command, waiting for parameters that never come. Every
-    // command sent afterwards is swallowed as one of them, including the
-    // reset meant to fix it.
-    //
-    // Four filler bytes is what an ordinary reset sends, and it is enough for
-    // any command this firmware issues. It is not enough for a chip that has
-    // read noise: nobody knows what it thinks it is waiting for.
-    CHECK(port.data_bytes_written() >= 64);
-}
-
-TEST_CASE(flushing_writes_only_data_and_never_a_command) {
-    ScriptedCh375 port({});
-    port.allow_unscripted();
-    Ch375Transport transport(port);
-
-    transport.flush_command_state();
-
-    // A command byte here would be read as one of the parameters being waited
-    // for, which is the very thing being cleared.
-    CHECK_EQ(port.commands_written(), 0);
-}
-
 // ------------------------------------- abandoning a read part way through
 
 TEST_CASE(a_block_with_an_impossible_length_leaves_the_port_in_step) {
@@ -625,44 +530,6 @@ TEST_CASE(a_good_block_is_not_drained_of_anything) {
     CHECK(port.complete());
 }
 
-// -------------------------------------------- looking in the wrong place
-
-TEST_CASE(a_reply_that_only_reads_at_another_rate_names_that_rate) {
-    // A silent chip and a receiver sampling at the wrong rate are the same
-    // thing from outside: a channel that answers nothing. They want completely
-    // different repairs - one is a wire or a module, the other is this side's
-    // own timing - and nothing until now could tell them apart.
-    ScriptedCh375 port({expect_command(Ch375Command::CheckExist), expect_data(0xA5),
-                        expect_command(Ch375Command::CheckExist), expect_data(0xA5),
-                        reply(0x5A)});
-    Ch375Transport transport(port);
-    const unsigned rates[] = {9600, 10400};
-
-    CHECK_EQ(transport.sweep_rx(rates, 2, 9600), 10400u);
-}
-
-TEST_CASE(a_chip_that_answers_at_no_sampling_rate_names_none) {
-    ScriptedCh375 port({});
-    port.allow_unscripted();
-    Ch375Transport transport(port);
-    const unsigned rates[] = {9600, 10400, 8800};
-
-    // Nothing anywhere. The receiver is not the problem, so the answer is
-    // zero rather than a rate somebody might act on.
-    CHECK_EQ(transport.sweep_rx(rates, 3, 9600), 0u);
-}
-
-TEST_CASE(a_sweep_leaves_the_receiver_where_it_started) {
-    ScriptedCh375 port({});
-    port.allow_unscripted();
-    Ch375Transport transport(port);
-    const unsigned rates[] = {10400, 8800};
-
-    transport.sweep_rx(rates, 2, 9600);
-
-    CHECK_EQ(port.rx_baud(), 9600u);
-}
-
 // -------------------------------------- bringing a stranded chip home
 
 TEST_CASE(a_chip_left_at_the_raised_rate_is_found_there_and_reset) {
@@ -693,4 +560,3 @@ TEST_CASE(a_chip_left_at_the_raised_rate_is_found_there_and_reset) {
     CHECK_EQ(port.baud(), 9600u);
     CHECK(port.complete());
 }
-

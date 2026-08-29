@@ -263,12 +263,28 @@ public:
     /// and the transfer it belonged to is over.
     void nak_control_transfers(int transfers) { control_naks_ = transfers; }
 
+    /// Keep a retried control NAK in flight until ABORT_NAK is issued.
+    ///
+    /// This models the upper end of DS2 1.3's retry window: the firmware's
+    /// setup deadline can expire before the chip finishes retrying, and only
+    /// ABORT_NAK makes the command port available for recovery traffic.
+    void hold_control_nak_retry(bool holding) { hold_control_nak_retry_ = holding; }
+    bool nak_retry_in_progress() const { return nak_retry_in_progress_; }
+    std::uint32_t abort_nak_count() const { return abort_nak_count_; }
+
     /// How long this chip takes to answer a token.
     ///
     /// A real controller runs a USB transaction and raises its interrupt when
     /// it is done; it is not instant, and a host that assumes it is will issue
     /// the next token into a chip still working on the last one.
     void answer_tokens_after(std::uint32_t micros) { token_delay_us_ = micros; }
+
+    /// What an idle interrupt-IN token reports to the MCU.
+    ///
+    /// The ordinary answer is 0x2A (NAK). STALL (0x2E) and timeout (0x20)
+    /// exercise the path that must eventually release anything held by a
+    /// device which is no longer usable but whose Disconnect was lost.
+    void answer_idle_tokens_with(std::uint8_t status) { idle_token_status_ = status; }
 
     /// How many IN tokens have been issued to this chip.
     int tokens_issued() const { return tokens_issued_; }
@@ -281,6 +297,16 @@ public:
     /// The question speed_set_after_last_mode already asks, about the other
     /// per-mode setting.
     bool retry_set_after_last_mode() const { return retry_after_mode_; }
+
+    /// Lose one unacknowledged SET_RETRY policy write.
+    void drop_next_retry_policy(std::uint8_t policy) {
+        dropped_retry_policy_ = policy;
+        drop_retry_policy_ = true;
+    }
+
+    /// The next SET_USB_MODE is heard but its status reply is lost/refused.
+    void ignore_next_mode_reply() { next_mode_reply_ = 1; }
+    void refuse_next_mode_reply() { next_mode_reply_ = 2; }
 
     std::uint8_t device_address() const { return device_address_; }
     std::uint8_t host_address() const { return host_address_; }
@@ -501,9 +527,14 @@ private:
     std::uint32_t token_ready_us_ = 0;
     bool token_pending_ = false;
     int tokens_issued_ = 0;
+    std::uint8_t idle_token_status_ = static_cast<std::uint8_t>(0x20 | kResponseNak);
     std::uint8_t retry_policy_ = kChipDefaultRetry;
     bool retry_after_mode_ = false;
     bool retry_prefix_seen_ = false;
+    bool drop_retry_policy_ = false;
+    std::uint8_t dropped_retry_policy_ = 0;
+    /// 0=normal, 1=silent, 2=explicit CommandStatus::Abort.
+    std::uint8_t next_mode_reply_ = 0;
     int transfers_done_ = 0;
     /// What the next RD_USB_DATA0 will hand back.
     std::vector<std::uint8_t> pending_read_;
@@ -519,6 +550,9 @@ private:
     bool ignore_setup_ = false;
     bool boot_protocol_ = false;
     int control_naks_ = 0;
+    bool hold_control_nak_retry_ = false;
+    bool nak_retry_in_progress_ = false;
+    std::uint32_t abort_nak_count_ = 0;
     void begin_control_transfer();
     void finish_control_stage();
     /// DS2 1.3: bit 7 is what chooses between retrying a NAK on the bus and

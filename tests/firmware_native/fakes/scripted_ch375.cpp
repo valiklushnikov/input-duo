@@ -151,6 +151,15 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
         return;
     }
 
+    if (nak_retry_in_progress_) {
+        if (command == static_cast<std::uint8_t>(Ch375Command::AbortNak)) {
+            nak_retry_in_progress_ = false;
+            control_naks_ = 0;
+            ++abort_nak_count_;
+        }
+        return;
+    }
+
     pending_command_ = command;
     expecting_data_ = false;
 
@@ -243,6 +252,11 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
             outgoing_read_ = 0;
             retry_policy_ = kChipDefaultRetry;
             retry_prefix_seen_ = false;
+            nak_retry_in_progress_ = false;
+            break;
+
+        case Ch375Command::AbortNak:
+            ++abort_nak_count_;
             break;
 
         case Ch375Command::SetBaudRate:
@@ -349,7 +363,14 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
                     int_asserted_ = !silent_;
                 }
             }
-            queue(static_cast<std::uint8_t>(CommandStatus::Success));
+            if (next_mode_reply_ == 1) {
+                next_mode_reply_ = 0;
+            } else if (next_mode_reply_ == 2) {
+                next_mode_reply_ = 0;
+                queue(static_cast<std::uint8_t>(CommandStatus::Abort));
+            } else {
+                queue(static_cast<std::uint8_t>(CommandStatus::Success));
+            }
             expecting_data_ = false;
             break;
         }
@@ -403,8 +424,7 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
                 if (retries_naks()) {
                     break;
                 }
-                pending_status_ =
-                    static_cast<std::uint8_t>(0x20 | kResponseNak);
+                pending_status_ = idle_token_status_;
             } else {
                 pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Success);
             }
@@ -426,6 +446,10 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
             }
             retry_prefix_seen_ = false;
             expecting_data_ = false;
+            if (drop_retry_policy_ && value == dropped_retry_policy_) {
+                drop_retry_policy_ = false;
+                break;
+            }
             retry_policy_ = value;
             retry_after_mode_ = true;
             break;
@@ -543,6 +567,7 @@ void FakeCh375Chip::power_cycle() {
     token_pending_ = false;
     expecting_data_ = false;
     pending_command_ = 0;
+    nak_retry_in_progress_ = false;
 }
 
 void FakeCh375Chip::attach_device() {
@@ -669,6 +694,10 @@ bool FakeCh375Chip::control_transfer_naks() {
         return false;
     }
     if (retries_naks()) {
+        if (hold_control_nak_retry_) {
+            nak_retry_in_progress_ = true;
+            return true;
+        }
         // The chip asks again itself, on the bus, without telling anyone - so
         // every NAK the device still had in it is spent inside this one
         // transaction, and what the MCU sees is a transfer that completed.

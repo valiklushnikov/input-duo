@@ -348,6 +348,25 @@ TEST_CASE(a_controller_that_goes_quiet_with_a_device_up_releases_it) {
     CHECK(static_cast<int>(rig.device.state()) != static_cast<int>(Ch375State::Ready));
 }
 
+TEST_CASE(a_stall_or_timeout_from_the_endpoint_eventually_releases_the_device) {
+    // Replacing Ready's Success-or-NAK discriminator with `if (true)` must
+    // fail this test. STALL and timeout are completed transactions, but they
+    // are not evidence that the HID device is still usable. If Disconnect was
+    // lost, Detached is the only event that releases a key held on the PC.
+    const std::uint8_t failures[2] = {0x2E, 0x20};
+    for (std::uint8_t failure : failures) {
+        Rig rig;
+        bring_up(rig);
+        rig.count(Ch375EventKind::Ready);
+        rig.chip.answer_idle_tokens_with(failure);
+
+        rig.run(kDeviceLostUs * (kQuietRetriesBeforeTeardown + 2));
+
+        CHECK_EQ(rig.count(Ch375EventKind::Detached), 1);
+        CHECK(static_cast<int>(rig.device.state()) != static_cast<int>(Ch375State::Ready));
+    }
+}
+
 TEST_CASE(a_moment_of_silence_re_arms_the_endpoint_instead_of_the_whole_bus) {
     // Tearing the chip and the bus down re-enumerates the peripheral: its
     // lights go out and come back, and everything held on it is released and
@@ -409,6 +428,69 @@ TEST_CASE(the_policy_that_makes_an_idle_endpoint_answer_survives_the_bus_reset) 
     CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
     CHECK(rig.chip.retry_set_after_last_mode());
     CHECK_EQ(rig.chip.retry_policy(), kRetryReportNak);
+}
+
+TEST_CASE(a_lost_ready_policy_write_is_reasserted_when_the_endpoint_is_rearmed) {
+    // SET_RETRY has no reply. Losing the one Ready-phase write leaves the chip
+    // retrying an idle NAK on the bus forever, exactly the original teardown
+    // fault. The first quiet re-arm is the observable recovery opportunity.
+    Rig rig;
+    rig.chip.drop_next_retry_policy(kRetryReportNak);
+    bring_up(rig);
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+    CHECK(rig.chip.retry_policy() != kRetryReportNak);
+
+    rig.run(kDeviceLostUs + 200000);
+
+    CHECK_EQ(rig.device.quiet_rearms(), 1u);
+    CHECK_EQ(rig.chip.retry_policy(), kRetryReportNak);
+}
+
+TEST_CASE(an_unanswered_status_blocks_enumeration_from_changing_state) {
+    // Deleting tick's PendingReply::Status early return must fail this test.
+    // The setup is ready to fail, but its transition may not happen while a
+    // GET_STATUS byte still owns the transport's single reply slot.
+    Rig rig;
+    rig.chip.attach_device();
+    for (int tick = 0; tick < 4000 && rig.device.state() != Ch375State::Enumerating; ++tick) {
+        rig.device.tick(rig.chip.now_us());
+        rig.chip.advance(100);
+    }
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Enumerating));
+    rig.setup.always_fail(true);
+    rig.chip.hold_interrupt_unanswered(true);
+
+    rig.device.tick(rig.chip.now_us());
+    CHECK_EQ(static_cast<int>(rig.transport.pending_reply()),
+             static_cast<int>(PendingReply::Status));
+    rig.chip.advance(100);
+    rig.device.tick(rig.chip.now_us());
+
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Enumerating));
+    CHECK_EQ(static_cast<int>(rig.transport.pending_reply()),
+             static_cast<int>(PendingReply::Status));
+}
+
+TEST_CASE(a_mode_without_a_success_reply_is_not_treated_as_accepted) {
+    // Replacing finish_pending_command's `taken` predicate with true must fail
+    // both halves: neither silence nor the explicit 0x5F refusal authorises a
+    // bus reset against a controller whose host mode is unconfirmed.
+    for (int reply = 0; reply < 2; ++reply) {
+        Rig rig;
+        rig.run(200000);
+        if (reply == 0) {
+            rig.chip.ignore_next_mode_reply();
+        } else {
+            rig.chip.refuse_next_mode_reply();
+        }
+        rig.chip.attach_device();
+
+        rig.run(100000);
+
+        CHECK_EQ(rig.device.mode_failures(), 1u);
+        CHECK_EQ(static_cast<int>(rig.device.state()),
+                 static_cast<int>(Ch375State::RecoverWait));
+    }
 }
 
 TEST_CASE(a_controller_that_raises_an_interrupt_and_never_says_why_releases_it) {
@@ -556,12 +638,13 @@ TEST_CASE(two_devices_do_not_interfere) {
 
 // --------------------------------------------------------- bounded per tick
 
-TEST_CASE(one_tick_does_a_bounded_amount_of_work) {
+TEST_CASE(one_tick_issues_a_bounded_number_of_commands) {
     Rig rig;
     rig.chip.attach_device();
 
-    // However much there is to do, a single tick must not run away with the
-    // loop: U1 also has to service USB, the link to U2 and the watchdog.
+    // This is a command-count bound, not a latency claim. The successful
+    // rate-negotiation tick performs blocking reply waits and takes about
+    // 67 ms on hardware even though it issues no more than this many commands.
     for (int index = 0; index < 50; ++index) {
         rig.chip.reset_command_count();
         rig.device.tick(rig.chip.now_us());
@@ -844,6 +927,29 @@ struct LiveRig {
     DescriptorSetup setup{transport};
     Ch375Device device{transport, setup};
 };
+
+TEST_CASE(a_setup_timeout_aborts_the_chips_nak_retry_before_recovery) {
+    // Removing ABORT_NAK must strand this rig: while the CH375 is still
+    // retrying the control transfer it ignores the recovery mode command, so
+    // the device can never enumerate on the next attempt.
+    LiveRig rig;
+    rig.chip.serve_boot_mouse();
+    rig.chip.hold_control_nak_retry(true);
+    rig.chip.nak_control_transfers(1);
+    rig.chip.attach_device();
+
+    run_for(rig, 600000, 100);
+
+    CHECK(!rig.chip.nak_retry_in_progress());
+    CHECK_EQ(rig.chip.abort_nak_count(), 1u);
+    CHECK_EQ(static_cast<int>(rig.device.state()),
+             static_cast<int>(Ch375State::RecoverWait));
+
+    rig.chip.hold_control_nak_retry(false);
+    run_for(rig, 2 * kRecoverDelayUs, 100);
+
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+}
 
 /// How many commands of the bring-up the chip is allowed to answer before it
 /// goes deaf, one scenario per value.
@@ -1234,6 +1340,11 @@ TEST_CASE(the_floor_is_derived_from_what_one_report_costs_on_the_wire) {
     // rung the bench measured block reads completing on.
     CHECK(9600u < duo_input::u1::ch375::report_rate_floor(7, kReportPollUs));
     CHECK(37500u > duo_input::u1::ch375::report_rate_floor(8, kReportPollUs));
+    // CH375's maximum packet is 64 bytes. Even that valid maximum needs
+    // 99 kbaud, so the 115200 rung still clears the floor; there is no valid
+    // packet size for which the ladder has no usable rung.
+    CHECK_EQ(duo_input::u1::ch375::report_rate_floor(64, kReportPollUs), 99000u);
+    CHECK(115200u > duo_input::u1::ch375::report_rate_floor(64, kReportPollUs));
 }
 
 TEST_CASE(a_channel_with_a_device_up_never_rests_below_that_floor) {
