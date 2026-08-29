@@ -41,6 +41,7 @@ using duo_input::config::KeyboardRoute;
 using duo_input::config::MacroStepType;
 using duo_input::hid::KeyboardSnapshot;
 using duo_input::hid::Target;
+namespace runtime = duo_input::runtime;
 using duo_input::runtime::OutputCommand;
 using duo_input::u1::Core1Runtime;
 using duo_input::u1::ICommandSink;
@@ -93,6 +94,23 @@ const std::uint8_t kProfile3Pairs[20] = {
 
 /// The trailing space is written ``_`` so a lost one is visible in a failure.
 const char* const kWantedText = "PROFILE-3_";
+
+/// Ten of the same letter, which ``PROFILE-3 `` has no pair of.
+///
+/// The sharpest probe there is, and the acceptance carries a macro of exactly
+/// this shape for the same reason. Every other letter announces itself by
+/// being a different usage from the one before it, so a release that never
+/// reached a computer still leaves the text readable: the next report has a
+/// different key down, and the host infers the release from its absence.
+/// Two of the same letter in a row cannot be told apart that way. The state
+/// after the second press is identical to the state after the first, so the
+/// only thing that makes two keystrokes out of it is the empty state between
+/// them arriving in a report of its own.
+const std::uint8_t kRepeatPairs[20] = {
+    0x00, 0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x04,
+    0x00, 0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x04, 0x00, 0x04,
+};
+constexpr int kRepeatCount = 10;
 
 char letter_of(std::uint8_t usage, bool shifted) {
     switch (usage) {
@@ -195,10 +213,14 @@ struct Board {
     /// a pointer into the step pool, and Core 1 reads it every pass.
     MacroStep steps[1];
 
-    void type_the_acceptance_macro() {
+    void type_the_acceptance_macro() { type(kProfile3Pairs, sizeof(kProfile3Pairs)); }
+
+    void type_the_repeat_macro() { type(kRepeatPairs, sizeof(kRepeatPairs)); }
+
+    void type(const std::uint8_t* pairs, std::size_t bytes) {
         steps[0].kind = MacroStepType::TEXT;
-        steps[0].pairs = kProfile3Pairs;
-        steps[0].pair_bytes = sizeof(kProfile3Pairs);
+        steps[0].pairs = pairs;
+        steps[0].pair_bytes = static_cast<std::uint16_t>(bytes);
         core1.define_macro(0, MacroDefinition{steps, 1});
         // Both computers, which is where the acceptance leaves the route and
         // the only setting in which the two paths can be compared at all.
@@ -286,6 +308,33 @@ struct Board {
     }
 };
 
+OutputCommand press_on_both(std::uint8_t usage) {
+    OutputCommand command;
+    command.kind = runtime::CommandKind::KeyPress;
+    command.route = runtime::Route::Both;
+    command.code = usage;
+    return command;
+}
+
+OutputCommand release_on_both(std::uint8_t usage) {
+    OutputCommand command = press_on_both(usage);
+    command.kind = runtime::CommandKind::KeyRelease;
+    return command;
+}
+
+/// Owes both computers an answer without changing what either would report.
+///
+/// A macro that held nothing letting go of nothing. It is the case the second
+/// half of an answer exists for: a sender with nothing to send still has to
+/// say the far side is up to date, or a state nobody needed to hear about
+/// would hold up the other computer for the whole grace.
+OutputCommand release_of_a_macro_holding_nothing() {
+    OutputCommand command;
+    command.kind = runtime::CommandKind::ReleaseMacro;
+    command.owner = 7;
+    return command;
+}
+
 /// The timings the sweep covers, chosen to bracket the hardware rather than to
 /// be tidy: a Core 0 pass from well under the millisecond the macro is paced
 /// at to well over it, a Core 1 pass from a spin to a slow controller round,
@@ -334,6 +383,76 @@ void check_one(const Named& entry) {
 }
 
 }  // namespace
+
+// --------------------------------------------------- what an answer means
+//
+// The state waits for every computer, so "this one is up to date" has to be
+// said on both occasions that make it true and on neither that does not.
+// Said too readily, the state moves on and a letter is lost; said too rarely,
+// the other computer stops for the whole grace on a board where nothing is
+// wrong.
+
+TEST_CASE(pc1_answers_for_a_state_it_already_had) {
+    duo::test::usb_host().reset();
+    OutputRuntime outputs;
+    UsbService usb;
+
+    outputs.process(press_on_both(0x04));
+    CHECK(usb.publish(outputs));
+    CHECK_FALSE(outputs.keyboard_unreported(Target::Pc1));
+
+    outputs.process(release_of_a_macro_holding_nothing());
+    CHECK(outputs.keyboard_unreported(Target::Pc1));
+
+    // Nothing to send, because nothing PC1 would report has changed. That is
+    // the other way of being up to date, and it has to be said.
+    usb.publish(outputs);
+    CHECK_FALSE(outputs.keyboard_unreported(Target::Pc1));
+}
+
+TEST_CASE(pc1_answers_when_there_is_no_host_to_tell) {
+    duo::test::usb_host().reset();
+    OutputRuntime outputs;
+    UsbService usb;
+
+    outputs.process(press_on_both(0x04));
+    duo::test::usb_host().mounted = false;
+
+    // Nothing can be told to a host that is not there. If that counted as
+    // owing an answer, unplugging PC1 would stop PC2 receiving anything.
+    CHECK_FALSE(usb.publish(outputs));
+    CHECK_FALSE(outputs.keyboard_unreported(Target::Pc1));
+}
+
+TEST_CASE(pc2_answers_for_what_went_out_and_for_nothing_that_did_not) {
+    duo::test::spi_link().reset();
+    OutputRuntime outputs;
+    SpiMaster link;
+
+    outputs.process(press_on_both(0x04));
+    CHECK(link.poll(1, outputs));
+    CHECK_FALSE(outputs.keyboard_unreported(Target::Pc2));
+
+    // The link goes down mid-word. PC2 does not have the new state and must
+    // not be recorded as having it, or the state would move on without it and
+    // the release would be the one PC2 never hears.
+    outputs.process(release_on_both(0x04));
+    CHECK(outputs.keyboard_unreported(Target::Pc2));
+    duo::test::spi_link().accept = false;
+    link.poll(2, outputs);
+    CHECK(outputs.keyboard_unreported(Target::Pc2));
+
+    // It comes back, and the state that was waiting goes out.
+    duo::test::spi_link().accept = true;
+    CHECK(link.poll(3, outputs));
+    CHECK_FALSE(outputs.keyboard_unreported(Target::Pc2));
+
+    // And a state PC2 already had is answered rather than resent.
+    outputs.process(release_of_a_macro_holding_nothing());
+    CHECK(outputs.keyboard_unreported(Target::Pc2));
+    link.poll(4, outputs);
+    CHECK_FALSE(outputs.keyboard_unreported(Target::Pc2));
+}
 
 TEST_CASE(the_acceptance_macro_types_its_whole_text_on_pc1_at_every_rate) {
     for (const Named& entry : kSweep) {
@@ -392,6 +511,26 @@ TEST_CASE(every_key_a_macro_presses_comes_back_up_on_both_computers) {
         CHECK(board.pc2.everything_released());
         CHECK_EQ(board.outputs.snapshot(Target::Pc1).keyboard.key_count, 0u);
         CHECK_EQ(board.outputs.snapshot(Target::Pc2).keyboard.key_count, 0u);
+    }
+}
+
+TEST_CASE(ten_of_the_same_letter_arrive_as_ten_keystrokes_on_both_computers) {
+    for (const Named& entry : kSweep) {
+        Board board(entry.timing);
+        board.type_the_repeat_macro();
+        board.run_us(200'000);
+        const std::string on_pc1 = board.pc1.typed();
+        const std::string on_pc2 = board.pc2.typed();
+        if (static_cast<int>(on_pc1.size()) != kRepeatCount ||
+            static_cast<int>(on_pc2.size()) != kRepeatCount) {
+            std::printf("  %-40s PC1=%d PC2=%d of %d\n", entry.label,
+                        static_cast<int>(on_pc1.size()), static_cast<int>(on_pc2.size()),
+                        kRepeatCount);
+        }
+        CHECK_EQ(static_cast<int>(on_pc1.size()), kRepeatCount);
+        CHECK_EQ(static_cast<int>(on_pc2.size()), kRepeatCount);
+        CHECK(board.pc1.everything_released());
+        CHECK(board.pc2.everything_released());
     }
 }
 

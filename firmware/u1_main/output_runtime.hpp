@@ -88,6 +88,14 @@ public:
     /// Until both have said it, the next keyboard command waits.
     void keyboard_reported(hid::Target target);
 
+    /// Is ``target`` still owed the keyboard state now held?
+    ///
+    /// The condition the drain waits on, readable from outside: a computer
+    /// that is behind is a computer whose keys are not what this holds.
+    bool keyboard_unreported(hid::Target target) const {
+        return outputs_.keyboard_unreported(target);
+    }
+
     /// Let go of everything, everywhere.
     void release_all();
 
