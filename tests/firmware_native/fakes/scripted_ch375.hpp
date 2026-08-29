@@ -57,6 +57,16 @@ inline Step reply(std::uint8_t value) {
 /// The rate a CH375 comes up at, and goes back to after a reset.
 inline constexpr unsigned kScriptedDefaultBaud = 9600;
 
+/// DS2 1.3: the retry policy a CH375 holds when nobody has set one.
+///
+/// Bit 7 set with bit 6 clear is "retry a NAK forever", so under it an
+/// endpoint with nothing to say never finishes its transaction and never
+/// raises the interrupt that would end it. This fake also puts the policy back
+/// here on every working mode, the way DS2 1.1 says the bus speed goes back to
+/// full speed - assumed of the retry policy rather than read in a datasheet,
+/// and the assumption is why the firmware sets it again after each mode.
+inline constexpr std::uint8_t kChipDefaultRetry = 0x85;
+
 class ScriptedCh375 final : public ICh375Transport {
 public:
     ScriptedCh375(std::initializer_list<Step> script) : script_(script) {}
@@ -252,6 +262,15 @@ public:
 
     /// How many IN tokens have been issued to this chip.
     int tokens_issued() const { return tokens_issued_; }
+
+    /// The retry policy this chip is holding (DS2 1.3).
+    std::uint8_t retry_policy() const { return retry_policy_; }
+
+    /// Was the retry policy set after the most recent working mode?
+    ///
+    /// The question speed_set_after_last_mode already asks, about the other
+    /// per-mode setting.
+    bool retry_set_after_last_mode() const { return retry_after_mode_; }
 
     std::uint8_t device_address() const { return device_address_; }
     std::uint8_t host_address() const { return host_address_; }
@@ -472,6 +491,9 @@ private:
     std::uint32_t token_ready_us_ = 0;
     bool token_pending_ = false;
     int tokens_issued_ = 0;
+    std::uint8_t retry_policy_ = kChipDefaultRetry;
+    bool retry_after_mode_ = false;
+    bool retry_prefix_seen_ = false;
     int transfers_done_ = 0;
     /// What the next RD_USB_DATA0 will hand back.
     std::vector<std::uint8_t> pending_read_;

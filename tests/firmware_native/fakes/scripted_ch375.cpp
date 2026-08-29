@@ -241,6 +241,8 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
             chip_baud_ = kScriptedDefaultBaud;
             outgoing_.clear();
             outgoing_read_ = 0;
+            retry_policy_ = kChipDefaultRetry;
+            retry_prefix_seen_ = false;
             break;
 
         case Ch375Command::SetBaudRate:
@@ -328,6 +330,8 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
             // The real chip puts the bus back to full speed here.
             bus_speed_ = UsbSpeed::Full12Mbps;
             speed_after_mode_ = false;
+            retry_policy_ = kChipDefaultRetry;
+            retry_after_mode_ = false;
             if (mode == UsbMode::HostWithSof && attached_ && report_disconnect_settling_) {
                 // Still catching up with the device after the reset.
                 pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Disconnect);
@@ -388,10 +392,23 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
                 finish_control_stage();
                 break;
             }
-            // A real device answers a poll with an interrupt, whether or not
-            // it had anything to say - but not instantly.
             ++tokens_issued_;
-            pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Success);
+            if (!report_waiting_) {
+                // A HID device sends a report when something changes and NAKs
+                // every poll in between. What the chip does with that is the
+                // retry policy's business (DS2 1.3): reported to the MCU as a
+                // failure status, or retried on the bus until the device has
+                // something - and under the second the transaction never
+                // finishes, so no interrupt is ever raised.
+                if ((retry_policy_ & 0x80) != 0) {
+                    break;
+                }
+                pending_status_ =
+                    static_cast<std::uint8_t>(0x20 | kResponseNak);
+            } else {
+                pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Success);
+            }
+            // A real controller does not answer instantly.
             if (token_delay_us_ == 0) {
                 int_asserted_ = !silent_;
             } else {
@@ -403,6 +420,14 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
 
         case Ch375Command::SetRetry:
             // Two data bytes: the 25H prefix and the policy. DS2 1.3.
+            if (!retry_prefix_seen_) {
+                retry_prefix_seen_ = true;
+                break;
+            }
+            retry_prefix_seen_ = false;
+            expecting_data_ = false;
+            retry_policy_ = value;
+            retry_after_mode_ = true;
             break;
 
         case Ch375Command::GetDescriptor: {

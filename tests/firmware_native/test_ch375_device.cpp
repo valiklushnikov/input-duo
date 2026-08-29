@@ -26,6 +26,7 @@ using duo_input::u1::ch375::DescriptorSetup;
 using duo_input::u1::ch375::kDeviceLostUs;
 using duo_input::u1::ch375::kQuietRetriesBeforeTeardown;
 using duo_input::u1::ch375::kRecoverDelayUs;
+using duo_input::u1::ch375::kRetryReportNak;
 using duo_input::u1::ch375::kPresenceRecheckUs;
 using duo_input::u1::ch375::kReportPollUs;
 using duo_input::u1::ch375::PendingReply;
@@ -360,6 +361,72 @@ TEST_CASE(a_moment_of_silence_re_arms_the_endpoint_instead_of_the_whole_bus) {
 
     CHECK_EQ(rig.count(Ch375EventKind::Detached), 0);
     CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+}
+
+TEST_CASE(a_device_with_nothing_to_say_is_not_a_device_that_has_gone) {
+    // A boot-protocol keyboard sends a report when a key changes and a mouse
+    // when it moves. Between those it answers every poll with a NAK, and on
+    // the bench a channel read forty polls, no reports, and a teardown - which
+    // the operator saw as a mouse that worked while it was moving and stopped
+    // within seconds of being still.
+    Rig rig;
+    bring_up(rig);
+    rig.count(Ch375EventKind::Ready);
+
+    rig.run(kDeviceLostUs * 5);
+
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+    CHECK_EQ(rig.count(Ch375EventKind::Detached), 0);
+    CHECK_EQ(rig.device.detach_from_lost(), 0u);
+    CHECK_EQ(rig.device.quiet_rearms(), 0u);
+}
+
+TEST_CASE(a_device_left_idle_still_delivers_the_next_report) {
+    // The operator's own experiment: thirty seconds of movement, five seconds
+    // of stillness, and then movement again that went nowhere.
+    Rig rig;
+    bring_up(rig);
+    rig.count(Ch375EventKind::Ready);
+
+    rig.run(kDeviceLostUs * 5);
+    const std::uint8_t report[4] = {0x00, 0x03, 0xFD, 0x00};
+    rig.chip.queue_report(report, sizeof(report));
+    rig.run(50000);
+
+    CHECK_EQ(rig.count(Ch375EventKind::Report), 1);
+}
+
+TEST_CASE(the_policy_that_makes_an_idle_endpoint_answer_survives_the_bus_reset) {
+    // Reporting the NAK is what turns a poll of an idle endpoint into an
+    // interrupt instead of a transaction that never finishes. The chip is put
+    // into three working modes between chip setup and Ready, and a working
+    // mode is where the other per-transaction setting - the bus speed - is
+    // already known to be undone (DS2 1.1).
+    Rig rig;
+    bring_up(rig);
+
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+    CHECK(rig.chip.retry_set_after_last_mode());
+    CHECK_EQ(rig.chip.retry_policy(), kRetryReportNak);
+}
+
+TEST_CASE(a_channel_that_was_not_ticked_does_not_give_up_its_device) {
+    // Silence that this side never asked a question in is not evidence about
+    // the device. Core 1 services two channels, the link and the watchdog on
+    // one loop, and a recovery on the other channel is exactly what takes this
+    // one's ticks away - so a channel starved of them used to come back and
+    // tear down a device that had been answering all along.
+    Rig rig;
+    bring_up(rig);
+    rig.count(Ch375EventKind::Ready);
+
+    rig.chip.advance(kDeviceLostUs * 5);
+    rig.device.tick(rig.chip.now_us());
+
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+    CHECK_EQ(rig.count(Ch375EventKind::Detached), 0);
+    CHECK_EQ(rig.device.detach_from_lost(), 0u);
+    CHECK_EQ(rig.device.quiet_rearms(), 0u);
 }
 
 TEST_CASE(a_device_unplugged_while_its_controller_recovers_leaves_nothing_claimed) {
