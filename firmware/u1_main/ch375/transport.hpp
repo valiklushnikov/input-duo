@@ -920,6 +920,11 @@ public:
             static_cast<std::uint8_t>(request.length & 0xFF),
             static_cast<std::uint8_t>(request.length >> 8),
         };
+        // USB 2.0 8.5.3: a SETUP transaction's data packet is always DATA0.
+        // CH375 does not maintain that toggle for us.  In particular, the
+        // status stage of a preceding control read leaves endpoint 7 at
+        // DATA1; reusing it makes the next request invisible to the device.
+        set_transmit_toggle(kToggleData0);
         if (!write_block(setup, sizeof(setup))) {
             return false;
         }

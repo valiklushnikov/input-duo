@@ -626,6 +626,41 @@ TEST_CASE(a_sixteen_bit_axis_carries_more_than_a_byte_could) {
     CHECK_EQ(out.events[0].y, static_cast<std::int16_t>(-300));
 }
 
+TEST_CASE(the_bench_mouses_packed_twelve_bit_axes_leave_the_wheel_at_its_declared_byte) {
+    MouseNormalizer normalizer;
+    MouseReportLayout layout;
+    layout.report_id = true;
+    layout.report_id_value = 1;
+    layout.buttons = ReportField{true, 0, 1, 0, 5};
+    layout.x = ReportField{true, 1, 2, 0, 12};
+    layout.y = ReportField{true, 2, 2, 4, 12};
+    layout.wheel = ReportField{true, 4, 1, 0, 8};
+    layout.pan = ReportField{true, 5, 1, 0, 8};
+    layout.minimum_body_bytes = 4;
+    normalizer.set_layout(layout);
+    Collected out;
+
+    // Body bits: X=0x123, Y=-0x123 (0xEDD as signed 12-bit), then wheel -1
+    // and pan +1.  Reading whole little-endian words yields -12099 and -2915;
+    // reading boot offsets reports movement as scrolling.
+    const std::vector<std::uint8_t> report{0x01, 0x00, 0x23, 0xD1, 0xED, 0xFF, 0x01};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 2u);
+    CHECK_EQ(out.count_of(InputEventKind::MouseMove), 1);
+    CHECK_EQ(out.count_of(InputEventKind::Wheel), 1);
+    for (std::size_t index = 0; index < out.count; ++index) {
+        if (out.events[index].kind == InputEventKind::MouseMove) {
+            CHECK_EQ(out.events[index].x, static_cast<std::int16_t>(0x123));
+            CHECK_EQ(out.events[index].y, static_cast<std::int16_t>(-0x123));
+        }
+        if (out.events[index].kind == InputEventKind::Wheel) {
+            CHECK_EQ(out.events[index].wheel, -1);
+            CHECK_EQ(out.events[index].pan, 1);
+        }
+    }
+}
+
 TEST_CASE(the_buttons_are_read_where_the_layout_puts_them) {
     MouseNormalizer normalizer;
     // A descriptor is free to declare the axes first and the buttons after
@@ -648,4 +683,25 @@ TEST_CASE(the_buttons_are_read_where_the_layout_puts_them) {
 
     CHECK_EQ(out.count, 1u);
     CHECK(out.has(InputEventKind::MouseButtonDown, 1));
+}
+
+TEST_CASE(a_three_button_field_does_not_invent_two_side_buttons_when_button_three_is_down) {
+    MouseNormalizer normalizer;
+    MouseReportLayout layout;
+    layout.buttons = ReportField{true, 0, 1, 0, 3};
+    layout.x = ReportField{true, 1, 1, 0, 8};
+    layout.y = ReportField{true, 2, 1, 0, 8};
+    layout.minimum_body_bytes = 3;
+    normalizer.set_layout(layout);
+    Collected out;
+
+    // In a signed three-bit number 0b100 is -4. Buttons are not signed: it is
+    // only button three. Sign-extending it to 0xFC also sets bits 3 and 4,
+    // which are the two side buttons and may be bound to destination changes.
+    const std::vector<std::uint8_t> report{0x04, 0x00, 0x00};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 1u);
+    CHECK_EQ(out.events[0].kind, InputEventKind::MouseButtonDown);
+    CHECK_EQ(out.events[0].code, std::uint16_t{2});
 }

@@ -35,7 +35,7 @@
 // the descriptor has to prove itself first. Everything that can go wrong with
 // the fetch ends at boot: an interface that declares no report descriptor, one
 // longer than there is room for, a device that refuses the request, and a
-// descriptor that arrives but cannot be named in whole bytes.
+// descriptor that arrives but cannot be represented by the bounded layout.
 //
 // That last step is the one the controller cannot do at all: it has commands
 // for SET_ADDRESS, SET_CONFIGURATION and GET_DESCRIPTOR and for nothing else,
@@ -127,8 +127,14 @@ public:
     /// Why the report descriptor was not used, for a bring-up build to report.
     std::uint8_t last_report_descriptor_status() const { return report_status_; }
     ReportDescriptorError last_report_descriptor_error() const { return report_error_; }
+    /// How many bytes the interface said its report descriptor contains.
+    std::uint16_t report_descriptor_wanted() const { return report_wanted_; }
     /// How many bytes of it arrived.
     std::uint16_t report_descriptor_bytes() const { return report_received_; }
+    /// The bytes themselves, retained for the probe build's post-mortem.
+    protocol::ByteView report_descriptor() const {
+        return protocol::ByteView{report_buffer_, report_received_};
+    }
 
     /// Why the last attempt ended, for a bring-up build to report.
     std::uint8_t last_status() const { return last_status_; }

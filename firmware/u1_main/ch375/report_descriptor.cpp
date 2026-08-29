@@ -92,33 +92,28 @@ void record(BitField& field, std::uint32_t bit_offset, std::uint32_t bits) {
     field.bits = bits;
 }
 
-/// Turn a run of bits into the bytes the normalizer can read, or refuse it.
+/// Turn a run of bits into the span the normalizer can read, or refuse it.
 ///
-/// ``packed`` is true only for the buttons, where a run of bits inside a
-/// single byte is the ordinary way to declare them. An axis has to be a whole
-/// byte or a whole pair of them; a twelve-bit axis is real and nothing here
-/// can read it, so it is refused rather than rounded.
+/// RP2040 can cheaply extract at most sixteen signed bits from the three bytes
+/// such a field can touch.  This includes the bench mouse's two consecutive
+/// 12-bit axes: X is byte-aligned and Y begins in the high nibble of the next
+/// byte.  Recording the bit offset is essential; rounding Y down would turn
+/// movement into unrelated values and put the wheel at the wrong byte again.
 bool to_bytes(const BitField& field, bool packed, ReportField& out) {
     if (!field.present) {
         out = ReportField{};
         return true;
     }
-    if ((field.bit_offset % 8) != 0) {
-        // The normalizer reads whole bytes. A field starting inside one cannot
-        // be handed to it, and rounding down shifts every value it carries.
+    if (field.bits == 0 || field.bits > 16) {
         return false;
     }
-    std::uint32_t bytes = 0;
     if (packed) {
-        if (field.bits == 0 || field.bits > 8) {
+        if (field.bits > 8) {
             return false;
         }
-        bytes = 1;
-    } else if (field.bits == 8 || field.bits == 16) {
-        bytes = field.bits / 8;
-    } else {
-        return false;
     }
+    const std::uint32_t bit_inside_byte = field.bit_offset % 8;
+    const std::uint32_t bytes = (bit_inside_byte + field.bits + 7) / 8;
     const std::uint32_t offset = field.bit_offset / 8;
     if (offset + bytes > 0xFF) {
         return false;
@@ -126,6 +121,8 @@ bool to_bytes(const BitField& field, bool packed, ReportField& out) {
     out.present = true;
     out.offset = static_cast<std::uint8_t>(offset);
     out.bytes = static_cast<std::uint8_t>(bytes);
+    out.bit_offset = static_cast<std::uint8_t>(bit_inside_byte);
+    out.bits = static_cast<std::uint8_t>(field.bits);
     return true;
 }
 

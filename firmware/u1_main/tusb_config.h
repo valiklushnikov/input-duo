@@ -28,10 +28,13 @@ extern "C" {
 
 #define CFG_TUD_HID_EP_BUFSIZE 8
 
-// The configurator sends 512-byte chunks inside COBS frames; a buffer smaller
-// than a frame would split every one of them across two reads for no reason.
+// The protocol permits a 1024-byte payload, but CDC carries the complete COBS
+// wire frame: header, CRC, COBS overhead and delimiter make that frame larger
+// than 1024 bytes.  tud_cdc_write() accepts only what fits in this FIFO and
+// returns a short count for the rest, so a 1024-byte FIFO silently cut the
+// diagnostic reply before its delimiter and made it undecodable.
 #define CFG_TUD_CDC_RX_BUFSIZE 1024
-#define CFG_TUD_CDC_TX_BUFSIZE 1024
+#define CFG_TUD_CDC_TX_BUFSIZE 2048
 #define CFG_TUD_CDC_EP_BUFSIZE 64
 
 #ifdef __cplusplus

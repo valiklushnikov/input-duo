@@ -250,6 +250,16 @@ public:
     /// the one failure that cannot be recovered from without resetting the bus.
     void ignore_report_descriptor(bool ignoring) { ignore_report_descriptor_ = ignoring; }
 
+    /// Take the request, answer the data stage, and hand back no bytes.
+    ///
+    /// The transfer completes at every step - the setup packet is accepted,
+    /// the IN transaction succeeds, the status stage lands - and the endpoint
+    /// buffer is empty every time. Different from a refusal, which says no,
+    /// and from silence, which says nothing at all: this one says yes and
+    /// carries nothing, and the firmware handed the empty buffer to the
+    /// parser and recorded the parser's refusal as the device's.
+    void empty_report_descriptor(bool empty) { empty_report_descriptor_ = empty; }
+
     /// How many times the report descriptor has been asked for, and how many
     /// bytes the last request asked for.
     int report_descriptor_requests() const { return report_descriptor_requests_; }
@@ -260,6 +270,13 @@ public:
     int control_read_status_stages() const { return control_read_status_stages_; }
     /// The transmitter's data toggle, as it was last set (DS2 1.7).
     std::uint8_t transmit_toggle() const { return transmit_toggle_; }
+    /// The transmitter's toggle as it stood when each SETUP token went out.
+    ///
+    /// USB 2.0 8.5.3: the data packet of a SETUP transaction is always DATA0.
+    /// The chip tracks neither toggle, so what the last transfer left behind
+    /// is what the next setup packet goes out as - which is why this is
+    /// recorded per packet rather than only at the end.
+    const std::vector<std::uint8_t>& setup_toggles() const { return setup_toggles_; }
 
     // --- control transfers the chip has no dedicated command for ------------
     //
@@ -609,11 +626,13 @@ private:
     std::uint8_t control_packet_ = 8;
     bool refuse_report_descriptor_ = false;
     bool ignore_report_descriptor_ = false;
+    bool empty_report_descriptor_ = false;
     int report_descriptor_requests_ = 0;
     std::uint16_t report_descriptor_asked_ = 0;
     int report_descriptor_packets_ = 0;
     int control_read_status_stages_ = 0;
     std::uint8_t transmit_toggle_ = 0;
+    std::vector<std::uint8_t> setup_toggles_;
     bool boot_protocol_ = false;
     int control_naks_ = 0;
     bool hold_control_nak_retry_ = false;

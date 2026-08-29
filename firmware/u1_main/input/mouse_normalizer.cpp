@@ -26,20 +26,36 @@ bool read_field(const ch375::ReportField& field, const std::uint8_t* body,
     if (!field.present || field.bytes == 0) {
         return false;
     }
-    const std::size_t end = static_cast<std::size_t>(field.offset) + field.bytes;
+    const std::uint8_t width = field.bits == 0
+                                   ? static_cast<std::uint8_t>(field.bytes * 8)
+                                   : field.bits;
+    if (width == 0 || width > 16 || field.bit_offset > 7) {
+        return false;
+    }
+    const std::size_t bytes =
+        (static_cast<std::size_t>(field.bit_offset) + width + 7) / 8;
+    if (bytes > field.bytes || bytes > 3) {
+        return false;
+    }
+    const std::size_t end = static_cast<std::size_t>(field.offset) + bytes;
     if (end > body_size) {
         return false;
     }
-    if (field.bytes == 1) {
-        out = static_cast<std::int16_t>(static_cast<std::int8_t>(body[field.offset]));
-        return true;
+
+    // USB numbers are little-endian, but HID fields are bit streams and need
+    // not start on a byte. Assemble only the bytes touched, shift the declared
+    // field down, then sign-extend its own width rather than the container's.
+    std::uint32_t container = 0;
+    for (std::size_t byte = 0; byte < bytes; ++byte) {
+        container |= static_cast<std::uint32_t>(body[field.offset + byte]) << (8 * byte);
     }
-    // Two bytes, little-endian, which is how USB carries every multi-byte
-    // field (USB 2.0 8.1). Anything wider was refused by the parser.
-    const std::uint16_t raw =
-        static_cast<std::uint16_t>(static_cast<std::uint16_t>(body[field.offset]) |
-                                   static_cast<std::uint16_t>(body[field.offset + 1] << 8));
-    out = static_cast<std::int16_t>(raw);
+    const std::uint32_t mask = (std::uint32_t{1} << width) - 1;
+    std::uint32_t raw = (container >> field.bit_offset) & mask;
+    const std::uint32_t sign = std::uint32_t{1} << (width - 1);
+    if ((raw & sign) != 0) {
+        raw |= ~mask;
+    }
+    out = static_cast<std::int16_t>(static_cast<std::int32_t>(raw));
     return true;
 }
 
@@ -91,7 +107,20 @@ std::size_t MouseNormalizer::apply(protocol::ByteView report, InputEvent* out,
     // hundred reports is one press.
     std::int16_t button_bits = 0;
     if (read_field(layout_.buttons, body, body_size, button_bits)) {
-        const std::uint8_t buttons = static_cast<std::uint8_t>(button_bits & 0xFF);
+        // read_field sign-extends movement fields, as it must. Buttons are an
+        // unsigned bit set, so discard that sign fill above the width the HID
+        // descriptor declared. Without this, button 3 of a three-button mouse
+        // (0b100) becomes 0xFC and invents both side buttons too.
+        const std::uint8_t declared_bits =
+            layout_.buttons.bits == 0
+                ? static_cast<std::uint8_t>(layout_.buttons.bytes * 8)
+                : layout_.buttons.bits;
+        const std::uint8_t button_mask =
+            declared_bits >= 8
+                ? std::uint8_t{0xFF}
+                : static_cast<std::uint8_t>((std::uint16_t{1} << declared_bits) - 1);
+        const std::uint8_t buttons =
+            static_cast<std::uint8_t>(button_bits) & button_mask;
         const std::uint8_t changed = static_cast<std::uint8_t>(buttons ^ buttons_);
         for (std::size_t index = 0; index < kMouseButtons; ++index) {
             const std::uint8_t mask = static_cast<std::uint8_t>(1u << index);

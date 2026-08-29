@@ -219,13 +219,22 @@ SetupProgress DescriptorSetup::collect_report_descriptor(std::uint32_t now_us) {
 
 /// Read what arrived, and keep it only if all of it can be named in bytes.
 SetupProgress DescriptorSetup::apply_report_descriptor(std::uint32_t now_us) {
+    if (report_received_ == 0) {
+        // The transfer itself completed, but there is no descriptor to ask
+        // the parser about.  Keep that distinct from bytes which arrived and
+        // did not describe a mouse: the distinction is essential on a board
+        // where the only post-mortem evidence is this status and byte count.
+        report_error_ = ReportDescriptorError::None;
+        return abandon_report_descriptor(now_us, kReportDescriptorUnreadable);
+    }
+
     MouseReportLayout layout = boot_mouse_layout();
     report_error_ = parse_mouse_report_descriptor(
         protocol::ByteView{report_buffer_, report_received_}, layout);
     if (report_error_ != ReportDescriptorError::None) {
-        // A descriptor that does not add up, a mouse with a twelve-bit axis,
-        // a device that is not a pointer at all. Each of them is a device this
-        // firmware can still route on boot protocol's fixed report.
+        // A descriptor that does not add up, a field wider than the bounded
+        // reader, a device that is not a pointer at all. Each of them is a
+        // device this firmware can still route on boot protocol's fixed report.
         return abandon_report_descriptor(now_us, kReportDescriptorUnusable);
     }
 
@@ -240,7 +249,10 @@ SetupProgress DescriptorSetup::apply_report_descriptor(std::uint32_t now_us) {
 SetupProgress DescriptorSetup::abandon_report_descriptor(std::uint32_t now_us,
                                                         std::uint8_t status) {
     report_status_ = status;
-    report_received_ = 0;
+    // Do not erase bytes already collected.  A zero byte count means nothing
+    // arrived; a non-zero count plus kReportDescriptorUnusable means the
+    // parser rejected actual evidence.  begin() resets the count before the
+    // next device, so preserving it here cannot leak into another attempt.
     return select_boot_protocol(now_us);
 }
 

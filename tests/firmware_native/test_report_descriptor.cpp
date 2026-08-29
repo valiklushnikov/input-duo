@@ -11,9 +11,9 @@
 // that believes what it is told walks out of the buffer. Every item here is
 // measured against what is left.
 //
-// What comes out is deliberately narrow: byte offsets for the four fields the
-// normalizer reads. A layout that cannot be expressed that way is refused by
-// name, and a refused layout is one the caller keeps out of report protocol.
+// What comes out is deliberately narrow: bounded bit spans for the four fields
+// the normalizer reads. A layout that cannot be expressed that way is refused
+// by name, and a refused layout is one the caller keeps out of report protocol.
 
 #include "ch375/report_descriptor.hpp"
 #include "test_support.hpp"
@@ -319,10 +319,10 @@ TEST_CASE(nothing_at_all_is_refused_rather_than_read) {
              static_cast<int>(ReportDescriptorError::Truncated));
 }
 
-TEST_CASE(a_field_that_does_not_start_on_a_byte_is_refused) {
+TEST_CASE(a_field_that_does_not_start_on_a_byte_is_recorded_in_bits) {
     // Five button bits and then X immediately, with no padding: X starts at
-    // bit five. The normalizer reads whole bytes, so this layout cannot be
-    // expressed to it, and pretending otherwise shifts every axis.
+    // bit five and Y at bit thirteen. The byte span alone is ambiguous; the
+    // bit offset keeps both values exact.
     const std::vector<std::uint8_t> bytes = {
         0x05, 0x01,        // Usage Page (Generic Desktop)
         0x09, 0x02,        // Usage (Mouse)
@@ -344,12 +344,20 @@ TEST_CASE(a_field_that_does_not_start_on_a_byte_is_refused) {
     MouseReportLayout layout;
 
     CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(bytes), layout)),
-             static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+             static_cast<int>(ReportDescriptorError::None));
+    CHECK_EQ(layout.x.offset, std::uint8_t{0});
+    CHECK_EQ(layout.x.bytes, std::uint8_t{2});
+    CHECK_EQ(layout.x.bit_offset, std::uint8_t{5});
+    CHECK_EQ(layout.x.bits, std::uint8_t{8});
+    CHECK_EQ(layout.y.offset, std::uint8_t{1});
+    CHECK_EQ(layout.y.bytes, std::uint8_t{2});
+    CHECK_EQ(layout.y.bit_offset, std::uint8_t{5});
+    CHECK_EQ(layout.y.bits, std::uint8_t{8});
 }
 
-TEST_CASE(an_axis_that_is_not_one_or_two_bytes_wide_is_refused) {
-    // Twelve-bit axes. Real, and packed three to four bytes; nothing here can
-    // read them, so the device keeps the layout it is already understood by.
+TEST_CASE(packed_twelve_bit_axes_are_kept_exactly) {
+    // The pair occupies three bytes: X starts at byte one and Y at the high
+    // nibble of byte two. This is the shape the real bench mouse uses.
     std::vector<std::uint8_t> bytes = {
         0x05, 0x01,        // Usage Page (Generic Desktop)
         0x09, 0x02,        // Usage (Mouse)
@@ -371,7 +379,76 @@ TEST_CASE(an_axis_that_is_not_one_or_two_bytes_wide_is_refused) {
     MouseReportLayout layout;
 
     CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::None));
+    CHECK_EQ(layout.x.offset, std::uint8_t{1});
+    CHECK_EQ(layout.x.bytes, std::uint8_t{2});
+    CHECK_EQ(layout.x.bit_offset, std::uint8_t{0});
+    CHECK_EQ(layout.x.bits, std::uint8_t{12});
+    CHECK_EQ(layout.y.offset, std::uint8_t{2});
+    CHECK_EQ(layout.y.bytes, std::uint8_t{2});
+    CHECK_EQ(layout.y.bit_offset, std::uint8_t{4});
+    CHECK_EQ(layout.y.bits, std::uint8_t{12});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{4});
+}
+
+TEST_CASE(the_bench_mouses_real_packed_twelve_bit_descriptor_is_accepted) {
+    // Captured byte-for-byte from the attached mouse on 2026-08-30.  Its
+    // seven-byte report is ID 1, buttons, two packed signed 12-bit axes,
+    // wheel and AC Pan.  Boot protocol hides the last two fields, so this is
+    // the vector the wheel repair has to understand rather than approximate.
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x01,
+        0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00,
+        0x25, 0x01, 0x95, 0x05, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01,
+        0x75, 0x03, 0x81, 0x03, 0x05, 0x01, 0x16, 0x01, 0xF8, 0x26,
+        0xFF, 0x07, 0x75, 0x0C, 0x95, 0x02, 0x09, 0x30, 0x09, 0x31,
+        0x81, 0x06, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01,
+        0x09, 0x38, 0x81, 0x06, 0xC0, 0x05, 0x0C, 0x0A, 0x38, 0x02,
+        0x95, 0x01, 0x81, 0x06, 0xC0,
+    };
+    MouseReportLayout layout;
+
+    CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::None));
+    CHECK(layout.report_id);
+    CHECK_EQ(layout.report_id_value, std::uint8_t{1});
+    CHECK_EQ(layout.buttons.offset, std::uint8_t{0});
+    CHECK_EQ(layout.x.offset, std::uint8_t{1});
+    CHECK_EQ(layout.x.bytes, std::uint8_t{2});
+    CHECK_EQ(layout.x.bits, std::uint8_t{12});
+    CHECK_EQ(layout.y.offset, std::uint8_t{2});
+    CHECK_EQ(layout.y.bytes, std::uint8_t{2});
+    CHECK_EQ(layout.y.bit_offset, std::uint8_t{4});
+    CHECK_EQ(layout.y.bits, std::uint8_t{12});
+    CHECK_EQ(layout.wheel.offset, std::uint8_t{4});
+    CHECK_EQ(layout.pan.offset, std::uint8_t{5});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{4});
+}
+
+TEST_CASE(an_axis_wider_than_the_bounded_reader_is_refused_without_half_a_layout) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x01,        // Usage Page (Generic Desktop)
+        0x09, 0x02,        // Usage (Mouse)
+        0xA1, 0x01,        // Collection (Application)
+        0x05, 0x09,        //   Usage Page (Button)
+        0x19, 0x01, 0x29, 0x08,
+        0x75, 0x01, 0x95, 0x08,
+        0x81, 0x02,        //   eight button bits
+        0x05, 0x01,
+        0x09, 0x30, 0x09, 0x31,
+        0x75, 0x14,        //   Report Size (20)
+        0x95, 0x02,
+        0x81, 0x06,
+        0xC0,
+    };
+    MouseReportLayout layout = boot_mouse_layout();
+
+    CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(bytes), layout)),
              static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+    CHECK_FALSE(layout.report_id);
+    CHECK_EQ(layout.x.offset, std::uint8_t{1});
+    CHECK_EQ(layout.x.bytes, std::uint8_t{1});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{3});
 }
 
 TEST_CASE(a_refused_descriptor_leaves_the_caller_nothing_half_filled) {
@@ -482,30 +559,31 @@ std::vector<std::uint8_t> byte_aligned_twelve_bit_axes() {
 
 }  // namespace
 
-TEST_CASE(a_twelve_bit_axis_on_a_byte_boundary_is_still_refused) {
+TEST_CASE(a_twelve_bit_axis_on_a_byte_boundary_is_kept_twelve_bits_wide) {
     const std::vector<std::uint8_t> bytes = byte_aligned_twelve_bit_axes();
     MouseReportLayout layout;
 
-    // Nothing here can read a twelve-bit field, and rounding it down to one
-    // byte throws away the top four bits of every movement.
     CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(bytes), layout)),
-             static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+             static_cast<int>(ReportDescriptorError::None));
+    CHECK_EQ(layout.x.offset, std::uint8_t{1});
+    CHECK_EQ(layout.x.bytes, std::uint8_t{2});
+    CHECK_EQ(layout.x.bits, std::uint8_t{12});
+    CHECK_EQ(layout.y.offset, std::uint8_t{3});
+    CHECK_EQ(layout.y.bytes, std::uint8_t{2});
+    CHECK_EQ(layout.y.bits, std::uint8_t{12});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{5});
 }
 
-TEST_CASE(a_layout_refused_at_the_last_step_still_leaves_the_caller_its_own) {
-    // The other test of this refuses at the first step, where nothing has been
-    // built yet. This one gets all the way to the end - a real pointer, with
-    // fields that cannot be named in bytes - which is the only path where a
-    // finished layout exists and could be written out by mistake.
+TEST_CASE(an_accepted_packed_layout_replaces_the_callers_fallback) {
     MouseReportLayout layout = boot_mouse_layout();
     const std::vector<std::uint8_t> bytes = byte_aligned_twelve_bit_axes();
 
     CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(bytes), layout)),
-             static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+             static_cast<int>(ReportDescriptorError::None));
 
     CHECK_FALSE(layout.report_id);
     CHECK_EQ(layout.buttons.offset, std::uint8_t{0});
     CHECK_EQ(layout.x.offset, std::uint8_t{1});
-    CHECK_EQ(layout.y.offset, std::uint8_t{2});
-    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{3});
+    CHECK_EQ(layout.y.offset, std::uint8_t{3});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{5});
 }

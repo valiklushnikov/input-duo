@@ -18,10 +18,10 @@
 // buffer. Every step here is measured against what is left, and a descriptor
 // that does not add up is refused whole rather than partly believed.
 //
-// What comes out is narrow on purpose: byte offsets and widths for the four
-// fields the normalizer reads. A layout that cannot be said in those terms -
-// an axis on a bit boundary, a twelve-bit field - is refused by name, and the
-// caller keeps such a device on the path it already worked on.
+// What comes out is narrow on purpose: bit spans for the four fields the
+// normalizer reads. Fields up to sixteen bits may cross a byte boundary; a
+// wider value or a report that cannot be named safely is refused whole, and
+// the caller keeps such a device on the path it already worked on.
 
 #include <cstddef>
 #include <cstdint>
@@ -33,11 +33,14 @@ namespace duo_input::u1::ch375 {
 /// Where one field sits in a report, once the Report ID has been taken off.
 struct ReportField {
     bool present = false;
-    /// Bytes from the start of the report body, which is the byte after the
-    /// Report ID on a device that sends one and the first byte on one that
-    /// does not.
+    /// First byte touched, from the start of the report body.
     std::uint8_t offset = 0;
+    /// Number of bytes touched. A packed 12-bit field can touch two bytes.
     std::uint8_t bytes = 0;
+    /// First bit inside ``offset``. Zero for every byte-aligned field.
+    std::uint8_t bit_offset = 0;
+    /// Declared width. Zero preserves byte-wide layouts built by old callers.
+    std::uint8_t bits = 0;
 };
 
 /// The four fields a mouse report has to give up before it can be routed.
@@ -74,7 +77,7 @@ enum class ReportDescriptorError : std::uint8_t {
     Truncated,
     /// Nothing in here reports X and Y, so there is no mouse to be found.
     NoMouseReport,
-    /// A mouse, but not one whose fields can be named as whole bytes.
+    /// A mouse, but not one whose fields fit the bounded bit reader.
     UnsupportedLayout,
 };
 

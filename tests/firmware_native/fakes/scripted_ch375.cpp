@@ -761,6 +761,7 @@ bool FakeCh375Chip::control_transfer_naks() {
 
 void FakeCh375Chip::begin_control_transfer() {
     setup_packets_.push_back(outbound_block_);
+    setup_toggles_.push_back(transmit_toggle_);
     control_pending_ = false;
     // A new setup packet ends whatever transfer was open. That is the real
     // rule (USB 2.0 8.5.3) and it is also what keeps an abandoned read from
@@ -786,6 +787,16 @@ void FakeCh375Chip::begin_control_transfer() {
             pending_read_.clear();
             pending_status_ = 0x2E;
             int_asserted_ = !silent_;
+            return;
+        }
+        if (empty_report_descriptor_) {
+            // Yes to every stage and nothing in the buffer. The transfer runs
+            // to its end and the host has collected no descriptor at all.
+            control_read_total_ = 0;
+            control_read_open_ = true;
+            control_read_data1_ = true;
+            pending_read_.clear();
+            finish_transfer(false);
             return;
         }
         control_read_total_ = report_descriptor_.size() < report_descriptor_asked_

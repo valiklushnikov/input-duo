@@ -427,6 +427,9 @@ duo_input::u1::PinActivity watch_existing_pin(unsigned pin, std::uint32_t for_us
 #endif
 
 /// Sends the configurator's replies back down the CDC pipe.
+static_assert(CFG_TUD_CDC_TX_BUFSIZE >= duo_input::u1::kMaxWireFrame,
+              "TinyUSB TX FIFO must hold one complete encoded protocol frame");
+
 class CdcWriter : public duo_input::u1::CdcSink {
 public:
     void write(const std::uint8_t* data, std::size_t size) override {
@@ -604,9 +607,11 @@ namespace {
     // Zeroed, because what is sent is measured from what was
     // written - and anything past that in an uninitialised
     // buffer goes out as part of the message.
-    // Wider than it was: the report-descriptor line is the only place the
-    // wheel's fate is visible, and a report that runs out of room stops at
-    // whichever device happened to be printed first.
+    // Large enough for two compact device summaries and one ordinary raw HID
+    // report descriptor.  The previous prose report spent the whole buffer on
+    // the first device and cut the second one mid-line, exactly where the
+    // failing mouse happened to be.  This format favours discriminating facts
+    // over narration and ends with a marker that makes truncation visible.
     static char text[1023] = {};
     int used = 0;
     const char* names[2] = {"keyboard", "mouse"};
@@ -616,35 +621,25 @@ namespace {
         const unsigned state = static_cast<unsigned>(device.state());
         used += snprintf(
             text + used, sizeof(text) - static_cast<std::size_t>(used),
-            "%s state=%s speed=%s attached=%u gone=%u ready=%u reports=%u\n"
-            "  check_exist=%s int_seen=%u status_read_failed=%u\n"
-            "  connect=%u disconnect=%u success=%u failure=%u impossible=%u\n"
-            "  detach_disconnect=%u detach_lost=%u enum_failed=%u mode_failed=%u\n"
-            "  setup attempts=%u last=0x%02X (%s) polls=%u\n"
-            "  found=%s endpoint=%u packet=%u boot=adv:%s sel:%s parse=%u\n"
-            "  layout=%s rd=0x%02X bytes=%u id=%s/%u  b@%u x@%u/%u y@%u/%u w@%u p@%u min=%u\n"
-            "  last report (%u bytes): %02X %02X %02X %02X\n"
-            "  port=%u baud, refused_changes=%u\n"
-            "  mode_refused setup=%u recover=%u  found_elsewhere=%u alive_refusing=%u\n"
-            "  not_back_yet=%u found_at=%u presence_lost=%u quiet_rearms=%u collapses=%u\n"
-            "  mode_reply=%s 0x%02X (%s)\n"
-            "  slowest pass round the loop=%u us\n"
-            "  commands the output queue refused=%u\n",
+            "%s st=%s rate=%s life=%u/%u/%u reports=%u int=%u/%u\n"
+            " bus ce=%s status=%u/%u/%u/%u/%u enumfail=%u modefail=%u polls=%u\n"
+            " hid=%s ep=%u pkt=%u boot=%s/%s setup=%u last=%02X cfgerr=%u\n"
+            " rd=%02X err=%u got/want=%u/%u layout=%s id=%s/%u "
+            "b=%u x=%u/%u+%u:%u y=%u/%u+%u:%u w=%u p=%u min=%u\n"
+            " last=%u:%02X %02X %02X %02X port=%u refused=%u "
+            "recover=%u/%u/%u/%u/%u slow=%u drop=%u\n",
             names[index], state < 7 ? kStates[state] : "?",
             device.device_rate_known() ? (device.device_is_low_speed() ? "low" : "full")
                                        : "unknown",
             tally.attached, tally.detached,
             tally.ready, tally.reports,
+            device.interrupts_seen(), device.status_reads_failed(),
             (index == 0 ? g_probe.keyboard_probe : g_probe.mouse_probe).check_exist_ok
                 ? "0xA8"
                 : "WRONG",
-            device.interrupts_seen(), device.status_reads_failed(),
             device.status_connect(), device.status_disconnect(), device.status_success(),
             device.status_failure(), device.status_impossible(),
-            device.detach_from_disconnect(), device.detach_from_lost(),
             device.enumerate_failures(), device.mode_failures(),
-            setups[index]->attempts(), setups[index]->last_status(),
-            describe_setup_status(setups[index]->last_status()),
             device.polls_issued(),
             setups[index]->kind() == duo_input::u1::ch375::DeviceKind::Keyboard
                 ? "keyboard"
@@ -652,42 +647,31 @@ namespace {
                        ? "mouse"
                        : "nothing"),
             setups[index]->interrupt_endpoint(), setups[index]->max_packet(),
-            // Two answers, not one. The first is only what the interface
-            // descriptor advertises; the second is whether SET_PROTOCOL
-            // actually landed. Printing the first as "boot=yes" was read
-            // as the second for weeks, while the mouse went on sending
-            // its own report format with an identifier in front of it.
             setups[index]->boot_protocol() ? "yes" : "no",
             setups[index]->boot_protocol_selected() ? "yes" : "no",
+            setups[index]->attempts(), setups[index]->last_status(),
             static_cast<unsigned>(setups[index]->last_parse_error()),
-            // Where the wheel is, or why there is not one. "layout=own" with
-            // a wheel offset inside the reported size is the whole repair;
-            // "layout=boot" plus the rd= byte says which way it fell back.
-            setups[index]->has_mouse_layout() ? "own" : "boot",
             setups[index]->last_report_descriptor_status(),
+            static_cast<unsigned>(setups[index]->last_report_descriptor_error()),
             setups[index]->report_descriptor_bytes(),
+            setups[index]->report_descriptor_wanted(),
+            setups[index]->has_mouse_layout() ? "own" : "boot",
             setups[index]->mouse_layout().report_id ? "yes" : "no",
             setups[index]->mouse_layout().report_id_value,
             setups[index]->mouse_layout().buttons.offset,
             setups[index]->mouse_layout().x.offset, setups[index]->mouse_layout().x.bytes,
+            setups[index]->mouse_layout().x.bit_offset, setups[index]->mouse_layout().x.bits,
             setups[index]->mouse_layout().y.offset, setups[index]->mouse_layout().y.bytes,
+            setups[index]->mouse_layout().y.bit_offset, setups[index]->mouse_layout().y.bits,
             setups[index]->mouse_layout().wheel.offset,
             setups[index]->mouse_layout().pan.offset,
             setups[index]->mouse_layout().minimum_body_bytes,
             tally.last_size, tally.last[0], tally.last[1], tally.last[2], tally.last[3],
             (index == 0 ? g_keyboard_port : g_mouse_port).baud(),
             device.baud_change_failures(), device.setup_mode_failures(),
-            device.recover_mode_failures(), device.chip_found_elsewhere(),
-            device.alive_but_refusing(),
-            device.chip_not_back_yet(), device.chip_found_at(),
-            device.presence_lost(), device.quiet_rearms(),
-            device.collapses_while_raised(),
-            device.mode_answered() ? "answered" : "silent", device.mode_reply(),
-            describe_mode_reply(device.mode_answered(), device.mode_reply()),
+            device.recover_mode_failures(), device.presence_lost(),
+            device.quiet_rearms(), device.collapses_while_raised(),
             worst_pass_us,
-            // Not per device - it is the whole runtime's count, and
-            // this build replaces the diagnostics reply that would
-            // otherwise carry it with this text.
             static_cast<unsigned>(g_runtime.dropped_commands()));
         // snprintf answers with how much it *would* have written. Left
         // unclamped, the next call is handed a negative amount of room
@@ -696,6 +680,27 @@ namespace {
             used = static_cast<int>(sizeof(text)) - 1;
             break;
         }
+
+        // A parser failure without its bytes is still a guess.  Keep this in
+        // the same reply so the exact real descriptor can become a native
+        // regression vector before the parser is changed.
+        const duo_input::protocol::ByteView raw = setups[index]->report_descriptor();
+        if (raw.size != 0 && !setups[index]->has_mouse_layout()) {
+            used += snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used),
+                             " rdhex=");
+            for (std::size_t byte = 0;
+                 byte < raw.size && used < static_cast<int>(sizeof(text)) - 3; ++byte) {
+                used += snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used),
+                                 "%02X", raw.data[byte]);
+            }
+            if (used < static_cast<int>(sizeof(text)) - 1) {
+                text[used++] = '\n';
+                text[used] = '\0';
+            }
+        }
+    }
+    if (used < static_cast<int>(sizeof(text)) - 5) {
+        used += snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used), "END\n");
     }
     // snprintf answers with how much it *would* have written, not
     // how much it did. Trusting that sends whatever lies past the end

@@ -543,6 +543,21 @@ std::vector<std::uint8_t> report_id_wheel_mouse_descriptor() {
     };
 }
 
+/// Captured from the attached mouse: Report ID 1, five buttons, packed
+/// twelve-bit X/Y, wheel and AC Pan.
+std::vector<std::uint8_t> bench_mouse_descriptor() {
+    return {
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x01,
+        0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00,
+        0x25, 0x01, 0x95, 0x05, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01,
+        0x75, 0x03, 0x81, 0x03, 0x05, 0x01, 0x16, 0x01, 0xF8, 0x26,
+        0xFF, 0x07, 0x75, 0x0C, 0x95, 0x02, 0x09, 0x30, 0x09, 0x31,
+        0x81, 0x06, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01,
+        0x09, 0x38, 0x81, 0x06, 0xC0, 0x05, 0x0C, 0x0A, 0x38, 0x02,
+        0x95, 0x01, 0x81, 0x06, 0xC0,
+    };
+}
+
 /// Run one report through a normalizer set up the way the runtime sets it up.
 struct Routed {
     duo_input::u1::input::InputEvent events[duo_input::u1::input::kMaxEventsPerReport];
@@ -675,6 +690,32 @@ TEST_CASE(buttons_and_axes_land_behind_a_report_id_too) {
         if (out.events[index].kind == duo_input::u1::input::InputEventKind::MouseMove) {
             CHECK_EQ(out.events[index].x, std::int16_t{-10});
             CHECK_EQ(out.events[index].y, std::int16_t{79});
+        }
+    }
+}
+
+TEST_CASE(the_real_bench_mouse_keeps_report_protocol_and_routes_packed_axes_and_wheel) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_mouse_with_report_descriptor(bench_mouse_descriptor(), true);
+
+    rig.begin(rig.chip.now_us());
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK(rig.setup.has_mouse_layout());
+    CHECK_FALSE(rig.setup.boot_protocol_selected());
+
+    // ID 1; no buttons; X=+0x123; Y=-0x123; wheel=-1; pan=+1.
+    const Routed out = route(rig.setup, {0x01, 0x00, 0x23, 0xD1, 0xED, 0xFF, 0x01});
+    CHECK_EQ(out.count_of(duo_input::u1::input::InputEventKind::MouseMove), 1);
+    CHECK_EQ(out.count_of(duo_input::u1::input::InputEventKind::Wheel), 1);
+    for (std::size_t index = 0; index < out.count; ++index) {
+        if (out.events[index].kind == duo_input::u1::input::InputEventKind::MouseMove) {
+            CHECK_EQ(out.events[index].x, std::int16_t{0x123});
+            CHECK_EQ(out.events[index].y, std::int16_t{-0x123});
+        }
+        if (out.events[index].kind == duo_input::u1::input::InputEventKind::Wheel) {
+            CHECK_EQ(out.events[index].wheel, -1);
+            CHECK_EQ(out.events[index].pan, 1);
         }
     }
 }
@@ -829,6 +870,89 @@ TEST_CASE(a_device_that_refuses_it_still_moves_the_pointer) {
              static_cast<int>(duo_input::u1::input::InputEventKind::MouseMove));
     CHECK_EQ(out.events[0].x, std::int16_t{-10});
     CHECK_EQ(out.events[0].y, std::int16_t{79});
+}
+
+// The bring-up report is the only evidence a board ever gives up, and these
+// four outcomes are four different repairs. Collapsing them into one status
+// with the byte count wiped is what sent a whole session looking for a fetch
+// that produced nothing, on a line that could not have said anything else.
+//
+//   0xF6  the device refused the request
+//   0xF5  bytes arrived and did not describe a mouse this firmware can read
+//   0xF4  the transfer completed and carried nothing
+//   0xF3  silent so many times it is not asked again
+
+TEST_CASE(a_data_stage_that_carries_nothing_is_reported_as_nothing) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_mouse_with_report_descriptor(plain_wheel_mouse_descriptor(), true);
+    rig.chip.empty_report_descriptor(true);
+
+    rig.begin(rig.chip.now_us());
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+
+    // Asked for, answered, and empty. Not 0xF5 - that byte says the bytes
+    // arrived and were unreadable, and no bytes arrived.
+    CHECK_EQ(rig.chip.report_descriptor_requests(), 1);
+    CHECK_EQ(rig.setup.last_report_descriptor_status(), std::uint8_t{0xF4});
+    CHECK_EQ(rig.setup.report_descriptor_bytes(), std::uint16_t{0});
+    // The parser was never asked, so it has no verdict to give. A Truncated
+    // here would be the firmware blaming the bytes for not existing.
+    CHECK_EQ(static_cast<int>(rig.setup.last_report_descriptor_error()),
+             static_cast<int>(duo_input::u1::ch375::ReportDescriptorError::None));
+    CHECK_FALSE(rig.setup.has_mouse_layout());
+    CHECK(rig.setup.boot_protocol_selected());
+}
+
+TEST_CASE(a_descriptor_that_arrives_and_will_not_parse_keeps_its_evidence) {
+    Rig rig;
+    rig.chip.attach_device();
+    std::vector<std::uint8_t> nonsense;
+    for (int index = 0; index < 20; ++index) {
+        nonsense.push_back(0xA1);
+        nonsense.push_back(0x01);
+    }
+    rig.chip.serve_mouse_with_report_descriptor(nonsense, true);
+
+    rig.begin(rig.chip.now_us());
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+
+    CHECK_EQ(rig.setup.last_report_descriptor_status(), std::uint8_t{0xF5});
+    // How many arrived, still standing. Zeroed on the way out, this reads
+    // exactly like a fetch that collected nothing - and a reader who believes
+    // it goes looking for a transport fault that is not there.
+    CHECK_EQ(rig.setup.report_descriptor_bytes(),
+             static_cast<std::uint16_t>(nonsense.size()));
+    CHECK_EQ(rig.setup.report_descriptor_wanted(),
+             static_cast<std::uint16_t>(nonsense.size()));
+    // And what the parser made of them, which is the difference between a
+    // device that is not a pointer and one whose axes are on bit boundaries.
+    CHECK_EQ(static_cast<int>(rig.setup.last_report_descriptor_error()),
+             static_cast<int>(duo_input::u1::ch375::ReportDescriptorError::NoMouseReport));
+    CHECK_FALSE(rig.setup.has_mouse_layout());
+}
+
+TEST_CASE(every_control_setup_packet_starts_with_data0) {
+    Rig rig;
+    rig.chip.attach_device();
+    // This deliberately forces two manual control transfers in succession:
+    // first GET_DESCRIPTOR, then the boot-protocol fallback.  Finishing the
+    // read leaves the transmitter at DATA1, but USB 2.0 8.5.3 requires the
+    // data packet of every new SETUP transaction to be DATA0.
+    std::vector<std::uint8_t> nonsense;
+    for (int index = 0; index < 20; ++index) {
+        nonsense.push_back(0xA1);
+        nonsense.push_back(0x01);
+    }
+    rig.chip.serve_mouse_with_report_descriptor(nonsense, true);
+
+    rig.begin(rig.chip.now_us());
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+
+    const auto& toggles = rig.chip.setup_toggles();
+    CHECK_EQ(toggles.size(), std::size_t{2});
+    CHECK_EQ(toggles[0], duo_input::u1::ch375::kToggleData0);
+    CHECK_EQ(toggles[1], duo_input::u1::ch375::kToggleData0);
 }
 
 TEST_CASE(a_descriptor_that_cannot_be_parsed_falls_back_to_boot) {
