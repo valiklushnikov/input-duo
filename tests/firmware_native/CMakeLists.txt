@@ -356,6 +356,29 @@ endif()
 
 add_test(NAME normalizers COMMAND duo_normalizers_test)
 
+add_executable(duo_trace_replay_test
+    test_main.cpp
+    test_trace_replay.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/keyboard_normalizer.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/mouse_normalizer.cpp
+)
+
+target_link_libraries(duo_trace_replay_test PRIVATE duo_common)
+target_include_directories(duo_trace_replay_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_compile_definitions(duo_trace_replay_test PRIVATE
+    DUO_KEYBOARD_TRACE_PATH="${CMAKE_SOURCE_DIR}/tests/vectors/hid_reports/keyboard_boot_reports.json"
+    DUO_MOUSE_TRACE_PATH="${CMAKE_SOURCE_DIR}/tests/vectors/hid_reports/mouse_boot_reports.json"
+)
+
+if(MSVC)
+    target_compile_options(duo_trace_replay_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME trace_replay COMMAND duo_trace_replay_test)
+
 add_executable(duo_binding_engine_test
     test_main.cpp
     test_binding_engine.cpp
