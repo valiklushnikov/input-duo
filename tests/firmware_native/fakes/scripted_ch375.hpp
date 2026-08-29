@@ -343,6 +343,15 @@ public:
     /// Stop answering at all, as a chip with a broken port would.
     void go_silent(bool silent) { silent_ = silent; }
 
+    /// Drop the answer to the next few CHECK_EXISTs, and nothing else.
+    ///
+    /// One byte lost on a wire, rather than a chip that has stopped being a
+    /// chip. The two are the same from outside - a probe that goes unanswered
+    /// - and they want completely different responses, because taking the
+    /// second for the first re-runs the whole of chip setup on a healthy
+    /// channel.
+    void miss_next_check_exists(int count) { missed_check_exists_ = count; }
+
     void advance(std::uint32_t micros) { now_us_ += micros; }
 
     UsbMode mode() const { return mode_; }
@@ -427,6 +436,7 @@ private:
     bool garbage_ = false;
     bool silent_ = false;
     bool hold_int_unanswered_ = false;
+    int missed_check_exists_ = 0;
     bool saw_bus_reset_ = false;
     bool saw_auto_setup_ = false;
     bool fail_auto_setup_ = false;

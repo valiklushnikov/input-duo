@@ -1010,6 +1010,41 @@ TEST_CASE(a_channel_whose_chip_is_well_is_not_set_up_again_for_nothing) {
     CHECK_EQ(rig.chip.mode_set_count(), modes_before);
 }
 
+TEST_CASE(one_missed_probe_byte_is_not_a_lost_chip) {
+    // Declaring the chip lost re-runs the whole of chip setup: RESET_ALL, sixty
+    // milliseconds of waiting, a probe, a mode command and the climb back up
+    // the baud ladder - about a second of a working channel doing nothing, and
+    // a peripheral that goes dark and comes back if one was attached. The far
+    // cheaper search for a chip that has moved is guarded by three failures
+    // (kProbesBeforeChipSearch); this was guarded by none, so a single dropped
+    // byte bought all of it.
+    Rig rig;
+    rig.run(300000);
+    const std::uint32_t modes_before = rig.chip.mode_set_count();
+    rig.chip.miss_next_check_exists(1);
+
+    rig.run(4 * kPresenceRecheckUs, 1000);
+
+    CHECK_EQ(rig.device.presence_lost(), 0u);
+    CHECK_EQ(rig.chip.mode_set_count(), modes_before);
+}
+
+TEST_CASE(two_missed_probe_bytes_in_a_row_are_a_chip_that_has_gone) {
+    // The other side of it: a second opinion, not a second chance. A chip that
+    // really has stopped answering must still be noticed, and quickly - the
+    // retry is immediate rather than a second later, so it costs one reply
+    // timeout to be sure.
+    Rig rig;
+    rig.run(300000);
+    const std::uint32_t modes_before = rig.chip.mode_set_count();
+    rig.chip.miss_next_check_exists(2);
+
+    rig.run(4 * kPresenceRecheckUs, 1000);
+
+    CHECK(rig.device.presence_lost() > 0u);
+    CHECK(rig.chip.mode_set_count() > modes_before);
+}
+
 TEST_CASE(re_proving_the_chip_does_not_cost_the_other_channel_its_poll_window) {
     // Against a healthy chip this measured nothing: the re-check is answered
     // immediately, so asking and waiting costs the same as asking and leaving,

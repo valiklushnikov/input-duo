@@ -260,8 +260,14 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
 
     switch (static_cast<Ch375Command>(pending_command_)) {
         case Ch375Command::CheckExist:
-            queue(static_cast<std::uint8_t>(~value));
             expecting_data_ = false;
+            if (missed_check_exists_ > 0) {
+                // The command was heard and the answer never arrived. One byte
+                // on a wire, not a chip that has gone.
+                --missed_check_exists_;
+                break;
+            }
+            queue(static_cast<std::uint8_t>(~value));
             break;
 
         case Ch375Command::GetDeviceRate:
