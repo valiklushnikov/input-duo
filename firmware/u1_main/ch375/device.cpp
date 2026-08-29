@@ -261,6 +261,19 @@ void Ch375Device::tick(std::uint32_t now_us) {
             // producing nothing at all.
             expect_data1_ = false;
             transport_.set_receive_toggle(kToggleData0);
+            // The control transfers are over and the polling begins, so the
+            // NAK changes meaning: from a device that is busy to one that has
+            // nothing to say, which is what a HID device says between the
+            // keystrokes and the movements. Waiting that out on the bus is a
+            // transaction that never finishes and an interrupt that is never
+            // raised, and a second of those was a keyboard declared lost for
+            // being idle. Reported, it is the evidence that the device is
+            // still there.
+            //
+            // Here rather than after the working mode, because no mode is
+            // taken between this point and the first poll: the modes are all
+            // behind it, and the policy they undo is the enumeration's.
+            transport_.set_retry(kRetryReportNak);
             // A device that got this far fetched every descriptor over this
             // rate, so the rung is proved.
             block_read_failures_ = 0;
@@ -613,10 +626,12 @@ bool Ch375Device::bring_chip_up(std::uint32_t now_us) {
 bool Ch375Device::finish_chip_setup(std::uint32_t now_us) {
     bring_up_ = ChipBringUp::Idle;
 
-    // The chip's own default is to retry a NAK forever (DS2 1.3). A device
-    // that stops answering would then hold the firmware inside a single
-    // command, and everything else on this loop stops with it.
-    transport_.set_retry(kRetryReportNak);
+    // The chip's own default is to retry a NAK for ever (DS2 1.3). A device
+    // that stops answering would then hold the chip inside a single
+    // transaction with nothing able to end it. Waiting one out is what the
+    // control transfers ahead of this need; ending is what everything else
+    // does.
+    transport_.set_retry(kRetryWaitOutNak);
 
     // Only now is the rate raised - after the chip has proved it is alive by
     // taking a mode command.
@@ -767,7 +782,7 @@ void Ch375Device::finish_pending_command(std::uint32_t now_us) {
                 // 12 Mbps (DS2 1.1).
                 transport_.set_usb_speed(device_is_low_speed_ ? UsbSpeed::Low1_5Mbps
                                                               : UsbSpeed::Full12Mbps);
-                transport_.set_retry(kRetryReportNak);
+                transport_.set_retry(kRetryWaitOutNak);
             }
             enter(skip_bus_reset_ ? Ch375State::HostMode : Ch375State::Resetting, now_us);
             return;
@@ -784,13 +799,17 @@ void Ch375Device::finish_pending_command(std::uint32_t now_us) {
             transport_.set_usb_speed(device_is_low_speed_ ? UsbSpeed::Low1_5Mbps
                                                           : UsbSpeed::Full12Mbps);
             // And with it the retry policy, for the same reason and on the
-            // same evidence: the one set during chip setup is three working
-            // modes ago by the time this device is polled, and on the default
-            // the chip retries a NAK on the bus instead of reporting it - so a
-            // poll of an endpoint with nothing to say never finishes and never
-            // raises an interrupt. That was forty polls, eight interrupts and
-            // a keyboard declared lost for being idle.
-            transport_.set_retry(kRetryReportNak);
+            // same evidence: the one set during chip setup is two working
+            // modes ago by the time this device is enumerated, and a mode is
+            // where the other per-transaction setting is already known to be
+            // undone.
+            //
+            // Everything between here and Ready is a control transfer, and a
+            // NAK to one of those means "busy, ask again". The chip is what
+            // asks. Reporting it here instead was fifty-five setup attempts
+            // that all ended 0x2A on a mouse that had enumerated the day
+            // before.
+            transport_.set_retry(kRetryWaitOutNak);
             enter(Ch375State::HostMode, now_us);
             return;
 
