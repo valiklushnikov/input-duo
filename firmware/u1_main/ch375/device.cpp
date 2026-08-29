@@ -14,6 +14,20 @@ void Ch375Device::tick(std::uint32_t now_us) {
 
     InterruptStatus status = InterruptStatus::Success;
     const bool interrupted = poll_interrupt(status);
+    if (transport_.pending_reply() == PendingReply::Status) {
+        // Asked, and not answered yet. Nothing else may be said to the chip
+        // until it is: the chip answers commands in the order they arrive, so
+        // any command written now would be answered after this byte - and each
+        // reader would take the other's. This byte is the one that says a
+        // device arrived, a transaction finished, or a cable was pulled, so
+        // losing it is not something a later tick can repair.
+        //
+        // Nothing is lost by waiting. Every deadline in this machine is an
+        // absolute time, so they all still fire; the tick simply does no work
+        // this pass, which costs microseconds rather than the 20 ms the
+        // blocking read used to take out of the other channel.
+        return;
+    }
     if (interrupted) {
         last_status_ = static_cast<std::uint8_t>(status);
         const std::uint8_t raw = last_status_;
@@ -59,6 +73,16 @@ void Ch375Device::tick(std::uint32_t now_us) {
 
     switch (state_) {
         case Ch375State::Absent: {
+            // Three questions read this one port while a channel is idle - the
+            // idle re-check below, the connect poll after it, and the
+            // interrupt status at the top of the tick - and the chip answers
+            // in the order it was asked. So exactly one of them is outstanding
+            // at a time, and each is collected by the caller that asked it.
+            // Two at once means each reader takes the other's byte, which is
+            // not hypothetical: it is how a CHECK_EXIST reply was read as an
+            // interrupt status and a device that had just been plugged in was
+            // reported as a chip that had stopped answering.
+
             // An idle channel re-proves its chip, not just its socket.
             //
             // Absent asks whether a device is attached and reads silence as
@@ -79,8 +103,12 @@ void Ch375Device::tick(std::uint32_t now_us) {
                     return;
                 }
                 presence_probe_running_ = false;
-                if (answer != ReplyProgress::Answered ||
-                    !transport_.presence_probe_matched()) {
+                if (answer == ReplyProgress::Answered &&
+                    transport_.presence_probe_matched()) {
+                    unanswered_presence_ = 0;
+                    last_presence_us_ = now_us;
+                } else if (++unanswered_presence_ >= kPresenceProbesBeforeLost) {
+                    unanswered_presence_ = 0;
                     ++presence_lost_;
                     // Not a failure to recover from with a delay - there is
                     // nothing being held and nothing to release. Straight back
@@ -89,24 +117,43 @@ void Ch375Device::tick(std::uint32_t now_us) {
                     bring_up_ = ChipBringUp::Idle;
                     return;
                 }
-                last_presence_us_ = now_us;
-            } else if (now_us - last_presence_us_ >= kPresenceRecheckUs) {
-                transport_.begin_presence_probe(kPortProbeByte);
-                presence_probe_running_ = true;
-                // Nothing else this tick: the connect poll below reads the
-                // port too, and would take this question's answer.
-                return;
+                // One missed byte is not a lost chip. last_presence_us_ is
+                // deliberately left where it was, so the next tick asks again
+                // instead of waiting another second to find out.
             }
 
             bool connected = interrupted && status == InterruptStatus::Connect;
-            if (!connected && now_us - last_connect_poll_us_ >= kConnectPollUs) {
-                // Ask, rather than only waiting to be told. The announcement
-                // never comes for a device that was plugged in before the
-                // power, and it is consumed for nothing if the chip was
-                // answering nonsense when it arrived.
-                last_connect_poll_us_ = now_us;
-                InterruptStatus probed = InterruptStatus::Disconnect;
-                connected = transport_.test_connect(probed) && probed == InterruptStatus::Connect;
+            if (!connected && connect_probe_running_) {
+                const ReplyProgress answer = transport_.poll_connect_probe(probed_connect_);
+                if (answer == ReplyProgress::Waiting) {
+                    return;
+                }
+                connect_probe_running_ = false;
+                connected = answer == ReplyProgress::Answered &&
+                            probed_connect_ == InterruptStatus::Connect;
+            }
+            if (!connected && !transport_.reply_outstanding()) {
+                if (now_us - last_presence_us_ >= kPresenceRecheckUs) {
+                    transport_.begin_presence_probe(kPortProbeByte);
+                    presence_probe_running_ = true;
+                    // Nothing else this tick: everything else here reads the
+                    // same port and would take this question's answer.
+                    return;
+                }
+                if (now_us - last_connect_poll_us_ >= kConnectPollUs) {
+                    // Ask, rather than only waiting to be told. The
+                    // announcement never comes for a device that was plugged
+                    // in before the power, and it is consumed for nothing if
+                    // the chip was answering nonsense when it arrived.
+                    //
+                    // Asked and left, like the rest: this runs every 100 ms
+                    // against a chip that may be deaf, and blocking it was
+                    // 20 ms out of every 100 taken from the other channel.
+                    last_connect_poll_us_ = now_us;
+                    transport_.begin_connect_probe();
+                    connect_probe_running_ = true;
+                    return;
+                }
             }
             if (connected) {
                 publish(Ch375EventKind::Attached);
@@ -546,10 +593,49 @@ bool Ch375Device::bring_chip_up(std::uint32_t now_us) {
     // here rather than firing immediately on a chip that answered a moment ago.
     last_presence_us_ = now_us;
     presence_probe_running_ = false;
+    connect_probe_running_ = false;
+    unanswered_presence_ = 0;
     return true;
 }
 
 bool Ch375Device::poll_interrupt(InterruptStatus& status) {
+    // The answer to a status already asked for, if it has arrived.
+    //
+    // True only on the tick the byte is in hand. Asking and waiting inside one
+    // tick is what this replaced: on hardware a channel whose device was
+    // attached and stuck before Ready held INT asserted and answered nothing,
+    // so the pass round Core 1's loop measured 20 168 us - one whole reply
+    // timeout - and the other channel lost two and a half poll windows to it
+    // every tick.
+    if (transport_.pending_reply() == PendingReply::Status) {
+        const ReplyProgress progress = transport_.poll_status_read(status);
+        if (progress == ReplyProgress::Waiting) {
+            return false;
+        }
+        if (progress == ReplyProgress::Answered) {
+            return true;
+        }
+        ++status_reads_failed_;
+        return false;
+    }
+
+    // Somebody else's byte is already on its way.
+    //
+    // The presence probe and the connect poll read this same port, and the
+    // chip answers in the order it was asked. GET_STATUS written now would be
+    // answered *after* their byte, so this reader would take theirs and they
+    // would take the status. That is not hypothetical: a CHECK_EXIST reply
+    // sitting in the receive FIFO was read here as an interrupt status, the
+    // Connect it displaced was then read as the probe's answer, and a healthy
+    // chip whose device had just been plugged in was declared lost and put
+    // through the whole of chip setup again.
+    //
+    // Their questions have deadlines of their own, so this only ever waits for
+    // as long as one unanswered reply takes to expire.
+    if (transport_.reply_outstanding()) {
+        return false;
+    }
+
     // Reading the status is what clears the chip's request, so this is only
     // done when the line is actually asserted. Asking otherwise would consume
     // a status that belongs to nothing.
@@ -557,16 +643,24 @@ bool Ch375Device::poll_interrupt(InterruptStatus& status) {
         return false;
     }
     ++interrupts_seen_;
-    if (transport_.get_status(status)) {
-        return true;
-    }
-    ++status_reads_failed_;
+    transport_.begin_status_read();
     return false;
 }
 
 void Ch375Device::handle_detach(std::uint32_t now_us) {
     const bool had_device = state_ != Ch375State::Absent;
     detach_state_ = state_;
+
+    // Whatever question was on the wire belongs to nobody now.
+    //
+    // Before the transport had one slot for it, this cleared its own flag and
+    // left the byte: the mode command below reads the same port, so an
+    // abandoned probe's answer was read as the mode's reply - and the chip's
+    // real reply as the answer to the command after that. The return value was
+    // not even looked at, so nothing could have noticed.
+    transport_.abandon_reply();
+    presence_probe_running_ = false;
+    connect_probe_running_ = false;
 
     // Back to the mode this waits in. Mode 5 is where DS1 5.9 says to sit with
     // nothing attached, and DS2 1.2 says it is the only mode in which the chip
@@ -578,9 +672,8 @@ void Ch375Device::handle_detach(std::uint32_t now_us) {
     endpoint_ = 0;
     announced_ready_ = false;
     // The chip answered a mode command just now, so the idle re-check has
-    // nothing to establish for another interval. Any probe left outstanding
-    // from before belongs to a question nobody is waiting on any more.
-    presence_probe_running_ = false;
+    // nothing to establish for another interval.
+    unanswered_presence_ = 0;
     last_presence_us_ = now_us;
     enter(Ch375State::Absent, now_us);
     if (had_device) {

@@ -281,6 +281,20 @@ inline constexpr std::uint32_t kDeviceLostUs = 1000000;
 /// socket for long.
 inline constexpr std::uint32_t kPresenceRecheckUs = 1000000;
 
+/// How many of those go unanswered in a row before the chip is declared lost.
+///
+/// One is a byte, not a chip. Declaring a loss re-runs the whole of chip
+/// setup - RESET_ALL, sixty milliseconds of waiting, a probe, a mode command
+/// and the climb back up the baud ladder - which is a second of a working
+/// channel doing nothing, and the search for a lost chip is guarded by three
+/// failures (kProbesBeforeChipSearch) for exactly that reason while this far
+/// more expensive thing was guarded by none.
+///
+/// Two, not three: the retry is immediate rather than a second later, so the
+/// cost of the second opinion is one reply timeout, and a chip that really has
+/// stopped answering is still noticed inside about 20 ms of the first miss.
+inline constexpr std::uint16_t kPresenceProbesBeforeLost = 2;
+
 /// How often to ask whether something has been plugged in.
 ///
 /// The chip announces arrivals by itself, so this is a backstop rather than
@@ -482,8 +496,19 @@ private:
     std::uint32_t token_at_us_ = 0;
     std::uint32_t last_connect_poll_us_ = 0;
     /// The idle channel's own CHECK_EXIST, and when it last answered.
+    ///
+    /// Kept here as well as in the transport's one pending-reply slot, because
+    /// the two say different things: the slot says which question is on the
+    /// wire, and this says that this state is waiting for an answer. A probe
+    /// whose slot was taken by another reader is then noticed as unanswered
+    /// rather than silently forgotten.
     bool presence_probe_running_ = false;
+    /// Consecutive idle re-checks that went unanswered.
+    std::uint16_t unanswered_presence_ = 0;
     std::uint32_t last_presence_us_ = 0;
+    /// The idle channel's own TEST_CONNECT, and what it answered.
+    bool connect_probe_running_ = false;
+    InterruptStatus probed_connect_ = InterruptStatus::Disconnect;
     std::uint32_t last_answer_us_ = 0;
     std::uint8_t endpoint_ = 0;
     Ch375State detach_state_ = Ch375State::Absent;

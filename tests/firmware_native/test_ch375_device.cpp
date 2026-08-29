@@ -24,7 +24,9 @@ using duo_input::u1::ch375::Ch375Transport;
 using duo_input::u1::ch375::kDeviceLostUs;
 using duo_input::u1::ch375::kQuietRetriesBeforeTeardown;
 using duo_input::u1::ch375::kRecoverDelayUs;
+using duo_input::u1::ch375::kPresenceRecheckUs;
 using duo_input::u1::ch375::kReportPollUs;
+using duo_input::u1::ch375::PendingReply;
 using duo_input::u1::ch375::testing::FakeCh375Chip;
 using duo_input::u1::ch375::testing::FakeDeviceSetup;
 
@@ -698,6 +700,87 @@ TEST_CASE(a_tick_on_a_chip_that_is_not_answering_costs_the_loop_almost_nothing) 
     // Measured with this test: 20 000 us before the change - one whole reply
     // timeout inside one tick - and 10 us after it.
     CHECK(worst < 500u);
+}
+
+TEST_CASE(a_chip_that_holds_its_interrupt_and_answers_nothing_costs_the_loop_nothing) {
+    // Measured on hardware at 2026-08-29 11:31, with the four repairs on the
+    // board: the worst pass round Core 1's loop was 20 168 us - one whole
+    // kDefaultReplyTimeoutUs - once one channel had a device attached and
+    // stuck before Ready, holding INT and answering nothing. poll_interrupt
+    // called get_status, whose read_reply spun for 20 ms, and Core 1 ticks the
+    // two channels in sequence: two and a half of the *other* channel's 8 ms
+    // poll windows gone, every tick. The operator saw exactly that - "the
+    // cursor works intermittently, with interruptions; the keyboard does not
+    // type" - one channel's stuck enumeration starving the other through this
+    // one wait.
+    //
+    // Reading the status is also the only thing that clears the chip's
+    // request, so a chip that will not answer it holds the line asserted and
+    // the wait is paid again on the very next tick. Nothing else in the
+    // machine repeats a 20 ms wait that often.
+    Rig rig;
+    rig.run(300000);
+    rig.chip.hold_interrupt_unanswered(true);
+
+    const std::uint32_t worst = rig.worst_tick(3000);
+
+    // Measured with this test: 20 000 us before the change, one poll of an
+    // empty port after it.
+    CHECK(worst < 500u);
+}
+
+TEST_CASE(a_status_read_never_takes_the_answer_to_a_question_already_on_the_wire) {
+    // The interrupt status is read at the top of every tick, before the idle
+    // channel gets to poll the probe it put on the wire a tick ago. Both read
+    // the same port, and the chip answers commands in the order they arrive -
+    // so GET_STATUS written while a CHECK_EXIST is outstanding is answered
+    // after the probe's byte, and each reader takes the other's.
+    //
+    // A chip that holds its interrupt asserted and answers no status is the
+    // case that repeats it: the request is never cleared, so the line is still
+    // asserted on the next tick, and on the one after that. Every probe this
+    // channel puts on the wire is taken. The chip here answers CHECK_EXIST
+    // perfectly - nothing about it is a lost chip - so a channel that reports
+    // one, and puts a working chip through the whole of setup again to cure
+    // it, is reporting the collision and not the chip.
+    Rig rig;
+    rig.run(300000);
+    const std::uint32_t modes_before = rig.chip.mode_set_count();
+    rig.chip.hold_interrupt_unanswered(true);
+
+    rig.run(6 * kPresenceRecheckUs, 1000);
+
+    CHECK_EQ(rig.device.presence_lost(), 0u);
+    CHECK_EQ(rig.chip.mode_set_count(), modes_before);
+}
+
+TEST_CASE(a_device_plugged_in_while_the_chip_is_being_re_proved_is_not_read_as_a_loss) {
+    // The reviewer's sequence, exactly. The channel is idle in Absent and has
+    // just put its once-a-second CHECK_EXIST on the wire. Between that tick
+    // and the next, somebody plugs a device in: the chip raises INT, and its
+    // answer to the probe is already sitting in the receive FIFO. The next
+    // tick reads the status first.
+    //
+    // What that used to produce: the probe's 0x5A read as the interrupt
+    // status, the real Connect left queued and then read as the probe's
+    // answer, a mismatch, and a healthy chip put through the whole of setup
+    // again - with presence_lost counting plug events, which is the one
+    // counter that repair 4 exists to report.
+    Rig rig;
+    rig.run(300000);
+    for (int index = 0;
+         index < 200000 && rig.transport.pending_reply() != PendingReply::Presence; ++index) {
+        rig.device.tick(rig.chip.now_us());
+        rig.chip.advance(100);
+    }
+    CHECK_EQ(static_cast<int>(rig.transport.pending_reply()),
+             static_cast<int>(PendingReply::Presence));
+
+    rig.chip.attach_device();
+    rig.run(400000);
+
+    CHECK_EQ(rig.device.presence_lost(), 0u);
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
 }
 
 // ------------------------------------------------ finding a lost chip

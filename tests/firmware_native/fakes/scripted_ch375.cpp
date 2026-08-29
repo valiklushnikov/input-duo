@@ -163,6 +163,12 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
             break;
 
         case Ch375Command::GetStatus:
+            if (hold_int_unanswered_) {
+                // A chip that raised its interrupt and then stopped talking.
+                // The request is not cleared, so the line stays asserted and
+                // the status is asked for again on the very next tick.
+                break;
+            }
             auto_setup_running_ = false;
             queue(pending_status_);
             // Reading the status is what clears the request - DS1 5.12.
@@ -456,6 +462,11 @@ bool FakeCh375Chip::read_data(std::uint8_t& value) {
 }
 
 bool FakeCh375Chip::int_asserted() const {
+    if (hold_int_unanswered_) {
+        // Asserted and never cleared: only reading the status clears it, and
+        // this chip does not answer that.
+        return true;
+    }
     // A real AUTO_SETUP is several control transfers over the USB bus, and a
     // caller that only worked when it finished within one pass of the loop
     // would not survive meeting a device.

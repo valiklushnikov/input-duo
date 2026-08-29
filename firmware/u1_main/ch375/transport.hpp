@@ -97,6 +97,27 @@ enum class ReplyProgress : std::uint8_t {
     TimedOut,
 };
 
+/// Which question is on the wire waiting for its one-byte answer.
+///
+/// One slot, not one per caller, and that is the point. The chip answers
+/// commands in the order they are written, so two questions outstanding at
+/// once means each poller can take the other's byte - which is not
+/// hypothetical: a CHECK_EXIST answer sitting in the receive FIFO was read as
+/// an interrupt status, and the Connect it displaced was then read as the
+/// probe's answer, so a healthy chip whose device had just been plugged in was
+/// declared lost and set up again from scratch. With one slot the question is
+/// "whose byte is this" and it has exactly one answer.
+enum class PendingReply : std::uint8_t {
+    /// Nothing is outstanding; the port is free for whoever asks next.
+    None,
+    /// CHECK_EXIST - the presence probe.
+    Presence,
+    /// GET_STATUS - the interrupt status.
+    Status,
+    /// TEST_CONNECT - the idle channel's connect poll.
+    Connect,
+};
+
 /// How far a search for a chip that has stopped answering has got.
 enum class SearchProgress : std::uint8_t {
     /// Still walking the rates. Call again next tick.
@@ -146,13 +167,16 @@ public:
     /// Asking costs two frames into the port's queue and nothing else.
     ///
     /// Anything already waiting is thrown away first, so a byte left over from
-    /// an abandoned exchange cannot be read as this one's answer.
+    /// an abandoned exchange is very unlikely to be read as this one's answer.
+    /// Not "cannot": drain_arrived stops at the first read that finds nothing,
+    /// so a byte still crossing the wire at that instant survives it. What
+    /// makes it unlikely is the deadline - a question is only abandoned after
+    /// 20 ms of silence, and no answer this firmware waits for takes anywhere
+    /// near that long to arrive.
     void begin_presence_probe(std::uint8_t probe) {
-        drain_arrived();
         presence_expected_ = static_cast<std::uint8_t>(~probe);
         presence_matched_ = false;
-        presence_deadline_us_ = io_.now_us() + reply_timeout_us_;
-        presence_pending_ = true;
+        begin_reply(PendingReply::Presence);
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::CheckExist));
         io_.write_data(probe);
     }
@@ -160,22 +184,15 @@ public:
     /// Look once for that answer. Never waits.
     ///
     /// TimedOut without a probe outstanding, because a caller that asks about
-    /// a question it never put has not been kept waiting by anything.
+    /// a question it never put has not been kept waiting by anything - and
+    /// that includes one some later command abandoned on its behalf.
     ReplyProgress poll_presence_probe() {
-        if (!presence_pending_) {
-            return ReplyProgress::TimedOut;
-        }
         std::uint8_t answer = 0;
-        if (io_.read_data(answer)) {
-            presence_pending_ = false;
+        const ReplyProgress progress = poll_reply(PendingReply::Presence, answer);
+        if (progress == ReplyProgress::Answered) {
             presence_matched_ = answer == presence_expected_;
-            return ReplyProgress::Answered;
         }
-        if (expired(presence_deadline_us_)) {
-            presence_pending_ = false;
-            return ReplyProgress::TimedOut;
-        }
-        return ReplyProgress::Waiting;
+        return progress;
     }
 
     /// Was the byte that came back the exact inverse it should have been?
@@ -183,6 +200,84 @@ public:
     /// A chip that answers wrongly is worse than one that says nothing - it
     /// looks alive - so only the exact inverse counts (DS1 5.5).
     bool presence_probe_matched() const { return presence_matched_; }
+
+    /// DS1 5.12. Ask for the interrupt status and leave.
+    ///
+    /// The one call the first pass left blocking, and the one that mattered
+    /// most. Measured on hardware at 2026-08-29 11:31: a channel whose device
+    /// was attached and stuck before Ready held INT asserted and answered no
+    /// status, so every tick spent one whole reply timeout inside get_status -
+    /// 20 168 us of worst pass against 7296 us on an idle pair - and Core 1
+    /// charged it to the other channel as two and a half missed 8 ms poll
+    /// windows. Reading the status is also what clears the chip's request, so
+    /// a chip that will not answer holds the line asserted and the wait is
+    /// paid again on the very next tick.
+    ///
+    /// Only the caller who asked may collect it: this is the byte that says a
+    /// device arrived, a transaction finished, or a cable was pulled.
+    void begin_status_read() {
+        begin_reply(PendingReply::Status);
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::GetStatus));
+    }
+
+    /// Look once for that status. Never waits.
+    ///
+    /// Any byte is carried through, including ones this code does not
+    /// recognise: the failure statuses are a 32-value range that encodes which
+    /// PID the device answered with, and that byte is the only evidence of why
+    /// a transaction failed.
+    ReplyProgress poll_status_read(InterruptStatus& status) {
+        std::uint8_t answer = 0;
+        const ReplyProgress progress = poll_reply(PendingReply::Status, answer);
+        if (progress == ReplyProgress::Answered) {
+            status = static_cast<InterruptStatus>(answer);
+        }
+        return progress;
+    }
+
+    /// DS1 5.10. Ask whether a device is attached, and leave.
+    ///
+    /// The idle channel's backstop poll, which runs every 100 ms against a
+    /// chip that may well be deaf - one whose 5 V was cycled under a running
+    /// U1 hears nothing at the rate this side raised it to. Blocking, that was
+    /// 20 ms out of every 100 on a dead socket, all of it taken out of the
+    /// other channel's poll windows.
+    void begin_connect_probe() {
+        begin_reply(PendingReply::Connect);
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::TestConnect));
+    }
+
+    /// Look once for that answer. Never waits.
+    ReplyProgress poll_connect_probe(InterruptStatus& status) {
+        std::uint8_t answer = 0;
+        const ReplyProgress progress = poll_reply(PendingReply::Connect, answer);
+        if (progress == ReplyProgress::Answered) {
+            status = static_cast<InterruptStatus>(answer);
+        }
+        return progress;
+    }
+
+    /// Which question is on the wire, if any.
+    ///
+    /// A caller about to ask a different one has to know: two outstanding at
+    /// once is how one poller comes to take the other's byte.
+    PendingReply pending_reply() const { return pending_; }
+    bool reply_outstanding() const { return pending_ != PendingReply::None; }
+
+    /// Give up on the question that is on the wire.
+    ///
+    /// For a caller about to do something a pending answer cannot survive -
+    /// tearing a device down, going back through chip setup. What has already
+    /// arrived is thrown away rather than left to be read as the answer to
+    /// whatever is asked next, and the poller that asked is told TimedOut
+    /// rather than left waiting for a byte nobody will deliver.
+    void abandon_reply() {
+        if (pending_ == PendingReply::None) {
+            return;
+        }
+        pending_ = PendingReply::None;
+        drain_arrived();
+    }
 
     /// Take whatever has already arrived and throw it away, without waiting.
     ///
@@ -205,6 +300,7 @@ public:
     /// A chip that answers wrongly is worse than one that says nothing - it
     /// looks alive - so only the exact inverse counts.
     bool check_exist(std::uint8_t probe) {
+        abandon_reply();
         start_check_exist();
         io_.write_data(probe);
 
@@ -251,6 +347,7 @@ public:
     /// PID the device answered with, and that byte is the only evidence of why
     /// a transaction failed.
     bool get_status(InterruptStatus& status) {
+        abandon_reply();
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::GetStatus));
 
         std::uint8_t answer = 0;
@@ -281,6 +378,7 @@ public:
     /// keyboard look like a broken one.
     bool read_block(std::uint8_t* out, std::size_t capacity, std::size_t& size) {
         size = 0;
+        abandon_reply();
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::ReadUsbData0));
 
         std::uint8_t length = 0;
@@ -397,6 +495,7 @@ public:
     /// 9600, and a host still talking at the old speed to a chip that has gone
     /// back to the default is the same silence as a chip that is not there.
     bool set_baud_rate(std::uint8_t coefficient, std::uint8_t constant, unsigned baud) {
+        abandon_reply();
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::SetBaudRate));
         io_.write_data(coefficient);
         io_.write_data(constant);
@@ -657,6 +756,7 @@ public:
     /// It also never arrives for a device that was already plugged in when the
     /// power came on. Asking covers both.
     bool test_connect(InterruptStatus& status) {
+        abandon_reply();
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::TestConnect));
 
         std::uint8_t answer = 0;
@@ -722,6 +822,7 @@ public:
     /// Takes the byte 07H and answers a rate type; bit 4 set means 1.5 Mbps.
     /// Only valid in host mode 5, before frames are being generated.
     bool get_device_rate(bool& low_speed) {
+        abandon_reply();
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::GetDeviceRate));
         io_.write_data(kGetDeviceRatePrefix);
 
@@ -874,6 +975,37 @@ private:
         return static_cast<std::int32_t>(io_.now_us() - deadline_us) >= 0;
     }
 
+    /// Put one question on the wire and start its deadline.
+    ///
+    /// Anything already waiting goes first: it belongs to a question nobody is
+    /// collecting any more, and the chip answers in order, so leaving it there
+    /// would hand it to this caller.
+    void begin_reply(PendingReply who) {
+        drain_arrived();
+        pending_ = who;
+        pending_deadline_us_ = io_.now_us() + reply_timeout_us_;
+    }
+
+    /// One look for the answer to the question ``who`` asked.
+    ///
+    /// TimedOut when some other question is on the wire, or none at all: a
+    /// caller whose question was abandoned has not been kept waiting by
+    /// anything, and must not be left polling for a byte that is not coming.
+    ReplyProgress poll_reply(PendingReply who, std::uint8_t& answer) {
+        if (pending_ != who) {
+            return ReplyProgress::TimedOut;
+        }
+        if (io_.read_data(answer)) {
+            pending_ = PendingReply::None;
+            return ReplyProgress::Answered;
+        }
+        if (expired(pending_deadline_us_)) {
+            pending_ = PendingReply::None;
+            return ReplyProgress::TimedOut;
+        }
+        return ReplyProgress::Waiting;
+    }
+
     bool read_reply(std::uint8_t& value) {
         const std::uint32_t deadline = io_.now_us() + reply_timeout_us_;
         while (true) {
@@ -887,6 +1019,10 @@ private:
     }
 
     bool command_with_status(Ch375Command command, std::uint8_t argument) {
+        // Whatever was outstanding is not this command's answer. Left there it
+        // would be read as one, and the chip's own reply would then be read as
+        // the answer to the command after that, and so on for ever.
+        abandon_reply();
         io_.write_command(static_cast<std::uint8_t>(command));
         io_.write_data(argument);
 
@@ -943,11 +1079,11 @@ private:
     std::uint32_t block_reads_failed_ = 0;
     unsigned port_baud_ = kCh375DefaultBaud;
 
-    /// A CHECK_EXIST that has been asked and not yet answered.
-    bool presence_pending_ = false;
+    /// The one question that may be on the wire, and when it gives up.
+    PendingReply pending_ = PendingReply::None;
+    std::uint32_t pending_deadline_us_ = 0;
     std::uint8_t presence_expected_ = 0;
     bool presence_matched_ = false;
-    std::uint32_t presence_deadline_us_ = 0;
 
     ICh375Transport& io_;
     std::uint32_t reply_timeout_us_ = kDefaultReplyTimeoutUs;

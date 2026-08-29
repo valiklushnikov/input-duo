@@ -331,6 +331,15 @@ public:
     /// Answer every command with a byte that means nothing.
     void answer_garbage(bool broken) { garbage_ = broken; }
 
+    /// Hold the interrupt line asserted and never answer GET_STATUS.
+    ///
+    /// The state the keyboard's channel was measured in on hardware at
+    /// 2026-08-29 11:31: attached, stuck before Ready, INT held, and every
+    /// status read going unanswered. It is the one case where reading the
+    /// status blocks on every single tick, because the line is still asserted
+    /// on the next one.
+    void hold_interrupt_unanswered(bool holding) { hold_int_unanswered_ = holding; }
+
     /// Stop answering at all, as a chip with a broken port would.
     void go_silent(bool silent) { silent_ = silent; }
 
@@ -396,6 +405,7 @@ private:
 
     bool garbage_ = false;
     bool silent_ = false;
+    bool hold_int_unanswered_ = false;
     bool saw_bus_reset_ = false;
     bool saw_auto_setup_ = false;
     bool fail_auto_setup_ = false;
