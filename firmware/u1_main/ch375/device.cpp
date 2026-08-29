@@ -281,11 +281,11 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 // did not - it ran, then fell over, and every fall costs the
                 // operator a peripheral that goes dark and comes back.
                 //
-                // So the ladder is walked by what actually survives, not by
-                // what answers once. Down a rung on every collapse, and off
-                // the ladder entirely at the bottom: a link that keeps its
-                // speed and keeps dropping is worse than a slower one that
-                // does not.
+                // So the ladder is walked by what actually survives. Down a
+                // rung on every collapse, but not below the floor: at the
+                // bottom this used to go off the ladder entirely and park the
+                // port at 9600, where the channel provably cannot carry the
+                // traffic, so it collapsed harder and never came back.
                 if (raised_baud_ != kCh375DefaultBaud) {
                     ++collapses_while_raised_;
                     step_ladder_down();

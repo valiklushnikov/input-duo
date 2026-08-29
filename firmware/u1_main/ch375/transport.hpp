@@ -68,8 +68,16 @@ public:
 /// one millisecond gives up before a perfectly good answer has finished
 /// arriving - and then reads the tail of it as the start of the next one.
 ///
-/// That happened. Twenty milliseconds is far past any real answer and still
-/// far below anything a person would notice.
+/// That happened. Twenty milliseconds is far past any real answer.
+///
+/// It is not, however, "far below anything a person would notice", which this
+/// note used to claim: that measures human perception, and the cost that
+/// matters is that Core 1 ticks both channels in sequence and the other one's
+/// interrupt endpoint wants polling every 8 ms. Twenty milliseconds is two and
+/// a half of its poll windows. So this figure is right for a chip that is
+/// going to answer and ruinous for one that is not, and the paths that ask a
+/// chip which is not answering - the recovery probe and the search across
+/// rates - do not use it as a spin at all. See ReplyProgress below.
 inline constexpr std::uint32_t kDefaultReplyTimeoutUs = 20000;
 
 /// What has become of a reply that is being waited for across ticks.
