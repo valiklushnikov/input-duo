@@ -5,6 +5,18 @@
 namespace duo_input::u1::ch375 {
 
 void Ch375Device::tick(std::uint32_t now_us) {
+    // A command's status byte is on the wire and nobody has collected it.
+    //
+    // First, before even chip setup: whatever else this tick might want to do
+    // begins by writing to the same port, and the chip answers in the order it
+    // was asked, so the next question's byte would arrive behind this one and
+    // each reader would take the other's. Collecting it is also the only way
+    // to stop it being read as the answer to a command asked minutes later.
+    if (pending_command_ != PendingCommand::None) {
+        finish_pending_command(now_us);
+        return;
+    }
+
     // The chip is put into host mode lazily rather than in a constructor: a
     // controller that is not powered yet would otherwise fail at construction
     // time, with nowhere to report it and no way to try again.
@@ -174,16 +186,12 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 // rest in.
                 const UsbMode next =
                     skip_bus_reset_ ? UsbMode::HostWithSof : UsbMode::HostReset;
-                if (!transport_.set_usb_mode(next)) {
-                    ++mode_failures_;
-                    fail(now_us);
-                    return;
-                }
-                if (skip_bus_reset_) {
-                    transport_.set_usb_speed(device_is_low_speed_ ? UsbSpeed::Low1_5Mbps
-                                                                  : UsbSpeed::Full12Mbps);
-                }
-                enter(skip_bus_reset_ ? Ch375State::HostMode : Ch375State::Resetting, now_us);
+                // Asked and left. A device that has just arrived on a chip
+                // that has stopped answering is the state the board was
+                // measured in, and spinning here for the mode's status byte
+                // is what took 20 170 us out of Core 1's pass.
+                transport_.begin_set_usb_mode(next);
+                pending_command_ = PendingCommand::AttachMode;
             }
             return;
         }
@@ -193,18 +201,11 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 return;
             }
             // Leaving mode 7 in place would hold the bus down forever, which
-            // is indistinguishable from a dead port.
-            if (!transport_.set_usb_mode(UsbMode::HostWithSof)) {
-                fail(now_us);
-                return;
-            }
-            // After the mode, never before: setting a working mode puts the
-            // bus back to 12 Mbps (DS2 1.1). A low-speed device addressed at
-            // full speed says nothing, and a controller reports something that
-            // says nothing as gone.
-            transport_.set_usb_speed(device_is_low_speed_ ? UsbSpeed::Low1_5Mbps
-                                                          : UsbSpeed::Full12Mbps);
-            enter(Ch375State::HostMode, now_us);
+            // is indistinguishable from a dead port. The speed follows the
+            // mode rather than preceding it, and that happens where the answer
+            // is collected.
+            transport_.begin_set_usb_mode(UsbMode::HostWithSof);
+            pending_command_ = PendingCommand::ResetDone;
             return;
 
         case Ch375State::HostMode:
@@ -402,16 +403,13 @@ void Ch375Device::tick(std::uint32_t now_us) {
             }
             // Start the whole sequence again from the bus reset. Picking up
             // where it left off would carry the broken state along with it.
-            if (!transport_.set_usb_mode(UsbMode::HostReset)) {
-                // Still unhappy. Wait out another delay rather than spinning,
-                // and go back through chip setup: a controller this broken may
-                // have lost its mode entirely.
-                ++recover_mode_failures_;
-                chip_ready_ = false;
-                entered_us_ = now_us;
-                return;
-            }
-            enter(Ch375State::Resetting, now_us);
+            //
+            // This is the recovery loop of a channel that is already unwell,
+            // so it is the one place the mode command is most likely to go
+            // unanswered - and it runs once a second for as long as the fault
+            // lasts.
+            transport_.begin_set_usb_mode(UsbMode::HostReset);
+            pending_command_ = PendingCommand::RecoverMode;
             return;
 
         case Ch375State::Fault:
@@ -468,7 +466,14 @@ bool Ch375Device::bring_chip_up(std::uint32_t now_us) {
             }
             if (progress == ReplyProgress::Answered && transport_.presence_probe_matched()) {
                 unanswered_probes_ = 0;
-                break;
+                // Mode 5 is where DS1 5.9 says to wait: enabled, generating no
+                // frames, watching for a device by itself. Asked and left -
+                // this is a chip that has answered exactly one probe, and the
+                // blocking form spent a whole reply timeout on the ones that
+                // answer a probe and then nothing else.
+                transport_.begin_set_usb_mode(UsbMode::HostNoSof);
+                bring_up_ = ChipBringUp::Moding;
+                return false;
             }
             ++chip_not_back_yet_;
             bring_up_ = ChipBringUp::Idle;
@@ -524,37 +529,50 @@ bool Ch375Device::bring_chip_up(std::uint32_t now_us) {
             chip_reset_at_us_ = now_us;
             return false;
         }
+
+        case ChipBringUp::Moding: {
+            const ReplyProgress progress = transport_.poll_command_status();
+            if (progress == ReplyProgress::Waiting) {
+                return false;
+            }
+            if (progress != ReplyProgress::Answered ||
+                !transport_.command_status_succeeded()) {
+                // Counted. Without this the channel can spin here forever with
+                // every reading frozen, which looks from outside exactly like a
+                // board that has stopped running - and cost an evening of being
+                // read as one.
+                ++setup_mode_failures_;
+
+                // What it answered, not merely that it refused. A chip that
+                // takes CHECK_EXIST and refuses a mode is a different fault
+                // from one that is deaf, and the two have looked identical
+                // from out here all along: both are just a channel that does
+                // nothing.
+                mode_reply_ = transport_.last_status_reply();
+                mode_answered_ = transport_.last_status_answered();
+
+                bring_up_ = ChipBringUp::Idle;
+                if (transport_.check_exist(kPortProbeByte)) {
+                    ++alive_but_refusing_;
+                }
+
+                // Nothing else is sent. Searching for the chip at other rates,
+                // flushing it with filler and sweeping the receiver all write
+                // bytes at rates it may not be using, and each of those can
+                // wedge a chip that was about to come good on its own.
+                fail(now_us);
+                return false;
+            }
+            return finish_chip_setup(now_us);
+        }
     }
 
+    return false;
+}
+
+bool Ch375Device::finish_chip_setup(std::uint32_t now_us) {
     bring_up_ = ChipBringUp::Idle;
 
-    // Mode 5 is where DS1 5.9 says to wait: enabled, generating no frames,
-    // watching for a device by itself.
-    if (!transport_.set_usb_mode(UsbMode::HostNoSof)) {
-        // Counted. Without this the channel can spin here forever with every
-        // reading frozen, which looks from outside exactly like a board that
-        // has stopped running - and cost an evening of being read as one.
-        ++setup_mode_failures_;
-
-        // Does it answer anything at all? A chip that takes CHECK_EXIST and
-        // refuses a mode is a different fault from one that is deaf, and the
-        // two have looked identical from out here all along: both are just a
-        // channel that does nothing.
-        // What it answered, not merely that it refused.
-        mode_reply_ = transport_.last_status_reply();
-        mode_answered_ = transport_.last_status_answered();
-
-        if (transport_.check_exist(kPortProbeByte)) {
-            ++alive_but_refusing_;
-        }
-
-        // Nothing else is sent. Searching for the chip at other rates,
-        // flushing it with filler and sweeping the receiver all write bytes at
-        // rates it may not be using, and each of those can wedge a chip that
-        // was about to come good on its own.
-        fail(now_us);
-        return false;
-    }
     // The chip's own default is to retry a NAK forever (DS2 1.3). A device
     // that stops answering would then hold the firmware inside a single
     // command, and everything else on this loop stops with it.
@@ -654,6 +672,72 @@ bool Ch375Device::poll_interrupt(InterruptStatus& status) {
     return false;
 }
 
+void Ch375Device::finish_pending_command(std::uint32_t now_us) {
+    const ReplyProgress progress = transport_.poll_command_status();
+    if (progress == ReplyProgress::Waiting) {
+        return;
+    }
+    const PendingCommand who = pending_command_;
+    pending_command_ = PendingCommand::None;
+    // A question that timed out is not a command that was taken. Nothing below
+    // may read silence as agreement: a chip that never heard the mode is still
+    // in whatever mode it was in, and going on would run a bus reset against a
+    // controller that is not in host mode at all.
+    const bool taken =
+        progress == ReplyProgress::Answered && transport_.command_status_succeeded();
+
+    switch (who) {
+        case PendingCommand::AttachMode:
+            if (!taken) {
+                ++mode_failures_;
+                fail(now_us);
+                return;
+            }
+            if (skip_bus_reset_) {
+                // No reset to come, so the speed is set here. After the mode
+                // and never before: a working mode puts the bus back to
+                // 12 Mbps (DS2 1.1).
+                transport_.set_usb_speed(device_is_low_speed_ ? UsbSpeed::Low1_5Mbps
+                                                              : UsbSpeed::Full12Mbps);
+            }
+            enter(skip_bus_reset_ ? Ch375State::HostMode : Ch375State::Resetting, now_us);
+            return;
+
+        case PendingCommand::ResetDone:
+            if (!taken) {
+                fail(now_us);
+                return;
+            }
+            // After the mode, never before: setting a working mode puts the
+            // bus back to 12 Mbps (DS2 1.1). A low-speed device addressed at
+            // full speed says nothing, and a controller reports something that
+            // says nothing as gone.
+            transport_.set_usb_speed(device_is_low_speed_ ? UsbSpeed::Low1_5Mbps
+                                                          : UsbSpeed::Full12Mbps);
+            enter(Ch375State::HostMode, now_us);
+            return;
+
+        case PendingCommand::RecoverMode:
+            if (!taken) {
+                // Still unhappy. Wait out another delay rather than spinning,
+                // and go back through chip setup: a controller this broken may
+                // have lost its mode entirely.
+                ++recover_mode_failures_;
+                chip_ready_ = false;
+                entered_us_ = now_us;
+                return;
+            }
+            enter(Ch375State::Resetting, now_us);
+            return;
+
+        case PendingCommand::DetachMode:
+        case PendingCommand::None:
+            // Collected so that it is not read as somebody else's answer, and
+            // otherwise of no interest: there is nothing left to configure.
+            return;
+    }
+}
+
 void Ch375Device::handle_detach(std::uint32_t now_us) {
     const bool had_device = state_ != Ch375State::Absent;
     detach_state_ = state_;
@@ -674,7 +758,18 @@ void Ch375Device::handle_detach(std::uint32_t now_us) {
     // can be asked how fast a device is. Left in mode 6, that question returns
     // nonsense - and a low-speed mouse read as full speed is addressed at
     // eight times its rate, answers nothing, and is reported gone.
-    transport_.set_usb_mode(UsbMode::HostNoSof);
+    //
+    // Not asked at all when the chip is on its way back through setup: it is
+    // about to be reset, so the mode would not survive, and its status byte
+    // would still be crossing the wire when RESET_ALL went out.
+    //
+    // Nothing here reads that byte for its content, but somebody has to read
+    // it: one left in the receive FIFO becomes the answer to the next question
+    // asked, and to the one after that.
+    if (chip_ready_) {
+        transport_.begin_set_usb_mode(UsbMode::HostNoSof);
+        pending_command_ = PendingCommand::DetachMode;
+    }
     device_is_low_speed_ = false;
     endpoint_ = 0;
     announced_ready_ = false;

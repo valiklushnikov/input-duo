@@ -57,6 +57,32 @@ enum class ChipBringUp : std::uint8_t {
     Probing,
     /// Every rate is being walked looking for a chip that has moved.
     Searching,
+    /// SET_USB_MODE has gone and its status byte has not come back.
+    Moding,
+};
+
+/// A command whose one-byte status is on the wire, and who is waiting for it.
+///
+/// SET_USB_MODE is asked at five points of a device's life and its answer used
+/// to be spun for. Asked and left, the question outlives the tick that put it
+/// there, so the tick that collects the byte has to know what the machine
+/// meant to do with it. One value per point, because they do different things
+/// with the same byte.
+enum class PendingCommand : std::uint8_t {
+    /// Nothing is outstanding.
+    None,
+    /// Mode 7 or mode 6, sent when a device was found attached.
+    AttachMode,
+    /// Mode 6, ending the bus reset.
+    ResetDone,
+    /// Mode 7, starting the recovery cycle over.
+    RecoverMode,
+    /// Mode 5, on the way back to Absent after a device went away.
+    ///
+    /// Nothing depends on the answer. It is collected all the same, because a
+    /// byte left in the receive FIFO is read as the answer to whatever is
+    /// asked next, and then to the one after that, for ever.
+    DetachMode,
 };
 
 /// How many probes at the home rate go unanswered before the chip is looked
@@ -483,12 +509,22 @@ private:
     /// Read the chip's interrupt status if it is asking. False if it is not.
     bool poll_interrupt(InterruptStatus& status);
 
+    /// Collect the status byte of a command asked on an earlier tick, and do
+    /// whatever the state that asked it meant to do with the answer.
+    void finish_pending_command(std::uint32_t now_us);
+
+    /// The last steps of chip setup, once the chip has taken a working mode.
+    ///
+    /// True, like bring_chip_up itself, only on the tick that finishes.
+    bool finish_chip_setup(std::uint32_t now_us);
+
     Ch375Transport& transport_;
     IDeviceSetup& setup_;
 
     Ch375State state_ = Ch375State::Absent;
     bool chip_ready_ = false;
     ChipBringUp bring_up_ = ChipBringUp::Idle;
+    PendingCommand pending_command_ = PendingCommand::None;
     std::uint32_t chip_reset_at_us_ = 0;
     bool skip_bus_reset_ = false;
     /// What the attached device turned out to be, asked while still in the

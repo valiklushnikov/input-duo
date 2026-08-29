@@ -21,6 +21,7 @@ using duo_input::u1::ch375::BaudOption;
 using duo_input::u1::ch375::Ch375Transport;
 using duo_input::u1::ch375::CommandStatus;
 using duo_input::u1::ch375::InterruptStatus;
+using duo_input::u1::ch375::ReplyProgress;
 using duo_input::u1::ch375::SearchProgress;
 using duo_input::u1::ch375::UsbMode;
 using duo_input::u1::ch375::testing::expect_command;
@@ -87,7 +88,11 @@ TEST_CASE(setting_the_usb_mode_reports_the_operation_status) {
                       reply(static_cast<std::uint8_t>(CommandStatus::Success))});
     Ch375Transport transport(io);
 
-    CHECK(transport.set_usb_mode(UsbMode::HostWithSof));
+    transport.begin_set_usb_mode(UsbMode::HostWithSof);
+
+    CHECK_EQ(static_cast<int>(transport.poll_command_status()),
+             static_cast<int>(ReplyProgress::Answered));
+    CHECK(transport.command_status_succeeded());
     CHECK(io.complete());
 }
 
@@ -97,7 +102,15 @@ TEST_CASE(a_refused_usb_mode_is_a_failure_not_a_silence) {
                       reply(static_cast<std::uint8_t>(CommandStatus::Abort))});
     Ch375Transport transport(io);
 
-    CHECK(!transport.set_usb_mode(UsbMode::HostReset));
+    transport.begin_set_usb_mode(UsbMode::HostReset);
+
+    // It answered, and what it answered was a refusal. The two are different
+    // facts and only one of them can be acted on.
+    CHECK_EQ(static_cast<int>(transport.poll_command_status()),
+             static_cast<int>(ReplyProgress::Answered));
+    CHECK(!transport.command_status_succeeded());
+    CHECK_EQ(transport.last_status_reply(), static_cast<std::uint8_t>(CommandStatus::Abort));
+    CHECK(transport.last_status_answered());
     CHECK(io.complete());
 }
 
@@ -108,7 +121,38 @@ TEST_CASE(a_status_byte_that_is_neither_success_nor_abort_is_a_failure) {
                       expect_data(static_cast<std::uint8_t>(UsbMode::HostWithSof)), reply(0x00)});
     Ch375Transport transport(io);
 
-    CHECK(!transport.set_usb_mode(UsbMode::HostWithSof));
+    transport.begin_set_usb_mode(UsbMode::HostWithSof);
+
+    CHECK_EQ(static_cast<int>(transport.poll_command_status()),
+             static_cast<int>(ReplyProgress::Answered));
+    CHECK(!transport.command_status_succeeded());
+}
+
+TEST_CASE(a_mode_command_that_is_not_answered_is_never_read_as_taken) {
+    // The whole reason this became a deferred question: the chip most likely
+    // to go unanswered is the one being brought back from a fault, and the
+    // blocking form spent a whole reply timeout finding that out. Silence must
+    // not read as agreement - a chip that never heard the mode is still in
+    // whatever mode it was in.
+    ScriptedCh375 io({expect_command(Ch375Command::SetUsbMode),
+                      expect_data(static_cast<std::uint8_t>(UsbMode::HostNoSof))});
+    Ch375Transport transport(io);
+
+    transport.begin_set_usb_mode(UsbMode::HostNoSof);
+
+    // Nothing has arrived and the deadline has not passed, so the caller is
+    // told to come back - it is not kept here.
+    CHECK_EQ(static_cast<int>(transport.poll_command_status()),
+             static_cast<int>(ReplyProgress::Waiting));
+    CHECK(io.elapsed_us() < transport.reply_timeout_us());
+
+    ReplyProgress progress = ReplyProgress::Waiting;
+    for (int pass = 0; pass < 100000 && progress == ReplyProgress::Waiting; ++pass) {
+        progress = transport.poll_command_status();
+    }
+    CHECK_EQ(static_cast<int>(progress), static_cast<int>(ReplyProgress::TimedOut));
+    CHECK(!transport.command_status_succeeded());
+    CHECK(!transport.last_status_answered());
 }
 
 // --------------------------------------------------------------- get_status

@@ -768,6 +768,42 @@ struct LiveRig {
 /// this transport still allowed to wait - see the link hardening report.
 constexpr int kStallPoints = 6;
 
+TEST_CASE(the_mode_command_that_starts_a_bus_reset_is_asked_and_left) {
+    // SET_USB_MODE is asked at five points of a device's life, and every one
+    // of them used to spin for its status byte. The tick that asks must now
+    // end there: the answer belongs to a later tick, and until it arrives
+    // nothing else may be written, because the chip answers in the order it
+    // was asked and the next question's byte would arrive behind this one.
+    Rig rig;
+    rig.run(200000);
+    rig.chip.attach_device();
+
+    for (int pass = 0; pass < 200; ++pass) {
+        rig.device.tick(rig.chip.now_us());
+        if (rig.transport.pending_reply() == PendingReply::Command ||
+            rig.device.state() != Ch375State::Absent) {
+            // Either the question has been put and left, or the machine has
+            // moved on without it - which is the thing being ruled out.
+            break;
+        }
+        rig.chip.advance(1000);
+    }
+
+    // The question is on the wire, and the machine has not acted on an answer
+    // it does not have yet.
+    CHECK_EQ(static_cast<int>(rig.transport.pending_reply()),
+             static_cast<int>(PendingReply::Command));
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Absent));
+
+    rig.chip.advance(1000);
+    rig.device.tick(rig.chip.now_us());
+
+    // Collected, and only then does the bus reset begin.
+    CHECK_EQ(static_cast<int>(rig.transport.pending_reply()),
+             static_cast<int>(PendingReply::None));
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Resetting));
+}
+
 TEST_CASE(no_tick_between_a_device_attaching_and_it_working_stalls_the_other_channel) {
     // Measured on hardware at 2026-08-29 12:06, with the deferred status read
     // on the board: the worst pass round Core 1's loop was still 20 170 us -

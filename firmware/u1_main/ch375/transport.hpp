@@ -128,6 +128,8 @@ enum class PendingReply : std::uint8_t {
     Status,
     /// TEST_CONNECT - the idle channel's connect poll.
     Connect,
+    /// A command that answers 51H or 5FH - SET_USB_MODE and its kind.
+    Command,
 };
 
 /// How far a search for a chip that has stopped answering has got.
@@ -323,9 +325,58 @@ public:
         return answer == static_cast<std::uint8_t>(~probe);
     }
 
-    /// DS1 5.9. Set the USB working mode.
-    bool set_usb_mode(UsbMode mode) {
-        return command_with_status(Ch375Command::SetUsbMode, static_cast<std::uint8_t>(mode));
+    /// Ask a command that answers a status byte, and leave.
+    ///
+    /// The blocking form spun for a whole reply timeout, and its biggest
+    /// caller is SET_USB_MODE, which runs at five points of a device's life -
+    /// the attach, both halves of the bus reset, the recovery cycle and the
+    /// detach. Measured on hardware at 2026-08-29 12:06: a channel sitting at
+    /// attached=1, ready=0 - between the attach and Ready, which is precisely
+    /// the stretch these run in - took 20 170 us round Core 1's loop, and the
+    /// other channel lost two and a half of its 8 ms poll windows to it.
+    ///
+    /// The answer is collected by poll_command_status on a later tick. Until
+    /// it is, nothing else may be written: the chip answers in the order it
+    /// was asked, so a second question would be answered after this byte and
+    /// each reader would take the other's.
+    void begin_command_status(Ch375Command command, std::uint8_t argument) {
+        last_status_reply_ = 0;
+        last_status_answered_ = false;
+        command_status_ok_ = false;
+        begin_reply(PendingReply::Command);
+        io_.write_command(static_cast<std::uint8_t>(command));
+        io_.write_data(argument);
+    }
+
+    /// Look once for that status byte. Never waits.
+    ///
+    /// The byte is kept as well as judged, because "it refused" and "it said
+    /// 5FH" are different facts and only one of them can be acted on: a chip
+    /// that says 5FH is refusing, one that says nothing is not listening, and
+    /// one that says some third byte has a port out of step.
+    ReplyProgress poll_command_status() {
+        std::uint8_t answer = 0;
+        const ReplyProgress progress = poll_reply(PendingReply::Command, answer);
+        if (progress == ReplyProgress::Answered) {
+            last_status_reply_ = answer;
+            last_status_answered_ = true;
+            // 51H and 5FH are the whole documented set. Anything else means
+            // the port has lost step, and calling that success would let a
+            // desynchronised chip pass for a working one.
+            command_status_ok_ = answer == static_cast<std::uint8_t>(CommandStatus::Success);
+        }
+        return progress;
+    }
+
+    /// Did the last collected status say the command was taken?
+    ///
+    /// Only meaningful once poll_command_status has answered; a question that
+    /// timed out leaves this false, which is the safe direction.
+    bool command_status_succeeded() const { return command_status_ok_; }
+
+    /// DS1 5.9. Set the USB working mode, and leave.
+    void begin_set_usb_mode(UsbMode mode) {
+        begin_command_status(Ch375Command::SetUsbMode, static_cast<std::uint8_t>(mode));
     }
 
     /// What the chip actually answered the last status-bearing command with,
@@ -1069,6 +1120,7 @@ private:
 
     std::uint8_t last_status_reply_ = 0;
     bool last_status_answered_ = false;
+    bool command_status_ok_ = false;
 
     /// Move this side's transmit rate, and remember where it went.
     ///
