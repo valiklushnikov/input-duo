@@ -72,6 +72,23 @@ public:
 /// far below anything a person would notice.
 inline constexpr std::uint32_t kDefaultReplyTimeoutUs = 20000;
 
+/// What has become of a reply that is being waited for across ticks.
+///
+/// The blocking wait below is right for a chip that answers and ruinous for
+/// one that does not: 20 ms is two and a half times the 8 ms an interrupt
+/// endpoint on the *other* channel wants, and Core 1 ticks the two in
+/// sequence. Measured on hardware, 747 of one channel's 751 reply timeouts
+/// were a single command in the recovery path, and one tick reached 50 686 us.
+/// A caller that can come back later asks and leaves instead.
+enum class ReplyProgress : std::uint8_t {
+    /// Nothing has arrived and the deadline has not passed.
+    Waiting,
+    /// A byte came back. Whether it is the right byte is a separate question.
+    Answered,
+    /// The deadline passed with nothing on the wire.
+    TimedOut,
+};
+
 /// The eight bytes of a USB setup packet, before they are laid out.
 ///
 /// USB 2.0 section 9.3. The controller has commands of its own for three
@@ -100,6 +117,69 @@ public:
     /// arrives, the command is incomplete and the chip has no valid reply.
     void start_check_exist() {
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::CheckExist));
+    }
+
+    /// Ask CHECK_EXIST and leave, collecting the answer on a later tick.
+    ///
+    /// The blocking form spins for up to reply_timeout_us_, and the recovery
+    /// path asks it of a chip that by definition is not answering. Measured on
+    /// hardware: 747 of one channel's 751 reply timeouts were this command, at
+    /// 20 ms each, on a core that owes the other channel a poll every 8 ms.
+    /// Asking costs two frames into the port's queue and nothing else.
+    ///
+    /// Anything already waiting is thrown away first, so a byte left over from
+    /// an abandoned exchange cannot be read as this one's answer.
+    void begin_presence_probe(std::uint8_t probe) {
+        drain_arrived();
+        presence_expected_ = static_cast<std::uint8_t>(~probe);
+        presence_matched_ = false;
+        presence_deadline_us_ = io_.now_us() + reply_timeout_us_;
+        presence_pending_ = true;
+        io_.write_command(static_cast<std::uint8_t>(Ch375Command::CheckExist));
+        io_.write_data(probe);
+    }
+
+    /// Look once for that answer. Never waits.
+    ///
+    /// TimedOut without a probe outstanding, because a caller that asks about
+    /// a question it never put has not been kept waiting by anything.
+    ReplyProgress poll_presence_probe() {
+        if (!presence_pending_) {
+            return ReplyProgress::TimedOut;
+        }
+        std::uint8_t answer = 0;
+        if (io_.read_data(answer)) {
+            presence_pending_ = false;
+            presence_matched_ = answer == presence_expected_;
+            return ReplyProgress::Answered;
+        }
+        if (expired(presence_deadline_us_)) {
+            presence_pending_ = false;
+            return ReplyProgress::TimedOut;
+        }
+        return ReplyProgress::Waiting;
+    }
+
+    /// Was the byte that came back the exact inverse it should have been?
+    ///
+    /// A chip that answers wrongly is worse than one that says nothing - it
+    /// looks alive - so only the exact inverse counts (DS1 5.5).
+    bool presence_probe_matched() const { return presence_matched_; }
+
+    /// Take whatever has already arrived and throw it away, without waiting.
+    ///
+    /// Not drain_port: that one waits a full reply timeout to discover an
+    /// empty port, which is the cost this whole mechanism exists to avoid.
+    /// This asks only for bytes that are there now, and stops at the first
+    /// read that finds nothing - which is what the end of the traffic looks
+    /// like.
+    void drain_arrived() {
+        for (std::size_t index = 0; index < kMaxBlockSize + 2; ++index) {
+            std::uint8_t discarded = 0;
+            if (!io_.read_data(discarded)) {
+                return;
+            }
+        }
     }
 
     /// DS1 5.5. Send a byte, expect its bitwise inverse.
@@ -751,6 +831,12 @@ private:
 
     std::uint8_t last_status_reply_ = 0;
     bool last_status_answered_ = false;
+
+    /// A CHECK_EXIST that has been asked and not yet answered.
+    bool presence_pending_ = false;
+    std::uint8_t presence_expected_ = 0;
+    bool presence_matched_ = false;
+    std::uint32_t presence_deadline_us_ = 0;
 
     ICh375Transport& io_;
     std::uint32_t reply_timeout_us_ = kDefaultReplyTimeoutUs;

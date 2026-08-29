@@ -42,6 +42,21 @@ enum class Ch375State : std::uint8_t {
     Fault,
 };
 
+/// Where bringing the chip itself up has got to.
+///
+/// A sub-state machine rather than a straight line, because the one question
+/// it asks - is the chip answering? - is asked of a chip that very often is
+/// not, and waiting for that answer inside a single tick spends the other
+/// channel's poll window. Each step here does a bounded piece and returns.
+enum class ChipBringUp : std::uint8_t {
+    /// Nothing started. The next tick sends RESET_ALL.
+    Idle,
+    /// RESET_ALL has gone; the chip needs about 40 ms before it hears anything.
+    Resetting,
+    /// CHECK_EXIST has been asked at the home rate and not yet answered.
+    Probing,
+};
+
 enum class Ch375EventKind : std::uint8_t {
     None,
     /// A device was plugged in. It is not usable yet.
@@ -338,6 +353,12 @@ public:
     void request_reenumeration();
 
 private:
+    /// Get the chip itself answering, a bounded piece per tick.
+    ///
+    /// True only on the tick that finishes the job, which is the tick the rest
+    /// of the state machine may run in.
+    bool bring_chip_up(std::uint32_t now_us);
+
     void enter(Ch375State state, std::uint32_t now_us);
     void publish(Ch375EventKind kind);
     void publish_report(const std::uint8_t* data, std::size_t size);
@@ -352,8 +373,7 @@ private:
 
     Ch375State state_ = Ch375State::Absent;
     bool chip_ready_ = false;
-    /// The chip has been told to reset and is still coming back.
-    bool chip_resetting_ = false;
+    ChipBringUp bring_up_ = ChipBringUp::Idle;
     std::uint32_t chip_reset_at_us_ = 0;
     bool skip_bus_reset_ = false;
     /// What the attached device turned out to be, asked while still in the

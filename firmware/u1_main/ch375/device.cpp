@@ -8,126 +8,8 @@ void Ch375Device::tick(std::uint32_t now_us) {
     // The chip is put into host mode lazily rather than in a constructor: a
     // controller that is not powered yet would otherwise fail at construction
     // time, with nowhere to report it and no way to try again.
-    if (!chip_ready_) {
-        if (chip_resetting_) {
-            if (now_us - chip_reset_at_us_ < kChipResetUs) {
-                return;
-            }
-            chip_resetting_ = false;
-        } else {
-            if (state_ == Ch375State::RecoverWait && now_us - entered_us_ < kRecoverDelayUs) {
-                // Still counting down. Retrying flat out would hammer a
-                // controller that is already unhappy, every tick, forever.
-                return;
-            }
-            // Start from a chip that is definitely idle. Whatever state the
-            // last run left it in - including ones it does not leave by itself
-            // - is gone after this, and the wait is the price.
-            transport_.reset_all();
-            transport_.drain_pending_status();
-            chip_resetting_ = true;
-            chip_reset_at_us_ = now_us;
-            return;
-        }
-        // The chip has just come back from RESET_ALL, which returns its port
-        // to 9600 whatever it was doing before. This side has to go back with
-        // it before anything can be said at all.
-        transport_.reset_port_speed(kCh375DefaultBaud);
-
-        // Nothing is said to the chip until it has said something first.
-        //
-        // CHECK_EXIST is one command and one data byte and it proves the port
-        // by construction (DS1 5.5), so it is the cheapest thing that can be
-        // wrong. A mode command sent to a controller that is still coming back
-        // from its reset is read as part of that restart, and then every byte
-        // after it is out of step - a chip that worked a second ago and now
-        // answers nothing at all.
-        if (!transport_.check_exist(kPortProbeByte)) {
-            ++chip_not_back_yet_;
-
-            // Silent at the rate it should have come back to. If this code had
-            // raised it, that is where it may still be - the reset was sent at
-            // a rate it had stopped holding, so it never heard it. One known
-            // rate is worth asking; anything else is guessing at its expense.
-            if (raised_baud_ != kCh375DefaultBaud &&
-                transport_.recover_from(raised_baud_, kCh375DefaultBaud)) {
-                ++chip_recovered_from_raised_;
-                raised_baud_ = kCh375DefaultBaud;
-                // It has just been reset, so it needs the same wait as any
-                // other reset before anything else is said to it.
-                chip_resetting_ = true;
-                chip_reset_at_us_ = now_us;
-                return;
-            }
-            fail(now_us);
-            return;
-        }
-
-        // Mode 5 is where DS1 5.9 says to wait: enabled, generating no frames,
-        // watching for a device by itself.
-        if (!transport_.set_usb_mode(UsbMode::HostNoSof)) {
-            // Counted. Without this the channel can spin here forever with
-            // every reading frozen, which looks from outside exactly like a
-            // board that has stopped running - and cost an evening of being
-            // read as one.
-            ++setup_mode_failures_;
-
-            // Does it answer anything at all? A chip that takes CHECK_EXIST
-            // and refuses a mode is a different fault from one that is deaf,
-            // and the two have looked identical from out here all along: both
-            // are just a channel that does nothing.
-            // What it answered, not merely that it refused.
-            mode_reply_ = transport_.last_status_reply();
-            mode_answered_ = transport_.last_status_answered();
-
-            if (transport_.check_exist(kPortProbeByte)) {
-                ++alive_but_refusing_;
-            }
-
-            // Nothing else is sent. Searching for the chip at other rates,
-            // flushing it with filler and sweeping the receiver all write
-            // bytes at rates it may not be using, and each of those can wedge
-            // a chip that was about to come good on its own.
-            fail(now_us);
-            return;
-        }
-        // The chip's own default is to retry a NAK forever (DS2 1.3). A device
-        // that stops answering would then hold the firmware inside a single
-        // command, and everything else on this loop stops with it.
-        transport_.set_retry(kRetryReportNak);
-
-        // Only now is the rate raised - after the chip has proved it is alive
-        // by taking a mode command.
-        //
-        // At 9600 one mouse report costs fifteen bytes of eleven bits each:
-        // seventeen milliseconds for something a moving hand produces every
-        // eight. The deficit never closes while the hand keeps moving, and the
-        // peripheral is reset and re-enumerated for a silence this side is
-        // causing. That is the fault this exists to fix.
-        //
-        // But asking costs a write at a rate the chip may not be using, and a
-        // chip that half-hears one stops answering entirely. Asked before the
-        // chip had answered anything, that barrage met every dead channel once
-        // a second - including the freshly powered one somebody had just
-        // walked over to revive, wedged again before they got back to their
-        // chair. A chip that has just accepted a mode command is not in that
-        // state, and is the only kind worth asking.
-        if (!baud_exhausted_) {
-            port_baud_ = transport_.try_speed(kBaudLadder[baud_rung_], kCh375DefaultBaud);
-            // Remembered, because it is the only other place the chip can be.
-            raised_baud_ = port_baud_;
-            if (port_baud_ == kCh375DefaultBaud) {
-                ++baud_change_failures_;
-                if (baud_rung_ + 1 < kBaudLadderSize) {
-                    ++baud_rung_;
-                } else {
-                    baud_exhausted_ = true;
-                }
-            }
-        }
-        chip_ready_ = true;
-        enter(Ch375State::Absent, now_us);
-        last_connect_poll_us_ = now_us - kConnectPollUs;
+    if (!chip_ready_ && !bring_chip_up(now_us)) {
+        return;
     }
 
     InterruptStatus status = InterruptStatus::Success;
@@ -404,6 +286,147 @@ void Ch375Device::tick(std::uint32_t now_us) {
         case Ch375State::Fault:
             return;
     }
+}
+
+bool Ch375Device::bring_chip_up(std::uint32_t now_us) {
+    switch (bring_up_) {
+        case ChipBringUp::Idle:
+            if (state_ == Ch375State::RecoverWait && now_us - entered_us_ < kRecoverDelayUs) {
+                // Still counting down. Retrying flat out would hammer a
+                // controller that is already unhappy, every tick, forever.
+                return false;
+            }
+            // Start from a chip that is definitely idle. Whatever state the
+            // last run left it in - including ones it does not leave by itself
+            // - is gone after this, and the wait is the price.
+            transport_.reset_all();
+            transport_.drain_pending_status();
+            bring_up_ = ChipBringUp::Resetting;
+            chip_reset_at_us_ = now_us;
+            return false;
+
+        case ChipBringUp::Resetting:
+            if (now_us - chip_reset_at_us_ < kChipResetUs) {
+                return false;
+            }
+            // The chip has just come back from RESET_ALL, which returns its
+            // port to 9600 whatever it was doing before. This side has to go
+            // back with it before anything can be said at all.
+            transport_.reset_port_speed(kCh375DefaultBaud);
+
+            // Nothing is said to the chip until it has said something first.
+            //
+            // CHECK_EXIST is one command and one data byte and it proves the
+            // port by construction (DS1 5.5), so it is the cheapest thing that
+            // can be wrong. A mode command sent to a controller that is still
+            // coming back from its reset is read as part of that restart, and
+            // then every byte after it is out of step - a chip that worked a
+            // second ago and now answers nothing at all.
+            //
+            // Asked and left. The answer is picked up on a later tick, because
+            // a chip that is not coming back would otherwise hold this core
+            // for 20 ms while the other channel's endpoint goes unpolled.
+            transport_.begin_presence_probe(kPortProbeByte);
+            bring_up_ = ChipBringUp::Probing;
+            return false;
+
+        case ChipBringUp::Probing: {
+            const ReplyProgress progress = transport_.poll_presence_probe();
+            if (progress == ReplyProgress::Waiting) {
+                return false;
+            }
+            if (progress == ReplyProgress::Answered && transport_.presence_probe_matched()) {
+                break;
+            }
+            ++chip_not_back_yet_;
+            bring_up_ = ChipBringUp::Idle;
+
+            // Silent at the rate it should have come back to. If this code had
+            // raised it, that is where it may still be - the reset was sent at
+            // a rate it had stopped holding, so it never heard it. One known
+            // rate is worth asking; anything else is guessing at its expense.
+            if (raised_baud_ != kCh375DefaultBaud &&
+                transport_.recover_from(raised_baud_, kCh375DefaultBaud)) {
+                ++chip_recovered_from_raised_;
+                raised_baud_ = kCh375DefaultBaud;
+                // It has just been reset, so it needs the same wait as any
+                // other reset before anything else is said to it.
+                bring_up_ = ChipBringUp::Resetting;
+                chip_reset_at_us_ = now_us;
+                return false;
+            }
+            fail(now_us);
+            return false;
+        }
+    }
+
+    bring_up_ = ChipBringUp::Idle;
+
+    // Mode 5 is where DS1 5.9 says to wait: enabled, generating no frames,
+    // watching for a device by itself.
+    if (!transport_.set_usb_mode(UsbMode::HostNoSof)) {
+        // Counted. Without this the channel can spin here forever with every
+        // reading frozen, which looks from outside exactly like a board that
+        // has stopped running - and cost an evening of being read as one.
+        ++setup_mode_failures_;
+
+        // Does it answer anything at all? A chip that takes CHECK_EXIST and
+        // refuses a mode is a different fault from one that is deaf, and the
+        // two have looked identical from out here all along: both are just a
+        // channel that does nothing.
+        // What it answered, not merely that it refused.
+        mode_reply_ = transport_.last_status_reply();
+        mode_answered_ = transport_.last_status_answered();
+
+        if (transport_.check_exist(kPortProbeByte)) {
+            ++alive_but_refusing_;
+        }
+
+        // Nothing else is sent. Searching for the chip at other rates,
+        // flushing it with filler and sweeping the receiver all write bytes at
+        // rates it may not be using, and each of those can wedge a chip that
+        // was about to come good on its own.
+        fail(now_us);
+        return false;
+    }
+    // The chip's own default is to retry a NAK forever (DS2 1.3). A device
+    // that stops answering would then hold the firmware inside a single
+    // command, and everything else on this loop stops with it.
+    transport_.set_retry(kRetryReportNak);
+
+    // Only now is the rate raised - after the chip has proved it is alive by
+    // taking a mode command.
+    //
+    // At 9600 one mouse report costs fifteen bytes of eleven bits each:
+    // seventeen milliseconds for something a moving hand produces every eight.
+    // The deficit never closes while the hand keeps moving, and the peripheral
+    // is reset and re-enumerated for a silence this side is causing. That is
+    // the fault this exists to fix.
+    //
+    // But asking costs a write at a rate the chip may not be using, and a chip
+    // that half-hears one stops answering entirely. Asked before the chip had
+    // answered anything, that barrage met every dead channel once a second -
+    // including the freshly powered one somebody had just walked over to
+    // revive, wedged again before they got back to their chair. A chip that
+    // has just accepted a mode command is not in that state, and is the only
+    // kind worth asking.
+    if (!baud_exhausted_) {
+        port_baud_ = transport_.try_speed(kBaudLadder[baud_rung_], kCh375DefaultBaud);
+        // Remembered, because it is the only other place the chip can be.
+        raised_baud_ = port_baud_;
+        if (port_baud_ == kCh375DefaultBaud) {
+            ++baud_change_failures_;
+            if (baud_rung_ + 1 < kBaudLadderSize) {
+                ++baud_rung_;
+            } else {
+                baud_exhausted_ = true;
+            }
+        }
+    }
+    chip_ready_ = true;
+    enter(Ch375State::Absent, now_us);
+    last_connect_poll_us_ = now_us - kConnectPollUs;
+    return true;
 }
 
 bool Ch375Device::poll_interrupt(InterruptStatus& status) {

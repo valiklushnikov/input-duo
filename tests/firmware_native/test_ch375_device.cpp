@@ -46,6 +46,26 @@ struct Rig {
         device.tick(chip.now_us());
     }
 
+    /// The longest a single tick took, measured on the fake's own clock.
+    ///
+    /// That clock moves only when the code under test polls a port with
+    /// nothing on it, so this measures the one thing that matters here: time
+    /// spent waiting for a chip, which Core 1 takes out of the other
+    /// channel's poll window.
+    std::uint32_t worst_tick(int ticks, std::uint32_t step_us = 1000) {
+        std::uint32_t worst = 0;
+        for (int index = 0; index < ticks; ++index) {
+            const std::uint32_t before = chip.now_us();
+            device.tick(chip.now_us());
+            const std::uint32_t spent = chip.now_us() - before;
+            if (spent > worst) {
+                worst = spent;
+            }
+            chip.advance(step_us);
+        }
+        return worst;
+    }
+
     /// Take every event the device has produced, keeping the last of a kind.
     int count(Ch375EventKind kind) {
         int seen = 0;
@@ -648,4 +668,28 @@ TEST_CASE(a_token_whose_answer_never_comes_does_not_stop_the_polling_forever) {
     rig.run(500000);
 
     CHECK(rig.chip.tokens_issued() > before);
+}
+
+// ------------------------------------------- the reply wait is a state
+
+TEST_CASE(a_tick_on_a_chip_that_is_not_answering_costs_the_loop_almost_nothing) {
+    // Core 1 ticks both channels in sequence, and a mouse's interrupt endpoint
+    // wants polling about every 8 ms. So a channel that is waiting on a chip
+    // which is never going to answer spends the *other* channel's poll window.
+    //
+    // Measured on hardware before this: 747 of one channel's 751 reply
+    // timeouts were the recovery path's CHECK_EXIST, 20 ms each, and a single
+    // tick reached 50 686 us. The question has to be asked and left, with the
+    // answer collected on a later tick.
+    Rig rig;
+    rig.chip.go_silent(true);
+    // Nothing plugged in: this is the recovery loop of a channel whose chip
+    // has stopped talking, which is where the measured time went.
+    rig.run(3 * kRecoverDelayUs, 1000);
+
+    const std::uint32_t worst = rig.worst_tick(3000);
+
+    // Measured with this test: 20 000 us before the change - one whole reply
+    // timeout inside one tick - and 10 us after it.
+    CHECK(worst < 500u);
 }
