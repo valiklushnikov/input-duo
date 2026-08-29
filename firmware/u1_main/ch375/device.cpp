@@ -336,11 +336,18 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 if (raised_baud_ != kCh375DefaultBaud) {
                     ++collapses_while_raised_;
                     step_ladder_down();
-                    // raised_baud_ is deliberately left alone. The chip may be
-                    // stranded at it right now - that is what a collapse looks
-                    // like from here - and this is the only record of where it
-                    // was put. Clearing it here threw away the one thing the
-                    // recovery needs, and left the chip unreachable.
+                    // raised_baud_ is deliberately left alone, but not for
+                    // the reason this note used to give. It said the value was
+                    // the only record of where the chip had been put and the
+                    // one thing the recovery needed - which was true of
+                    // recover_from, and recover_from was deleted in repair 2.
+                    // The search walks the home rate and every rung, so it
+                    // needs no hint about where to look.
+                    //
+                    // What is still true is the comparison above: raised_baud_
+                    // says whether this channel had climbed off the default at
+                    // all, and only a link that had is one whose collapse
+                    // should cost it a rung.
                 }
 
                 handle_detach(now_us);

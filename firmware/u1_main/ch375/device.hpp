@@ -392,9 +392,15 @@ public:
     ///
     /// The rate, not a tally, because the rate is the fact: it says whether
     /// the chip was where this code had put it - so this side abandoned a rate
-    /// the chip was holding - or somewhere neither end chose. Zero means the
-    /// search has either never run or never found it, and chip_found_elsewhere
-    /// separates those two.
+    /// the chip was holding - or somewhere neither end chose.
+    ///
+    /// Zero is three cases, not the two this note used to name. The search has
+    /// never run; the search ran and found nothing anywhere; or the search ran
+    /// and found the chip at the home rate, which is written nowhere because
+    /// only a chip found away from home is recorded here. chip_found_elsewhere
+    /// counts the third case out - it moves only when the chip was somewhere
+    /// else - and chip_not_back_yet says whether the search was ever provoked
+    /// at all.
     unsigned chip_found_at() const { return chip_found_at_; }
 
     /// How often an idle channel found its chip no longer answering.

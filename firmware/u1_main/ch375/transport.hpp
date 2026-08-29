@@ -75,9 +75,21 @@ public:
 /// matters is that Core 1 ticks both channels in sequence and the other one's
 /// interrupt endpoint wants polling every 8 ms. Twenty milliseconds is two and
 /// a half of its poll windows. So this figure is right for a chip that is
-/// going to answer and ruinous for one that is not, and the paths that ask a
-/// chip which is not answering - the recovery probe and the search across
-/// rates - do not use it as a spin at all. See ReplyProgress below.
+/// going to answer and ruinous for one that is not.
+///
+/// It is used two ways. As a deadline on a question that was asked and left -
+/// the presence probe, the interrupt status, the connect poll, the search
+/// across rates - it costs nothing but the delay before the caller gives up,
+/// which is what ReplyProgress below is for. As the bound on read_reply it is
+/// a spin, and the whole of it is taken out of the other channel.
+///
+/// Read as a spin by, at the time of writing: set_usb_mode (five call sites),
+/// get_device_rate on every attach, drain_pending_status at every bring-up,
+/// check_exist and port_answers inside try_speed, the check_exist in the
+/// mode-refused branch, and read_block with the drain_port behind it - which
+/// on a rate that cannot carry a block costs two of these in one tick. Those
+/// are the ticks that can still blow the budget; the list is kept in the link
+/// hardening report and is not empty.
 inline constexpr std::uint32_t kDefaultReplyTimeoutUs = 20000;
 
 /// What has become of a reply that is being waited for across ticks.
@@ -681,7 +693,18 @@ public:
         search_step_ = SearchStep::Rate;
     }
 
-    /// Do one step of that search. Never waits.
+    /// Do one step of that search.
+    ///
+    /// Never waits for a reply: each step either moves the port to the next
+    /// rate or takes one look for an answer already asked for. It is not free,
+    /// though, and the note here used to say it was. A step that changes the
+    /// rate calls set_port_baud, and on hardware PioCh375Transport::set_baud
+    /// spends about 3.5 ms in two mandated sleeps - kFrameTailUs = 1500 us so
+    /// the last frame leaves at the old rate, and kBaudChangeUs = 2000 us
+    /// because DS1 5.2 says the chip answers at neither rate for about a
+    /// millisecond after the change. At most one rate changes per step, so
+    /// 3.5 ms is the worst a search step can cost, against 154 056 us for the
+    /// same search done inside one tick.
     SearchProgress poll_chip_search() {
         switch (search_step_) {
             case SearchStep::Rate: {
