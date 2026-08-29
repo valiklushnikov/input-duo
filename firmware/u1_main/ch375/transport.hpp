@@ -89,6 +89,16 @@ enum class ReplyProgress : std::uint8_t {
     TimedOut,
 };
 
+/// How far a search for a chip that has stopped answering has got.
+enum class SearchProgress : std::uint8_t {
+    /// Still walking the rates. Call again next tick.
+    Waiting,
+    /// It answered somewhere, and the port is back at the home rate.
+    Found,
+    /// It answered at no rate at all, and the port is back at the home rate.
+    NotFound,
+};
+
 /// The eight bytes of a USB setup packet, before they are laid out.
 ///
 /// USB 2.0 section 9.3. The controller has commands of its own for three
@@ -497,41 +507,22 @@ public:
         return 0;
     }
 
-    /// Look for a chip at the one rate this code put it at.
-    ///
-    /// When a raised link degrades, the reset meant to bring the chip home is
-    /// sent at the rate it can no longer hold - so it never arrives, and the
-    /// chip stays where it was while this side goes back to the default and
-    /// knocks on an empty door for ever.
-    ///
-    /// One rate, not a sweep. This is not a search: the rate is known, because
-    /// this code chose it. Probing rates the chip was never put at is how a
-    /// controller that was about to come good gets a half-heard opcode
-    /// instead.
-    ///
-    /// Returns true if it answered there, with the port back at ``home`` and
-    /// the chip reset.
-    bool recover_from(unsigned raised, unsigned home) {
-        if (raised == home || !io_.set_baud(raised)) {
-            io_.set_baud(home);
-            return false;
-        }
-        if (!port_answers(kPortProofRounds)) {
-            io_.set_baud(home);
-            return false;
-        }
-        // It is there and it can hear us. Send it home.
-        reset_all();
-        io_.set_baud(home);
-        return true;
-    }
-
-    /// Find a chip that has stopped answering, and bring it home.
+    /// Look for a chip that has stopped answering, one step per tick.
     ///
     /// A chip left at a rate this side abandoned answers nothing where it is
-    /// expected, and until now the only cure was somebody walking to the board
-    /// and pulling its power - which is what this project has been doing for
-    /// weeks. It is reachable; nobody was asking in the right place.
+    /// expected, and until this ran the only cure was somebody walking to the
+    /// board and pulling its power - which is what this project did for weeks.
+    /// It is reachable; nobody was asking in the right place. Wired in on the
+    /// bench it recovered a stranded chip with no power cycle, first time all
+    /// week.
+    ///
+    /// There is no way to reach a CH375 on this board except the serial port:
+    /// docs/hardware/ch375-wiring.md gives RXD, TXD and INT per channel and no
+    /// reset line. The manufacturer recommends the hardware this board does
+    /// not have - CH375 datasheet, serial interface section, "mends
+    /// communication baud-rate dynamically, one suggest is that controlling
+    /// RSTI of CH375 through MCU I/O point in order to reset CH375 to default
+    /// baud-rate" - so this is the software equivalent and the only lever.
     ///
     /// Only CHECK_EXIST is used to look, because it is one command and one
     /// data byte and it proves the port by construction (DS1 5.5). After a
@@ -540,35 +531,84 @@ public:
     /// positionally, so a swallowed parameter puts every later byte out of
     /// step - which is how it got lost in the first place.
     ///
-    /// Returns true if it was found, with the port back at ``home``.
-    bool find_chip(unsigned home) {
-        unsigned rates[1 + kBaudLadderSize];
-        rates[0] = home;
-        for (std::size_t index = 0; index < kBaudLadderSize; ++index) {
-            rates[index + 1] = kBaudLadder[index].baud;
-        }
-
-        for (std::size_t index = 0; index < 1 + kBaudLadderSize; ++index) {
-            if (!io_.set_baud(rates[index])) {
-                continue;
-            }
-            if (port_answers(kPortProofRounds)) {
-                if (rates[index] != home) {
-                    // Found somewhere it should not be. Tell it to reset while
-                    // it can still hear, then come home with it.
-                    reset_all();
-                    io_.set_baud(home);
-                }
-                return true;
-            }
-            for (int filler = 0; filler < 4; ++filler) {
-                io_.write_data(0x00);
-            }
-        }
-
-        io_.set_baud(home);
-        return false;
+    /// Split across ticks, not run to completion. Done in one call it walks
+    /// four rates with two probes each, all inside the blocking reply wait: on
+    /// the bench that took the worst tick to 154 056 us, which Core 1 charges
+    /// to the other channel as a lag in somebody's typing.
+    void begin_chip_search(unsigned home) {
+        search_home_ = home;
+        search_index_ = 0;
+        search_round_ = 0;
+        search_found_at_ = 0;
+        search_step_ = SearchStep::Rate;
     }
+
+    /// Do one step of that search. Never waits.
+    SearchProgress poll_chip_search() {
+        switch (search_step_) {
+            case SearchStep::Rate: {
+                if (search_index_ >= 1 + kBaudLadderSize) {
+                    io_.set_baud(search_home_);
+                    search_step_ = SearchStep::Done;
+                    return SearchProgress::NotFound;
+                }
+                if (!io_.set_baud(search_rate(search_index_))) {
+                    // A port with a fixed rate cannot be asked at another one.
+                    ++search_index_;
+                    return SearchProgress::Waiting;
+                }
+                search_round_ = 0;
+                search_probe_ = kPortProbeByte;
+                begin_presence_probe(search_probe_);
+                search_step_ = SearchStep::Probe;
+                return SearchProgress::Waiting;
+            }
+
+            case SearchStep::Probe: {
+                const ReplyProgress progress = poll_presence_probe();
+                if (progress == ReplyProgress::Waiting) {
+                    return SearchProgress::Waiting;
+                }
+                if (progress == ReplyProgress::Answered && presence_matched_) {
+                    if (++search_round_ < kPortProofRounds) {
+                        // A marginal rate answers sometimes, and accepting it
+                        // on one byte is how a link that half works gets
+                        // chosen over one that works.
+                        search_probe_ = static_cast<std::uint8_t>(~search_probe_);
+                        begin_presence_probe(search_probe_);
+                        return SearchProgress::Waiting;
+                    }
+                    search_found_at_ = search_rate(search_index_);
+                    if (search_found_at_ != search_home_) {
+                        // Found somewhere it should not be. Tell it to reset
+                        // while it can still hear, then come home with it.
+                        reset_all();
+                        io_.set_baud(search_home_);
+                    }
+                    search_step_ = SearchStep::Done;
+                    return SearchProgress::Found;
+                }
+                for (int filler = 0; filler < 4; ++filler) {
+                    io_.write_data(0x00);
+                }
+                ++search_index_;
+                search_step_ = SearchStep::Rate;
+                return SearchProgress::Waiting;
+            }
+
+            case SearchStep::Done:
+            default:
+                return search_found_at_ != 0 ? SearchProgress::Found
+                                             : SearchProgress::NotFound;
+        }
+    }
+
+    /// The rate the chip answered at, or zero if it answered nowhere.
+    ///
+    /// Kept apart from "it was found" because the two say different things: a
+    /// chip found at the home rate was merely slow to come back, and one found
+    /// at a rung is one this code stranded there and can strand again.
+    unsigned chip_search_found_at() const { return search_found_at_; }
 
     /// DS1 5.10. Ask whether a device is attached, rather than waiting to be
     /// told.
@@ -831,6 +871,22 @@ private:
 
     std::uint8_t last_status_reply_ = 0;
     bool last_status_answered_ = false;
+
+    /// Where a search across the rates has got to.
+    enum class SearchStep : std::uint8_t { Rate, Probe, Done };
+
+    /// The rates a lost chip can be at: the one it comes up at, and every one
+    /// this code is capable of having moved it to.
+    unsigned search_rate(std::size_t index) const {
+        return index == 0 ? search_home_ : kBaudLadder[index - 1].baud;
+    }
+
+    SearchStep search_step_ = SearchStep::Done;
+    unsigned search_home_ = kCh375DefaultBaud;
+    std::size_t search_index_ = 0;
+    int search_round_ = 0;
+    std::uint8_t search_probe_ = kPortProbeByte;
+    unsigned search_found_at_ = 0;
 
     /// A CHECK_EXIST that has been asked and not yet answered.
     bool presence_pending_ = false;

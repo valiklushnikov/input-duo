@@ -693,3 +693,59 @@ TEST_CASE(a_tick_on_a_chip_that_is_not_answering_costs_the_loop_almost_nothing) 
     // timeout inside one tick - and 10 us after it.
     CHECK(worst < 500u);
 }
+
+// ------------------------------------------------ finding a lost chip
+
+TEST_CASE(a_chip_left_at_a_rate_this_side_abandoned_is_found_and_brought_home) {
+    // The state a reflash of U1 leaves behind: the processor restarts talking
+    // at 9600 and the controller is still wherever the last run put it. This
+    // board has no reset line to a CH375 (docs/hardware/ch375-wiring.md gives
+    // RXD, TXD and INT and nothing else), so the serial port is the only lever
+    // there is - and the manufacturer says the same thing from the other side
+    // (CH375 datasheet, serial interface section: reset it through an MCU pin
+    // to bring the baud rate home). Until this, the cure was a person walking
+    // to the board and pulling the module's 5 V.
+    Rig rig;
+    rig.chip.strand_at(115200);
+
+    rig.run(6 * kRecoverDelayUs, 1000);
+
+    CHECK(rig.device.chip_found_elsewhere() > 0u);
+    // Where it was found, not merely that it was: the rate says whether this
+    // side abandoned a chip that was holding a rung, or the chip is somewhere
+    // neither end chose.
+    CHECK_EQ(rig.device.chip_found_at(), 115200u);
+    // Revived without anybody touching it, and both ends agree about the rate
+    // they are speaking at - which is what being brought home means.
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Absent));
+    CHECK_EQ(rig.chip.chip_baud(), rig.chip.port_baud());
+}
+
+TEST_CASE(a_chip_that_answers_nowhere_is_not_hunted_for_every_second) {
+    // The search writes to rates the chip may not be using, and a chip that
+    // half-hears a byte swallows the next command as its parameter. So it is
+    // not the first thing tried - only what is left after several probes at
+    // the rate the chip should have come back to have gone unanswered.
+    Rig rig;
+    rig.chip.go_silent(true);
+
+    rig.run(2 * kRecoverDelayUs, 1000);
+
+    CHECK_EQ(rig.device.chip_found_elsewhere(), 0u);
+    CHECK_EQ(rig.device.chip_found_at(), 0u);
+}
+
+TEST_CASE(searching_every_rate_for_a_lost_chip_still_fits_inside_a_tick) {
+    // The prototype wired this search into the blocking reply wait and the
+    // worst tick went from 50 686 us to 154 056 us - measured, and felt as a
+    // lag while typing, because Core 1 ticks the other channel afterwards.
+    // Four rates and two probes each is a state machine's worth of work, not
+    // one tick's.
+    Rig rig;
+    rig.chip.go_silent(true);
+    rig.run(6 * kRecoverDelayUs, 1000);
+
+    const std::uint32_t worst = rig.worst_tick(20000);
+
+    CHECK(worst < 500u);
+}

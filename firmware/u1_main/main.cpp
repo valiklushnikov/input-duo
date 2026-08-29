@@ -644,7 +644,7 @@ namespace {
             device.baud_change_failures(), device.setup_mode_failures(),
             device.recover_mode_failures(), device.chip_found_elsewhere(),
             device.alive_but_refusing(),
-            device.chip_not_back_yet(), device.chip_recovered_from_raised(),
+            device.chip_not_back_yet(), device.chip_found_at(),
             device.quiet_rearms(), device.collapses_while_raised(),
             device.mode_answered() ? "answered" : "silent", device.mode_reply(),
             describe_mode_reply(device.mode_answered(), device.mode_reply()),

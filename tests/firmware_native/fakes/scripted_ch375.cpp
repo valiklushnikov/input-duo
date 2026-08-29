@@ -105,11 +105,40 @@ void FakeCh375Chip::queue(std::uint8_t value) {
     outgoing_.push_back(garbage_ ? 0x00 : value);
 }
 
+bool FakeCh375Chip::set_baud(unsigned baud) {
+    if (baud == 0) {
+        return false;
+    }
+    port_baud_ = baud;
+    port_rx_baud_ = baud;
+    return true;
+}
+
+bool FakeCh375Chip::set_rx_baud(unsigned baud) {
+    if (baud == 0) {
+        return false;
+    }
+    port_rx_baud_ = baud;
+    return true;
+}
+
 void FakeCh375Chip::write_command(std::uint8_t command) {
     if (command == static_cast<std::uint8_t>(Ch375Command::CheckExist)) {
         ++check_exist_count_;
     }
     ++command_count_;
+
+    if (!chip_hears()) {
+        // Counted above and then dropped: the command was written, which is
+        // what a caller's own counters see, and the chip never received it.
+        // Nothing is queued, so nothing comes back - which from this side is
+        // indistinguishable from a chip that is not there, and is exactly the
+        // fault a search across rates exists to tell apart.
+        pending_command_ = 0;
+        expecting_data_ = false;
+        return;
+    }
+
     pending_command_ = command;
     expecting_data_ = false;
 
@@ -177,6 +206,22 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
             expecting_data_ = true;
             break;
 
+        case Ch375Command::ResetAll:
+            // DS1 5.2 and 5.4: the port goes back to the rate the chip comes
+            // up at, whatever it was doing before. Everything else the chip
+            // was in the middle of is out of scope here - what the tests are
+            // about is that a chip found at an abandoned rate can be told to
+            // come home, and does.
+            chip_baud_ = kScriptedDefaultBaud;
+            outgoing_.clear();
+            outgoing_read_ = 0;
+            break;
+
+        case Ch375Command::SetBaudRate:
+            baud_coefficient_seen_ = false;
+            expecting_data_ = true;
+            break;
+
         case Ch375Command::GetDeviceRate:
         case Ch375Command::SetUsbSpeed:
         case Ch375Command::CheckExist:
@@ -194,7 +239,7 @@ void FakeCh375Chip::write_command(std::uint8_t command) {
 }
 
 void FakeCh375Chip::write_data(std::uint8_t value) {
-    if (!expecting_data_) {
+    if (!chip_hears() || !expecting_data_) {
         return;
     }
 
@@ -209,6 +254,34 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
             queue(static_cast<std::uint8_t>(low_speed_ ? 0x10 : 0x00));
             expecting_data_ = false;
             break;
+
+        case Ch375Command::SetBaudRate: {
+            // A coefficient and a constant (DS1 5.2). Only the rates this
+            // firmware asks for are modelled; anything else is a divisor the
+            // chip on this bench was never given, and answering it would let a
+            // test pass on a rate that does not exist.
+            if (!baud_coefficient_seen_) {
+                baud_coefficient_ = value;
+                baud_coefficient_seen_ = true;
+                break;
+            }
+            baud_coefficient_seen_ = false;
+            expecting_data_ = false;
+            for (std::size_t index = 0; index < kBaudLadderSize; ++index) {
+                if (kBaudLadder[index].coefficient != baud_coefficient_ ||
+                    kBaudLadder[index].constant != value) {
+                    continue;
+                }
+                // The chip moves first and answers at the new rate, which is
+                // the whole difficulty of this command: a receiver still set
+                // to the old one reads silence and calls a chip that moved a
+                // chip that refused.
+                chip_baud_ = kBaudLadder[index].baud;
+                queue(static_cast<std::uint8_t>(CommandStatus::Success));
+                break;
+            }
+            break;
+        }
 
         case Ch375Command::SetUsbSpeed:
             bus_speed_ = static_cast<UsbSpeed>(value);
@@ -354,6 +427,13 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
 }
 
 bool FakeCh375Chip::read_data(std::uint8_t& value) {
+    if (!chip_is_audible()) {
+        // The chip may well be talking. Nothing readable comes of it while
+        // this side is sampling at another rate, and time still passes -
+        // without which every bounded wait here would run forever.
+        now_us_ += 10;
+        return false;
+    }
     if (outgoing_read_ < outgoing_.size()) {
         value = outgoing_[outgoing_read_++];
         if (outgoing_read_ == outgoing_.size()) {

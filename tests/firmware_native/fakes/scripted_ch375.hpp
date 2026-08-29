@@ -285,6 +285,33 @@ public:
     /// Refuse to configure, as a device the chip cannot talk to would cause.
     void fail_auto_setup(bool failing) { fail_auto_setup_ = failing; }
 
+    // --- the serial port's own rate ----------------------------------------
+    //
+    // The chip and this side each have one, and the two coming apart is the
+    // fault the recovery path exists for. There is no reset line to a CH375 on
+    // this board (docs/hardware/ch375-wiring.md gives RXD, TXD and INT and
+    // nothing else), so a chip left at a rate this side abandoned hears
+    // nothing, answers nothing, and cannot be told anything either.
+
+    bool set_baud(unsigned baud) override;
+    bool set_rx_baud(unsigned baud) override;
+
+    /// What this side is transmitting at, and what it is listening at.
+    unsigned port_baud() const { return port_baud_; }
+    unsigned port_rx_baud() const { return port_rx_baud_; }
+
+    /// What the chip itself is speaking and listening at.
+    ///
+    /// It comes up at 9600 and returns there after RESET_ALL (DS1 5.2), and
+    /// SET_BAUDRATE is the only other thing that moves it.
+    unsigned chip_baud() const { return chip_baud_; }
+
+    /// Leave the chip at a rate this side is not using.
+    ///
+    /// The state a reflash of U1 leaves behind: the processor restarts at
+    /// 9600 and the controller is still wherever the last run put it.
+    void strand_at(unsigned baud) { chip_baud_ = baud; }
+
     /// Answer every command with a byte that means nothing.
     void answer_garbage(bool broken) { garbage_ = broken; }
 
@@ -331,6 +358,22 @@ private:
     bool attached_ = false;
     bool int_asserted_ = false;
     std::uint8_t pending_status_ = 0;
+
+    /// Can the chip hear this side, and can this side hear the chip?
+    ///
+    /// Both ends have to be at the same rate. Half-hearing is not modelled as
+    /// plausible nonsense - the chip simply misses the frame - which is the
+    /// safe direction: a test cannot pass by accident on a byte that only
+    /// looked right.
+    bool chip_hears() const { return port_baud_ == chip_baud_; }
+    bool chip_is_audible() const { return port_rx_baud_ == chip_baud_; }
+
+    unsigned chip_baud_ = kScriptedDefaultBaud;
+    unsigned port_baud_ = kScriptedDefaultBaud;
+    unsigned port_rx_baud_ = kScriptedDefaultBaud;
+    /// The two divisor bytes of SET_BAUDRATE, as they arrive.
+    std::uint8_t baud_coefficient_ = 0;
+    bool baud_coefficient_seen_ = false;
 
     bool garbage_ = false;
     bool silent_ = false;

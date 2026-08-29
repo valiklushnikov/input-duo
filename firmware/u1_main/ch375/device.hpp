@@ -55,7 +55,18 @@ enum class ChipBringUp : std::uint8_t {
     Resetting,
     /// CHECK_EXIST has been asked at the home rate and not yet answered.
     Probing,
+    /// Every rate is being walked looking for a chip that has moved.
+    Searching,
 };
+
+/// How many probes at the home rate go unanswered before the chip is looked
+/// for at the rates this code could have moved it to.
+///
+/// Not the first thing tried: the search writes to rates the chip may not be
+/// using, and a chip that half-hears a byte swallows the next command as its
+/// parameter. A channel that has been silent for this many recovery cycles is
+/// already unreachable, and looking cannot make it more so.
+inline constexpr std::uint16_t kProbesBeforeChipSearch = 3;
 
 enum class Ch375EventKind : std::uint8_t {
     None,
@@ -298,8 +309,14 @@ public:
     /// chip is not coming back at all, which is a different fault.
     std::uint16_t chip_not_back_yet() const { return chip_not_back_yet_; }
 
-    /// How often the chip was found still at the rate this code raised it to.
-    std::uint16_t chip_recovered_from_raised() const { return chip_recovered_from_raised_; }
+    /// The rate the search last found the chip answering at, or zero.
+    ///
+    /// The rate, not a tally, because the rate is the fact: it says whether
+    /// the chip was where this code had put it - so this side abandoned a rate
+    /// the chip was holding - or somewhere neither end chose. Zero means the
+    /// search has either never run or never found it, and chip_found_elsewhere
+    /// separates those two.
+    unsigned chip_found_at() const { return chip_found_at_; }
 
     /// How often a quiet endpoint was re-armed instead of torn down.
     ///
@@ -408,7 +425,9 @@ private:
     bool rx_swept_ = false;
     unsigned rx_sweep_hit_ = 0;
     std::uint16_t chip_not_back_yet_ = 0;
-    std::uint16_t chip_recovered_from_raised_ = 0;
+    /// Consecutive probes at the home rate that went unanswered.
+    std::uint16_t unanswered_probes_ = 0;
+    unsigned chip_found_at_ = 0;
     std::uint16_t quiet_rearms_ = 0;
     std::uint16_t collapses_while_raised_ = 0;
     std::uint8_t relights_ = 0;

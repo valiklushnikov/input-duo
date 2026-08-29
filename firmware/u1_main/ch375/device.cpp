@@ -336,6 +336,7 @@ bool Ch375Device::bring_chip_up(std::uint32_t now_us) {
                 return false;
             }
             if (progress == ReplyProgress::Answered && transport_.presence_probe_matched()) {
+                unanswered_probes_ = 0;
                 break;
             }
             ++chip_not_back_yet_;
@@ -343,19 +344,53 @@ bool Ch375Device::bring_chip_up(std::uint32_t now_us) {
 
             // Silent at the rate it should have come back to. If this code had
             // raised it, that is where it may still be - the reset was sent at
-            // a rate it had stopped holding, so it never heard it. One known
-            // rate is worth asking; anything else is guessing at its expense.
-            if (raised_baud_ != kCh375DefaultBaud &&
-                transport_.recover_from(raised_baud_, kCh375DefaultBaud)) {
-                ++chip_recovered_from_raised_;
-                raised_baud_ = kCh375DefaultBaud;
-                // It has just been reset, so it needs the same wait as any
-                // other reset before anything else is said to it.
-                bring_up_ = ChipBringUp::Resetting;
-                chip_reset_at_us_ = now_us;
+            // a rate it had stopped holding, so it never heard it. And there
+            // is no other way to reach it: this board wires RXD, TXD and INT
+            // to each CH375 and no reset line (docs/hardware/ch375-wiring.md),
+            // so a chip that stops listening cannot be told anything except
+            // over the port it has stopped listening on.
+            //
+            // Not on the first silence, because the search writes at rates the
+            // chip may not be using and a half-heard byte swallows the command
+            // after it. After this many, the channel is already unreachable.
+            if (++unanswered_probes_ >= kProbesBeforeChipSearch) {
+                unanswered_probes_ = 0;
+                transport_.begin_chip_search(kCh375DefaultBaud);
+                bring_up_ = ChipBringUp::Searching;
                 return false;
             }
             fail(now_us);
+            return false;
+        }
+
+        case ChipBringUp::Searching: {
+            const SearchProgress found = transport_.poll_chip_search();
+            if (found == SearchProgress::Waiting) {
+                return false;
+            }
+            if (found != SearchProgress::Found) {
+                // It answered nowhere. A chip in that state transmits nothing
+                // at any rate, and on this board nothing else can be done to
+                // it - which is why the wiring note asks for a GPIO on RSTI.
+                bring_up_ = ChipBringUp::Idle;
+                fail(now_us);
+                return false;
+            }
+
+            const unsigned at = transport_.chip_search_found_at();
+            bring_up_ = ChipBringUp::Resetting;
+            if (at == kCh375DefaultBaud) {
+                // It was at home after all, merely slow to answer. Nothing was
+                // reset, so there is nothing to wait out.
+                chip_reset_at_us_ = now_us - kChipResetUs;
+                return false;
+            }
+            ++chip_found_elsewhere_;
+            chip_found_at_ = at;
+            raised_baud_ = kCh375DefaultBaud;
+            // It was reset where it was found, so it needs the wait every
+            // reset needs before anything else is said to it.
+            chip_reset_at_us_ = now_us;
             return false;
         }
     }

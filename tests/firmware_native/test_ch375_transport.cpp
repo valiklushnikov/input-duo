@@ -21,6 +21,7 @@ using duo_input::u1::ch375::BaudOption;
 using duo_input::u1::ch375::Ch375Transport;
 using duo_input::u1::ch375::CommandStatus;
 using duo_input::u1::ch375::InterruptStatus;
+using duo_input::u1::ch375::SearchProgress;
 using duo_input::u1::ch375::UsbMode;
 using duo_input::u1::ch375::testing::expect_command;
 using duo_input::u1::ch375::testing::expect_data;
@@ -423,12 +424,36 @@ TEST_CASE(a_refused_change_puts_both_ends_back_together) {
 
 // --------------------------------------------------- finding a lost chip
 
+namespace {
+
+/// Drive the search the way Ch375Device does: one step per tick, never
+/// waiting inside one.
+///
+/// The bound is not a timeout - it is an assertion that the search terminates.
+/// Four rates, two probes each and a 20 ms deadline per probe, against a fake
+/// whose clock moves 10 us per empty read, is comfortably inside this.
+SearchProgress settle_search(Ch375Transport& transport, unsigned home) {
+    transport.begin_chip_search(home);
+    for (int step = 0; step < 200000; ++step) {
+        const SearchProgress progress = transport.poll_chip_search();
+        if (progress != SearchProgress::Waiting) {
+            return progress;
+        }
+    }
+    return SearchProgress::Waiting;
+}
+
+}  // namespace
+
+
 TEST_CASE(a_chip_at_the_default_rate_is_found_without_touching_anything) {
     ScriptedCh375 port({expect_command(Ch375Command::CheckExist), expect_data(0xA5), reply(0x5A),
                         expect_command(Ch375Command::CheckExist), expect_data(0x5A), reply(0xA5)});
     Ch375Transport transport(port);
 
-    CHECK(transport.find_chip(9600));
+    CHECK_EQ(static_cast<int>(settle_search(transport, 9600)),
+             static_cast<int>(SearchProgress::Found));
+    CHECK_EQ(transport.chip_search_found_at(), 9600u);
     CHECK_EQ(port.baud(), 9600u);
     CHECK(!port.saw_reset_at(9600));
     CHECK(port.complete());
@@ -450,7 +475,9 @@ TEST_CASE(a_chip_stranded_at_a_raised_rate_is_found_and_brought_back) {
                         expect_command(Ch375Command::ResetAll)});
     Ch375Transport transport(port);
 
-    CHECK(transport.find_chip(9600));
+    CHECK_EQ(static_cast<int>(settle_search(transport, 9600)),
+             static_cast<int>(SearchProgress::Found));
+    CHECK_EQ(transport.chip_search_found_at(), 115200u);
     CHECK(port.saw_reset_at(115200));
     CHECK_EQ(port.baud(), 9600u);
 }
@@ -460,7 +487,9 @@ TEST_CASE(a_chip_that_answers_nowhere_leaves_the_port_where_it_belongs) {
     port.allow_unscripted();
     Ch375Transport transport(port);
 
-    CHECK(!transport.find_chip(9600));
+    CHECK_EQ(static_cast<int>(settle_search(transport, 9600)),
+             static_cast<int>(SearchProgress::NotFound));
+    CHECK_EQ(transport.chip_search_found_at(), 0u);
     CHECK_EQ(port.baud(), 9600u);
 }
 
@@ -596,35 +625,28 @@ TEST_CASE(a_chip_left_at_the_raised_rate_is_found_there_and_reset) {
     // When a raised link degrades, the reset meant to bring the chip home goes
     // out at the rate it can no longer hold, so it never arrives. The chip
     // stays where it was put while this side knocks on an empty door.
-    ScriptedCh375 port({expect_command(Ch375Command::CheckExist), expect_data(0xA5), reply(0x5A),
+    //
+    // The rate this code raised it to is one of the ladder's rungs, so the
+    // search reaches it: the home rate first, then every rung in order.
+    ScriptedCh375 port({// Nothing at the rate it should be at.
+                        expect_command(Ch375Command::CheckExist), expect_data(0xA5),
+                        expect_data(0x00), expect_data(0x00), expect_data(0x00), expect_data(0x00),
+                        // Nor at the top rung.
+                        expect_command(Ch375Command::CheckExist), expect_data(0xA5),
+                        expect_data(0x00), expect_data(0x00), expect_data(0x00), expect_data(0x00),
+                        // There it is, at 62500.
+                        expect_command(Ch375Command::CheckExist), expect_data(0xA5), reply(0x5A),
                         expect_command(Ch375Command::CheckExist), expect_data(0x5A), reply(0xA5),
                         expect_data(0x00), expect_data(0x00), expect_data(0x00), expect_data(0x00),
                         expect_command(Ch375Command::ResetAll)});
     port.answers_at(62500);
     Ch375Transport transport(port);
 
-    CHECK(transport.recover_from(62500, 9600));
+    CHECK_EQ(static_cast<int>(settle_search(transport, 9600)),
+             static_cast<int>(SearchProgress::Found));
+    CHECK_EQ(transport.chip_search_found_at(), 62500u);
     CHECK(port.saw_reset_at(62500));
     CHECK_EQ(port.baud(), 9600u);
     CHECK(port.complete());
 }
 
-TEST_CASE(a_chip_not_at_the_raised_rate_either_is_left_alone) {
-    ScriptedCh375 port({expect_command(Ch375Command::CheckExist), expect_data(0xA5)});
-    port.answers_at(9600);
-    Ch375Transport transport(port);
-
-    CHECK(!transport.recover_from(62500, 9600));
-    CHECK(!port.saw_reset_at(62500));
-    CHECK_EQ(port.baud(), 9600u);
-}
-
-TEST_CASE(nothing_is_probed_when_no_rate_was_ever_raised) {
-    // The rate is known because this code chose it. With nothing chosen there
-    // is nothing to ask, and probing anyway is guessing at the chip's expense.
-    ScriptedCh375 port({});
-    Ch375Transport transport(port);
-
-    CHECK(!transport.recover_from(9600, 9600));
-    CHECK_EQ(port.commands_written(), 0);
-}
