@@ -278,10 +278,6 @@ inline constexpr std::uint32_t kTokenAnswerUs = 100000;
 /// hiccup, which is what the operator sees.
 inline constexpr std::uint8_t kQuietRetriesBeforeTeardown = 3;
 
-/// How many refused mode commands before asking whether this side is the one
-/// at fault. High enough that a channel merely settling is not swept.
-inline constexpr std::uint16_t kRxSweepAfterFailures = 6;
-
 /// How long a working device may go without its controller answering.
 ///
 /// A controller that stops answering while a device is up is the dangerous
@@ -408,13 +404,6 @@ public:
     /// completely different repairs.
     std::uint16_t alive_but_refusing() const { return alive_but_refusing_; }
 
-    /// The sampling rate a dead channel's reply read correctly at, or zero.
-    ///
-    /// Zero after a sweep means the chip really is saying nothing. Anything
-    /// else means it was talking the whole time and this side was listening
-    /// at the wrong speed, which is a fault in here and not on the bench.
-    unsigned rx_sweep_hit() const { return rx_sweep_hit_; }
-
     /// The byte the chip answered the refused mode command with, and whether
     /// it answered at all. Three different faults arrive as one refusal.
     /// How often the chip had not finished resetting when it was asked.
@@ -461,7 +450,6 @@ public:
 
     std::uint8_t mode_reply() const { return mode_reply_; }
     bool mode_answered() const { return mode_answered_; }
-    bool rx_swept() const { return rx_swept_; }
 
     /// How often the chip would not move to the faster port rate.
     ///
@@ -584,8 +572,6 @@ private:
     std::uint16_t recover_mode_failures_ = 0;
     std::uint16_t chip_found_elsewhere_ = 0;
     std::uint16_t alive_but_refusing_ = 0;
-    bool rx_swept_ = false;
-    unsigned rx_sweep_hit_ = 0;
     std::uint16_t chip_not_back_yet_ = 0;
     /// Consecutive probes at the home rate that went unanswered.
     std::uint16_t unanswered_probes_ = 0;
