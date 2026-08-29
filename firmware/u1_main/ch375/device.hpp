@@ -71,6 +71,8 @@ enum class ChipBringUp : std::uint8_t {
 enum class PendingCommand : std::uint8_t {
     /// Nothing is outstanding.
     None,
+    /// GET_DEVICE_RATE, asked the moment a device is found attached.
+    DeviceRate,
     /// Mode 7 or mode 6, sent when a device was found attached.
     AttachMode,
     /// Mode 6, ending the bus reset.
@@ -466,7 +468,16 @@ public:
     std::uint16_t polls_issued() const { return polls_issued_; }
 
     /// Whether the device that is attached answered as a low-speed one.
+    ///
+    /// Only meaningful when device_rate_known() is true. The chip is asked
+    /// once per attach and the answer decides how the bus runs from then on,
+    /// so "it did not answer" and "full speed" have to stay apart: they used
+    /// to be folded into one boolean, and a low-speed mouse addressed at eight
+    /// times its rate says nothing and is reported gone.
     bool device_is_low_speed() const { return device_is_low_speed_; }
+
+    /// Did the chip actually answer GET_DEVICE_RATE for the device now up?
+    bool device_rate_known() const { return device_rate_known_; }
 
     /// Take the oldest event, if there is one.
     bool take_event(Ch375Event& event);
@@ -530,6 +541,8 @@ private:
     /// What the attached device turned out to be, asked while still in the
     /// mode where the question is valid.
     bool device_is_low_speed_ = false;
+    /// Whether that came from an answer rather than from a default.
+    bool device_rate_known_ = false;
     bool announced_ready_ = false;
     std::uint32_t entered_us_ = 0;
     std::uint32_t last_poll_us_ = 0;

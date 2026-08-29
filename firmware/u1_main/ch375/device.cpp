@@ -179,19 +179,13 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 // Asked here, in mode 5, because DS2 1.2 says that is the only
                 // mode the question is valid in - and the answer decides how
                 // the bus has to run from now on.
-                bool low_speed = false;
-                device_is_low_speed_ = transport_.get_device_rate(low_speed) && low_speed;
-                // DS1 5.9: mode 7 first, then mode 6. Mode 7 holds the bus in
-                // reset and keeps holding it, so it is a step, not a state to
-                // rest in.
-                const UsbMode next =
-                    skip_bus_reset_ ? UsbMode::HostWithSof : UsbMode::HostReset;
+                //
                 // Asked and left. A device that has just arrived on a chip
                 // that has stopped answering is the state the board was
-                // measured in, and spinning here for the mode's status byte
-                // is what took 20 170 us out of Core 1's pass.
-                transport_.begin_set_usb_mode(next);
-                pending_command_ = PendingCommand::AttachMode;
+                // measured in at 2026-08-29 12:06, and this is the first of
+                // the two commands its 20 170 us pass was spent inside.
+                transport_.begin_device_rate();
+                pending_command_ = PendingCommand::DeviceRate;
             }
             return;
         }
@@ -673,6 +667,34 @@ bool Ch375Device::poll_interrupt(InterruptStatus& status) {
 }
 
 void Ch375Device::finish_pending_command(std::uint32_t now_us) {
+    if (pending_command_ == PendingCommand::DeviceRate) {
+        // Not a status byte, so it has its own collector.
+        bool low_speed = false;
+        const ReplyProgress rate = transport_.poll_device_rate(low_speed);
+        if (rate == ReplyProgress::Waiting) {
+            return;
+        }
+        pending_command_ = PendingCommand::None;
+        if (rate != ReplyProgress::Answered) {
+            // Silence is not full speed. Folding the two together is how a
+            // low-speed mouse gets addressed at eight times its rate, answers
+            // nothing, and is reported gone - and it would be done here on the
+            // strength of a chip that has just failed to answer at all, which
+            // is a channel to recover rather than a bus to configure.
+            device_rate_known_ = false;
+            fail(now_us);
+            return;
+        }
+        device_is_low_speed_ = low_speed;
+        device_rate_known_ = true;
+        // DS1 5.9: mode 7 first, then mode 6. Mode 7 holds the bus in reset
+        // and keeps holding it, so it is a step, not a state to rest in.
+        const UsbMode next = skip_bus_reset_ ? UsbMode::HostWithSof : UsbMode::HostReset;
+        transport_.begin_set_usb_mode(next);
+        pending_command_ = PendingCommand::AttachMode;
+        return;
+    }
+
     const ReplyProgress progress = transport_.poll_command_status();
     if (progress == ReplyProgress::Waiting) {
         return;
@@ -730,6 +752,7 @@ void Ch375Device::finish_pending_command(std::uint32_t now_us) {
             enter(Ch375State::Resetting, now_us);
             return;
 
+        case PendingCommand::DeviceRate:
         case PendingCommand::DetachMode:
         case PendingCommand::None:
             // Collected so that it is not read as somebody else's answer, and
@@ -771,6 +794,7 @@ void Ch375Device::handle_detach(std::uint32_t now_us) {
         pending_command_ = PendingCommand::DetachMode;
     }
     device_is_low_speed_ = false;
+    device_rate_known_ = false;
     endpoint_ = 0;
     announced_ready_ = false;
     // The chip answered a mode command just now, so the idle re-check has

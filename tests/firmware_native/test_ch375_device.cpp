@@ -768,6 +768,42 @@ struct LiveRig {
 /// this transport still allowed to wait - see the link hardening report.
 constexpr int kStallPoints = 6;
 
+TEST_CASE(the_rate_a_device_answered_with_is_a_fact_the_channel_holds) {
+    // DS2 1.2 can only be asked in mode 5, so it is asked once, on the attach,
+    // and everything after it runs on the answer.
+    Rig rig;
+    rig.chip.set_low_speed(true);
+
+    bring_up(rig);
+
+    CHECK(rig.device.device_rate_known());
+    CHECK(rig.device.device_is_low_speed());
+}
+
+TEST_CASE(a_device_rate_that_was_never_answered_is_not_read_as_full_speed) {
+    // The two used to be one boolean: get_device_rate() && low_speed made a
+    // chip that said nothing indistinguishable from a full-speed device. A
+    // low-speed mouse addressed at eight times its rate answers nothing and is
+    // reported gone, so the channel would tear down and re-enumerate a device
+    // that is sitting right there.
+    //
+    // The chip here answers the interrupt that says a device arrived and then
+    // stops, which is the state the board was measured in: attached, and never
+    // ready.
+    Rig rig;
+    rig.run(200000);
+    rig.chip.attach_device();
+    rig.chip.go_silent_after(1);
+
+    rig.run(3 * kRecoverDelayUs, 1000);
+
+    CHECK(!rig.device.device_rate_known());
+    // And nothing was configured on the strength of a speed nobody stated.
+    CHECK(rig.device.state() != Ch375State::HostMode);
+    CHECK(rig.device.state() != Ch375State::Enumerating);
+    CHECK(rig.device.state() != Ch375State::Ready);
+}
+
 TEST_CASE(the_mode_command_that_starts_a_bus_reset_is_asked_and_left) {
     // SET_USB_MODE is asked at five points of a device's life, and every one
     // of them used to spin for its status byte. The tick that asks must now

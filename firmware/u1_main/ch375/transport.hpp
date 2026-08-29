@@ -130,6 +130,8 @@ enum class PendingReply : std::uint8_t {
     Connect,
     /// A command that answers 51H or 5FH - SET_USB_MODE and its kind.
     Command,
+    /// GET_DEVICE_RATE - how fast the attached device is.
+    DeviceRate,
 };
 
 /// How far a search for a chip that has stopped answering has got.
@@ -891,21 +893,34 @@ public:
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::ResetAll));
     }
 
-    /// DS2 1.2. Is the attached device a low-speed one?
+    /// DS2 1.2. Ask how fast the attached device is, and leave.
     ///
     /// Takes the byte 07H and answers a rate type; bit 4 set means 1.5 Mbps.
     /// Only valid in host mode 5, before frames are being generated.
-    bool get_device_rate(bool& low_speed) {
-        abandon_reply();
+    ///
+    /// Asked once on every attach, which is the first thing that happens to a
+    /// channel after a device arrives - and the channel measured on hardware
+    /// at 2026-08-29 12:06 was stuck at attached=1, ready=0, so this was one
+    /// of the two commands its 20 170 us pass was being spent inside.
+    void begin_device_rate() {
+        begin_reply(PendingReply::DeviceRate);
         io_.write_command(static_cast<std::uint8_t>(Ch375Command::GetDeviceRate));
         io_.write_data(kGetDeviceRatePrefix);
+    }
 
+    /// Look once for that answer. Never waits.
+    ///
+    /// ``low_speed`` is written only when a byte actually came back. A caller
+    /// that folded "no answer" into "not low speed" would address a low-speed
+    /// mouse at eight times its rate, get nothing back, and report a device
+    /// that is sitting right there as gone.
+    ReplyProgress poll_device_rate(bool& low_speed) {
         std::uint8_t answer = 0;
-        if (!read_reply(answer)) {
-            return false;
+        const ReplyProgress progress = poll_reply(PendingReply::DeviceRate, answer);
+        if (progress == ReplyProgress::Answered) {
+            low_speed = (answer & 0x10) != 0;
         }
-        low_speed = (answer & 0x10) != 0;
-        return true;
+        return progress;
     }
 
     /// DS2 1.1. Set the bus speed.

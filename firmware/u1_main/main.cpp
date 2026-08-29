@@ -612,7 +612,9 @@ namespace {
             "  slowest pass round the loop=%u us\n"
             "  commands the output queue refused=%u\n",
             names[index], state < 7 ? kStates[state] : "?",
-            device.device_is_low_speed() ? "low" : "full", tally.attached, tally.detached,
+            device.device_rate_known() ? (device.device_is_low_speed() ? "low" : "full")
+                                       : "unknown",
+            tally.attached, tally.detached,
             tally.ready, tally.reports,
             (index == 0 ? g_probe.keyboard_probe : g_probe.mouse_probe).check_exist_ok
                 ? "0xA8"
