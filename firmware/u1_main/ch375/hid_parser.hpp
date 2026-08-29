@@ -55,6 +55,16 @@ struct HidCapabilities {
     /// format this firmware already understands without reading its report
     /// descriptor.
     bool boot_protocol = false;
+    /// How many bytes the chosen interface's HID report descriptor is.
+    ///
+    /// From the HID class descriptor between the interface and its endpoints
+    /// (HID 1.11 6.2.1), and the only place the number exists - a GET_DESCRIPTOR
+    /// for type 0x22 has to say how much to ask for, and a device that is asked
+    /// for less than it has answers with the descriptor cut short.
+    ///
+    /// Zero means the interface did not declare one, which is a device to leave
+    /// on the path it already worked on rather than one to guess at.
+    std::uint16_t report_descriptor_length = 0;
 };
 
 /// The largest packet the controller can read in one go (DS1 5.13).

@@ -6,6 +6,14 @@ namespace {
 constexpr std::uint8_t kDescriptorConfiguration = 0x02;
 constexpr std::uint8_t kDescriptorInterface = 0x04;
 constexpr std::uint8_t kDescriptorEndpoint = 0x05;
+/// HID 1.11 6.2.1, the class descriptor that sits between an interface and
+/// its endpoints, and 7.1.1's type for the report descriptor it names.
+constexpr std::uint8_t kDescriptorHid = 0x21;
+constexpr std::uint8_t kDescriptorReport = 0x22;
+/// bLength, bDescriptorType, bcdHID (2), bCountryCode, bNumDescriptors.
+constexpr std::size_t kHidHeaderBytes = 6;
+/// Each subordinate descriptor it names: a type and a two-byte length.
+constexpr std::size_t kHidSubordinateBytes = 3;
 
 constexpr std::uint8_t kClassHid = 0x03;
 constexpr std::uint8_t kSubclassBoot = 0x01;
@@ -70,6 +78,7 @@ ParseError parse_configuration(protocol::ByteView descriptor, HidCapabilities& o
     DeviceKind open_kind = DeviceKind::Unknown;
     std::uint8_t open_number = 0;
     bool open_boot = false;
+    std::uint16_t open_report_length = 0;
 
     std::size_t at = descriptor.data[0];
     if (at < kMinimumRecord || at > total) {
@@ -103,12 +112,48 @@ ParseError parse_configuration(protocol::ByteView descriptor, HidCapabilities& o
             open_kind = kind_of(device_class, protocol);
             open_number = number;
             open_boot = subclass == kSubclassBoot;
+            // Belongs to this interface and not to the one before it. A
+            // composite device declares one HID record per interface, and
+            // carrying the previous interface's length forward asks the device
+            // for the wrong number of bytes - which comes back as a descriptor
+            // cut short or as one with somebody else's bytes on the end.
+            open_report_length = 0;
             // An interface is only interesting until its endpoints have been
             // seen. A composite device has several, and the first HID one is
             // often consumer controls - stopping there picks an interface
             // this firmware cannot route and calls the keyboard behind it
             // unsupported.
             interface_open = open_kind != DeviceKind::Unknown;
+        } else if (type == kDescriptorHid && interface_open) {
+            // No test can tell this check from the one below it: both refuse
+            // the same records with the same error, because a record shorter
+            // than its header can never hold the entries it counts either.
+            // What it does is stop the count itself being read - the sixth
+            // byte of a two-byte record is not in the record, and at the end
+            // of a descriptor it is not in the buffer.
+            if (length < kHidHeaderBytes) {
+                return ParseError::Truncated;
+            }
+            const std::size_t named = descriptor.data[at + 5];
+            // Every entry has to fit inside the record's own length. One that
+            // does not is read out of whatever record follows this one, and
+            // bLength - which is what the walk steps by - would never notice.
+            if (kHidHeaderBytes + named * kHidSubordinateBytes > length) {
+                return ParseError::Truncated;
+            }
+            for (std::size_t index = 0; index < named; ++index) {
+                const std::size_t entry = at + kHidHeaderBytes + index * kHidSubordinateBytes;
+                if (descriptor.data[entry] != kDescriptorReport) {
+                    // A physical descriptor, or something this firmware has no
+                    // use for. Only the report descriptor says where a wheel is.
+                    continue;
+                }
+                open_report_length =
+                    static_cast<std::uint16_t>(descriptor.data[entry + 1]) |
+                    static_cast<std::uint16_t>(
+                        static_cast<std::uint16_t>(descriptor.data[entry + 2]) << 8);
+                break;
+            }
         } else if (type == kDescriptorEndpoint && interface_open) {
             if (length < 7) {
                 return ParseError::Truncated;
@@ -134,6 +179,7 @@ ParseError parse_configuration(protocol::ByteView descriptor, HidCapabilities& o
                 candidate.endpoint = static_cast<std::uint8_t>(address & 0x0F);
                 candidate.max_packet = max_packet;
                 candidate.boot_protocol = open_boot;
+                candidate.report_descriptor_length = open_report_length;
 
                 // A keyboard is what this device is mainly for, so it wins
                 // outright. A mouse is kept and the walk continues, in case a

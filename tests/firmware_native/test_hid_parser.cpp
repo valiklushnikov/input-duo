@@ -233,3 +233,156 @@ TEST_CASE(a_total_length_longer_than_the_buffer_is_refused) {
                  parse_configuration(duo_input::protocol::ByteView{bytes, sizeof(bytes)}, found)),
              static_cast<int>(ParseError::Truncated));
 }
+
+// ------------------------------------------- how long the report descriptor is
+//
+// The report descriptor is fetched separately, with its own request, and the
+// request has to say how many bytes to ask for. The only place that number
+// exists is the HID class descriptor sitting between the interface and its
+// endpoints - a record this parser used to walk straight past.
+
+TEST_CASE(the_report_descriptors_length_is_taken_from_the_hid_record) {
+    const std::vector<std::uint8_t> bytes = load("boot_mouse.bin");
+    HidCapabilities found;
+
+    CHECK_EQ(static_cast<int>(parse_configuration(view(bytes), found)),
+             static_cast<int>(ParseError::None));
+    // 0x0034. Asking for fewer bytes than this gets a descriptor cut short,
+    // which parses as garbage or not at all; asking for more is harmless.
+    CHECK_EQ(found.report_descriptor_length, std::uint16_t{52});
+}
+
+TEST_CASE(a_keyboards_report_descriptor_length_is_read_too) {
+    const std::vector<std::uint8_t> bytes = load("boot_keyboard.bin");
+    HidCapabilities found;
+
+    CHECK_EQ(static_cast<int>(parse_configuration(view(bytes), found)),
+             static_cast<int>(ParseError::None));
+    CHECK_EQ(found.report_descriptor_length, std::uint16_t{63});
+}
+
+TEST_CASE(the_length_belongs_to_the_interface_that_was_chosen) {
+    const std::vector<std::uint8_t> bytes = load("consumer_composite.bin");
+    HidCapabilities found;
+
+    CHECK_EQ(static_cast<int>(parse_configuration(view(bytes), found)),
+             static_cast<int>(ParseError::None));
+    CHECK_EQ(static_cast<int>(found.kind), static_cast<int>(DeviceKind::Keyboard));
+    // The first interface is consumer controls and declares 0x19 bytes; the
+    // keyboard behind it declares 0x3F. Taking the first one asks the device
+    // for twenty-five bytes of a sixty-three byte descriptor.
+    CHECK_EQ(found.report_descriptor_length, std::uint16_t{63});
+}
+
+TEST_CASE(a_five_button_mouse_declares_a_longer_descriptor) {
+    const std::vector<std::uint8_t> bytes = load("mouse_5_button.bin");
+    HidCapabilities found;
+
+    CHECK_EQ(static_cast<int>(parse_configuration(view(bytes), found)),
+             static_cast<int>(ParseError::None));
+    // 0x5E. Ninety-four bytes is already two transactions on an eight-byte
+    // control endpoint, which is the ordinary case and not an exotic one.
+    CHECK_EQ(found.report_descriptor_length, std::uint16_t{94});
+}
+
+TEST_CASE(an_interface_with_no_hid_record_declares_no_length) {
+    // A HID interface is required to have one, and a device is under no
+    // obligation to be correct. Zero says "nothing to ask for", which is what
+    // sends such a device down the path it already worked on.
+    std::vector<std::uint8_t> bytes = load("boot_mouse.bin");
+    // Turn the HID record's type byte into something nobody looks for. Its
+    // length is untouched, so the walk still steps over it correctly.
+    bool found_record = false;
+    for (std::size_t at = 0; at + 1 < bytes.size(); ++at) {
+        if (bytes[at] == 9 && bytes[at + 1] == 0x21) {
+            bytes[at + 1] = 0x2F;
+            found_record = true;
+            break;
+        }
+    }
+    CHECK(found_record);
+
+    HidCapabilities capabilities;
+    CHECK_EQ(static_cast<int>(parse_configuration(view(bytes), capabilities)),
+             static_cast<int>(ParseError::None));
+    CHECK_EQ(capabilities.report_descriptor_length, std::uint16_t{0});
+    CHECK_EQ(static_cast<int>(capabilities.kind), static_cast<int>(DeviceKind::Mouse));
+}
+
+TEST_CASE(a_hid_record_that_names_no_report_descriptor_declares_no_length) {
+    // bNumDescriptors counts the subordinate descriptors after the header. A
+    // record that names a physical descriptor and no report descriptor has
+    // nothing here to fetch, and reading the two bytes anyway takes them from
+    // whatever follows.
+    std::vector<std::uint8_t> bytes = load("boot_mouse.bin");
+    for (std::size_t at = 0; at + 8 < bytes.size(); ++at) {
+        if (bytes[at] == 9 && bytes[at + 1] == 0x21) {
+            bytes[at + 6] = 0x23;  // Physical descriptor, not Report
+            break;
+        }
+    }
+
+    HidCapabilities capabilities;
+    CHECK_EQ(static_cast<int>(parse_configuration(view(bytes), capabilities)),
+             static_cast<int>(ParseError::None));
+    CHECK_EQ(capabilities.report_descriptor_length, std::uint16_t{0});
+}
+
+TEST_CASE(a_hid_record_that_promises_more_than_it_holds_is_refused) {
+    // bLength has to cover six header bytes plus three for every subordinate
+    // descriptor it counts. A record that says two and is nine bytes long is
+    // one whose second entry is read out of the record after it - and the walk
+    // itself never notices, because bLength is what the walk steps by.
+    std::vector<std::uint8_t> bytes = load("boot_mouse.bin");
+    bool patched = false;
+    for (std::size_t at = 0; at + 8 < bytes.size(); ++at) {
+        if (bytes[at] == 9 && bytes[at + 1] == 0x21) {
+            bytes[at + 5] = 2;  // bNumDescriptors, in a record sized for one
+            patched = true;
+            break;
+        }
+    }
+    CHECK(patched);
+
+    HidCapabilities capabilities;
+    CHECK_EQ(static_cast<int>(parse_configuration(view(bytes), capabilities)),
+             static_cast<int>(ParseError::Truncated));
+}
+
+TEST_CASE(a_length_is_not_carried_from_one_interface_to_the_next) {
+    // A mouse interface that declares a fifty-two byte report descriptor, and
+    // a keyboard behind it that declares none at all. The keyboard is what
+    // gets chosen - it wins outright - and it must declare nothing rather than
+    // inherit the interface in front of it, which would ask a keyboard for
+    // fifty-two bytes of a descriptor it does not have.
+    const std::vector<std::uint8_t> bytes = {
+        9,    0x02, 50,   0,    2,    1,    0,    0x80, 50,    // configuration
+        9,    0x04, 0,    0,    1,    0x03, 0x01, 0x02, 0,     // a boot mouse
+        9,    0x21, 0x11, 0x01, 0,    1,    0x22, 0x34, 0,     // its HID record
+        7,    0x05, 0x82, 0x03, 4,    0,    10,                // its endpoint
+        9,    0x04, 1,    0,    1,    0x03, 0x01, 0x01, 0,     // a boot keyboard
+        7,    0x05, 0x81, 0x03, 8,    0,    10,                // its endpoint
+    };
+    HidCapabilities capabilities;
+
+    CHECK_EQ(static_cast<int>(parse_configuration(view(bytes), capabilities)),
+             static_cast<int>(ParseError::None));
+    CHECK_EQ(static_cast<int>(capabilities.kind), static_cast<int>(DeviceKind::Keyboard));
+    CHECK_EQ(capabilities.report_descriptor_length, std::uint16_t{0});
+}
+
+TEST_CASE(a_hid_record_shorter_than_its_own_header_is_refused) {
+    // Two bytes of a HID record, at the very end of the descriptor. Its count
+    // of subordinate descriptors is the sixth byte, which is not in the record
+    // and, here, not in the buffer either - so a reader that reaches for it is
+    // reading whatever the firmware keeps after this array.
+    const std::vector<std::uint8_t> bytes = {
+        9, 0x02, 20, 0, 1, 1, 0, 0x80, 50,       // configuration, 20 bytes total
+        9, 0x04, 0, 0, 1, 0x03, 0x01, 0x02, 0,   // a boot mouse interface
+        2, 0x21,                                 // a HID record and nothing else
+    };
+    HidCapabilities capabilities;
+
+    CHECK_EQ(static_cast<int>(parse_configuration(view(bytes), capabilities)),
+             static_cast<int>(ParseError::Truncated));
+}
