@@ -59,6 +59,45 @@ void Ch375Device::tick(std::uint32_t now_us) {
 
     switch (state_) {
         case Ch375State::Absent: {
+            // An idle channel re-proves its chip, not just its socket.
+            //
+            // Absent asks whether a device is attached and reads silence as
+            // "no device". It has no way to notice that the chip stopped
+            // being a configured chip at all - and a CH375 whose 5 V was
+            // cycled under a running U1 is back at 9600 with no working mode,
+            // deaf at the rate this side raised it to. The channel then waits
+            // here for ever. There is no reset line to reach it with either
+            // (docs/hardware/ch375-wiring.md), so asking is the whole of the
+            // available diagnosis.
+            //
+            // Asked and left, like every other question put to a chip that
+            // may not answer: a spin here would cost the other channel its
+            // 8 ms poll window once a second.
+            if (presence_probe_running_) {
+                const ReplyProgress answer = transport_.poll_presence_probe();
+                if (answer == ReplyProgress::Waiting) {
+                    return;
+                }
+                presence_probe_running_ = false;
+                if (answer != ReplyProgress::Answered ||
+                    !transport_.presence_probe_matched()) {
+                    ++presence_lost_;
+                    // Not a failure to recover from with a delay - there is
+                    // nothing being held and nothing to release. Straight back
+                    // through chip setup, which resets it and starts over.
+                    chip_ready_ = false;
+                    bring_up_ = ChipBringUp::Idle;
+                    return;
+                }
+                last_presence_us_ = now_us;
+            } else if (now_us - last_presence_us_ >= kPresenceRecheckUs) {
+                transport_.begin_presence_probe(kPortProbeByte);
+                presence_probe_running_ = true;
+                // Nothing else this tick: the connect poll below reads the
+                // port too, and would take this question's answer.
+                return;
+            }
+
             bool connected = interrupted && status == InterruptStatus::Connect;
             if (!connected && now_us - last_connect_poll_us_ >= kConnectPollUs) {
                 // Ask, rather than only waiting to be told. The announcement
@@ -503,6 +542,10 @@ bool Ch375Device::bring_chip_up(std::uint32_t now_us) {
     chip_ready_ = true;
     enter(Ch375State::Absent, now_us);
     last_connect_poll_us_ = now_us - kConnectPollUs;
+    // The chip has just proved itself, so the idle re-check starts its clock
+    // here rather than firing immediately on a chip that answered a moment ago.
+    last_presence_us_ = now_us;
+    presence_probe_running_ = false;
     return true;
 }
 
@@ -534,6 +577,11 @@ void Ch375Device::handle_detach(std::uint32_t now_us) {
     device_is_low_speed_ = false;
     endpoint_ = 0;
     announced_ready_ = false;
+    // The chip answered a mode command just now, so the idle re-check has
+    // nothing to establish for another interval. Any probe left outstanding
+    // from before belongs to a question nobody is waiting on any more.
+    presence_probe_running_ = false;
+    last_presence_us_ = now_us;
     enter(Ch375State::Absent, now_us);
     if (had_device) {
         publish(Ch375EventKind::Detached);

@@ -607,7 +607,7 @@ namespace {
             "  last report (%u bytes): %02X %02X %02X %02X\n"
             "  port=%u baud, refused_changes=%u\n"
             "  mode_refused setup=%u recover=%u  found_elsewhere=%u alive_refusing=%u\n"
-            "  not_back_yet=%u recovered_raised=%u quiet_rearms=%u collapses=%u\n"
+            "  not_back_yet=%u found_at=%u presence_lost=%u quiet_rearms=%u collapses=%u\n"
             "  mode_reply=%s 0x%02X (%s)\n"
             "  slowest pass round the loop=%u us\n"
             "  commands the output queue refused=%u\n",
@@ -645,7 +645,8 @@ namespace {
             device.recover_mode_failures(), device.chip_found_elsewhere(),
             device.alive_but_refusing(),
             device.chip_not_back_yet(), device.chip_found_at(),
-            device.quiet_rearms(), device.collapses_while_raised(),
+            device.presence_lost(), device.quiet_rearms(),
+            device.collapses_while_raised(),
             device.mode_answered() ? "answered" : "silent", device.mode_reply(),
             describe_mode_reply(device.mode_answered(), device.mode_reply()),
             worst_pass_us,

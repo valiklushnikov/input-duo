@@ -314,6 +314,14 @@ public:
     /// sampling a rate the wiring cannot hold produces.
     void break_block_reads_at_or_above(unsigned baud) { block_reads_break_at_ = baud; }
 
+    /// Cycle the module's 5 V under a running U1.
+    ///
+    /// The chip comes back at 9600 with no working mode and nothing pending,
+    /// while this side is still talking at whatever rate it raised the chip
+    /// to. That is the state every power cycle on this bench produced, and
+    /// there is no reset line to notice it with.
+    void power_cycle();
+
     /// Leave the chip at a rate this side is not using.
     ///
     /// The state a reflash of U1 leaves behind: the processor restarts at

@@ -470,6 +470,18 @@ bool FakeCh375Chip::int_asserted() const {
     return int_asserted_;
 }
 
+void FakeCh375Chip::power_cycle() {
+    chip_baud_ = kScriptedDefaultBaud;
+    mode_ = UsbMode::DeviceDisabled;
+    outgoing_.clear();
+    outgoing_read_ = 0;
+    pending_status_ = 0;
+    int_asserted_ = false;
+    token_pending_ = false;
+    expecting_data_ = false;
+    pending_command_ = 0;
+}
+
 void FakeCh375Chip::attach_device() {
     attached_ = true;
     pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Connect);

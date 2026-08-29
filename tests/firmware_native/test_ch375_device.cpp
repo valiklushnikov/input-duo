@@ -870,3 +870,52 @@ TEST_CASE(the_port_and_the_rate_this_side_believes_in_never_disagree) {
     // rather than the two never having been asked to differ.
     CHECK(rig.chip.port_baud() > 9600u);
 }
+
+// ------------------------------------- an idle channel re-proves its chip
+
+TEST_CASE(an_idle_channel_notices_its_chip_stopped_being_a_configured_chip) {
+    // Ch375State::Absent asks whether a device is attached and reads silence
+    // as "no device". It has no way to notice that its chip stopped being a
+    // configured chip at all - and a CH375 whose 5 V was cycled under a
+    // running U1 is back at 9600 with no host mode, deaf at the rate this side
+    // raised it to. The channel then sits in Absent for ever. That is the
+    // state this project cured by reflashing U1, all week.
+    Rig rig;
+    rig.run(300000);
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Absent));
+    CHECK(rig.chip.port_baud() > 9600u);
+    const std::uint32_t modes_before = rig.chip.mode_set_count();
+
+    rig.chip.power_cycle();
+    rig.run(6 * kRecoverDelayUs, 1000);
+
+    // Chip setup ran again, unaided, and the chip is back in the mode DS1 5.9
+    // says to wait in.
+    CHECK(rig.device.presence_lost() > 0u);
+    CHECK(rig.chip.mode_set_count() > modes_before);
+    CHECK_EQ(static_cast<int>(rig.chip.mode()),
+             static_cast<int>(duo_input::u1::ch375::UsbMode::HostNoSof));
+}
+
+TEST_CASE(a_channel_whose_chip_is_well_is_not_set_up_again_for_nothing) {
+    // The re-check must not become a reason to tear a healthy channel down:
+    // chip setup resets the chip, drops the port to 9600 and climbs the ladder
+    // again, which is a second of a working channel doing nothing.
+    Rig rig;
+    rig.run(300000);
+    const std::uint32_t modes_before = rig.chip.mode_set_count();
+
+    rig.run(10 * kRecoverDelayUs, 1000);
+
+    CHECK_EQ(rig.device.presence_lost(), 0u);
+    CHECK_EQ(rig.chip.mode_set_count(), modes_before);
+}
+
+TEST_CASE(re_proving_the_chip_does_not_cost_the_other_channel_its_poll_window) {
+    Rig rig;
+    rig.run(300000);
+
+    const std::uint32_t worst = rig.worst_tick(20000);
+
+    CHECK(worst < 500u);
+}

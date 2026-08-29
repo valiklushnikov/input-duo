@@ -268,6 +268,19 @@ inline constexpr std::uint16_t kRxSweepAfterFailures = 6;
 /// quarter of a second after it finally came up.
 inline constexpr std::uint32_t kDeviceLostUs = 1000000;
 
+/// How often an idle channel asks its chip to prove it is still a chip.
+///
+/// Absent is not a resting place for the chip, only for the socket: a CH375
+/// whose 5 V was cycled under a running U1 comes back at 9600 with no working
+/// mode, and answers nothing at the rate this side raised it to. Asking about
+/// a device instead of about the chip reads that as "no device", which is the
+/// phantom Absent this project cured by reflashing all week.
+///
+/// One CHECK_EXIST a second: one command and one data byte, cheap enough that
+/// an idle channel costs nothing and often enough that nobody watches a dead
+/// socket for long.
+inline constexpr std::uint32_t kPresenceRecheckUs = 1000000;
+
 /// How often to ask whether something has been plugged in.
 ///
 /// The chip announces arrivals by itself, so this is a backstop rather than
@@ -370,6 +383,13 @@ public:
     /// separates those two.
     unsigned chip_found_at() const { return chip_found_at_; }
 
+    /// How often an idle channel found its chip no longer answering.
+    ///
+    /// Nonzero means a chip was power-cycled, or otherwise stopped being a
+    /// configured chip, under a running U1 - and that the channel noticed by
+    /// itself instead of sitting in Absent until somebody reflashed.
+    std::uint16_t presence_lost() const { return presence_lost_; }
+
     /// How often a quiet endpoint was re-armed instead of torn down.
     ///
     /// Each teardown avoided is a peripheral that did not go dark and come
@@ -461,6 +481,9 @@ private:
     bool token_outstanding_ = false;
     std::uint32_t token_at_us_ = 0;
     std::uint32_t last_connect_poll_us_ = 0;
+    /// The idle channel's own CHECK_EXIST, and when it last answered.
+    bool presence_probe_running_ = false;
+    std::uint32_t last_presence_us_ = 0;
     std::uint32_t last_answer_us_ = 0;
     std::uint8_t endpoint_ = 0;
     Ch375State detach_state_ = Ch375State::Absent;
@@ -486,6 +509,7 @@ private:
     /// Consecutive probes at the home rate that went unanswered.
     std::uint16_t unanswered_probes_ = 0;
     unsigned chip_found_at_ = 0;
+    std::uint16_t presence_lost_ = 0;
     std::uint16_t quiet_rearms_ = 0;
     std::uint16_t collapses_while_raised_ = 0;
     std::uint8_t relights_ = 0;
