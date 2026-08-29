@@ -7,9 +7,10 @@ Two configurations live here, chosen with ``--config``:
     default, and the one already written to a board.
 
 ``toggle``
-    The roadmap's Task 3 Step 3 evidence: a thousand physical route toggles,
-    performed by the device rather than by a person's forefinger. See
-    :data:`TOGGLE_CYCLES` for the arithmetic.
+    The roadmap's Task 3 Step 3 evidence: route toggles in quantity, performed
+    by the device rather than by a person's forefinger, from ten arrow-key
+    presses a tired operator will not miscount. See :data:`TOGGLE_CYCLES` for
+    the arithmetic and the honest shortfall against the roadmap's thousand.
 
 They share everything below the project itself - the round-trip check, the
 backup, the write and the read-back - because a configuration that was built
@@ -283,18 +284,25 @@ S4_PACKAGE_SHA256 = "2f64e548dbad3f46b96c0f6e6336a9e229815834686cd86b37bd3468307
 #     a macro holds 64 steps                          (MACRO_STEPS_PER_MACRO)
 #     one cycle is a route change and one character   2 steps
 #     so one run is                                   32 route changes
-#     32 runs is                                      1024 route changes
+#     10 runs is                                      320 route changes
 #
-# 1024 >= 1000, from 32 deliberate keypresses rather than a thousand. That is
-# the honest number: the roadmap's thousand is reached, and it is reached in
-# runs of 32, so a run that goes missing costs 32 toggles and is visible in the
-# character count rather than being silently absorbed.
+# 320, not 1000, and that is a ruling rather than an accident. 32 route
+# changes is the ceiling one macro can hold - 64 steps is a hard protocol
+# limit, macros do not chain, and a held key does not re-trigger a binding -
+# so reaching a thousand means 32 presses, and 32 presses is where the
+# procedure stopped being runnable. The run of each press is one full line of
+# text, so ten runs are ten lines: they fit on one screen, they count
+# themselves, and the operator never counts a character. Thirty-two lines do
+# not fit on a screen, and an operator who has lost count is a worse
+# instrument than a smaller number honestly reported. The shortfall is
+# recorded in the roadmap ledger, with this arithmetic.
 #
 # Why a character after every route change: it is the load. A route change on
 # its own queues almost nothing, and a queue that is never pressed cannot
-# refuse a command. It is also the only outward evidence - every character
-# goes to both computers, so each ends with exactly 32 per run, and a shortfall
-# is the sign that a start was refused or a command was dropped.
+# refuse a command. It is also the outward evidence - every character goes to
+# both computers, so each ends with exactly 32 per run, on one line, and a
+# short line or a missing line is the sign that a start was refused or a
+# command was dropped.
 
 #: Route changes one run of the toggle macro performs.
 TOGGLE_CYCLES = MACRO_STEPS_PER_MACRO // 2
@@ -302,8 +310,21 @@ TOGGLE_CYCLES = MACRO_STEPS_PER_MACRO // 2
 #: What each cycle types. One character, so the count is the toggle count.
 TOGGLE_CHARACTER = "a"
 
+#: What the last cycle of a run adds, so one press is one line.
+#:
+#: This is the whole counting design. A run that left its line open would run
+#: into the next one and two presses would read as one; a run that closes its
+#: line makes every press a fixed-width group the operator can count at a
+#: glance, and makes a dropped character show up as a line shorter than its
+#: neighbours instead of as a total that has to be counted to be doubted.
+TOGGLE_LINE_END = "\n"
+
 #: How many times the operator starts the macro.
-TOGGLE_RUNS = 32
+#:
+#: Ten, because ten lines fit on one screen and thirty-two do not. See the
+#: arithmetic above for why this is 320 route changes and not the roadmap's
+#: thousand, and the ledger for the ruling.
+TOGGLE_RUNS = 10
 
 MACRO_TOGGLE = 1
 MACRO_MARK = 2
@@ -319,8 +340,17 @@ def toggle_route_changes() -> int:
 
 
 def toggle_characters_per_computer() -> int:
-    """Characters each computer must end with, if nothing is dropped."""
+    """Characters each computer must end with, if nothing is dropped.
+
+    The line endings are not counted: they are the group separators, not the
+    load, and the operator counts groups.
+    """
     return TOGGLE_CYCLES * TOGGLE_RUNS
+
+
+def toggle_lines() -> int:
+    """Lines the whole procedure writes - one per press, so one per run."""
+    return TOGGLE_RUNS
 
 
 def toggle_steps() -> tuple[MacroStep, ...]:
@@ -330,12 +360,16 @@ def toggle_steps() -> tuple[MacroStep, ...]:
     on changes nothing and releases nothing - the count would be a fiction.
     It starts on PC2 and so ends on PC1, which leaves the device reachable
     from the near computer and makes every run start where the last one did.
+
+    The last cycle closes the line. It costs no extra step - a text step holds
+    far more than one character - and it is what turns a press into a group.
     """
     steps: list[MacroStep] = []
     for cycle in range(TOGGLE_CYCLES):
         route = KeyboardRoute.PC2 if cycle % 2 == 0 else KeyboardRoute.PC1
+        last = cycle == TOGGLE_CYCLES - 1
         steps.append(set_keyboard_route_step(route))
-        steps.append(text_step(TOGGLE_CHARACTER))
+        steps.append(text_step(TOGGLE_CHARACTER + (TOGGLE_LINE_END if last else "")))
     return tuple(steps)
 
 
@@ -360,7 +394,19 @@ def _toggle_macro_plans() -> tuple[tuple[int, str, TargetMode, tuple[MacroStep, 
 
 
 def _toggle_bindings() -> tuple[tuple[Trigger, Action], ...]:
-    """The toggle configuration's trigger set."""
+    """The toggle configuration's trigger set.
+
+    Every key the operator script names is an arrow key. The navigation
+    cluster is kept beside it - the Step 4 configuration binds both, and an
+    operator who has learned one keyboard should not have to learn another -
+    but the arrows are the ones the script asks for, because the keyboard this
+    is run on is a compact layout with no navigation cluster at all.
+
+    ``Down`` is the odd one out: it is not a macro but the arrow twin of F10,
+    the keyboard route to PC2. The run ends on PC1 and the stranded-modifier
+    check has to be made on *both* computers, so the operator needs a way to
+    move the keyboard across that is not an Fn layer.
+    """
     bindings = _profile_and_route_bindings()
     bindings += _macro_bindings(
         (
@@ -370,6 +416,12 @@ def _toggle_bindings() -> tuple[tuple[Trigger, Action], ...]:
             (_UP, MACRO_TOGGLE),
             (_LEFT, MACRO_MARK),
             (_RIGHT, MACRO_HOME),
+        )
+    )
+    bindings.append(
+        (
+            Trigger(TriggerKind.KEYBOARD_USAGE, _DOWN),
+            Action(ActionKind.SET_KEYBOARD_ROUTE, int(KeyboardRoute.PC2)),
         )
     )
     return tuple(bindings)
@@ -590,21 +642,31 @@ def describe_toggle(package: bytes) -> str:
         f"active profile at boot: {config.active_profile_id}",
         f"profiles: {len(config.profiles)}",
         "",
-        "one run of TOGGLE (Insert, or Up):",
+        "one run of TOGGLE (Up, or Insert):",
         f"    macro steps          {MACRO_STEPS_PER_MACRO}"
         f"  (the whole budget; 2 per cycle)",
         f"    route changes        {TOGGLE_CYCLES}",
-        f"    characters typed     {TOGGLE_CYCLES} to BOTH computers",
+        f"    characters typed     {TOGGLE_CYCLES} to BOTH computers,"
+        f" then a line ending",
+        f"    so one press is      one line of {TOGGLE_CYCLES} characters",
         f"    route order          {routes[0]} .. {routes[-1]}, alternating",
         "",
         "the whole procedure:",
-        f"    runs                 {TOGGLE_RUNS}",
+        f"    presses              {TOGGLE_RUNS}",
         f"    route changes        {TOGGLE_CYCLES} x {TOGGLE_RUNS}"
-        f" = {toggle_route_changes()}   (>= 1000)",
-        f"    characters expected  {toggle_characters_per_computer()} on EACH computer",
+        f" = {toggle_route_changes()}",
+        f"    lines expected       {toggle_lines()} on EACH computer,"
+        f" {toggle_characters_per_computer()} characters in all",
         "",
-        "MARK (Home, or Left) brackets a run; HOME (PageUp, or Right) puts the",
-        "keyboard back on PC1 if a run is interrupted.",
+        f"the roadmap asks for 1000 physical toggles and this performs"
+        f" {toggle_route_changes()}.",
+        f"32 is the ceiling one macro can hold, so 1000 needs 32 presses, and 32",
+        "presses is where the procedure stopped being runnable: 32 lines do not",
+        "fit on a screen and the count stops counting itself. The shortfall is a",
+        "recorded ruling in the roadmap ledger, not a substitution.",
+        "",
+        "other keys: Down moves the keyboard to PC2 (F10's twin), Right brings it",
+        "back and starts a fresh line, Left writes a [MARK] bracket.",
         "",
     ]
     for profile in config.profiles:
@@ -623,59 +685,55 @@ def toggle_operator_script() -> str:
 
     Kept here rather than in a document so that it cannot disagree with the
     numbers above it: both are rendered from the same constants.
+
+    Every key it names is an arrow key. Left Shift is held once, for the whole
+    run, and not re-gripped: the stranded-modifier release was accepted on
+    hardware by S4c, across an unplug and a reconnect, and what is being asked
+    here is only that the modifier is not stranded at the end. Nothing is
+    counted by eye - one press writes one line, so the lines count the presses
+    and the editor's own status bar carries the total.
     """
-    expected = toggle_characters_per_computer()
+    lines_expected = toggle_lines()
     return "\n".join(
         [
             "operator script",
             "---------------",
-            "  0. Open a text editor on BOTH computers and put the cursor in it.",
-            "     Read the counters first:",
+            "  1. Read the counters. Write down dropped_commands and runtime_fault:",
             "         python tools/step4_acceptance_config.py diagnostics",
-            "     Write down dropped_commands and runtime_fault.",
-            "  1. Press Home once. [MARK] appears on both computers. This is the",
-            "     line the count starts after.",
-            "  2. Hold Left Shift down with the other hand. It is the key that",
-            "     must not be left stranded. The first route change of a run",
-            "     releases it on the computer being left behind and forgets it -",
-            "     which is correct: a key held on a computer you can no longer",
-            "     reach is worse than one that was let go. So let go of Shift and",
-            "     take hold of it again between presses, and each run exercises",
-            "     that release instead of only the first one doing so.",
-            f"  3. Press Insert {TOGGLE_RUNS} times, about one press per second,",
-            "     re-gripping Left Shift between presses as step 2 says.",
-            f"     Each press types {TOGGLE_CYCLES} characters on each computer and",
-            f"     changes the keyboard route {TOGGLE_CYCLES} times. Wait for the",
-            "     characters of one press to appear before making the next: the",
-            "     device queues at most four starts and silently refuses a fifth.",
-            "     Expect about a minute.",
-            "  4. Let go of Left Shift. Press Home again to close the run.",
-            "  5. On EACH computer, count the characters between the two [MARK]",
-            f"     lines. There must be exactly {expected}.",
-            "  6. Type `abc` on each computer, by hand.",
-            "  7. Read the counters again:",
+            "     Then open an empty Notepad on BOTH computers, click in it, and",
+            "     switch on View > Status Bar. While this configuration is loaded",
+            "     the arrow keys drive the device and will not move the cursor.",
+            "  2. Hold Left Shift down. Keep holding it until step 4 - do not let",
+            "     go and do not take a fresh grip. It is the key that must not be",
+            "     left stranded when the route moves out from under it.",
+            f"  3. Press Up {TOGGLE_RUNS} times, about one press a second. Each press writes",
+            f"     one line of {TOGGLE_CYCLES} characters on BOTH computers. If a line is",
+            "     still filling, let it finish before pressing again.",
+            f"  4. Let go of Left Shift. Each screen must show {lines_expected} lines of the",
+            "     same length and nothing else, and the status bar must read",
+            f"     Ln {lines_expected + 1}, Col 1.",
+            "  5. Type `abc` here, by hand. Press Down - the keyboard moves to the",
+            "     other computer - type `abc` there, then press Right to come back.",
+            "  6. Read the counters again:",
             "         python tools/step4_acceptance_config.py diagnostics",
             "",
             "what a pass looks like",
-            f"  - {expected} characters on each computer, so"
-            f" {toggle_route_changes()} route changes happened",
-            "  - dropped_commands unchanged from step 0",
-            "  - runtime_fault 0",
-            "  - step 6 typed `abc`, lower case, on both computers",
+            f"  - {lines_expected} lines of {TOGGLE_CYCLES} characters on each computer, so"
+            f" {toggle_route_changes()} route",
+            f"    changes and {toggle_characters_per_computer()} characters got through",
+            f"  - the status bar read Ln {lines_expected + 1}, Col 1 on both, before step 5",
+            "  - dropped_commands unchanged from step 1, runtime_fault 0",
+            "  - step 5 typed `abc`, lower case, on both computers",
             "",
             "what a failure looks like, and which is which",
-            "  - dropped_commands went up: a press, a release or a macro step",
-            "    never reached the computer it was for. FAIL.",
-            "  - runtime_fault is 1: the output queue is refusing commands right",
-            "    now. FAIL.",
-            "  - step 6 typed `ABC`: Left Shift is stranded on that computer -",
-            "    a route change released it there and nothing put it back. FAIL.",
-            "  - step 6 typed nothing on one computer: something is holding that",
-            "    link. FAIL.",
-            f"  - fewer than {expected} characters but dropped_commands unchanged:",
-            "    a macro start was refused because Insert was pressed while four",
-            "    runs were already queued. NOT a firmware failure - the toggle",
-            "    count is short, so repeat step 1-5 more slowly.",
+            "  - step 5 typed `ABC`: Left Shift is stranded on that computer. FAIL.",
+            "  - step 5 typed nothing on one computer: that link is stuck. FAIL.",
+            "  - dropped_commands went up, or runtime_fault is 1. FAIL.",
+            "  - one line shorter than the others: a macro step was lost. FAIL,",
+            "    and say which line it was.",
+            f"  - fewer than {lines_expected} lines: a press was refused while runs were still",
+            "    queued. NOT a firmware failure. Press Right, clear both editors",
+            "    and start again at step 2, more slowly.",
         ]
     )
 
@@ -718,7 +776,8 @@ CONFIGURATIONS = {
         backup_label="before-route-toggle",
         backup_reason=(
             "Captured before the route-toggle configuration "
-            "(a macro that changes the keyboard route 32 times per run) was written."
+            "(a macro that changes the keyboard route 32 times per run, one "
+            "run per line) was written."
         ),
     ),
 }

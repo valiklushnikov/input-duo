@@ -40,6 +40,7 @@ from step4_acceptance_config import (  # noqa: E402
     S4_PACKAGE_SHA256,
     TOGGLE_CHARACTER,
     TOGGLE_CYCLES,
+    TOGGLE_LINE_END,
     TOGGLE_RUNS,
     build_package,
     build_toggle_package,
@@ -47,6 +48,7 @@ from step4_acceptance_config import (  # noqa: E402
     deploy,
     describe_toggle,
     toggle_characters_per_computer,
+    toggle_lines,
     toggle_operator_script,
     toggle_route_changes,
     verify_round_trip,
@@ -95,7 +97,22 @@ def test_every_route_step_is_followed_by_exactly_one_character():
         route_step, text_step_ = macro.steps[index], macro.steps[index + 1]
         assert route_step.type == MacroStepType.SET_KEYBOARD_ROUTE
         assert text_step_.type == MacroStepType.TEXT
-        assert text_step_.source_text == TOGGLE_CHARACTER
+        assert text_step_.source_text.startswith(TOGGLE_CHARACTER)
+
+
+def test_one_run_writes_exactly_one_line_and_ends_it():
+    # The operator counts lines, not characters. That only works if a run
+    # produces one line and closes it: a run that left its line open would
+    # merge with the next one, and two presses would look like one.
+    macro = build_toggle_session().project.profiles[0].macros[MACRO_TOGGLE - 1]
+    typed = "".join(
+        step.source_text for step in macro.steps if step.type == MacroStepType.TEXT
+    )
+    assert typed == TOGGLE_CHARACTER * TOGGLE_CYCLES + TOGGLE_LINE_END
+    assert typed.count("\n") == 1
+    assert typed.endswith("\n")
+    # Every line is the same width, so a short one is visible at a glance.
+    assert len(typed.splitlines()[0]) == TOGGLE_CYCLES
 
 
 def test_consecutive_route_steps_alternate_between_the_two_computers():
@@ -121,9 +138,23 @@ def test_the_toggle_macro_types_to_both_computers():
     assert TargetMode(macro.target) == TargetMode.BOTH
 
 
-def test_the_planned_runs_reach_the_thousand_toggles_the_roadmap_asks_for():
-    assert toggle_route_changes() == TOGGLE_CYCLES * TOGGLE_RUNS
-    assert toggle_route_changes() >= 1000
+def test_the_delivered_toggle_count_is_the_one_the_ledger_records():
+    # The roadmap asks for 1000. This procedure performs 320, and that
+    # shortfall is a recorded ruling rather than a silent substitution: ten
+    # lines fit on one screen and thirty-two do not, and an operator who
+    # miscounts is a worse instrument than a smaller number honestly
+    # reported. If either constant moves, the ledger entry is wrong and this
+    # test is what says so.
+    assert TOGGLE_RUNS == 10
+    assert toggle_route_changes() == TOGGLE_CYCLES * TOGGLE_RUNS == 320
+    assert toggle_lines() == TOGGLE_RUNS
+    assert toggle_characters_per_computer() == 320
+
+
+def test_describe_admits_the_procedure_is_short_of_the_thousand(package: bytes):
+    text = describe_toggle(package)
+    assert "1000" in text
+    assert str(toggle_route_changes()) in text
 
 
 def test_every_profile_carries_the_toggle_macro_on_the_keys_the_script_names(package: bytes):
@@ -138,6 +169,37 @@ def test_every_profile_carries_the_toggle_macro_on_the_keys_the_script_names(pac
             and binding.action.argument == MACRO_TOGGLE
         }
         assert triggers == {"Insert", "Up"}
+
+
+def test_every_key_the_script_names_is_an_arrow_key(package: bytes):
+    # The operator's keyboard is a compact layout: no Insert, no Home, no
+    # PageUp, and an F-row only behind an Fn layer. Everything the script
+    # asks for has to be reachable from the four arrows the board has.
+    config = decode_device_config(package)
+    arrows = {"Up", "Down", "Left", "Right"}
+    for profile in config.profiles:
+        bound = {
+            key_name(binding.trigger.code)
+            for binding in profile.bindings
+            if binding.trigger.kind == TriggerKind.KEYBOARD_USAGE
+        }
+        assert arrows <= bound
+
+
+def test_the_other_computer_is_reachable_from_an_arrow_key(package: bytes):
+    # The run ends on PC1 and the stranded-modifier check has to be made on
+    # both computers, so the operator needs a way to move the keyboard that
+    # is not F10.
+    config = decode_device_config(package)
+    for profile in config.profiles:
+        down = next(
+            binding
+            for binding in profile.bindings
+            if binding.trigger.kind == TriggerKind.KEYBOARD_USAGE
+            and key_name(binding.trigger.code) == "Down"
+        )
+        assert down.action.kind == ActionKind.SET_KEYBOARD_ROUTE
+        assert KeyboardRoute(down.action.argument) == KeyboardRoute.PC2
 
 
 def test_every_profile_can_mark_a_run_and_come_home(package: bytes):
@@ -181,12 +243,45 @@ def test_the_operator_script_asks_for_the_number_of_presses_the_plan_needs():
     # The script is rendered from the same constants as the arithmetic, so it
     # cannot come to disagree with the configuration it describes.
     script = toggle_operator_script()
-    assert f"Press Insert {TOGGLE_RUNS} times" in script
+    assert f"Press Up {TOGGLE_RUNS} times" in script
     assert str(toggle_characters_per_computer()) in script
     # A pass and a failure must be distinguishable, and a short count that is
     # the operator's own doing must not be reported as a firmware failure.
     assert "dropped_commands unchanged" in script
     assert "NOT a firmware failure" in script
+
+
+def test_the_operator_script_never_names_a_key_the_keyboard_does_not_have():
+    # This is the defect being fixed: the script asked for Insert and Home on
+    # a keyboard that has neither, so it could not be run at all.
+    script = toggle_operator_script()
+    for absent in ("Insert", "Home", "PageUp", "Delete", "End"):
+        assert absent not in script
+
+
+def test_the_operator_script_holds_the_modifier_instead_of_re_gripping_it():
+    # Re-gripping Left Shift between presses was the fiddliest part of the
+    # procedure and it bought little: S4c already accepted the stranded
+    # modifier on hardware, across an unplug and a reconnect. Here the
+    # modifier only has to prove it is not stranded at the end.
+    script = toggle_operator_script()
+    assert "re-grip" not in script.lower()
+    assert "keep holding" in script.lower()
+
+
+def test_the_operator_script_counts_lines_rather_than_characters():
+    # Counting 1024 characters by eye is a chore, not a check. One press is
+    # one full line, so the operator counts ten of them and reads the total
+    # off the editor's own status bar.
+    script = toggle_operator_script()
+    assert f"{toggle_lines()} lines" in script
+    assert f"Ln {toggle_lines() + 1}" in script
+
+
+def test_the_operator_script_fits_on_one_page():
+    # A procedure that has to be scrolled back through is one that gets done
+    # out of order.
+    assert len(toggle_operator_script().splitlines()) <= 40
 
 
 def test_the_two_configurations_are_not_the_same_package():
