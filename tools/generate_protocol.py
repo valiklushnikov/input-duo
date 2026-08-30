@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 from pathlib import Path
 
@@ -151,14 +152,54 @@ def render_python(schema: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-def _write_if_changed(path: Path, content: str, check: bool) -> bool:
-    encoded = content.encode("utf-8")
-    if path.is_file() and path.read_bytes() == encoded:
+def _lines(text: str) -> list[str]:
+    """Split into lines the way this comparison has to see them.
+
+    ``str.splitlines`` drops the terminator, so CRLF and LF land on the same
+    list. That is the point: a checkout's line endings belong to the filesystem
+    git wrote it onto, not to the schema. ``--check`` asks whether the
+    generated files still describe ``protocol/schema.json``, and on Windows
+    every fresh clone holds CRLF while the generator writes LF - a byte
+    comparison answers "stale" for a reason that has nothing to do with the
+    protocol, and takes ``build_release.ps1`` down with it.
+    """
+    return text.splitlines()
+
+
+def stale_report(path: Path, content: str) -> str | None:
+    """``None`` when ``path`` already says ``content``, else why it does not.
+
+    The report names the file and shows the differing lines. A release gate
+    that exits 1 printing nothing tells its operator only that something,
+    somewhere, is wrong.
+    """
+    if not path.is_file():
+        return f"{path}: missing; run tools/generate_protocol.py"
+
+    current = path.read_bytes().decode("utf-8")
+    if _lines(current) == _lines(content):
+        return None
+
+    diff = difflib.unified_diff(
+        _lines(current),
+        _lines(content),
+        fromfile=f"{path} (checked in)",
+        tofile=f"{path} (from protocol/schema.json)",
+        lineterm="",
+    )
+    return f"{path}: out of date\n" + "\n".join(diff)
+
+
+def write_if_changed(path: Path, content: str) -> bool:
+    """Write ``content`` unless ``path`` already says the same thing.
+
+    "The same thing" ignores line endings, so running the generator inside a
+    CRLF checkout no longer rewrites three files into LF for no reason.
+    """
+    if stale_report(path, content) is None:
         return False
-    if check:
-        return True
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(encoded)
+    path.write_bytes(content.encode("utf-8"))
     return True
 
 
@@ -168,10 +209,29 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     schema: dict[str, object] = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-    stale = _write_if_changed(CPP_PATH, render_cpp(schema), args.check)
-    stale |= _write_if_changed(PYTHON_PATH, render_python(schema), args.check)
-    stale |= _write_if_changed(PYTHON_INIT_PATH, "# generated; do not edit\n", args.check)
-    return 1 if args.check and stale else 0
+    outputs = [
+        (CPP_PATH, render_cpp(schema)),
+        (PYTHON_PATH, render_python(schema)),
+        (PYTHON_INIT_PATH, "# generated; do not edit\n"),
+    ]
+
+    if args.check:
+        reports = [
+            report for target, content in outputs if (report := stale_report(target, content)) is not None
+        ]
+        for report in reports:
+            print(report)
+        if reports:
+            print(
+                f"{len(reports)} generated file(s) no longer match protocol/schema.json; "
+                "run tools/generate_protocol.py"
+            )
+            return 1
+        return 0
+
+    for target, content in outputs:
+        write_if_changed(target, content)
+    return 0
 
 
 if __name__ == "__main__":
