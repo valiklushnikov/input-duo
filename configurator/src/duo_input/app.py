@@ -43,12 +43,19 @@ def build_main_window(
     service: DeviceService | None = None,
     session: ProjectSession | None = None,
     translations: TranslationManager | None = None,
+    transport_factory: object | None = None,
 ) -> MainWindow:
-    """Create the shell with its device service and a clean project session."""
+    """Create the shell with its device service and a clean project session.
+
+    ``transport_factory`` exists for tests: the window attaches itself to
+    whatever the factory offers, so a suite that left it at its default would
+    open the operator's real device.
+    """
     return MainWindow(
         service if service is not None else DeviceService(),
         session if session is not None else ProjectSession.new(),
         translations=translations,
+        transport_factory=transport_factory,
     )
 
 

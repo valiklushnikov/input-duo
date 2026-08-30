@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -73,6 +73,12 @@ MINIMUM_HEIGHT = 700
 TransportFactory = Callable[[], object | None]
 
 
+#: How often the shell looks for a device that is not attached yet. Short
+#: enough that plugging a board in feels immediate, long enough that the
+#: retry costs nothing while the socket stays empty.
+AUTOCONNECT_INTERVAL_MS = 2000
+
+
 def default_transport_factory() -> object | None:
     """Open the first port that presents the U1 identity, if there is one."""
     from duo_input.device.discovery import find_u1_ports
@@ -127,6 +133,16 @@ class MainWindow(QMainWindow):
         self.autosave = AutosaveService(parent=self)
         self.autosave.timer.timeout.connect(self.autosave_now)
         self.autosave.timer.start()
+        # The device attaches itself. The operator plugs a board in and the
+        # program notices; there is nothing for them to decide, so there is no
+        # button to press.
+        self._autoconnect = QTimer(self)
+        self._autoconnect.setInterval(AUTOCONNECT_INTERVAL_MS)
+        self._autoconnect.timeout.connect(self.try_autoconnect)
+        self._autoconnect.start()
+        # Attach at once as well: a board already plugged in should be there
+        # by the time the window is on screen, not two seconds afterwards.
+        QTimer.singleShot(0, self.try_autoconnect)
         self._updating_selector = False
 
         self.setMinimumSize(MINIMUM_WIDTH, MINIMUM_HEIGHT)
@@ -195,8 +211,7 @@ class MainWindow(QMainWindow):
 
         # Tab order follows the visual order: the toolbar row first, then the
         # section list and finally the page it selects.
-        self.setTabOrder(self.profile_selector, self.connect_button)
-        self.setTabOrder(self.connect_button, self.save_button)
+        self.setTabOrder(self.profile_selector, self.save_button)
         self.setTabOrder(self.save_button, self.write_button)
         self.setTabOrder(self.write_button, self.nav)
         self.setTabOrder(self.nav, self.pages)
@@ -221,10 +236,6 @@ class MainWindow(QMainWindow):
         set_role(self.connection_label, ROLE_CHIP)
         set_signal(self.connection_label, SIGNAL_MUTED)
 
-        self.connect_button = QPushButton(self.tr("Connect"), bar)
-        self.connect_button.setAccessibleName(self.tr("Connect or disconnect the device"))
-        self.connect_button.clicked.connect(self._on_connect_clicked)
-
         self.save_button = QPushButton(self.tr("Save"), bar)
         self.save_button.setAccessibleName(self.tr("Save the project file"))
         set_role(self.save_button, ROLE_PRIMARY)
@@ -242,7 +253,6 @@ class MainWindow(QMainWindow):
         row.addStretch(1)
         row.addWidget(self.connection_label)
         row.addSpacing(SPACE_MD)
-        row.addWidget(self.connect_button)
         row.addWidget(self.save_button)
         row.addWidget(self.write_button)
         return bar
@@ -501,9 +511,6 @@ class MainWindow(QMainWindow):
             self.connection_label,
             SIGNAL_OK if self._service.is_connected else SIGNAL_MUTED,
         )
-        self.connect_button.setText(
-            self.tr("Disconnect") if self._service.is_connected else self.tr("Connect")
-        )
         self._refresh_state_strip()
 
     def _refresh_state_strip(self) -> None:
@@ -624,15 +631,24 @@ class MainWindow(QMainWindow):
             return
         self._service.connect_device(link)
 
+    def try_autoconnect(self) -> None:
+        """Attach to the device if one is there, and say nothing if it is not.
+
+        This runs on a timer, so an empty socket is the ordinary state rather
+        than an event worth reporting: announcing it would fill the log with a
+        line every two seconds and tell the operator nothing they cannot see
+        in the connection label.
+        """
+        if self._service.is_connected:
+            return
+        link = self.transport_factory()
+        if link is None:
+            return
+        self._service.connect_device(link)
+
     def disconnect_device(self) -> None:
         self._service.disconnect_device()
         self._sync_device_state()
-
-    def _on_connect_clicked(self) -> None:
-        if self._service.is_connected:
-            self.disconnect_device()
-        else:
-            self.connect_device()
 
     def write_to_device(self) -> None:
         """Send the compiled project in one transaction; never edits it."""

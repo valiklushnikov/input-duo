@@ -76,7 +76,8 @@ def main() -> int:
     translations = TranslationManager(application)
     translations.set_language(arguments.language, remember=False)
 
-    window = MainWindow(DeviceService())
+    # Never reach for a real device: this renders pages, it does not test them.
+    window = MainWindow(DeviceService(), transport_factory=lambda: None)
     window.resize(WIDTH, HEIGHT)
     window.show()
     application.processEvents()

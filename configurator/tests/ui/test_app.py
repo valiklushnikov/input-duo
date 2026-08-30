@@ -31,7 +31,7 @@ def test_entry_point_target_is_the_main_callable():
 def test_build_main_window_produces_a_wired_shell(qtbot):
     service = DeviceService(timeout_ms=5000)
 
-    window = build_main_window(service)
+    window = build_main_window(service, transport_factory=lambda: None)
     qtbot.addWidget(window)
 
     assert isinstance(window, MainWindow)

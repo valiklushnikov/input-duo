@@ -154,7 +154,7 @@ def test_every_control_carries_an_accessible_name(page):
 @pytest.fixture
 def window(qtbot, tmp_path, monkeypatch) -> MainWindow:
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
-    window = MainWindow(DeviceService(timeout_ms=5000))
+    window = MainWindow(DeviceService(timeout_ms=5000), transport_factory=lambda: None)
     qtbot.addWidget(window, before_close_func=_discard_on_teardown)
     return window
 

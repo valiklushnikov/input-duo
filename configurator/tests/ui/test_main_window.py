@@ -44,7 +44,10 @@ def _discard_on_teardown(window: MainWindow) -> None:
 
 @pytest.fixture
 def window(qtbot, service) -> MainWindow:
-    window = MainWindow(service)
+    # The window attaches itself to whatever the factory offers. In the suite
+    # that must be nothing at all: a factory left on its default would open
+    # the operator's real device the moment any test built a window.
+    window = MainWindow(service, transport_factory=lambda: None)
     qtbot.addWidget(window, before_close_func=_discard_on_teardown)
     return window
 
@@ -72,6 +75,43 @@ def test_window_starts_clean_with_the_default_project(window):
     assert window.nav.count() >= 1
     assert window.save_button.isEnabled() is True
     assert window.write_button.isEnabled() is False
+
+
+def test_the_shell_offers_no_connect_button(window):
+    """Attaching to the device is not a decision the operator has to make."""
+    assert not hasattr(window, "connect_button")
+
+
+def test_the_window_attaches_itself_to_a_device_that_is_present(qtbot, service, emulator):
+    """A device already plugged in is connected without being asked."""
+    window = MainWindow(service, transport_factory=lambda: emulator)
+    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+
+    qtbot.waitUntil(lambda: service.state is DeviceState.READY, timeout=5000)
+
+
+def test_the_window_attaches_to_a_device_that_arrives_later(qtbot, service, emulator):
+    """Plugging the board in after startup must not require a restart."""
+    offered: list[object] = [None]
+    window = MainWindow(service, transport_factory=lambda: offered[0])
+    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    assert service.is_connected is False
+
+    offered[0] = emulator
+    window.try_autoconnect()
+
+    qtbot.waitUntil(lambda: service.is_connected, timeout=5000)
+
+
+def test_an_absent_device_is_not_announced_over_and_over(qtbot, service):
+    """The retry is silent: an empty socket is the normal state, not an event."""
+    window = MainWindow(service, transport_factory=lambda: None)
+    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+
+    for _ in range(5):
+        window.try_autoconnect()
+
+    assert [line for line in window.overview.events() if "connect_device" in line] == []
 
 
 def test_minimum_window_size_shows_every_control(qtbot, window):
@@ -186,7 +226,6 @@ def test_tab_order_follows_the_visual_order(qtbot, window):
 
     wanted = [
         window.profile_selector,
-        window.connect_button,
         window.save_button,
         window.write_button,
         window.nav,

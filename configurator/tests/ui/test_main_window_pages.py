@@ -38,7 +38,7 @@ def emulator() -> U1Emulator:
 
 @pytest.fixture
 def window(qtbot) -> MainWindow:
-    window = MainWindow(DeviceService(timeout_ms=5000))
+    window = MainWindow(DeviceService(timeout_ms=5000), transport_factory=lambda: None)
     qtbot.addWidget(window, before_close_func=_discard_on_teardown)
     return window
 
