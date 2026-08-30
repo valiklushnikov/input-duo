@@ -6,6 +6,7 @@
 // agrees with itself and with nothing else.
 
 #include "config_profiles.hpp"
+#include "mapping/engine.hpp"
 #include "protocol/crc.hpp"
 #include "test_support.hpp"
 
@@ -22,8 +23,13 @@ using duo_input::config::TriggerKind;
 using duo_input::protocol::ByteView;
 using duo_input::u1::StoredProfiles;
 using duo_input::u1::macros::MacroDefinition;
+using duo_input::u1::input::InputEvent;
+using duo_input::u1::input::InputEventKind;
+using duo_input::u1::mapping::ActionRequestKind;
 using duo_input::u1::mapping::Binding;
+using duo_input::u1::mapping::BindingEngine;
 using duo_input::u1::mapping::kMaxBindings;
+using duo_input::u1::mapping::Outcome;
 
 namespace {
 
@@ -117,16 +123,61 @@ TEST_CASE(a_keyboard_binding_keeps_its_trigger_and_its_modifiers) {
     CHECK_EQ(static_cast<int>(bindings[0].mode), static_cast<int>(BindingMode::REPLACE));
 }
 
-TEST_CASE(a_mouse_binding_keeps_the_button_number_the_format_uses) {
+TEST_CASE(a_mouse_binding_is_renumbered_to_the_index_the_input_uses) {
     Loaded loaded;
     Binding bindings[kMaxBindings];
     loaded.profiles.bindings_for(1, bindings);
 
-    // The format numbers buttons from one and the engine matches on the same
-    // number the capture reports, so nothing is renumbered on the way in.
+    // The format numbers buttons from one, because zero means "no button".
+    // The input pipeline numbers them from zero, because they are bit
+    // positions in the report. The engine matches a binding against an event
+    // straight, so the translation has to happen here - the same translation
+    // the capture path already makes in the other direction.
     CHECK_EQ(static_cast<int>(bindings[1].trigger), static_cast<int>(TriggerKind::MOUSE_BUTTON));
-    CHECK_EQ(static_cast<int>(bindings[1].code), 5);
+    CHECK_EQ(static_cast<int>(bindings[1].code), 4);
     CHECK_EQ(static_cast<int>(bindings[1].mode), static_cast<int>(BindingMode::ADD));
+}
+
+TEST_CASE(a_mouse_binding_answers_the_button_the_operator_pressed) {
+    Loaded loaded;
+    Binding bindings[kMaxBindings];
+    const std::size_t count = loaded.profiles.bindings_for(1, bindings);
+    BindingEngine engine;
+    engine.set_bindings(bindings, count);
+
+    // The vector binds what the configuration calls button 5 - the second side
+    // button. That button arrives from the report as bit 4.
+    InputEvent press;
+    press.kind = InputEventKind::MouseButtonDown;
+    press.code = 4;
+    const Outcome outcome = engine.handle(press);
+
+    int switched = 0;
+    for (std::size_t index = 0; index < outcome.count; ++index) {
+        if (outcome.actions[index].kind == ActionRequestKind::SetProfile) {
+            ++switched;
+        }
+    }
+    CHECK_EQ(switched, 1);
+}
+
+TEST_CASE(a_mouse_binding_leaves_the_neighbouring_button_alone) {
+    Loaded loaded;
+    Binding bindings[kMaxBindings];
+    const std::size_t count = loaded.profiles.bindings_for(1, bindings);
+    BindingEngine engine;
+    engine.set_bindings(bindings, count);
+
+    // Bit 5 is what button 5 would be if nothing were renumbered. Answering it
+    // is the failure this whole translation exists to prevent.
+    InputEvent press;
+    press.kind = InputEventKind::MouseButtonDown;
+    press.code = 5;
+    const Outcome outcome = engine.handle(press);
+
+    for (std::size_t index = 0; index < outcome.count; ++index) {
+        CHECK(outcome.actions[index].kind != ActionRequestKind::SetProfile);
+    }
 }
 
 TEST_CASE(an_action_that_carries_no_argument_still_arrives_intact) {
@@ -308,7 +359,8 @@ TEST_CASE(a_profile_that_is_not_there_yields_nothing) {
 
     CHECK_EQ(loaded.profiles.bindings_for(200, bindings), 0u);
 }
-
+
+
 TEST_CASE(a_profile_carries_the_routes_it_is_stored_as_starting_in) {
     Rerouted rerouted;
     CHECK(rerouted.profiles.loaded());

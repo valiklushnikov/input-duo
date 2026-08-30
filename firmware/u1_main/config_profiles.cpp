@@ -82,6 +82,16 @@ std::size_t StoredProfiles::bindings_for(std::uint8_t profile_id, mapping::Bindi
         mapping::Binding& slot = out[written];
         slot.trigger = binding.trigger_kind();
         slot.code = binding.trigger_code();
+        if (slot.trigger == config::TriggerKind::MOUSE_BUTTON) {
+            // The format numbers buttons from one, because zero means "no
+            // button" to the validator. The input pipeline numbers them from
+            // zero, because they are bit positions in the mouse report, and
+            // the engine matches a binding against an event straight. Without
+            // this the binding answers the next button along - and the one on
+            // button 5 answers a bit no mouse ever sets. The capture path
+            // makes the same translation in the other direction.
+            slot.code = static_cast<std::uint16_t>(slot.code - 1);
+        }
         slot.required_modifiers = binding.trigger_modifiers();
         slot.mode = binding.mode();
         slot.action = binding.action_kind();
