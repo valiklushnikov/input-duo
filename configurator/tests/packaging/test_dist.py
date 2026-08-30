@@ -161,10 +161,33 @@ def test_the_executable_carries_a_stamped_icon(dist):
     )
 
 
+def test_the_interface_typeface_ships(files, dist):
+    """Without these three files the program silently wears Segoe UI instead.
+
+    ``install_fonts`` may not fail loudly - a blank window is worse than the
+    wrong typeface - so a build whose font ``--include-data-files`` line broke
+    would look healthy and pass every other test here while shipping none of
+    the typography the design specifies. The folder matters as much as the
+    files: ``install_fonts`` reads ``duo_input/resources/fonts`` beside the
+    package and nowhere else, so a face that landed elsewhere is a face that
+    is never loaded.
+    """
+    shipped = {
+        path.relative_to(dist).as_posix() for path in files if path.suffix.lower() == ".ttf"
+    }
+
+    for weight in ("Regular", "Medium", "SemiBold"):
+        assert f"duo_input/resources/fonts/GolosText-{weight}.ttf" in shipped, weight
+
+
 def test_the_licence_notices_ship(files):
     names = {path.name for path in files}
 
     assert "third-party-licenses.md" in names
+    # SIL OFL 1.1 requires the licence to travel with the faces themselves,
+    # so the build copies it beside the program. Shipping the fonts without
+    # it is a licence breach, not an oversight in the notices file.
+    assert "OFL-GolosText.txt" in names
 
 
 def test_the_executable_carries_the_project_version(dist):
