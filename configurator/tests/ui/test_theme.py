@@ -180,6 +180,12 @@ def test_a_control_is_tall_enough_to_hit():
     assert theme.CONTROL_HEIGHT % theme.GRID == 0
 
 
+def test_a_card_is_rounder_than_the_controls_inside_it():
+    """A card that shares its radius with its own inputs reads as one slab."""
+    assert theme.RADIUS_CARD > theme.RADIUS
+    assert theme.RADIUS_CARD - theme.RADIUS <= 4
+
+
 # ------------------------------------------------------------------ stylesheet
 
 

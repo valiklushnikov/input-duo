@@ -141,6 +141,8 @@ SPACING = (SPACE_XS, SPACE_SM, SPACE_MD, SPACE_LG, SPACE_XL)
 CONTROL_HEIGHT = 28
 #: Corner radius, one value for everything that has corners.
 RADIUS = 4
+#: Cards sit a little softer than the controls they contain.
+RADIUS_CARD = 6
 
 # ------------------------------------------------------------------- the roles
 #
@@ -501,7 +503,7 @@ QListWidget#{NAME_RAIL}::item:selected {{
 QGroupBox {{
     background-color: {SURFACE};
     border: 1px solid {LINE};
-    border-radius: {RADIUS}px;
+    border-radius: {RADIUS_CARD}px;
     margin-top: 0px;
     padding: {2 * SPACE_XL - SPACE_SM}px {SPACE_LG}px {SPACE_LG}px {SPACE_LG}px;
     font-size: {TEXT_CARD_TITLE}pt;
