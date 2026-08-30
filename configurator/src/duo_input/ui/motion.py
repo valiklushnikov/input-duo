@@ -57,6 +57,19 @@ def fade_in(widget: QWidget, duration: int = FAST) -> QPropertyAnimation | None:
     animation.setEasingCurve(_CURVE)
     animation.setStartValue(0.0)
     animation.setEndValue(1.0)
+
+    def _clear_effect() -> None:
+        # DeleteWhenStopped frees the animation, not the effect it drove, so
+        # a widget that was ever faded in would otherwise carry a graphics
+        # effect forever - and a widget with one renders through an offscreen
+        # buffer, which is exactly what leaked one page's pixels over another
+        # inside a QStackedWidget. Guard against clearing a *newer* fade on
+        # the same widget: if this fired late, the widget's current effect is
+        # already someone else's.
+        if widget.graphicsEffect() is effect:
+            widget.setGraphicsEffect(None)
+
+    animation.finished.connect(_clear_effect)
     animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
     return animation
 

@@ -56,6 +56,28 @@ def test_a_second_fade_does_not_strand_the_first_effect(widget, monkeypatch):
     assert widget.graphicsEffect() is None
 
 
+def test_a_finished_fade_clears_its_own_effect(widget, monkeypatch, qtbot):
+    """The effect a fade attaches must not outlive the animation that drove it.
+
+    ``DeleteWhenStopped`` frees the ``QPropertyAnimation`` when it reaches its
+    end, but that has never freed the ``QGraphicsOpacityEffect`` the animation
+    was driving - a widget left carrying one renders through an offscreen
+    buffer forever after, which is what let one page's pixels show through
+    another inside a ``QStackedWidget``. This only exercises the enabled
+    path, so the offscreen suite's default (disabled) path would never have
+    caught it.
+    """
+    monkeypatch.setattr(motion, "animations_enabled", lambda: True)
+
+    animation = motion.fade_in(widget, duration=20)
+
+    assert animation is not None
+    with qtbot.waitSignal(animation.finished, timeout=2000):
+        pass
+
+    assert widget.graphicsEffect() is None
+
+
 def test_an_enabled_fade_returns_a_running_animation(widget, monkeypatch):
     monkeypatch.setattr(motion, "animations_enabled", lambda: True)
 
