@@ -39,6 +39,7 @@ from duo_input.ui.diagnostics import DiagnosticsPage
 from duo_input.ui.macros import MacrosPage
 from duo_input.ui.models.binding_table import MouseCapabilities
 from duo_input.ui.models.project_session import ProjectSession, SetActiveProfile
+from duo_input.ui import motion
 from duo_input.ui.mouse import MouseSwitchPage
 from duo_input.ui.overview import OverviewPage
 from duo_input.ui.profiles import ProfilesPage
@@ -180,7 +181,7 @@ class MainWindow(QMainWindow):
         for page in (self.bindings, self.mouse):
             page.button_observed.connect(self._on_button_observed)
         self.nav.setCurrentRow(self.PAGE_OVERVIEW)
-        self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
+        self.nav.currentRowChanged.connect(self._show_page_index)
 
         splitter.addWidget(self.nav)
         splitter.addWidget(self.pages)
@@ -357,6 +358,13 @@ class MainWindow(QMainWindow):
 
     def show_page(self, page: int) -> None:
         self.nav.setCurrentRow(page)
+
+    def _show_page_index(self, index: int) -> None:
+        """Switch pages, bringing the new one up rather than snapping to it."""
+        self.pages.setCurrentIndex(index)
+        page = self.pages.currentWidget()
+        if page is not None:
+            motion.fade_in(page)
 
     def _editor_pages(self) -> tuple[QWidget, ...]:
         """Pages that both render a session and ask for changes to it."""

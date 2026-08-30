@@ -453,3 +453,16 @@ def test_the_issue_banner_appears_with_the_issues_and_leaves_with_them(window):
 
     assert window.issues_banner.isVisibleTo(window) is True
     assert window.issues_banner.property("signal") == theme.SIGNAL_ERROR
+
+
+def test_changing_the_page_still_shows_the_page(qtbot, window):
+    """The fade must never leave a page stranded behind a half-applied effect."""
+    window.show_page(MainWindow.PAGE_MOUSE)
+
+    assert window.pages.currentWidget() is window.mouse
+    assert window.mouse.graphicsEffect() is None
+
+    window.show_page(MainWindow.PAGE_OVERVIEW)
+
+    assert window.pages.currentWidget() is window.overview
+    assert window.overview.graphicsEffect() is None
