@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QLabel
 
 from duo_input.i18n import (
     DEFAULT_LANGUAGE,
@@ -19,6 +20,7 @@ from duo_input.i18n import (
     translations_directory,
 )
 from duo_input.ui.settings import SettingsPage
+from duo_input.ui import theme
 
 SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "duo_input"
 
@@ -263,6 +265,17 @@ def test_every_control_carries_an_accessible_name(page):
         page.log_level_combo,
     ):
         assert widget.accessibleName()
+
+
+def test_settings_use_the_shared_visual_hierarchy(page):
+    titles = [
+        label.text()
+        for label in page.findChildren(QLabel)
+        if label.property("role") == theme.ROLE_PAGE_TITLE
+    ]
+
+    assert titles == ["Settings"]
+    assert page.restart_label.property("role") == theme.ROLE_NOTE
 
 
 # ------------------------------------------------------------- screenshots

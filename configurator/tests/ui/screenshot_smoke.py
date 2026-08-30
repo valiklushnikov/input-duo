@@ -17,8 +17,10 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-WIDTH = 1280
-HEIGHT = 800
+# The supported minimum window is the hard case.  A layout that only works at
+# a roomy desktop size has not passed the screenshot review.
+WIDTH = 1024
+HEIGHT = 700
 
 
 def _english_sources() -> set[str]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from PySide6.QtWidgets import QLabel
 
 from duo_input.domain.models import Action, Binding, Trigger
 from duo_input.generated.protocol import (
@@ -18,6 +19,7 @@ from duo_input.ui.models.binding_table import (
 )
 from duo_input.ui.models.project_session import AddBinding, ProjectSession
 from duo_input.ui.mouse import MouseSwitchPage
+from duo_input.ui import theme
 
 
 def _switch(code: int, *, kind=TriggerKind.MOUSE_BUTTON, action=None) -> Binding:
@@ -232,3 +234,30 @@ def test_every_control_carries_an_accessible_name(page):
         page.existing_list,
     ):
         assert widget.accessibleName()
+
+
+def test_the_page_uses_the_shared_visual_hierarchy(page):
+    titles = [
+        label.text()
+        for label in page.findChildren(QLabel)
+        if label.property("role") == theme.ROLE_PAGE_TITLE
+    ]
+
+    assert titles == ["Mouse"]
+    assert page.warning_label.property("role") == theme.ROLE_BANNER
+    assert page.apply_button.property("role") == theme.ROLE_PRIMARY
+
+
+def test_a_conflict_is_shown_as_an_error_not_a_warning(page):
+    page.set_session(
+        page.session.apply(
+            AddBinding(
+                page.session.project.active_profile_id,
+                _switch(0x04, kind=TriggerKind.KEYBOARD_USAGE),
+            )
+        )
+    )
+    page.select_trigger_kind(TriggerKind.KEYBOARD_USAGE)
+
+    assert page.warning_label.text()
+    assert page.warning_label.property("signal") == theme.SIGNAL_ERROR

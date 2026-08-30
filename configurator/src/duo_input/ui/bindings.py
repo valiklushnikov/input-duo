@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -50,6 +49,20 @@ from duo_input.ui.models.project_session import (
     ProjectSession,
     RemoveBinding,
     UpdateBinding,
+)
+from duo_input.ui.theme import (
+    ROLE_BANNER,
+    ROLE_PRIMARY,
+    SIGNAL_ERROR,
+    SIGNAL_MUTED,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+    fact_form,
+    field_label,
+    page_header,
+    set_role,
+    set_signal,
 )
 
 #: Seconds the device keeps capture mode open, mirrored from the design spec.
@@ -157,8 +170,15 @@ class BindingsPage(QWidget):
         self._updating = False
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(12)
+        outer.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
+        outer.setSpacing(SPACE_LG)
+        outer.addWidget(
+            page_header(
+                self.tr("Bindings"),
+                self.tr("Choose what a key or mouse button does in this profile."),
+                self,
+            )
+        )
 
         self.model = BindingTableModel(self)
         self.table = QTableView(self)
@@ -166,6 +186,7 @@ class BindingsPage(QWidget):
         self.table.setModel(self.model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setAlternatingRowColors(True)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.selectionModel().selectionChanged.connect(self._on_selection_changed)
         outer.addWidget(self.table, 1)
@@ -177,30 +198,31 @@ class BindingsPage(QWidget):
 
     def _build_editor(self) -> QWidget:
         box = QGroupBox(self.tr("Binding"), self)
+        box.setMaximumWidth(820)
         layout = QVBoxLayout(box)
+        layout.setSpacing(SPACE_MD)
 
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form = fact_form()
 
         self.trigger_kind = QComboBox(box)
         self.trigger_kind.setAccessibleName(self.tr("Trigger kind"))
         self.trigger_kind.addItem(self.tr("Keyboard key"), TriggerKind.KEYBOARD_USAGE)
         self.trigger_kind.addItem(self.tr("Mouse button"), TriggerKind.MOUSE_BUTTON)
         self.trigger_kind.currentIndexChanged.connect(self._on_trigger_kind_changed)
-        form.addRow(QLabel(self.tr("Trigger:"), box), self.trigger_kind)
+        form.addRow(field_label(self.tr("Trigger:"), box), self.trigger_kind)
 
         self.key_combo = QComboBox(box)
         self.key_combo.setAccessibleName(self.tr("Keyboard key"))
         for usage in SELECTABLE_USAGES:
             self.key_combo.addItem(key_name(usage), usage)
         self.key_combo.currentIndexChanged.connect(self._on_editor_changed)
-        self.key_label = QLabel(self.tr("Key:"), box)
+        self.key_label = field_label(self.tr("Key:"), box)
         form.addRow(self.key_label, self.key_combo)
 
         self.mouse_combo = QComboBox(box)
         self.mouse_combo.setAccessibleName(self.tr("Mouse button"))
         self.mouse_combo.currentIndexChanged.connect(self._on_editor_changed)
-        self.mouse_label = QLabel(self.tr("Button:"), box)
+        self.mouse_label = field_label(self.tr("Button:"), box)
         form.addRow(self.mouse_label, self.mouse_combo)
 
         modifier_row = QHBoxLayout()
@@ -212,13 +234,13 @@ class BindingsPage(QWidget):
             self.modifier_boxes[key] = check
             modifier_row.addWidget(check)
         modifier_row.addStretch(1)
-        form.addRow(QLabel(self.tr("Modifiers:"), box), self._wrap(modifier_row, box))
+        form.addRow(field_label(self.tr("Modifiers:"), box), self._wrap(modifier_row, box))
 
         self.mode_combo = QComboBox(box)
         self.mode_combo.setAccessibleName(self.tr("Binding mode"))
         self.mode_combo.addItem(self.tr("Replace"), BindingMode.REPLACE)
         self.mode_combo.addItem(self.tr("Add"), BindingMode.ADD)
-        form.addRow(QLabel(self.tr("Mode:"), box), self.mode_combo)
+        form.addRow(field_label(self.tr("Mode:"), box), self.mode_combo)
 
         self.action_combo = QComboBox(box)
         self.action_combo.setAccessibleName(self.tr("Action"))
@@ -226,17 +248,19 @@ class BindingsPage(QWidget):
             self.action_combo.addItem(kind.name, kind)
         self.action_combo.setCurrentIndex(self.action_combo.findData(_DEFAULT_ACTION))
         self.action_combo.currentIndexChanged.connect(self._on_action_kind_changed)
-        form.addRow(QLabel(self.tr("Action:"), box), self.action_combo)
+        form.addRow(field_label(self.tr("Action:"), box), self.action_combo)
 
         self.argument_combo = QComboBox(box)
         self.argument_combo.setAccessibleName(self.tr("Action target"))
         self.argument_combo.currentIndexChanged.connect(self._on_editor_changed)
-        form.addRow(QLabel(self.tr("Target:"), box), self.argument_combo)
+        form.addRow(field_label(self.tr("Target:"), box), self.argument_combo)
         layout.addLayout(form)
 
         self.conflict_label = QLabel(box)
         self.conflict_label.setAccessibleName(self.tr("Why this binding cannot be used"))
         self.conflict_label.setWordWrap(True)
+        set_role(self.conflict_label, ROLE_BANNER)
+        set_signal(self.conflict_label, SIGNAL_MUTED)
         layout.addWidget(self.conflict_label)
 
         buttons = QHBoxLayout()
@@ -245,6 +269,7 @@ class BindingsPage(QWidget):
         self.capture_button.clicked.connect(self.capture_trigger)
         self.add_button = QPushButton(self.tr("Add"), box)
         self.add_button.setAccessibleName(self.tr("Add this binding"))
+        set_role(self.add_button, ROLE_PRIMARY)
         self.add_button.clicked.connect(self._on_add_clicked)
         self.apply_button = QPushButton(self.tr("Apply"), box)
         self.apply_button.setAccessibleName(self.tr("Apply the changes to the selected binding"))
@@ -252,6 +277,7 @@ class BindingsPage(QWidget):
         self.remove_button = QPushButton(self.tr("Remove"), box)
         self.remove_button.setAccessibleName(self.tr("Remove the selected binding"))
         self.remove_button.clicked.connect(self._on_remove_clicked)
+        buttons.setSpacing(SPACE_SM)
         for button in (self.capture_button, self.add_button, self.apply_button, self.remove_button):
             buttons.addWidget(button)
         buttons.addStretch(1)
@@ -479,6 +505,7 @@ class BindingsPage(QWidget):
         selected = self.selected_binding()
         reason = self._reason_this_cannot_be_used(selected)
         self.conflict_label.setText(reason)
+        set_signal(self.conflict_label, SIGNAL_ERROR if reason else SIGNAL_MUTED)
         usable = not reason and self.current_binding() is not None
         self.add_button.setEnabled(usable)
         self.apply_button.setEnabled(usable and selected is not None)

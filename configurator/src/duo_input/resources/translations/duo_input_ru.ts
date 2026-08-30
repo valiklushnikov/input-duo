@@ -23,165 +23,175 @@
 <context>
     <name>BindingsPage</name>
     <message>
-        <location filename="../../ui/bindings.py" line="165"/>
+        <location filename="../../ui/bindings.py" line="177"/>
+        <source>Bindings</source>
+        <translation>Назначения</translation>
+    </message>
+    <message>
+        <location filename="../../ui/bindings.py" line="178"/>
+        <source>Choose what a key or mouse button does in this profile.</source>
+        <translation>Настройте действия клавиш и кнопок мыши в этом профиле.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/bindings.py" line="185"/>
         <source>Bindings of the active profile</source>
         <translation>Назначения активного профиля</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="179"/>
+        <location filename="../../ui/bindings.py" line="200"/>
         <source>Binding</source>
         <translation>Назначение</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="186"/>
+        <location filename="../../ui/bindings.py" line="208"/>
         <source>Trigger kind</source>
         <translation>Вид триггера</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="187"/>
-        <location filename="../../ui/bindings.py" line="193"/>
+        <location filename="../../ui/bindings.py" line="209"/>
+        <location filename="../../ui/bindings.py" line="215"/>
         <source>Keyboard key</source>
         <translation>Клавиша клавиатуры</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="188"/>
-        <location filename="../../ui/bindings.py" line="201"/>
+        <location filename="../../ui/bindings.py" line="210"/>
+        <location filename="../../ui/bindings.py" line="223"/>
         <source>Mouse button</source>
         <translation>Кнопка мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="190"/>
+        <location filename="../../ui/bindings.py" line="212"/>
         <source>Trigger:</source>
         <translation>Триггер:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="197"/>
+        <location filename="../../ui/bindings.py" line="219"/>
         <source>Key:</source>
         <translation>Клавиша:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="203"/>
+        <location filename="../../ui/bindings.py" line="225"/>
         <source>Button:</source>
         <translation>Кнопка:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="210"/>
+        <location filename="../../ui/bindings.py" line="232"/>
         <source>{0} modifier</source>
         <translation>Модификатор {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="215"/>
+        <location filename="../../ui/bindings.py" line="237"/>
         <source>Modifiers:</source>
         <translation>Модификаторы:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="218"/>
+        <location filename="../../ui/bindings.py" line="240"/>
         <source>Binding mode</source>
         <translation>Режим назначения</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="219"/>
+        <location filename="../../ui/bindings.py" line="241"/>
         <source>Replace</source>
         <translation>Заменить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="220"/>
-        <location filename="../../ui/bindings.py" line="246"/>
+        <location filename="../../ui/bindings.py" line="242"/>
+        <location filename="../../ui/bindings.py" line="270"/>
         <source>Add</source>
         <translation>Добавить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="221"/>
+        <location filename="../../ui/bindings.py" line="243"/>
         <source>Mode:</source>
         <translation>Режим:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="224"/>
+        <location filename="../../ui/bindings.py" line="246"/>
         <source>Action</source>
         <translation>Действие</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="229"/>
+        <location filename="../../ui/bindings.py" line="251"/>
         <source>Action:</source>
         <translation>Действие:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="232"/>
+        <location filename="../../ui/bindings.py" line="254"/>
         <source>Action target</source>
         <translation>Цель действия</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="234"/>
+        <location filename="../../ui/bindings.py" line="256"/>
         <source>Target:</source>
         <translation>Цель:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="238"/>
+        <location filename="../../ui/bindings.py" line="260"/>
         <source>Why this binding cannot be used</source>
         <translation>Почему это назначение нельзя применить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="243"/>
+        <location filename="../../ui/bindings.py" line="267"/>
         <source>Detect</source>
         <translation>Определить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="244"/>
+        <location filename="../../ui/bindings.py" line="268"/>
         <source>Detect the trigger on the device</source>
         <translation>Определить триггер на устройстве</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="247"/>
+        <location filename="../../ui/bindings.py" line="271"/>
         <source>Add this binding</source>
         <translation>Добавить это назначение</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="249"/>
+        <location filename="../../ui/bindings.py" line="274"/>
         <source>Apply</source>
         <translation>Применить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="250"/>
+        <location filename="../../ui/bindings.py" line="275"/>
         <source>Apply the changes to the selected binding</source>
         <translation>Применить изменения к выбранному назначению</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="252"/>
+        <location filename="../../ui/bindings.py" line="277"/>
         <source>Remove</source>
         <translation>Удалить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="253"/>
+        <location filename="../../ui/bindings.py" line="278"/>
         <source>Remove the selected binding</source>
         <translation>Удалить выбранное назначение</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="433"/>
+        <location filename="../../ui/bindings.py" line="459"/>
         <source>Button {0}</source>
         <translation>Кнопка {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="491"/>
+        <location filename="../../ui/bindings.py" line="518"/>
         <source>No mouse is attached, so no mouse button can be bound.</source>
         <translation>Мышь не подключена, поэтому назначить кнопку мыши нельзя.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="494"/>
+        <location filename="../../ui/bindings.py" line="521"/>
         <source>Choose a trigger first.</source>
         <translation>Сначала выберите триггер.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="497"/>
+        <location filename="../../ui/bindings.py" line="524"/>
         <source>This profile has no macros to run.</source>
         <translation>В этом профиле нет макросов для запуска.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="499"/>
+        <location filename="../../ui/bindings.py" line="526"/>
         <source>Choose what the trigger should do.</source>
         <translation>Выберите, что должен делать триггер.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="504"/>
+        <location filename="../../ui/bindings.py" line="531"/>
         <source>{0} is already bound in this profile.</source>
         <translation>{0} уже назначен в этом профиле.</translation>
     </message>
@@ -189,23 +199,23 @@
 <context>
     <name>CaptureDialog</name>
     <message>
-        <location filename="../../ui/bindings.py" line="80"/>
+        <location filename="../../ui/bindings.py" line="93"/>
         <source>Detect a key or button</source>
         <extracomment>Seconds the device keeps capture mode open, mirrored from the design spec. Actions whose argument is fixed at zero.</extracomment>
         <translation>Определение клавиши или кнопки</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="84"/>
+        <location filename="../../ui/bindings.py" line="97"/>
         <source>Press the key or mouse button you want to bind.</source>
         <translation>Нажмите клавишу или кнопку мыши, которую хотите назначить.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="88"/>
+        <location filename="../../ui/bindings.py" line="101"/>
         <source>Time left to press a key</source>
         <translation>Осталось времени на нажатие</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="129"/>
+        <location filename="../../ui/bindings.py" line="142"/>
         <source>{0} s left</source>
         <translation>осталось {0} с</translation>
     </message>
@@ -432,249 +442,255 @@
 <context>
     <name>MacrosPage</name>
     <message>
-        <location filename="../../ui/macros.py" line="135"/>
+        <location filename="../../ui/macros.py" line="145"/>
+        <location filename="../../ui/macros.py" line="156"/>
         <source>Macros</source>
         <extracomment>The route a profile keyboard follows, as the macro target it corresponds to. Editor pages, one per step shape.</extracomment>
         <translation>Макросы</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="140"/>
+        <location filename="../../ui/macros.py" line="146"/>
+        <source>Build a sequence once, then run it from any assigned trigger.</source>
+        <translation>Создайте последовательность один раз и запускайте её назначенной клавишей или кнопкой.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/macros.py" line="162"/>
         <source>Macros of the active profile</source>
         <translation>Макросы активного профиля</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="146"/>
+        <location filename="../../ui/macros.py" line="168"/>
         <source>Macro name</source>
         <translation>Имя макроса</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="149"/>
+        <location filename="../../ui/macros.py" line="171"/>
         <source>Name:</source>
         <translation>Имя:</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="152"/>
+        <location filename="../../ui/macros.py" line="174"/>
         <source>Macro target</source>
         <translation>Цель макроса</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="154"/>
+        <location filename="../../ui/macros.py" line="176"/>
         <source>Inherit from profile</source>
         <translation>Как в профиле</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="157"/>
+        <location filename="../../ui/macros.py" line="179"/>
         <source>Both</source>
         <translation>Оба</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="161"/>
+        <location filename="../../ui/macros.py" line="183"/>
         <source>Types on:</source>
         <translation>Печатает на:</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="165"/>
+        <location filename="../../ui/macros.py" line="188"/>
         <source>New macro</source>
         <translation>Новый макрос</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="166"/>
+        <location filename="../../ui/macros.py" line="189"/>
         <source>Add a macro to this profile</source>
         <translation>Добавить макрос в этот профиль</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="168"/>
+        <location filename="../../ui/macros.py" line="191"/>
         <source>Delete macro</source>
         <translation>Удалить макрос</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="169"/>
+        <location filename="../../ui/macros.py" line="192"/>
         <source>Delete the selected macro</source>
         <translation>Удалить выбранный макрос</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="171"/>
+        <location filename="../../ui/macros.py" line="194"/>
         <source>Test run...</source>
         <translation>Тестовый запуск...</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="172"/>
+        <location filename="../../ui/macros.py" line="195"/>
         <source>Run this macro on the device</source>
         <translation>Запустить этот макрос на устройстве</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="180"/>
+        <location filename="../../ui/macros.py" line="203"/>
         <source>Steps</source>
         <translation>Шаги</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="185"/>
+        <location filename="../../ui/macros.py" line="209"/>
         <source>Steps of the selected macro</source>
         <translation>Шаги выбранного макроса</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="197"/>
+        <location filename="../../ui/macros.py" line="223"/>
         <source>Step type</source>
         <translation>Тип шага</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="202"/>
+        <location filename="../../ui/macros.py" line="228"/>
         <source>Add step</source>
         <translation>Добавить шаг</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="203"/>
+        <location filename="../../ui/macros.py" line="229"/>
         <source>Add a step of this type</source>
         <translation>Добавить шаг этого типа</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="205"/>
+        <location filename="../../ui/macros.py" line="231"/>
         <source>Delete step</source>
         <translation>Удалить шаг</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="206"/>
+        <location filename="../../ui/macros.py" line="232"/>
         <source>Delete the selected step</source>
         <translation>Удалить выбранный шаг</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="208"/>
+        <location filename="../../ui/macros.py" line="234"/>
         <source>Up</source>
         <translation>Вверх</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="209"/>
+        <location filename="../../ui/macros.py" line="235"/>
         <source>Move the selected step earlier</source>
         <translation>Переместить выбранный шаг выше</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="211"/>
+        <location filename="../../ui/macros.py" line="237"/>
         <source>Down</source>
         <translation>Вниз</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="212"/>
+        <location filename="../../ui/macros.py" line="238"/>
         <source>Move the selected step later</source>
         <translation>Переместить выбранный шаг ниже</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="226"/>
+        <location filename="../../ui/macros.py" line="252"/>
         <source>Why this step cannot be stored</source>
         <translation>Почему этот шаг нельзя сохранить</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="230"/>
+        <location filename="../../ui/macros.py" line="258"/>
         <source>Apply to step</source>
         <translation>Применить к шагу</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="231"/>
+        <location filename="../../ui/macros.py" line="259"/>
         <source>Store the edited step</source>
         <translation>Сохранить изменённый шаг</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="243"/>
+        <location filename="../../ui/macros.py" line="272"/>
         <source>Key</source>
         <translation>Клавиша</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="247"/>
+        <location filename="../../ui/macros.py" line="276"/>
         <source>Key:</source>
         <translation>Клавиша:</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="252"/>
+        <location filename="../../ui/macros.py" line="281"/>
         <source>{0} modifier</source>
         <translation>Модификатор {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="259"/>
+        <location filename="../../ui/macros.py" line="288"/>
         <source>Modifiers:</source>
         <translation>Модификаторы:</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="266"/>
+        <location filename="../../ui/macros.py" line="295"/>
         <source>Consumer usage</source>
         <translation>Код consumer-управления</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="269"/>
+        <location filename="../../ui/macros.py" line="298"/>
         <source>Usage:</source>
         <translation>Код:</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="276"/>
+        <location filename="../../ui/macros.py" line="305"/>
         <source>Text to type</source>
         <translation>Текст для набора</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="286"/>
+        <location filename="../../ui/macros.py" line="315"/>
         <source>Shortest delay</source>
         <translation>Наименьшая задержка</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="290"/>
+        <location filename="../../ui/macros.py" line="319"/>
         <source>Longest delay</source>
         <translation>Наибольшая задержка</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="293"/>
+        <location filename="../../ui/macros.py" line="322"/>
         <source>From, ms:</source>
         <translation>От, мс:</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="294"/>
+        <location filename="../../ui/macros.py" line="323"/>
         <source>To, ms:</source>
         <translation>До, мс:</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="301"/>
+        <location filename="../../ui/macros.py" line="330"/>
         <source>Keyboard route</source>
         <translation>Маршрут клавиатуры</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="305"/>
-        <location filename="../../ui/macros.py" line="316"/>
+        <location filename="../../ui/macros.py" line="334"/>
+        <location filename="../../ui/macros.py" line="345"/>
         <source>Route:</source>
         <translation>Маршрут:</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="312"/>
+        <location filename="../../ui/macros.py" line="341"/>
         <source>Mouse route command</source>
         <translation>Команда маршрута мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="323"/>
+        <location filename="../../ui/macros.py" line="352"/>
         <source>Profile to switch to</source>
         <translation>Профиль для переключения</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="327"/>
+        <location filename="../../ui/macros.py" line="356"/>
         <source>Profile:</source>
         <translation>Профиль:</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="467"/>
+        <location filename="../../ui/macros.py" line="497"/>
         <source>This macro already holds {0} steps.</source>
         <translation>В этом макросе уже {0} шагов.</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="470"/>
+        <location filename="../../ui/macros.py" line="500"/>
         <source>The shortest delay cannot exceed the longest.</source>
         <translation>Наименьшая задержка не может превышать наибольшую.</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="480"/>
+        <location filename="../../ui/macros.py" line="510"/>
         <source>A text step holds at most {0} characters; this one has {1}.</source>
         <translation>Текстовый шаг вмещает не более {0} символов, а здесь их {1}.</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="485"/>
+        <location filename="../../ui/macros.py" line="515"/>
         <source>{0!r} at position {1} cannot be typed on the {2} layout.</source>
         <translation>{0!r} в позиции {1} нельзя набрать в раскладке {2}.</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="592"/>
+        <location filename="../../ui/macros.py" line="622"/>
         <source>Macro {0}</source>
         <translation>Макрос {0}</translation>
     </message>
@@ -902,156 +918,166 @@
 <context>
     <name>MouseSwitchPage</name>
     <message>
-        <location filename="../../ui/mouse.py" line="74"/>
-        <source>Switch the mouse</source>
+        <location filename="../../ui/mouse.py" line="82"/>
+        <source>Mouse</source>
         <extracomment>Every action this page can produce, in the order it offers them.</extracomment>
+        <translation>Мышь</translation>
+    </message>
+    <message>
+        <location filename="../../ui/mouse.py" line="84"/>
+        <source>Choose the key or mouse button that sends the pointer to PC1 or PC2.</source>
+        <translation>Выберите клавишу или кнопку мыши для переключения указателя между ПК1 и ПК2.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/mouse.py" line="96"/>
+        <source>Switch the mouse</source>
         <translation>Переключение мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="80"/>
+        <location filename="../../ui/mouse.py" line="103"/>
         <source>Trigger kind</source>
         <translation>Вид триггера</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="81"/>
+        <location filename="../../ui/mouse.py" line="104"/>
         <source>Choose...</source>
         <translation>Выберите...</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="82"/>
-        <location filename="../../ui/mouse.py" line="88"/>
+        <location filename="../../ui/mouse.py" line="105"/>
+        <location filename="../../ui/mouse.py" line="111"/>
         <source>Keyboard key</source>
         <translation>Клавиша клавиатуры</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="83"/>
-        <location filename="../../ui/mouse.py" line="95"/>
+        <location filename="../../ui/mouse.py" line="106"/>
+        <location filename="../../ui/mouse.py" line="118"/>
         <source>Mouse button</source>
         <translation>Кнопка мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="85"/>
+        <location filename="../../ui/mouse.py" line="108"/>
         <source>1. What do you press?</source>
         <translation>1. Что вы нажимаете?</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="92"/>
+        <location filename="../../ui/mouse.py" line="115"/>
         <source>Key:</source>
         <translation>Клавиша:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="97"/>
+        <location filename="../../ui/mouse.py" line="120"/>
         <source>Button:</source>
         <translation>Кнопка:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="103"/>
+        <location filename="../../ui/mouse.py" line="126"/>
         <source>{0} modifier</source>
         <translation>Модификатор {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="110"/>
+        <location filename="../../ui/mouse.py" line="133"/>
         <source>Modifiers:</source>
         <translation>Модификаторы:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="113"/>
+        <location filename="../../ui/mouse.py" line="136"/>
         <source>What the trigger does</source>
         <translation>Что делает триггер</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="114"/>
+        <location filename="../../ui/mouse.py" line="137"/>
         <source>Toggle between PC1 and PC2</source>
         <translation>Переключать между ПК1 и ПК2</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="115"/>
+        <location filename="../../ui/mouse.py" line="138"/>
         <source>Always PC1</source>
         <translation>Всегда ПК1</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="116"/>
+        <location filename="../../ui/mouse.py" line="139"/>
         <source>Always PC2</source>
         <translation>Всегда ПК2</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="118"/>
+        <location filename="../../ui/mouse.py" line="141"/>
         <source>2. What should it do?</source>
         <translation>2. Что это должно делать?</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="121"/>
+        <location filename="../../ui/mouse.py" line="144"/>
         <source>Binding mode</source>
         <translation>Режим назначения</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="122"/>
+        <location filename="../../ui/mouse.py" line="145"/>
         <source>Replace the key</source>
         <translation>Заменить клавишу</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="123"/>
+        <location filename="../../ui/mouse.py" line="146"/>
         <source>Add to the key</source>
         <translation>Добавить к клавише</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="124"/>
+        <location filename="../../ui/mouse.py" line="147"/>
         <source>Mode:</source>
         <translation>Режим:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="128"/>
+        <location filename="../../ui/mouse.py" line="151"/>
         <source>Mouse switching warnings</source>
         <translation>Предупреждения о переключении мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="133"/>
+        <location filename="../../ui/mouse.py" line="158"/>
         <source>Bind</source>
         <translation>Назначить</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="134"/>
+        <location filename="../../ui/mouse.py" line="159"/>
         <source>Bind this trigger to the mouse route</source>
         <translation>Назначить этот триггер на маршрут мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="142"/>
+        <location filename="../../ui/mouse.py" line="168"/>
         <source>Mouse switching in this profile</source>
         <translation>Переключение мыши в этом профиле</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="145"/>
+        <location filename="../../ui/mouse.py" line="171"/>
         <source>Existing mouse switch bindings</source>
         <translation>Существующие назначения переключения мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="215"/>
+        <location filename="../../ui/mouse.py" line="242"/>
         <source>Button {0}</source>
         <translation>Кнопка {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="227"/>
+        <location filename="../../ui/mouse.py" line="254"/>
         <source>Toggle</source>
         <translation>Переключение</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="274"/>
-        <location filename="../../ui/mouse.py" line="279"/>
+        <location filename="../../ui/mouse.py" line="302"/>
+        <location filename="../../ui/mouse.py" line="307"/>
         <source>Choose what you press first.</source>
         <translation>Сначала выберите, что вы нажимаете.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="276"/>
+        <location filename="../../ui/mouse.py" line="304"/>
         <source>No mouse is attached, so no mouse button can be bound.</source>
         <translation>Мышь не подключена, поэтому назначить кнопку мыши нельзя.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="282"/>
+        <location filename="../../ui/mouse.py" line="310"/>
         <source>{0} is already bound in this profile.</source>
         <translation>{0} уже назначен в этом профиле.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="297"/>
+        <location filename="../../ui/mouse.py" line="325"/>
         <source>{0} is bound here but the attached mouse has not reported it.</source>
         <translation>{0} назначена здесь, но подключённая мышь о ней не сообщала.</translation>
     </message>
@@ -1209,84 +1235,94 @@
 <context>
     <name>ProfilesPage</name>
     <message>
-        <location filename="../../ui/profiles.py" line="62"/>
+        <location filename="../../ui/profiles.py" line="76"/>
+        <source>Profiles</source>
+        <extracomment>Side of the square that shows a profile&apos;s colour, in logical pixels. Longest profile name the binary format accepts, mirrored from validation. Item data role carrying the profile ID of a slot row.</extracomment>
+        <translation>Профили</translation>
+    </message>
+    <message>
+        <location filename="../../ui/profiles.py" line="78"/>
+        <source>Eight slots the device switches between. One of them is the one it starts in.</source>
+        <translation>Восемь слотов, между которыми переключается устройство. Один из них используется при запуске.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/profiles.py" line="91"/>
         <source>Profile slots</source>
-        <extracomment>Longest profile name the binary format accepts, mirrored from validation. Item data role carrying the profile ID of a slot row.</extracomment>
         <translation>Слоты профилей</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="75"/>
+        <location filename="../../ui/profiles.py" line="105"/>
         <source>Profile</source>
         <translation>Профиль</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="81"/>
+        <location filename="../../ui/profiles.py" line="114"/>
         <source>Profile name</source>
         <translation>Имя профиля</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="84"/>
+        <location filename="../../ui/profiles.py" line="117"/>
         <source>Name:</source>
         <translation>Имя:</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="87"/>
-        <location filename="../../ui/profiles.py" line="228"/>
+        <location filename="../../ui/profiles.py" line="120"/>
+        <location filename="../../ui/profiles.py" line="270"/>
         <source>Profile colour</source>
         <translation>Цвет профиля</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="89"/>
+        <location filename="../../ui/profiles.py" line="124"/>
         <source>Colour:</source>
         <translation>Цвет:</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="92"/>
+        <location filename="../../ui/profiles.py" line="127"/>
         <source>Profile routes</source>
         <translation>Маршруты профиля</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="93"/>
+        <location filename="../../ui/profiles.py" line="130"/>
         <source>Routes:</source>
         <translation>Маршруты:</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="98"/>
+        <location filename="../../ui/profiles.py" line="136"/>
         <source>Copy destination</source>
         <translation>Куда копировать</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="99"/>
+        <location filename="../../ui/profiles.py" line="137"/>
         <source>Copy into</source>
         <translation>Копировать в</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="100"/>
+        <location filename="../../ui/profiles.py" line="138"/>
         <source>Copy this profile into another slot</source>
         <translation>Скопировать этот профиль в другой слот</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="107"/>
+        <location filename="../../ui/profiles.py" line="146"/>
         <source>Make active</source>
         <translation>Сделать активным</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="108"/>
+        <location filename="../../ui/profiles.py" line="147"/>
         <source>Start the device in this profile</source>
         <translation>Запускать устройство в этом профиле</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="110"/>
+        <location filename="../../ui/profiles.py" line="149"/>
         <source>Clear</source>
         <translation>Очистить</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="111"/>
+        <location filename="../../ui/profiles.py" line="150"/>
         <source>Reset this profile slot</source>
         <translation>Сбросить этот слот профиля</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="181"/>
+        <location filename="../../ui/profiles.py" line="222"/>
         <source>{0} - {1} ({2} bindings, {3} macros){4}</source>
         <translation>{0} - {1} (назначений: {2}, макросов: {3}){4}</translation>
     </message>
@@ -1294,74 +1330,84 @@
 <context>
     <name>SettingsPage</name>
     <message>
-        <location filename="../../ui/settings.py" line="68"/>
+        <location filename="../../ui/settings.py" line="72"/>
+        <source>Settings</source>
+        <extracomment>Preferences are short answers; a full-window text field only looks empty. How each shipped language names itself, in that language. Log levels the operator may choose, quietest last.</extracomment>
+        <translation>Настройки</translation>
+    </message>
+    <message>
+        <location filename="../../ui/settings.py" line="73"/>
+        <source>Preferences that belong to you, not to the project.</source>
+        <translation>Параметры программы, которые относятся к вам, а не к проекту.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/settings.py" line="86"/>
         <source>Interface</source>
-        <extracomment>How each shipped language names itself, in that language. Log levels the operator may choose, quietest last.</extracomment>
         <translation>Интерфейс</translation>
     </message>
     <message>
-        <location filename="../../ui/settings.py" line="72"/>
+        <location filename="../../ui/settings.py" line="92"/>
         <source>Interface language</source>
         <translation>Язык интерфейса</translation>
     </message>
     <message>
-        <location filename="../../ui/settings.py" line="76"/>
+        <location filename="../../ui/settings.py" line="96"/>
         <source>Language:</source>
         <translation>Язык:</translation>
     </message>
     <message>
-        <location filename="../../ui/settings.py" line="79"/>
+        <location filename="../../ui/settings.py" line="99"/>
         <source>What happens after a language change</source>
         <translation>Что произойдёт после смены языка</translation>
     </message>
     <message>
-        <location filename="../../ui/settings.py" line="85"/>
+        <location filename="../../ui/settings.py" line="106"/>
         <source>Projects</source>
         <translation>Проекты</translation>
     </message>
     <message>
-        <location filename="../../ui/settings.py" line="90"/>
-        <location filename="../../ui/settings.py" line="187"/>
+        <location filename="../../ui/settings.py" line="115"/>
+        <location filename="../../ui/settings.py" line="215"/>
         <source>Default project folder</source>
         <translation>Папка проектов по умолчанию</translation>
     </message>
     <message>
-        <location filename="../../ui/settings.py" line="92"/>
+        <location filename="../../ui/settings.py" line="117"/>
         <source>Browse...</source>
         <translation>Обзор...</translation>
     </message>
     <message>
-        <location filename="../../ui/settings.py" line="93"/>
+        <location filename="../../ui/settings.py" line="118"/>
         <source>Choose the default project folder</source>
         <translation>Выбрать папку проектов по умолчанию</translation>
     </message>
     <message>
-        <location filename="../../ui/settings.py" line="99"/>
+        <location filename="../../ui/settings.py" line="124"/>
         <source>Folder:</source>
         <translation>Папка:</translation>
     </message>
     <message>
-        <location filename="../../ui/settings.py" line="103"/>
+        <location filename="../../ui/settings.py" line="128"/>
         <source>Logging</source>
         <translation>Журналирование</translation>
     </message>
     <message>
-        <location filename="../../ui/settings.py" line="107"/>
+        <location filename="../../ui/settings.py" line="134"/>
         <source>How much is written to the log</source>
         <translation>Сколько записывается в журнал</translation>
     </message>
     <message>
-        <location filename="../../ui/settings.py" line="111"/>
+        <location filename="../../ui/settings.py" line="138"/>
         <source>Level:</source>
         <translation>Уровень:</translation>
     </message>
     <message>
-        <location filename="../../ui/settings.py" line="114"/>
+        <location filename="../../ui/settings.py" line="141"/>
         <source>Macro text is never written to the log, at any level.</source>
         <translation>Текст макросов не попадает в журнал ни на одном уровне.</translation>
     </message>
     <message>
-        <location filename="../../ui/settings.py" line="177"/>
+        <location filename="../../ui/settings.py" line="205"/>
         <source>The interface language changes the next time Duo Input starts.</source>
         <translation>Язык интерфейса изменится при следующем запуске Duo Input.</translation>
     </message>
@@ -1369,87 +1415,87 @@
 <context>
     <name>TestMacroDialog</name>
     <message>
-        <location filename="../../ui/macros.py" line="655"/>
+        <location filename="../../ui/macros.py" line="685"/>
         <source>Test run</source>
         <translation>Тестовый запуск</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="662"/>
+        <location filename="../../ui/macros.py" line="692"/>
         <source>This runs macro #{0} on the device. It generates real key presses on the computer it is routed to.</source>
         <translation>Это запустит макрос №{0} на устройстве. Он создаёт настоящие нажатия клавиш на том компьютере, куда направлен.</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="671"/>
+        <location filename="../../ui/macros.py" line="701"/>
         <source>Target computer</source>
         <translation>Целевой компьютер</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="672"/>
+        <location filename="../../ui/macros.py" line="702"/>
         <source>Choose...</source>
         <translation>Выберите...</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="676"/>
+        <location filename="../../ui/macros.py" line="706"/>
         <source>Runs on:</source>
         <translation>Выполняется на:</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="680"/>
+        <location filename="../../ui/macros.py" line="710"/>
         <source>I understand this types on a real computer.</source>
         <translation>Я понимаю, что набор пойдёт на настоящий компьютер.</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="682"/>
+        <location filename="../../ui/macros.py" line="712"/>
         <source>Confirm the test run</source>
         <translation>Подтвердить тестовый запуск</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="687"/>
+        <location filename="../../ui/macros.py" line="717"/>
         <source>Why this macro cannot be tested</source>
         <translation>Почему этот макрос нельзя протестировать</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="692"/>
+        <location filename="../../ui/macros.py" line="722"/>
         <source>Run</source>
         <translation>Запустить</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="693"/>
+        <location filename="../../ui/macros.py" line="723"/>
         <source>Run the macro now</source>
         <translation>Запустить макрос сейчас</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="696"/>
+        <location filename="../../ui/macros.py" line="726"/>
         <source>Stop everything and release every key</source>
         <translation>Остановить всё и отпустить все клавиши</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="699"/>
+        <location filename="../../ui/macros.py" line="729"/>
         <source>Close</source>
         <translation>Закрыть</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="720"/>
+        <location filename="../../ui/macros.py" line="750"/>
         <source>The device is not connected.</source>
         <translation>Устройство не подключено.</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="723"/>
+        <location filename="../../ui/macros.py" line="753"/>
         <source>The device is not holding this project. Write it first, so the macro that runs is the macro on screen.</source>
         <translation>На устройстве записан другой проект. Сначала запишите этот, чтобы запускался именно тот макрос, что на экране.</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="728"/>
+        <location filename="../../ui/macros.py" line="758"/>
         <source>Choose which computer the macro should type on.</source>
         <translation>Выберите, на каком компьютере макрос должен печатать.</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="732"/>
+        <location filename="../../ui/macros.py" line="762"/>
         <source>This macro is configured to type on {0}. Change its target first.</source>
         <translation>Этот макрос настроен печатать на {0}. Сначала измените его цель.</translation>
     </message>
     <message>
-        <location filename="../../ui/macros.py" line="735"/>
+        <location filename="../../ui/macros.py" line="765"/>
         <source>Confirm that you expect real key presses.</source>
         <translation>Подтвердите, что вы ожидаете настоящих нажатий клавиш.</translation>
     </message>

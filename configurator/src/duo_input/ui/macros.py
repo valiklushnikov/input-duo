@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -69,6 +68,20 @@ from duo_input.ui.models.project_session import (
     RenameMacro,
     SetMacroSteps,
     SetMacroTarget,
+)
+from duo_input.ui.theme import (
+    ROLE_BANNER,
+    ROLE_PRIMARY,
+    SIGNAL_ERROR,
+    SIGNAL_MUTED,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+    fact_form,
+    field_label,
+    page_header,
+    set_role,
+    set_signal,
 )
 
 #: The route a profile keyboard follows, as the macro target it corresponds to.
@@ -124,8 +137,15 @@ class MacrosPage(QWidget):
         scroll.setWidget(splitter)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(12)
+        outer.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
+        outer.setSpacing(SPACE_LG)
+        outer.addWidget(
+            page_header(
+                self.tr("Macros"),
+                self.tr("Build a sequence once, then run it from any assigned trigger."),
+                self,
+            )
+        )
         outer.addWidget(scroll, 1)
         self._refresh()
 
@@ -134,6 +154,7 @@ class MacrosPage(QWidget):
     def _build_macro_column(self, parent: QWidget) -> QWidget:
         box = QGroupBox(self.tr("Macros"), parent)
         layout = QVBoxLayout(box)
+        layout.setSpacing(SPACE_MD)
 
         box.setMaximumWidth(380)
         self.macro_list = QListWidget(box)
@@ -141,12 +162,12 @@ class MacrosPage(QWidget):
         self.macro_list.currentRowChanged.connect(self._on_macro_row_changed)
         layout.addWidget(self.macro_list, 1)
 
-        form = QFormLayout()
+        form = fact_form()
         self.name_edit = QLineEdit(box)
         self.name_edit.setAccessibleName(self.tr("Macro name"))
         self.name_edit.setMaxLength(48)
         self.name_edit.editingFinished.connect(self._on_name_edited)
-        form.addRow(QLabel(self.tr("Name:"), box), self.name_edit)
+        form.addRow(field_label(self.tr("Name:"), box), self.name_edit)
 
         self.target_combo = QComboBox(box)
         self.target_combo.setAccessibleName(self.tr("Macro target"))
@@ -158,10 +179,11 @@ class MacrosPage(QWidget):
         ):
             self.target_combo.addItem(label, target)
         self.target_combo.currentIndexChanged.connect(self._on_target_changed)
-        form.addRow(QLabel(self.tr("Types on:"), box), self.target_combo)
+        form.addRow(field_label(self.tr("Types on:"), box), self.target_combo)
         layout.addLayout(form)
 
         buttons = QVBoxLayout()
+        buttons.setSpacing(SPACE_SM)
         self.add_macro_button = QPushButton(self.tr("New macro"), box)
         self.add_macro_button.setAccessibleName(self.tr("Add a macro to this profile"))
         self.add_macro_button.clicked.connect(self._on_add_macro_clicked)
@@ -179,6 +201,7 @@ class MacrosPage(QWidget):
     def _build_step_column(self, parent: QWidget) -> QWidget:
         box = QGroupBox(self.tr("Steps"), parent)
         layout = QVBoxLayout(box)
+        layout.setSpacing(SPACE_MD)
 
         self.steps = MacroStepListModel(self)
         self.step_list = QListView(box)
@@ -193,6 +216,8 @@ class MacrosPage(QWidget):
 
         add_row = QHBoxLayout()
         move_row = QHBoxLayout()
+        add_row.setSpacing(SPACE_SM)
+        move_row.setSpacing(SPACE_SM)
         self.step_type_combo = QComboBox(box)
         self.step_type_combo.setAccessibleName(self.tr("Step type"))
         self.step_type_combo.setMaximumWidth(200)
@@ -225,10 +250,13 @@ class MacrosPage(QWidget):
         self.step_issue_label = QLabel(box)
         self.step_issue_label.setAccessibleName(self.tr("Why this step cannot be stored"))
         self.step_issue_label.setWordWrap(True)
+        set_role(self.step_issue_label, ROLE_BANNER)
+        set_signal(self.step_issue_label, SIGNAL_MUTED)
         layout.addWidget(self.step_issue_label)
 
         self.apply_step_button = QPushButton(self.tr("Apply to step"), box)
         self.apply_step_button.setAccessibleName(self.tr("Store the edited step"))
+        set_role(self.apply_step_button, ROLE_PRIMARY)
         self.apply_step_button.clicked.connect(self._on_apply_step_clicked)
         layout.addWidget(self.apply_step_button)
         return box
@@ -238,13 +266,14 @@ class MacrosPage(QWidget):
 
         # 0 - key steps
         keys = QWidget(self.editors)
-        key_form = QFormLayout(keys)
+        key_form = fact_form()
+        keys.setLayout(key_form)
         self.key_combo = QComboBox(keys)
         self.key_combo.setAccessibleName(self.tr("Key"))
         for usage in SELECTABLE_USAGES:
             self.key_combo.addItem(key_name(usage), usage)
         self.key_combo.currentIndexChanged.connect(self._on_editor_changed)
-        key_form.addRow(QLabel(self.tr("Key:"), keys), self.key_combo)
+        key_form.addRow(field_label(self.tr("Key:"), keys), self.key_combo)
         modifier_row = QHBoxLayout()
         self.modifier_boxes: dict[str, QCheckBox] = {}
         for key, label, _bit in MODIFIER_BITS:
@@ -256,17 +285,20 @@ class MacrosPage(QWidget):
         modifier_row.addStretch(1)
         holder = QWidget(keys)
         holder.setLayout(modifier_row)
-        key_form.addRow(QLabel(self.tr("Modifiers:"), keys), holder)
+        key_form.addRow(field_label(self.tr("Modifiers:"), keys), holder)
         self.editors.addWidget(keys)
 
         # 1 - consumer control
         consumer = QWidget(self.editors)
-        consumer_form = QFormLayout(consumer)
+        consumer_form = fact_form()
+        consumer.setLayout(consumer_form)
         self.consumer_usage = QSpinBox(consumer)
         self.consumer_usage.setAccessibleName(self.tr("Consumer usage"))
         self.consumer_usage.setRange(1, 0xFFFF)
         self.consumer_usage.valueChanged.connect(self._on_editor_changed)
-        consumer_form.addRow(QLabel(self.tr("Usage:"), consumer), self.consumer_usage)
+        consumer_form.addRow(
+            field_label(self.tr("Usage:"), consumer), self.consumer_usage
+        )
         self.editors.addWidget(consumer)
 
         # 2 - text
@@ -281,7 +313,8 @@ class MacrosPage(QWidget):
 
         # 3 - delay
         delay = QWidget(self.editors)
-        delay_form = QFormLayout(delay)
+        delay_form = fact_form()
+        delay.setLayout(delay_form)
         self.delay_minimum = QSpinBox(delay)
         self.delay_minimum.setAccessibleName(self.tr("Shortest delay"))
         self.delay_minimum.setRange(0, MAX_DELAY_MS)
@@ -290,41 +323,54 @@ class MacrosPage(QWidget):
         self.delay_maximum.setAccessibleName(self.tr("Longest delay"))
         self.delay_maximum.setRange(0, MAX_DELAY_MS)
         self.delay_maximum.valueChanged.connect(self._on_editor_changed)
-        delay_form.addRow(QLabel(self.tr("From, ms:"), delay), self.delay_minimum)
-        delay_form.addRow(QLabel(self.tr("To, ms:"), delay), self.delay_maximum)
+        delay_form.addRow(
+            field_label(self.tr("From, ms:"), delay), self.delay_minimum
+        )
+        delay_form.addRow(
+            field_label(self.tr("To, ms:"), delay), self.delay_maximum
+        )
         self.editors.addWidget(delay)
 
         # 4 - keyboard route
         keyboard = QWidget(self.editors)
-        keyboard_form = QFormLayout(keyboard)
+        keyboard_form = fact_form()
+        keyboard.setLayout(keyboard_form)
         self.keyboard_route_combo = QComboBox(keyboard)
         self.keyboard_route_combo.setAccessibleName(self.tr("Keyboard route"))
         for route in KeyboardRoute:
             self.keyboard_route_combo.addItem(route.name, route)
         self.keyboard_route_combo.currentIndexChanged.connect(self._on_editor_changed)
-        keyboard_form.addRow(QLabel(self.tr("Route:"), keyboard), self.keyboard_route_combo)
+        keyboard_form.addRow(
+            field_label(self.tr("Route:"), keyboard), self.keyboard_route_combo
+        )
         self.editors.addWidget(keyboard)
 
         # 5 - mouse route
         mouse = QWidget(self.editors)
-        mouse_form = QFormLayout(mouse)
+        mouse_form = fact_form()
+        mouse.setLayout(mouse_form)
         self.mouse_route_combo = QComboBox(mouse)
         self.mouse_route_combo.setAccessibleName(self.tr("Mouse route command"))
         for command in MouseRouteCommand:
             self.mouse_route_combo.addItem(command.name, command)
         self.mouse_route_combo.currentIndexChanged.connect(self._on_editor_changed)
-        mouse_form.addRow(QLabel(self.tr("Route:"), mouse), self.mouse_route_combo)
+        mouse_form.addRow(
+            field_label(self.tr("Route:"), mouse), self.mouse_route_combo
+        )
         self.editors.addWidget(mouse)
 
         # 6 - profile
         profile = QWidget(self.editors)
-        profile_form = QFormLayout(profile)
+        profile_form = fact_form()
+        profile.setLayout(profile_form)
         self.profile_combo = QComboBox(profile)
         self.profile_combo.setAccessibleName(self.tr("Profile to switch to"))
         for slot in range(1, PROFILES + 1):
             self.profile_combo.addItem(str(slot), slot)
         self.profile_combo.currentIndexChanged.connect(self._on_editor_changed)
-        profile_form.addRow(QLabel(self.tr("Profile:"), profile), self.profile_combo)
+        profile_form.addRow(
+            field_label(self.tr("Profile:"), profile), self.profile_combo
+        )
         self.editors.addWidget(profile)
         return self.editors
 
@@ -460,6 +506,7 @@ class MacrosPage(QWidget):
 
         issue = self._step_issue(room)
         self.step_issue_label.setText(issue)
+        set_signal(self.step_issue_label, SIGNAL_ERROR if issue else SIGNAL_MUTED)
         self.apply_step_button.setEnabled(selected and not issue)
 
     def _step_issue(self, room: bool) -> str:
@@ -666,14 +713,14 @@ class TestMacroDialog(QDialog):
             )
         )
 
-        form = QFormLayout()
+        form = fact_form()
         self.target_combo = QComboBox(self)
         self.target_combo.setAccessibleName(self.tr("Target computer"))
         self.target_combo.addItem(self.tr("Choose..."), None)
         for target in (TargetMode.PC1, TargetMode.PC2, TargetMode.BOTH):
             self.target_combo.addItem(target.name, target)
         self.target_combo.currentIndexChanged.connect(self._refresh)
-        form.addRow(QLabel(self.tr("Runs on:"), self), self.target_combo)
+        form.addRow(field_label(self.tr("Runs on:"), self), self.target_combo)
         layout.addLayout(form)
 
         self.confirm_box = QCheckBox(

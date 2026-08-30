@@ -5,6 +5,8 @@
 __pycache__/
 *.pyc
 configurator/dist/
+configurator/dist-debug/
+configurator/nuitka-crash-report.xml
 configurator/.venv-build/
 *.egg-info/
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QLabel
 
 from duo_input.domain.models import Action, Binding, Trigger
 from duo_input.generated.protocol import PROFILES, ActionKind, BindingMode, TriggerKind
@@ -16,6 +18,7 @@ from duo_input.ui.models.project_session import (
     SetProfileColor,
 )
 from duo_input.ui.profiles import ProfilesPage
+from duo_input.ui import theme
 
 
 def _binding(code: int = 0x04) -> Binding:
@@ -162,3 +165,25 @@ def test_every_control_carries_an_accessible_name(page):
         page.activate_button,
     ):
         assert widget.accessibleName()
+
+
+def test_profile_slots_use_swatches_instead_of_coloured_text(page):
+    assert page.slots.item(0).icon().isNull() is False
+
+
+def test_profile_slots_never_need_a_horizontal_scrollbar(page):
+    assert (
+        page.slots.horizontalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+
+
+def test_the_page_uses_the_shared_visual_hierarchy(page):
+    titles = [
+        label.text()
+        for label in page.findChildren(QLabel)
+        if label.property("role") == theme.ROLE_PAGE_TITLE
+    ]
+
+    assert titles == ["Profiles"]
+    assert page.routes_label.property("role") == theme.ROLE_MONO

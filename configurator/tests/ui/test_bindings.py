@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from PySide6.QtWidgets import QLabel
 
 from duo_input.device.emulator import U1Emulator
 from duo_input.device.qt_transport import SynchronousTransportLink
@@ -35,6 +36,7 @@ from duo_input.ui.models.project_session import (
     SetActiveProfile,
     default_project,
 )
+from duo_input.ui import theme
 
 
 def _binding(code: int = 0x04, *, modifiers: int = 0, kind=TriggerKind.KEYBOARD_USAGE) -> Binding:
@@ -461,3 +463,15 @@ def test_every_control_carries_an_accessible_name(page):
         page.capture_button,
     ):
         assert widget.accessibleName()
+
+
+def test_the_page_uses_the_shared_visual_hierarchy(page):
+    titles = [
+        label.text()
+        for label in page.findChildren(QLabel)
+        if label.property("role") == theme.ROLE_PAGE_TITLE
+    ]
+
+    assert titles == ["Bindings"]
+    assert page.conflict_label.property("role") == theme.ROLE_BANNER
+    assert page.add_button.property("role") == theme.ROLE_PRIMARY

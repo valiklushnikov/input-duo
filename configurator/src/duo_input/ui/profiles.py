@@ -9,12 +9,11 @@ knowledge about files, devices or the binary format.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QColorDialog,
     QComboBox,
-    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -35,6 +34,21 @@ from duo_input.ui.models.project_session import (
     SetActiveProfile,
     SetProfileColor,
 )
+from duo_input.ui.theme import (
+    LINE_STRONG,
+    ROLE_MONO,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+    fact_form,
+    field_label,
+    monospace_font,
+    page_header,
+    set_role,
+)
+
+#: Side of the square that shows a profile's colour, in logical pixels.
+SWATCH = 12
 
 #: Longest profile name the binary format accepts, mirrored from validation.
 NAME_MAX_LENGTH = 48
@@ -54,18 +68,38 @@ class ProfilesPage(QWidget):
         self._selected_id = 1
         self._updating = False
 
-        outer = QHBoxLayout(self)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(12)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
+        outer.setSpacing(SPACE_LG)
+        outer.addWidget(
+            page_header(
+                self.tr("Profiles"),
+                self.tr(
+                    "Eight slots the device switches between. One of them is the "
+                    "one it starts in."
+                ),
+                self,
+            )
+        )
+
+        columns = QHBoxLayout()
+        columns.setContentsMargins(0, 0, 0, 0)
+        columns.setSpacing(SPACE_MD)
+        outer.addLayout(columns, 1)
 
         self.slots = QListWidget(self)
         self.slots.setAccessibleName(self.tr("Profile slots"))
-        self.slots.setMaximumWidth(280)
-        self.slots.setMinimumWidth(200)
+        self.slots.setMaximumWidth(320)
+        self.slots.setMinimumWidth(240)
+        self.slots.setIconSize(QSize(SWATCH, SWATCH))
+        self.slots.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.slots.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.slots.currentRowChanged.connect(self._on_row_changed)
-        outer.addWidget(self.slots)
+        columns.addWidget(self.slots)
 
-        outer.addWidget(self._build_editor(), 1)
+        columns.addWidget(self._build_editor(), 1)
         self._rebuild_slots()
         self._refresh_editor()
 
@@ -73,27 +107,35 @@ class ProfilesPage(QWidget):
 
     def _build_editor(self) -> QWidget:
         box = QGroupBox(self.tr("Profile"), self)
+        # A form of three short fields has no business spanning a wide window;
+        # a value the eye has to travel to is a value that gets missed.
+        box.setMaximumWidth(560)
         layout = QVBoxLayout(box)
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        layout.setSpacing(SPACE_MD)
+        form = fact_form()
 
         self.name_edit = QLineEdit(box)
         self.name_edit.setAccessibleName(self.tr("Profile name"))
         self.name_edit.setMaxLength(NAME_MAX_LENGTH)
         self.name_edit.editingFinished.connect(self._on_name_edited)
-        form.addRow(QLabel(self.tr("Name:"), box), self.name_edit)
+        form.addRow(field_label(self.tr("Name:"), box), self.name_edit)
 
         self.color_button = QPushButton(box)
         self.color_button.setAccessibleName(self.tr("Profile colour"))
+        self.color_button.setIconSize(QSize(SWATCH, SWATCH))
+        self.color_button.setFont(monospace_font())
         self.color_button.clicked.connect(self._on_color_clicked)
-        form.addRow(QLabel(self.tr("Colour:"), box), self.color_button)
+        form.addRow(field_label(self.tr("Colour:"), box), self.color_button)
 
         self.routes_label = QLabel(box)
         self.routes_label.setAccessibleName(self.tr("Profile routes"))
-        form.addRow(QLabel(self.tr("Routes:"), box), self.routes_label)
+        set_role(self.routes_label, ROLE_MONO)
+        self.routes_label.setFont(monospace_font())
+        form.addRow(field_label(self.tr("Routes:"), box), self.routes_label)
         layout.addLayout(form)
 
         copy_row = QHBoxLayout()
+        copy_row.setSpacing(SPACE_SM)
         self.copy_target = QComboBox(box)
         self.copy_target.setAccessibleName(self.tr("Copy destination"))
         self.copy_button = QPushButton(self.tr("Copy into"), box)
@@ -104,6 +146,7 @@ class ProfilesPage(QWidget):
         layout.addLayout(copy_row)
 
         actions = QHBoxLayout()
+        actions.setSpacing(SPACE_SM)
         self.activate_button = QPushButton(self.tr("Make active"), box)
         self.activate_button.setAccessibleName(self.tr("Start the device in this profile"))
         self.activate_button.clicked.connect(self._on_activate_clicked)
@@ -166,7 +209,9 @@ class ProfilesPage(QWidget):
                 item = self.slots.item(row)
                 item.setData(self.PROFILE_ID_ROLE, profile.id)
                 item.setText(self._slot_text(profile, active))
-                item.setForeground(QColor(*profile.color_rgb))
+                # The colour is the profile's, not the text's: a pale yellow
+                # profile name on white is a name nobody can read.
+                item.setIcon(_swatch(profile.color_rgb))
             if not any(profile.id == self._selected_id for profile in profiles):
                 self._selected_id = profiles[0].id
             for row, profile in enumerate(profiles):
@@ -189,6 +234,7 @@ class ProfilesPage(QWidget):
             self.name_edit.setText(profile.name)
             red, green, blue = profile.color_rgb
             self.color_button.setText(f"#{red:02X}{green:02X}{blue:02X}")
+            self.color_button.setIcon(_swatch(profile.color_rgb))
             self.routes_label.setText(
                 f"{profile.keyboard_route.name} / {profile.mouse_route.name}"
                 f" / {profile.text_layout.name}"
@@ -242,4 +288,17 @@ class ProfilesPage(QWidget):
         self.command_requested.emit(SetActiveProfile(self._selected_id))
 
 
-__all__ = ["NAME_MAX_LENGTH", "ProfilesPage"]
+def _swatch(color_rgb: tuple[int, int, int]) -> QIcon:
+    """A small square of one profile's colour, outlined so white still shows."""
+    pixmap = QPixmap(SWATCH, SWATCH)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(QColor(*color_rgb))
+    painter.setPen(QColor(LINE_STRONG))
+    painter.drawRoundedRect(0, 0, SWATCH - 1, SWATCH - 1, 2, 2)
+    painter.end()
+    return QIcon(pixmap)
+
+
+__all__ = ["NAME_MAX_LENGTH", "SWATCH", "ProfilesPage"]

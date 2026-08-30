@@ -14,7 +14,6 @@ from PySide6.QtCore import QSettings, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
-    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -26,6 +25,18 @@ from PySide6.QtWidgets import (
 
 from duo_input.i18n import LANGUAGES, TranslationManager
 from duo_input.persistence.locations import LOGGER_NAME
+from duo_input.ui.theme import (
+    ROLE_NOTE,
+    SPACE_LG,
+    SPACE_SM,
+    fact_form,
+    field_label,
+    page_header,
+    set_role,
+)
+
+#: Preferences are short answers; a full-window text field only looks empty.
+CARD_WIDTH = 640
 
 #: How each shipped language names itself, in that language.
 LANGUAGE_NAMES = {"ru": "Русский", "en": "English"}
@@ -54,8 +65,15 @@ class SettingsPage(QWidget):
         self._updating = False
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(12)
+        outer.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
+        outer.setSpacing(SPACE_LG)
+        outer.addWidget(
+            page_header(
+                self.tr("Settings"),
+                self.tr("Preferences that belong to you, not to the project."),
+                self,
+            )
+        )
         outer.addWidget(self._build_interface())
         outer.addWidget(self._build_projects())
         outer.addWidget(self._build_logging())
@@ -66,26 +84,33 @@ class SettingsPage(QWidget):
 
     def _build_interface(self) -> QWidget:
         box = QGroupBox(self.tr("Interface"), self)
-        form = QFormLayout(box)
+        box.setMaximumWidth(CARD_WIDTH)
+        form = fact_form()
+        box.setLayout(form)
 
         self.language_combo = QComboBox(box)
         self.language_combo.setAccessibleName(self.tr("Interface language"))
         for language in LANGUAGES:
             self.language_combo.addItem(LANGUAGE_NAMES.get(language, language), language)
         self.language_combo.currentIndexChanged.connect(self._on_language_changed)
-        form.addRow(QLabel(self.tr("Language:"), box), self.language_combo)
+        form.addRow(field_label(self.tr("Language:"), box), self.language_combo)
 
         self.restart_label = QLabel(box)
         self.restart_label.setAccessibleName(self.tr("What happens after a language change"))
         self.restart_label.setWordWrap(True)
+        set_role(self.restart_label, ROLE_NOTE)
         form.addRow(self.restart_label)
         return box
 
     def _build_projects(self) -> QWidget:
         box = QGroupBox(self.tr("Projects"), self)
-        form = QFormLayout(box)
+        box.setMaximumWidth(CARD_WIDTH)
+        form = fact_form()
+        box.setLayout(form)
 
         row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(SPACE_SM)
         self.project_directory_edit = QLineEdit(box)
         self.project_directory_edit.setAccessibleName(self.tr("Default project folder"))
         self.project_directory_edit.editingFinished.connect(self._on_directory_edited)
@@ -96,24 +121,27 @@ class SettingsPage(QWidget):
         row.addWidget(self.browse_button)
         holder = QWidget(box)
         holder.setLayout(row)
-        form.addRow(QLabel(self.tr("Folder:"), box), holder)
+        form.addRow(field_label(self.tr("Folder:"), box), holder)
         return box
 
     def _build_logging(self) -> QWidget:
         box = QGroupBox(self.tr("Logging"), self)
-        form = QFormLayout(box)
+        box.setMaximumWidth(CARD_WIDTH)
+        form = fact_form()
+        box.setLayout(form)
 
         self.log_level_combo = QComboBox(box)
         self.log_level_combo.setAccessibleName(self.tr("How much is written to the log"))
         for level in LOG_LEVELS:
             self.log_level_combo.addItem(level, level)
         self.log_level_combo.currentIndexChanged.connect(self._on_log_level_changed)
-        form.addRow(QLabel(self.tr("Level:"), box), self.log_level_combo)
+        form.addRow(field_label(self.tr("Level:"), box), self.log_level_combo)
 
         note = QLabel(
             self.tr("Macro text is never written to the log, at any level."), box
         )
         note.setWordWrap(True)
+        set_role(note, ROLE_NOTE)
         form.addRow(note)
         return box
 
@@ -203,4 +231,4 @@ class SettingsPage(QWidget):
         self.settings_changed.emit()
 
 
-__all__ = ["LANGUAGE_NAMES", "LOG_LEVELS", "SettingsPage"]
+__all__ = ["CARD_WIDTH", "LANGUAGE_NAMES", "LOG_LEVELS", "SettingsPage"]

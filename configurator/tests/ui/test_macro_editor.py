@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from PySide6.QtWidgets import QLabel
 
 from duo_input.device.emulator import U1Emulator
 from duo_input.device.service import DeviceService
@@ -25,6 +26,7 @@ from duo_input.ui.models.project_session import (
     SetMacroTarget,
     default_project,
 )
+from duo_input.ui import theme
 
 
 @pytest.fixture
@@ -495,3 +497,35 @@ def test_every_control_carries_an_accessible_name(page):
         page.test_button,
     ):
         assert widget.accessibleName()
+
+
+def test_the_page_uses_the_shared_visual_hierarchy(page):
+    titles = [
+        label.text()
+        for label in page.findChildren(QLabel)
+        if label.property("role") == theme.ROLE_PAGE_TITLE
+    ]
+
+    assert titles == ["Macros"]
+    assert page.step_issue_label.property("role") == theme.ROLE_BANNER
+    assert page.apply_step_button.property("role") == theme.ROLE_PRIMARY
+
+
+def test_every_step_editor_uses_the_shared_field_labels(page):
+    editor_labels = {
+        "Key:",
+        "Modifiers:",
+        "Usage:",
+        "From, ms:",
+        "To, ms:",
+        "Route:",
+        "Profile:",
+    }
+    labels = [
+        label
+        for label in page.findChildren(QLabel)
+        if label.text() in editor_labels
+    ]
+
+    assert labels
+    assert all(label.property("role") == theme.ROLE_FIELD_LABEL for label in labels)

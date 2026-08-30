@@ -13,12 +13,12 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
-    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -33,6 +33,21 @@ from duo_input.ui.models.binding_table import (
     trigger_label,
 )
 from duo_input.ui.models.project_session import AddBinding, ProjectSession
+from duo_input.ui.theme import (
+    ROLE_BANNER,
+    ROLE_PRIMARY,
+    SIGNAL_ERROR,
+    SIGNAL_MUTED,
+    SIGNAL_WARN,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+    fact_form,
+    field_label,
+    page_header,
+    set_role,
+    set_signal,
+)
 
 #: Every action this page can produce, in the order it offers them.
 SWITCH_ACTIONS: tuple[Action, ...] = (
@@ -62,19 +77,43 @@ class MouseSwitchPage(QWidget):
         self._updating = False
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(12)
-        outer.addWidget(self._build_editor())
-        outer.addWidget(self._build_existing(), 1)
+        outer.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
+        outer.setSpacing(SPACE_LG)
+        outer.addWidget(
+            page_header(
+                self.tr("Mouse"),
+                self.tr(
+                    "Choose the key or mouse button that sends the pointer to PC1 or PC2."
+                ),
+                self,
+            )
+        )
+
+        # The themed controls and page heading are taller than the stock Qt
+        # widgets.  Keep the supported 1024 x 700 window useful by scrolling
+        # this page's body instead of making the entire application taller.
+        body = QWidget(self)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, SPACE_SM, 0)
+        body_layout.setSpacing(SPACE_LG)
+        body_layout.addWidget(self._build_editor())
+        body_layout.addWidget(self._build_existing(), 1)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
         self._refresh()
 
     # ---------------------------------------------------------------- layout
 
     def _build_editor(self) -> QWidget:
         box = QGroupBox(self.tr("Switch the mouse"), self)
+        box.setMaximumWidth(820)
         layout = QVBoxLayout(box)
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        layout.setSpacing(SPACE_MD)
+        form = fact_form()
 
         self.trigger_kind = QComboBox(box)
         self.trigger_kind.setAccessibleName(self.tr("Trigger kind"))
@@ -82,19 +121,19 @@ class MouseSwitchPage(QWidget):
         self.trigger_kind.addItem(self.tr("Keyboard key"), TriggerKind.KEYBOARD_USAGE)
         self.trigger_kind.addItem(self.tr("Mouse button"), TriggerKind.MOUSE_BUTTON)
         self.trigger_kind.currentIndexChanged.connect(self._on_changed)
-        form.addRow(QLabel(self.tr("1. What do you press?"), box), self.trigger_kind)
+        form.addRow(field_label(self.tr("1. What do you press?"), box), self.trigger_kind)
 
         self.key_combo = QComboBox(box)
         self.key_combo.setAccessibleName(self.tr("Keyboard key"))
         for usage in SELECTABLE_USAGES:
             self.key_combo.addItem(key_name(usage), usage)
         self.key_combo.currentIndexChanged.connect(self._on_changed)
-        form.addRow(QLabel(self.tr("Key:"), box), self.key_combo)
+        form.addRow(field_label(self.tr("Key:"), box), self.key_combo)
 
         self.mouse_combo = QComboBox(box)
         self.mouse_combo.setAccessibleName(self.tr("Mouse button"))
         self.mouse_combo.currentIndexChanged.connect(self._on_changed)
-        form.addRow(QLabel(self.tr("Button:"), box), self.mouse_combo)
+        form.addRow(field_label(self.tr("Button:"), box), self.mouse_combo)
 
         modifiers = QHBoxLayout()
         self.modifier_boxes: dict[str, QCheckBox] = {}
@@ -107,7 +146,7 @@ class MouseSwitchPage(QWidget):
         modifiers.addStretch(1)
         holder = QWidget(box)
         holder.setLayout(modifiers)
-        form.addRow(QLabel(self.tr("Modifiers:"), box), holder)
+        form.addRow(field_label(self.tr("Modifiers:"), box), holder)
 
         self.action_combo = QComboBox(box)
         self.action_combo.setAccessibleName(self.tr("What the trigger does"))
@@ -115,23 +154,26 @@ class MouseSwitchPage(QWidget):
         self.action_combo.addItem(self.tr("Always PC1"), SWITCH_ACTIONS[1])
         self.action_combo.addItem(self.tr("Always PC2"), SWITCH_ACTIONS[2])
         self.action_combo.currentIndexChanged.connect(self._on_changed)
-        form.addRow(QLabel(self.tr("2. What should it do?"), box), self.action_combo)
+        form.addRow(field_label(self.tr("2. What should it do?"), box), self.action_combo)
 
         self.mode_combo = QComboBox(box)
         self.mode_combo.setAccessibleName(self.tr("Binding mode"))
         self.mode_combo.addItem(self.tr("Replace the key"), BindingMode.REPLACE)
         self.mode_combo.addItem(self.tr("Add to the key"), BindingMode.ADD)
-        form.addRow(QLabel(self.tr("Mode:"), box), self.mode_combo)
+        form.addRow(field_label(self.tr("Mode:"), box), self.mode_combo)
         layout.addLayout(form)
 
         self.warning_label = QLabel(box)
         self.warning_label.setAccessibleName(self.tr("Mouse switching warnings"))
         self.warning_label.setWordWrap(True)
+        set_role(self.warning_label, ROLE_BANNER)
+        set_signal(self.warning_label, SIGNAL_MUTED)
         layout.addWidget(self.warning_label)
 
         row = QHBoxLayout()
         self.apply_button = QPushButton(self.tr("Bind"), box)
         self.apply_button.setAccessibleName(self.tr("Bind this trigger to the mouse route"))
+        set_role(self.apply_button, ROLE_PRIMARY)
         self.apply_button.clicked.connect(self._on_apply_clicked)
         row.addWidget(self.apply_button)
         row.addStretch(1)
@@ -143,6 +185,7 @@ class MouseSwitchPage(QWidget):
         layout = QVBoxLayout(box)
         self.existing_list = QListWidget(box)
         self.existing_list.setAccessibleName(self.tr("Existing mouse switch bindings"))
+        self.existing_list.setAlternatingRowColors(True)
         layout.addWidget(self.existing_list)
         return box
 
@@ -264,9 +307,14 @@ class MouseSwitchPage(QWidget):
         finally:
             self._updating = False
 
+        conflict = self._conflict()
         warning = self._warning()
         self.warning_label.setText(warning)
-        self.apply_button.setEnabled(self._conflict() == "" and self.current_binding() is not None)
+        if warning and conflict:
+            set_signal(self.warning_label, SIGNAL_ERROR)
+        else:
+            set_signal(self.warning_label, SIGNAL_WARN if warning else SIGNAL_MUTED)
+        self.apply_button.setEnabled(conflict == "" and self.current_binding() is not None)
 
     def _conflict(self) -> str:
         kind = self.trigger_kind.currentData()
