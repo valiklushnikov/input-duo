@@ -498,6 +498,54 @@ def test_get_diagnostics_reports_device_counters(qtbot, service, emulator, confi
     assert diagnostics.aborted_staging == 0
 
 
+def test_a_diagnostics_reply_the_host_cannot_read_is_named_not_waited_out(
+    qtbot, service, emulator, config_a
+):
+    """A firmware whose GET_DIAGNOSTICS reply has another shape must be reported.
+
+    ``firmware/u1_main/config_service.cpp`` answers GET_DIAGNOSTICS with the
+    43-byte binary counters, except under ``DUO_SPI_DEBUG``/``DUO_CH375_PROBE``,
+    where it answers with ``1 + link_debug_size_`` bytes of probe text instead.
+    A host that met such a board must say what it could not read; a caller left
+    waiting for a reply that already arrived learns nothing at all.
+    """
+    emulator.install_active(config_a)
+
+    def mutate(frame: CdcFrame):
+        if frame.type is CdcMessageType.GET_DIAGNOSTICS:
+            probe_text = b"CH375 #1 answered, #2 silent"
+            return CdcFrame(frame.type, frame.sequence, bytes((ErrorCode.OK,)) + probe_text)
+        return None
+
+    _connect(qtbot, service, _MutatingTransport(emulator, mutate))
+
+    failure = _fail(qtbot, service, service.get_diagnostics)
+
+    assert failure.operation == "get_diagnostics"
+    assert failure.reason is FailureReason.BAD_PAYLOAD
+    assert "GET_DIAGNOSTICS" in failure.detail
+
+
+def test_a_device_info_request_is_refused_by_both_implementations(qtbot, service, emulator, config_a):
+    """DEVICE_INFO travels device-to-host; asking for one is not a request.
+
+    The firmware answers a single INVALID_REQUEST byte
+    (``config_service.cpp`` dispatch), and so does the emulator. The host never
+    sends one - it names DEVICE_INFO only as the *reply* it expects to HELLO -
+    so this pins the shape both sides already agree on rather than a behaviour
+    the configurator depends on.
+    """
+    emulator.install_active(config_a)
+    emulator.open()
+
+    reply = decode_cdc_frame(emulator.write(encode_cdc_frame(
+        CdcFrame(CdcMessageType.DEVICE_INFO, 1, b"")
+    )))
+
+    assert reply.type is CdcMessageType.DEVICE_INFO
+    assert bytes(reply.payload) == bytes((ErrorCode.INVALID_REQUEST,))
+
+
 def test_diagnostics_report_input_the_device_could_not_deliver(qtbot, service, emulator, config_a):
     emulator.install_active(config_a)
     emulator.dropped_commands = 4

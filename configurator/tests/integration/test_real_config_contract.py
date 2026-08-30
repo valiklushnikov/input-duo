@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 
 import pytest
 
@@ -28,6 +29,59 @@ from duo_input.ui.models.project_session import ProjectSession, RenameProfile, d
 
 #: Writing to a real device replaces what is on it, so it is opt-in.
 ALLOW_WRITES = os.environ.get("DUO_INPUT_HIL_WRITE") == "1"
+
+
+class DeviceRefused(AssertionError):
+    """The device answered, and the answer was a refusal."""
+
+
+class DeviceSilent(AssertionError):
+    """The device did not answer at all."""
+
+
+def wait_for_operation(qtbot, service, call, timeout: int = 5000):
+    """Run ``call`` and return the :class:`OperationResult`, or say why not.
+
+    ``DeviceService`` reports every outcome, success or failure, and it reports
+    a refusal as fast as the device gives one. Waiting only for
+    ``operation_succeeded`` throws that reason away and replaces it with the
+    full timeout, so a device that said "unsupported capability" in two
+    milliseconds is indistinguishable from one that was never plugged in. Every
+    wait in this file listens for both and reports whichever arrived.
+    """
+    outcomes: list[tuple[str, object]] = []
+
+    def on_success(result: object) -> None:
+        outcomes.append(("succeeded", result))
+
+    def on_failure(failure: object) -> None:
+        outcomes.append(("failed", failure))
+
+    service.operation_succeeded.connect(on_success)
+    service.operation_failed.connect(on_failure)
+    try:
+        call()
+        try:
+            qtbot.waitUntil(lambda: bool(outcomes), timeout=timeout)
+        except Exception as error:  # pytest-qt raises its own TimeoutError
+            if outcomes:
+                raise
+            raise DeviceSilent(
+                f"the device neither answered nor failed within {timeout} ms"
+            ) from error
+    finally:
+        service.operation_succeeded.disconnect(on_success)
+        service.operation_failed.disconnect(on_failure)
+
+    kind, value = outcomes[0]
+    if kind == "failed":
+        named = value.error_code.name if value.error_code is not None else ""
+        raise DeviceRefused(
+            f"{value.operation} failed: {value.reason.value}"
+            + (f" ({named})" if named else "")
+            + (f" - {value.detail}" if value.detail else "")
+        )
+    return value
 
 
 @pytest.fixture(scope="session")
@@ -50,9 +104,10 @@ def device(qtbot, port) -> DeviceService:
     from duo_input.device.qt_transport import QSerialPortTransport
 
     service = DeviceService(timeout_ms=5000)
-    with qtbot.waitSignal(service.operation_succeeded, timeout=10000) as blocker:
-        service.connect_device(QSerialPortTransport(port))
-    assert blocker.args[0].operation == "connect_device"
+    result = wait_for_operation(
+        qtbot, service, lambda: service.connect_device(QSerialPortTransport(port)), timeout=10000
+    )
+    assert result.operation == "connect_device"
     yield service
     service.disconnect_device()
 
@@ -63,8 +118,9 @@ def emulated(qtbot) -> DeviceService:
     emulator = U1Emulator()
     emulator.install_active(compile_project_to_binary(default_project()))
     service = DeviceService(timeout_ms=5000)
-    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
-        service.connect_device(SynchronousTransportLink(emulator))
+    wait_for_operation(
+        qtbot, service, lambda: service.connect_device(SynchronousTransportLink(emulator))
+    )
     yield service
     service.disconnect_device()
 
@@ -97,13 +153,29 @@ def test_the_real_device_grants_only_what_it_can_do(device, emulated):
     assert granted != emulated.device_info.capabilities
 
 
-def test_the_real_device_reports_its_status(qtbot, device):
-    with qtbot.waitSignal(device.operation_succeeded, timeout=5000) as blocker:
-        device.get_diagnostics()
+def test_the_real_device_reports_its_diagnostic_counters(qtbot, device):
+    """Diagnostics, not status: status is what ``connect_device`` already read."""
+    counters = wait_for_operation(qtbot, device, device.get_diagnostics).value
 
-    counters = blocker.args[0].value
     assert counters.bad_crc >= 0
     assert counters.bad_sequence >= 0
+
+
+def test_a_refusal_is_named_at_once_rather_than_waited_out(qtbot, emulated):
+    """No hardware: this is about how this file waits, not about the board.
+
+    Waiting only for ``operation_succeeded`` turns a device that refused in
+    milliseconds into a five-second timeout that names nothing - which is how a
+    firmware/host disagreement reaches a person as "the tests hang" instead of
+    as the reason the device gave.
+    """
+    emulated.disconnect_device()
+    started = time.monotonic()
+
+    with pytest.raises(DeviceRefused, match="not_connected"):
+        wait_for_operation(qtbot, emulated, emulated.get_diagnostics, timeout=5000)
+
+    assert time.monotonic() - started < 1.0
 
 
 # ------------------------------------------------------------------- write
@@ -114,10 +186,9 @@ def test_a_configuration_written_to_the_device_reads_back_identically(qtbot, dev
     session = ProjectSession.new().apply(RenameProfile(1, "Проверка"))
     package = compile_project_to_binary(session.project)
 
-    with qtbot.waitSignal(device.operation_succeeded, timeout=60000) as blocker:
-        device.write_config(package)
+    result = wait_for_operation(qtbot, device, lambda: device.write_config(package), timeout=60000)
 
-    assert blocker.args[0].operation == "write_config"
+    assert result.operation == "write_config"
     # The device reports the digest of what it stored, computed from flash.
     assert device.device_hash == hashlib.sha256(package).digest()
 
@@ -126,28 +197,26 @@ def test_a_configuration_written_to_the_device_reads_back_identically(qtbot, dev
 def test_reading_the_configuration_back_returns_the_same_bytes(qtbot, device):
     session = ProjectSession.new().apply(RenameProfile(2, "Чтение"))
     package = compile_project_to_binary(session.project)
-    with qtbot.waitSignal(device.operation_succeeded, timeout=60000):
-        device.write_config(package)
+    wait_for_operation(qtbot, device, lambda: device.write_config(package), timeout=60000)
 
-    with qtbot.waitSignal(device.operation_succeeded, timeout=60000) as blocker:
-        device.read_config()
+    result = wait_for_operation(qtbot, device, device.read_config, timeout=60000)
 
-    assert blocker.args[0].value == package
+    assert result.value == package
 
 
 @pytest.mark.skipif(not ALLOW_WRITES, reason="set DUO_INPUT_HIL_WRITE=1 to write to the device")
 def test_the_configuration_survives_a_reconnect(qtbot, device, port):
     session = ProjectSession.new().apply(RenameProfile(3, "Живучесть"))
     package = compile_project_to_binary(session.project)
-    with qtbot.waitSignal(device.operation_succeeded, timeout=60000):
-        device.write_config(package)
+    wait_for_operation(qtbot, device, lambda: device.write_config(package), timeout=60000)
     stored = device.device_hash
 
     device.disconnect_device()
     from duo_input.device.qt_transport import QSerialPortTransport
 
-    with qtbot.waitSignal(device.operation_succeeded, timeout=10000):
-        device.connect_device(QSerialPortTransport(port))
+    wait_for_operation(
+        qtbot, device, lambda: device.connect_device(QSerialPortTransport(port)), timeout=10000
+    )
 
     # Flash, not RAM: the whole point of the A/B store.
     assert device.device_hash == stored
@@ -158,9 +227,7 @@ def test_a_second_write_lands_in_the_other_slot_and_still_reads_back(qtbot, devi
     first = compile_project_to_binary(ProjectSession.new().apply(RenameProfile(1, "Раз")).project)
     second = compile_project_to_binary(ProjectSession.new().apply(RenameProfile(1, "Два")).project)
 
-    with qtbot.waitSignal(device.operation_succeeded, timeout=60000):
-        device.write_config(first)
-    with qtbot.waitSignal(device.operation_succeeded, timeout=60000):
-        device.write_config(second)
+    wait_for_operation(qtbot, device, lambda: device.write_config(first), timeout=60000)
+    wait_for_operation(qtbot, device, lambda: device.write_config(second), timeout=60000)
 
     assert device.device_hash == hashlib.sha256(second).digest()
