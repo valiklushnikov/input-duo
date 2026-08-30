@@ -427,7 +427,17 @@ Expected: all pass before touching hardware.
 
 - [ ] **Step 3: Execute and record HIL metrics**
 
-> **NOT DONE:** the two-board rig does not exist; the runner refuses to produce a report without it.
+> **RUNNER READY, RUN NOT YET TAKEN:** `hil_runner.py` now measures rather than
+> refusing. It records the firmware-internal input latency U1 counts of itself
+> (p95 against 20 ms and stalls against 50 ms, both exact because those are
+> bucket edges), U2's release against 100 ms, and a device row per peripheral
+> port carrying VID, PID, descriptor hash, buttons and a reason. **The
+> specification's end-to-end keystroke p95 is not measurable on this rig** -
+> nothing timestamps a finger and nothing injects HID into U1's CH375 ports -
+> and every check needing a logger at PC1/PC2, a switchable supply or a
+> configuration write is recorded as unmeasured with the rig it would take,
+> never skipped. See `task-10-hil-report.md`; the controller's commands are in
+> its section 5.
 
 `hil_runner.py` timestamps injected/observed events, calculates keyboard/mouse p95 ≤20 ms, flags pauses >50 ms and records U2 release ≤100 ms. Each device row records VID/PID/hash, buttons and pass/fail reason.
 
