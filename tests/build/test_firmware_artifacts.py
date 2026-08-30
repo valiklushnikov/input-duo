@@ -14,7 +14,10 @@ matters.
 from __future__ import annotations
 
 import os
+import re
 import struct
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -174,3 +177,56 @@ def test_a_release_image_contains_the_real_peripheral_input_path():
     assert any("InputPipeline8on_event" in name for name in symbols), (
         "release ELF does not contain InputPipeline::on_event"
     )
+
+
+# ------------------------------------- what a release has to be able to redo
+
+#: ``__DATE__`` spells months this way, in the C locale, always.
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+#: Anything shaped like a ``__DATE__`` string sitting in a flash image.
+_DATE_IN_IMAGE = re.compile(rb"[A-Z][a-z]{2} [ 0-9][0-9] 20[0-9]{2}")
+
+
+def source_date_epoch() -> int:
+    """The one timestamp a build of this tree is allowed to know about.
+
+    ``SOURCE_DATE_EPOCH`` is the cross-ecosystem convention for pinning it. In
+    its absence the commit being built is its own best answer: it is a property
+    of the source, which is exactly what "reproducible from clean checkout"
+    requires and what the wall clock is not.
+    """
+    pinned = os.environ.get("SOURCE_DATE_EPOCH")
+    if pinned:
+        return int(pinned)
+    completed = subprocess.run(
+        ["git", "-C", str(REPOSITORY_ROOT), "log", "-1", "--format=%ct"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(completed.stdout.strip())
+
+
+def expected_build_date() -> str:
+    """That timestamp in ``__DATE__`` spelling: ``Mmm dd yyyy``, day space padded."""
+    moment = datetime.fromtimestamp(source_date_epoch(), timezone.utc)
+    return f"{_MONTHS[moment.month - 1]} {moment.day:2d} {moment.year}"
+
+
+@pytest.mark.parametrize("name", EXPECTED_ARTIFACTS)
+def test_the_image_dates_itself_by_the_source_not_by_the_clock(artifacts, name):
+    """Two builds of one commit must be the same image.
+
+    The Pico SDK puts ``__DATE__`` in the binary info block, so the same source
+    produced a different image every day and ``SHA256SUMS.txt`` described one
+    afternoon rather than one commit. The date is worth keeping; taking it from
+    the clock is not.
+
+    Asserting on *every* date-shaped string in the image, rather than only on
+    the one the SDK emits today, means a future ``__DATE__`` leaking in from
+    anywhere else fails here too.
+    """
+    found = sorted({match.group().decode() for match in _DATE_IN_IMAGE.finditer(artifacts[name].read_bytes())})
+
+    assert found == [expected_build_date()]
