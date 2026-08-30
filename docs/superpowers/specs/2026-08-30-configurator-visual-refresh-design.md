@@ -35,7 +35,7 @@ their values.
 | `LINE` | `#D8DDE4` | `#D9D9D4` | hairlines |
 | `INK` | `#16191D` | `#17191C` | body text |
 | `INK_MUTED` | `#5A626D` | `#565B63` | field labels |
-| `INK_FAINT` | `#7F8794` | `#868C96` | absence of data |
+| `INK_FAINT` | `#7F8794` | `#7C838D` | absence of data |
 | `RAIL` | `#1E2530` | `#22242A` | navigation rail |
 | `ACCENT` | `#1A63D8` | `#2A5C8A` | interactive |
 | `OK` | `#16743F` | unchanged | agreement |
@@ -72,6 +72,11 @@ beside it.
 | distance to `OK` | ≥ 100 | 139 |
 | as text on `CANVAS` | ≥ 4.5 | 6.25 |
 | white text on its fill | ≥ 4.5 | 7.01 |
+
+`INK_FAINT` was re-measured rather than picked: the first candidate,
+`#868C96`, reaches only **2.89** on the new warm `CHROME`, under the 3.0 floor
+the suite sets for placeholder ink. `#7C838D` clears every ground (3.83 / 3.41
+/ 3.26) and stays lighter than `INK_MUTED`, as the ordering test requires.
 
 `ACCENT_STRONG` and `ACCENT_TINT` are re-derived from it: `#22496D` for the
 pressed state, `#EBF0F5` for the chip wash. Both need the same assertions the
