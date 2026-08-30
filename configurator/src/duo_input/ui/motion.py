@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation
+from PySide6.QtCore import QAbstractAnimation, QEasingCurve, QPoint, QPropertyAnimation
 from PySide6.QtWidgets import QGraphicsOpacityEffect, QWidget
 
 #: A page changing under the operator: quick enough not to be a wait.
@@ -41,15 +41,52 @@ def animations_enabled() -> bool:
 def fade_in(widget: QWidget, duration: int = FAST) -> QPropertyAnimation | None:
     """Bring ``widget`` up from transparent. ``None`` when it happened at once.
 
-    A widget with no effect is a widget at full opacity, so the instant path
-    clears any effect a previous fade left behind rather than setting one to
-    1.0 - ``setWindowOpacity`` would be meaningless here, since the things
-    faded are pages inside a window, not windows.
+    How that is done depends on what ``widget`` is, and the two cases are not
+    interchangeable. A ``QGraphicsOpacityEffect`` composites a child against
+    its parent, which is right for a page inside a window. On a *top-level*
+    window it composites against that window's own backing store, which is
+    black - the capture dialog opened as a black rectangle and lightened into
+    the page for the length of the fade. Only ``setWindowOpacity`` asks the
+    compositor to blend a window with what is really behind it.
+
+    A widget with no effect is a widget at full opacity, so the child's
+    instant path clears any effect a previous fade left behind rather than
+    setting one to 1.0.
     """
     if not animations_enabled() or duration <= 0:
-        widget.setGraphicsEffect(None)
+        if widget.isWindow():
+            widget.setWindowOpacity(1.0)
+        else:
+            widget.setGraphicsEffect(None)
         return None
 
+    if widget.isWindow():
+        return _fade_window_in(widget, duration)
+    return _fade_child_in(widget, duration)
+
+
+def _fade_window_in(widget: QWidget, duration: int) -> QPropertyAnimation:
+    """Fade a top-level window against the desktop behind it."""
+    widget.setWindowOpacity(0.0)
+    animation = QPropertyAnimation(widget, b"windowOpacity", widget)
+    animation.setDuration(duration)
+    animation.setEasingCurve(_CURVE)
+    animation.setStartValue(0.0)
+    animation.setEndValue(1.0)
+
+    def _restore(state: QAbstractAnimation.State, _previous) -> None:
+        # A fade that is stopped part-way would otherwise leave a window the
+        # operator cannot see and cannot dismiss.
+        if state is not QAbstractAnimation.State.Running:
+            widget.setWindowOpacity(1.0)
+
+    animation.stateChanged.connect(_restore)
+    animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+    return animation
+
+
+def _fade_child_in(widget: QWidget, duration: int) -> QPropertyAnimation:
+    """Fade a widget against its parent, which is what a page needs."""
     effect = QGraphicsOpacityEffect(widget)
     widget.setGraphicsEffect(effect)
     animation = QPropertyAnimation(effect, b"opacity", widget)
@@ -58,18 +95,23 @@ def fade_in(widget: QWidget, duration: int = FAST) -> QPropertyAnimation | None:
     animation.setStartValue(0.0)
     animation.setEndValue(1.0)
 
-    def _clear_effect() -> None:
+    def _clear_effect(state: QAbstractAnimation.State, _previous) -> None:
         # DeleteWhenStopped frees the animation, not the effect it drove, so
         # a widget that was ever faded in would otherwise carry a graphics
         # effect forever - and a widget with one renders through an offscreen
         # buffer, which is exactly what leaked one page's pixels over another
-        # inside a QStackedWidget. Guard against clearing a *newer* fade on
+        # inside a QStackedWidget. This hangs on ``stateChanged`` rather than
+        # ``finished`` because Qt emits ``finished`` only for an animation
+        # that reached its end: one stopped part-way would leave the widget
+        # at opacity 0.0 for good. Guard against clearing a *newer* fade on
         # the same widget: if this fired late, the widget's current effect is
         # already someone else's.
+        if state is QAbstractAnimation.State.Running:
+            return
         if widget.graphicsEffect() is effect:
             widget.setGraphicsEffect(None)
 
-    animation.finished.connect(_clear_effect)
+    animation.stateChanged.connect(_clear_effect)
     animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
     return animation
 
