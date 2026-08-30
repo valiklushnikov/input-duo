@@ -1,6 +1,6 @@
-"""Build and deploy the configurations the hardware acceptances are run against.
+"""Build and deploy the configurations this device is written with.
 
-Two configurations live here, chosen with ``--config``:
+Three configurations live here, chosen with ``--config``:
 
 ``step4``
     The Task 7 Step 4 acceptance configuration, described below. This is the
@@ -11,6 +11,13 @@ Two configurations live here, chosen with ``--config``:
     by the device rather than by a person's forefinger, from ten arrow-key
     presses a tired operator will not miscount. See :data:`TOGGLE_CYCLES` for
     the arithmetic and the honest shortfall against the roadmap's thousand.
+
+``operator``
+    The one the device lives in rather than the ones it is tested with. One
+    profile, the five route keys the acceptance proved, and every other key on
+    the board left alone - no macros, nothing on F1-F8, nothing on the arrows.
+    The two above are rigs: they swallow the keys a person works with, which is
+    correct while somebody is being asked to press them and useless afterwards.
 
 They share everything below the project itself - the round-trip check, the
 backup, the write and the read-back - because a configuration that was built
@@ -39,11 +46,12 @@ a backup taken afterwards is not a backup.
 
 Usage::
 
-    python tools/step4_acceptance_config.py describe [--config step4|toggle]
+    python tools/step4_acceptance_config.py describe \\
+        [--config step4|toggle|operator]
     python tools/step4_acceptance_config.py build --output PATH.bin \\
-        [--config step4|toggle]
+        [--config step4|toggle|operator]
     python tools/step4_acceptance_config.py deploy --package PATH.bin \\
-        --backup-dir hardware-backups [--config step4|toggle] [--port COMn]
+        --backup-dir hardware-backups [--config step4|toggle|operator] [--port COMn]
     python tools/step4_acceptance_config.py diagnostics [--port COMn]
 """
 
@@ -89,6 +97,7 @@ from duo_input.ui.models.project_session import (  # noqa: E402
     RenameProfile,
     SetActiveProfile,
     SetMacroSteps,
+    SetProfileRoutes,
 )
 
 # --------------------------------------------------------------- the design
@@ -450,6 +459,172 @@ def build_toggle_package() -> bytes:
     return _compile(build_toggle_session(), "the toggle project")
 
 
+# ------------------------------------------------ the operator's configuration
+#
+# The two configurations above are acceptance rigs. They bind F1-F8 to the
+# eight profiles and all four arrow keys to macros, which is right for an
+# acceptance - the operator is told which key to press and what to look for -
+# and wrong for every other day, because a keyboard whose arrows do not move
+# the cursor and whose F5 does not refresh a page is not a keyboard any more.
+#
+# This is the one the device lives in. It is defined almost entirely by what it
+# leaves alone: five triggers are taken and every other key on the board passes
+# through untouched. There are no macros, so no key has to be spent starting
+# one, and no profile keys, so a mis-press cannot carry the five route keys
+# away with it.
+#
+# The five are the ones the route acceptance already passed on, with the
+# meanings it proved, because an operator who has learned one keyboard should
+# not have to learn another. F12 and mouse button 4 are the *same* toggle
+# rather than an out and a back: the mouse has two routes, so one toggle covers
+# both directions, and having it under the hand that is already on the mouse is
+# what makes bringing the pointer home not start with finding a key.
+
+#: The one profile the operator uses. The device boots into it and, since
+#: nothing binds SET_PROFILE, never leaves it.
+OPERATOR_PROFILE_ID = 1
+
+OPERATOR_PROFILE_NAME = "Operator"
+
+#: Where the keyboard and the mouse point when the profile becomes active.
+#:
+#: A profile stores its own starting routes and the firmware applies them at
+#: boot, at a configuration write and at every profile change. PC1 for both,
+#: and the same for both: after a power cycle the first keystroke and the first
+#: mouse movement go to the same computer, which is the only arrangement in
+#: which the operator does not have to look at two screens to find out where
+#: they are. F9 and F12 then move from a place that is known rather than
+#: remembered.
+#:
+#: PC1 is also what a pristine profile carries, and the project says it anyway:
+#: a default that moved would otherwise move the device with it.
+OPERATOR_KEYBOARD_ROUTE = KeyboardRoute.PC1
+OPERATOR_MOUSE_ROUTE = MouseRoute.PC1
+
+
+@dataclass(frozen=True)
+class OperatorKey:
+    """One trigger the operator's configuration takes, and what it means."""
+
+    label: str
+    trigger: Trigger
+    action: Action
+    meaning: str
+
+
+OPERATOR_KEYS: tuple[OperatorKey, ...] = (
+    OperatorKey(
+        "F9",
+        Trigger(TriggerKind.KEYBOARD_USAGE, _F9),
+        Action(ActionKind.SET_KEYBOARD_ROUTE, int(KeyboardRoute.PC1)),
+        "keyboard to PC1",
+    ),
+    OperatorKey(
+        "F10",
+        Trigger(TriggerKind.KEYBOARD_USAGE, _F10),
+        Action(ActionKind.SET_KEYBOARD_ROUTE, int(KeyboardRoute.PC2)),
+        "keyboard to PC2",
+    ),
+    OperatorKey(
+        "F11",
+        Trigger(TriggerKind.KEYBOARD_USAGE, _F11),
+        Action(ActionKind.SET_KEYBOARD_ROUTE, int(KeyboardRoute.BOTH)),
+        "keyboard to both computers at once",
+    ),
+    OperatorKey(
+        "F12",
+        Trigger(TriggerKind.KEYBOARD_USAGE, _F12),
+        Action(ActionKind.TOGGLE_MOUSE_ROUTE),
+        "mouse to the other computer",
+    ),
+    OperatorKey(
+        "Mouse 4",
+        Trigger(TriggerKind.MOUSE_BUTTON, 4),
+        Action(ActionKind.TOGGLE_MOUSE_ROUTE),
+        "mouse back again - the same toggle, under the hand already on it",
+    ),
+)
+
+
+def build_operator_session() -> ProjectSession:
+    """The operator's project, built the way the GUI builds one.
+
+    One profile is touched. The other seven are left exactly as a pristine
+    project makes them - empty, named for their slot number, and reachable only
+    from the configurator - because a slot nobody can press their way into
+    should not look like a slot somebody configured.
+    """
+    session = (
+        ProjectSession.new()
+        .apply(SetActiveProfile(OPERATOR_PROFILE_ID))
+        .apply(RenameProfile(OPERATOR_PROFILE_ID, OPERATOR_PROFILE_NAME))
+        .apply(
+            SetProfileRoutes(
+                OPERATOR_PROFILE_ID, OPERATOR_KEYBOARD_ROUTE, OPERATOR_MOUSE_ROUTE
+            )
+        )
+    )
+    for key in OPERATOR_KEYS:
+        session = session.apply(
+            AddBinding(
+                OPERATOR_PROFILE_ID, Binding(key.trigger, BindingMode.REPLACE, key.action)
+            )
+        )
+    return session
+
+
+def build_operator_package() -> bytes:
+    """Compile the operator's project to the package a write would send."""
+    return _compile(build_operator_session(), "the operator project")
+
+
+def describe_operator(package: bytes) -> str:
+    """What the device will take, key by key, and what it will leave alone.
+
+    Rendered from the decoded package rather than from the plan above, so that
+    it describes the bytes a write would send and not the intention behind
+    them.
+    """
+    config = decode_device_config(package)
+    meanings = {
+        (int(key.trigger.kind), int(key.trigger.code)): key for key in OPERATOR_KEYS
+    }
+    profile = next(entry for entry in config.profiles if entry.id == OPERATOR_PROFILE_ID)
+    lines = [
+        f"package: {len(package)} bytes, sha256 {hashlib.sha256(package).hexdigest()}",
+        f"active profile at boot: {config.active_profile_id}",
+        f"profiles: {len(config.profiles)}, of which 1 is used",
+        "",
+        f"profile {profile.id} {profile.name!r} "
+        f"starts kbd={KeyboardRoute(profile.keyboard_route).name} "
+        f"mouse={MouseRoute(profile.mouse_route).name} "
+        f"layout={TextLayout(profile.text_layout).name} "
+        f"bindings={len(profile.bindings)} macros={len(profile.macros)}",
+        "",
+        "the keys this configuration takes:",
+    ]
+    for binding in profile.bindings:
+        key = meanings.get((int(binding.trigger.kind), int(binding.trigger.code)))
+        label = key.label if key else _binding_text(binding)
+        meaning = key.meaning if key else "not in the plan"
+        lines.append(
+            f"    {label:<9} {ActionKind(binding.action.kind).name:<20} {meaning}"
+        )
+    spare = [entry.id for entry in config.profiles if entry.id != OPERATOR_PROFILE_ID]
+    lines += [
+        "",
+        "every other key passes through untouched. No macros anywhere, so no",
+        "key is spent starting one; nothing on F1-F8, so the function row still",
+        "renames, refreshes and saves; nothing on the arrow keys, so they move",
+        "the cursor. The bench keyboard has no Insert, Home, PageUp, Delete or",
+        "End, and nothing is bound to any of those either.",
+        "",
+        f"profiles {spare[0]}-{spare[-1]} are empty and no binding selects them, so the device",
+        f"stays in profile {OPERATOR_PROFILE_ID} until the configurator says otherwise.",
+    ]
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------- offline verification
 
 
@@ -767,6 +942,17 @@ CONFIGURATIONS = {
         backup_reason=(
             "Captured before the Task 7 Step 4 acceptance configuration "
             "(eight self-naming profiles and the /target KYPKYMA macro) was written."
+        ),
+    ),
+    "operator": Configuration(
+        name="operator",
+        build_session=build_operator_session,
+        describe=describe_operator,
+        backup_label="before-operator-config",
+        backup_reason=(
+            "Captured before the operator's day-to-day configuration "
+            "(one profile, five route keys, every other key left alone) "
+            "was written."
         ),
     ),
     "toggle": Configuration(

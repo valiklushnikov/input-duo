@@ -296,8 +296,11 @@ def test_adding_a_second_configuration_did_not_move_the_first():
     assert hashlib.sha256(build_package()).hexdigest() == S4_PACKAGE_SHA256
 
 
-def test_the_configuration_registry_offers_both_by_name():
-    assert set(CONFIGURATIONS) == {"step4", "toggle"}
+def test_the_configuration_registry_offers_both_acceptance_rigs_by_name():
+    # The registry has grown a third entry since - the operator's own
+    # configuration - which is checked where it is defined. What matters here
+    # is that both rigs are still reachable and still build their own bytes.
+    assert {"step4", "toggle"} <= set(CONFIGURATIONS)
     assert CONFIGURATIONS["toggle"].build_package() == build_toggle_package()
     assert CONFIGURATIONS["step4"].build_package() == build_package()
 
