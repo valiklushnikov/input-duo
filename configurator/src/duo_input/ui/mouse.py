@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from duo_input.device.service import DeviceService
 from duo_input.domain.models import Action, Binding, Profile, Trigger
 from duo_input.generated.protocol import ActionKind, BindingMode, MouseRoute, TriggerKind
 from duo_input.ui.models.binding_table import (
@@ -32,7 +33,13 @@ from duo_input.ui.models.binding_table import (
     key_name,
     trigger_label,
 )
-from duo_input.ui.models.project_session import AddBinding, ProjectSession
+from duo_input.ui.bindings import CaptureDialog
+from duo_input.ui.models.project_session import (
+    AddBinding,
+    ProjectSession,
+    RemoveBinding,
+    UpdateBinding,
+)
 from duo_input.ui.theme import (
     ROLE_BANNER,
     ROLE_PRIMARY,
@@ -69,9 +76,16 @@ class MouseSwitchPage(QWidget):
     """Bind one trigger to Toggle, PC1 or PC2 for the mouse."""
 
     command_requested = Signal(object)
+    #: A mouse button the device just reported, so the shell can remember it.
+    button_observed = Signal(int)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        service: DeviceService | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
+        self._service = service
         self._session = ProjectSession.new()
         self._capabilities = MouseCapabilities()
         self._updating = False
@@ -133,7 +147,19 @@ class MouseSwitchPage(QWidget):
         self.mouse_combo = QComboBox(box)
         self.mouse_combo.setAccessibleName(self.tr("Mouse button"))
         self.mouse_combo.currentIndexChanged.connect(self._on_changed)
-        form.addRow(field_label(self.tr("Button:"), box), self.mouse_combo)
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(SPACE_SM)
+        button_row.addWidget(self.mouse_combo, 1)
+        self.capture_button = QPushButton(self.tr("Detect button"), box)
+        self.capture_button.setAccessibleName(
+            self.tr("Detect a mouse button on the device")
+        )
+        self.capture_button.clicked.connect(self.capture_mouse_button)
+        button_row.addWidget(self.capture_button)
+        button_holder = QWidget(box)
+        button_holder.setLayout(button_row)
+        form.addRow(field_label(self.tr("Button:"), box), button_holder)
 
         modifiers = QHBoxLayout()
         self.modifier_boxes: dict[str, QCheckBox] = {}
@@ -249,13 +275,54 @@ class MouseSwitchPage(QWidget):
             action=self.action_combo.currentData(),
         )
 
+    def apply_captured_trigger(self, trigger: Trigger) -> None:
+        """Select a mouse button reported by the device."""
+        if trigger.kind is not TriggerKind.MOUSE_BUTTON:
+            return
+        self._capabilities = self._capabilities.observing(trigger.code)
+        self._updating = True
+        try:
+            self.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+            self._rebuild_mouse_buttons()
+            self.mouse_combo.setCurrentIndex(
+                self.mouse_combo.findData(trigger.code)
+            )
+        finally:
+            self._updating = False
+        self._refresh()
+        # The shell owns the observations: a page-local memory of them would be
+        # wiped by the next device operation, which re-reads what is advertised.
+        self.button_observed.emit(int(trigger.code))
+
+    def capture_mouse_button(self) -> CaptureDialog | None:
+        """Open the ten-second, mouse-only capture dialog."""
+        if (
+            self._service is None
+            or not self._service.is_connected
+            or self.trigger_kind.currentData() is not TriggerKind.MOUSE_BUTTON
+        ):
+            return None
+        dialog = CaptureDialog(
+            self._service,
+            self,
+            accepted_kind=TriggerKind.MOUSE_BUTTON,
+        )
+        dialog.accepted.connect(lambda: self._on_capture_accepted(dialog))
+        dialog.open()
+        dialog.start()
+        return dialog
+
+    def _on_capture_accepted(self, dialog: CaptureDialog) -> None:
+        if dialog.trigger is not None:
+            self.apply_captured_trigger(dialog.trigger)
+
     # -------------------------------------------------------------- painting
 
     def _rebuild_mouse_buttons(self) -> None:
         current = self.mouse_combo.currentData()
         self.mouse_combo.clear()
         for button in self._capabilities.buttons:
-            self.mouse_combo.addItem(self.tr("Button {0}").format(button), button)
+            self.mouse_combo.addItem(self._mouse_button_label(button), button)
         if current is not None:
             index = self.mouse_combo.findData(current)
             if index >= 0:
@@ -272,8 +339,23 @@ class MouseSwitchPage(QWidget):
                 else MouseRoute(binding.action.argument).name
             )
             self.existing_list.addItem(
-                f"{trigger_label(binding.trigger)} -> {route} ({binding.mode.name})"
+                f"{self._trigger_label(binding.trigger)} -> {route} ({binding.mode.name})"
             )
+
+    def _mouse_button_label(self, button: int) -> str:
+        labels = {
+            1: self.tr("Left button"),
+            2: self.tr("Right button"),
+            3: self.tr("Middle button (wheel)"),
+            4: self.tr("Side button 1"),
+            5: self.tr("Side button 2"),
+        }
+        return labels.get(int(button), self.tr("Button {0}").format(button))
+
+    def _trigger_label(self, trigger: Trigger) -> str:
+        if trigger.kind is TriggerKind.MOUSE_BUTTON:
+            return self._mouse_button_label(trigger.code)
+        return trigger_label(trigger)
 
     def _unavailable_buttons(self) -> tuple[int, ...]:
         """Buttons a switch binding needs that the attached mouse cannot press."""
@@ -302,6 +384,11 @@ class MouseSwitchPage(QWidget):
                 box.setEnabled(kind is TriggerKind.KEYBOARD_USAGE)
             self.action_combo.setEnabled(kind is not None)
             self.mode_combo.setEnabled(kind is not None)
+            self.capture_button.setEnabled(
+                kind is TriggerKind.MOUSE_BUTTON
+                and self._service is not None
+                and self._service.is_connected
+            )
             self._rebuild_mouse_buttons()
             self._rebuild_existing()
         finally:
@@ -327,9 +414,10 @@ class MouseSwitchPage(QWidget):
             return self.tr("Choose what you press first.")
         for binding in self.profile.bindings:
             if binding.trigger == trigger:
-                return self.tr("{0} is already bound in this profile.").format(
-                    trigger_label(trigger)
-                )
+                if not is_mouse_switch(binding):
+                    return self.tr("{0} is already bound in this profile.").format(
+                        self._trigger_label(trigger)
+                    )
         return ""
 
     def _warning(self) -> str:
@@ -340,7 +428,9 @@ class MouseSwitchPage(QWidget):
             return conflict
         unavailable = self._unavailable_buttons()
         if unavailable:
-            names = ", ".join(f"Button {button}" for button in unavailable)
+            names = ", ".join(
+                self._mouse_button_label(button) for button in unavailable
+            )
             return self.tr(
                 "{0} is bound here but the attached mouse has not reported it."
             ).format(names)
@@ -355,9 +445,16 @@ class MouseSwitchPage(QWidget):
         binding = self.current_binding()
         if binding is None or self._conflict():
             return
+        profile_id = self._session.project.active_profile_id
+        previous = [item for item in self.profile.bindings if is_mouse_switch(item)]
+        if not previous:
+            self.command_requested.emit(AddBinding(profile_id, binding))
+            return
         self.command_requested.emit(
-            AddBinding(self._session.project.active_profile_id, binding)
+            UpdateBinding(profile_id, previous[0].uuid, binding)
         )
+        for obsolete in previous[1:]:
+            self.command_requested.emit(RemoveBinding(profile_id, obsolete.uuid))
 
 
 __all__ = ["SWITCH_ACTIONS", "MouseSwitchPage", "is_mouse_switch"]

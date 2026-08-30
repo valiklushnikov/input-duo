@@ -120,6 +120,8 @@ class MainWindow(QMainWindow):
         self._service = service
         self.translations = translations or TranslationManager()
         self._session = session if session is not None else ProjectSession.new()
+        #: Mouse buttons the attached device has actually reported.
+        self._observed_buttons: frozenset[int] = frozenset()
         self.transport_factory = transport_factory or default_transport_factory
         self.autosave = AutosaveService(parent=self)
         self.autosave.timer.timeout.connect(self.autosave_now)
@@ -158,7 +160,7 @@ class MainWindow(QMainWindow):
         self.profiles = ProfilesPage(self.pages)
         self.bindings = BindingsPage(self._service, self.pages)
         self.macros = MacrosPage(self._service, self.pages)
-        self.mouse = MouseSwitchPage(self.pages)
+        self.mouse = MouseSwitchPage(self._service, self.pages)
         self.diagnostics = DiagnosticsPage(self._service, self.pages)
         self.settings = SettingsPage(self.translations, parent=self.pages)
         sections = (
@@ -175,6 +177,8 @@ class MainWindow(QMainWindow):
             self.pages.addWidget(page)
         for page in self._editor_pages():
             page.command_requested.connect(self.apply_command)
+        for page in (self.bindings, self.mouse):
+            page.button_observed.connect(self._on_button_observed)
         self.nav.setCurrentRow(self.PAGE_OVERVIEW)
         self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
 
@@ -525,15 +529,29 @@ class MainWindow(QMainWindow):
             device.setText(self.tr("Written to device: differs from the project"))
             set_signal(device, SIGNAL_WARN)
 
+    def _on_button_observed(self, button: int) -> None:
+        """Remember a button the device reported and tell both editors."""
+        self._observed_buttons = self._observed_buttons | {int(button)}
+        self._sync_device_state()
+
     def _sync_device_state(self) -> None:
         connected = self._service.is_connected
         # A stale hash from a device that is no longer attached would be a lie.
         device_hash = self._service.device_hash if connected else b""
+        if not connected:
+            # A reconnect may be a different mouse; its extra buttons have to
+            # be seen again before they are offered.
+            self._observed_buttons = frozenset()
         capabilities = (
             MouseCapabilities.from_device_info(self._service.device_info)
             if connected
             else MouseCapabilities()
         )
+        # Protocol v1 never advertises buttons 4 and 5, so an observation is
+        # the only evidence they exist.  It has to outlive this re-read, which
+        # runs after every successful operation, a write included.
+        for button in sorted(self._observed_buttons):
+            capabilities = capabilities.observing(button)
         self.bindings.set_capabilities(capabilities)
         self.mouse.set_capabilities(capabilities)
         self.set_session(

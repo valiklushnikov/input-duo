@@ -67,6 +67,15 @@ def page(qtbot, service) -> BindingsPage:
     return page
 
 
+def _sync_capabilities(page: BindingsPage) -> None:
+    """Hand the page the capabilities the way MainWindow does after an operation."""
+    page.set_capabilities(
+        MouseCapabilities.from_device_info(page.service.device_info)
+        if page.service.is_connected
+        else MouseCapabilities()
+    )
+
+
 # ------------------------------------------------------------------- labels
 
 
@@ -426,12 +435,77 @@ def test_a_captured_event_becomes_the_trigger(qtbot, service, emulator):
     assert dialog.trigger == Trigger(TriggerKind.MOUSE_BUTTON, 4, 0)
 
 
+def test_a_mouse_only_capture_ignores_keyboard_events(qtbot, service):
+    dialog = CaptureDialog(service, accepted_kind=TriggerKind.MOUSE_BUTTON)
+    qtbot.addWidget(dialog)
+    dialog.open()
+
+    service.capture_received.emit(
+        bytes((TriggerKind.KEYBOARD_USAGE, 0x04, 0))
+    )
+
+    assert dialog.trigger is None
+    assert dialog.isVisible() is True
+
+    service.capture_received.emit(bytes((TriggerKind.MOUSE_BUTTON, 5, 0)))
+
+    assert dialog.trigger == Trigger(TriggerKind.MOUSE_BUTTON, 5, 0)
+    assert dialog.isVisible() is False
+
+
+def test_a_mouse_only_capture_still_gives_up_on_time(qtbot, service):
+    """An ignored keypress must not hand the operator a fresh ten seconds."""
+    dialog = CaptureDialog(service, accepted_kind=TriggerKind.MOUSE_BUTTON)
+    qtbot.addWidget(dialog)
+    dialog.open()
+
+    service.capture_received.emit(bytes((TriggerKind.KEYBOARD_USAGE, 0x04, 0)))
+
+    assert dialog.remaining_seconds == 10
+
+    for _ in range(10):
+        dialog.tick()
+
+    assert dialog.trigger is None
+    assert dialog.isVisible() is False
+
+
+def test_a_mouse_only_capture_rearms_after_a_keyboard_event(
+    qtbot, service, emulator
+):
+    link = SynchronousTransportLink(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(link)
+    dialog = CaptureDialog(service, accepted_kind=TriggerKind.MOUSE_BUTTON)
+    qtbot.addWidget(dialog)
+
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        dialog.start()
+    assert emulator.queue_capture_event(
+        bytes((TriggerKind.KEYBOARD_USAGE, 0x04, 0))
+    )
+    with qtbot.waitSignal(service.capture_received, timeout=5000):
+        link.poll()
+
+    assert dialog.trigger is None
+    qtbot.waitUntil(lambda: emulator.capture_active, timeout=5000)
+    assert emulator.capture_active is True
+
+    assert emulator.queue_capture_event(
+        bytes((TriggerKind.MOUSE_BUTTON, 4, 0))
+    )
+    with qtbot.waitSignal(service.capture_received, timeout=5000):
+        link.poll()
+
+    assert dialog.trigger == Trigger(TriggerKind.MOUSE_BUTTON, 4, 0)
+
+
 def test_capture_is_offered_only_while_the_device_is_connected(page, emulator, qtbot):
     assert page.capture_button.isEnabled() is False
 
     with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
         page.service.connect_device(emulator)
-    page.refresh_device_state()
+    _sync_capabilities(page)
 
     assert page.capture_button.isEnabled() is True
 
@@ -439,7 +513,7 @@ def test_capture_is_offered_only_while_the_device_is_connected(page, emulator, q
 def test_a_captured_mouse_button_becomes_available_on_the_page(page, emulator, qtbot):
     with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
         page.service.connect_device(emulator)
-    page.refresh_device_state()
+    _sync_capabilities(page)
 
     page.apply_captured_trigger(Trigger(TriggerKind.MOUSE_BUTTON, 5, 0))
 

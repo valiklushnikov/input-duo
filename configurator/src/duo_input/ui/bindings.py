@@ -84,18 +84,28 @@ class CaptureDialog(QDialog):
     the device to stop.
     """
 
-    def __init__(self, service: DeviceService, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        service: DeviceService,
+        parent: QWidget | None = None,
+        *,
+        accepted_kind: TriggerKind | None = None,
+    ) -> None:
         super().__init__(parent)
         self._service = service
+        self._accepted_kind = accepted_kind
         self._trigger: Trigger | None = None
         self._remaining = CAPTURE_SECONDS
 
         self.setWindowTitle(self.tr("Detect a key or button"))
         self.setModal(True)
         layout = QVBoxLayout(self)
-        self.prompt_label = QLabel(
-            self.tr("Press the key or mouse button you want to bind."), self
+        prompt = (
+            self.tr("Press the mouse button you want to use.")
+            if accepted_kind is TriggerKind.MOUSE_BUTTON
+            else self.tr("Press the key or mouse button you want to bind.")
         )
+        self.prompt_label = QLabel(prompt, self)
         self.prompt_label.setWordWrap(True)
         self.countdown_label = QLabel(self)
         self.countdown_label.setAccessibleName(self.tr("Time left to press a key"))
@@ -149,6 +159,13 @@ class CaptureDialog(QDialog):
             # A payload this host cannot read is not a trigger; keep waiting
             # rather than binding something the operator never pressed.
             return
+        if self._accepted_kind is not None and self._trigger.kind is not self._accepted_kind:
+            self._trigger = None
+            # Capture mode ends after the first physical press.  Start another
+            # window without resetting the visible ten-second countdown.
+            if self._service.is_connected:
+                self._service.begin_capture()
+            return
         self._timer.stop()
         self.accept()
 
@@ -161,6 +178,8 @@ class BindingsPage(QWidget):
     """The bindings of the active profile, plus the editor that changes them."""
 
     command_requested = Signal(object)
+    #: A mouse button the device just reported, so the shell can remember it.
+    button_observed = Signal(int)
 
     def __init__(self, service: DeviceService, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -327,19 +346,6 @@ class BindingsPage(QWidget):
         self._capabilities = capabilities
         self._refresh()
 
-    def refresh_device_state(self) -> None:
-        """Re-read what the connected device advertises about its peripherals."""
-        if self._service.is_connected:
-            observed = self._capabilities.observed
-            self._capabilities = MouseCapabilities.from_device_info(self._service.device_info)
-            # A reconnect may be a different mouse; its extra buttons have to be
-            # seen again before they are offered.
-            if observed and self._capabilities.advertised:
-                self._capabilities = MouseCapabilities(advertised=True)
-        else:
-            self._capabilities = MouseCapabilities()
-        self._refresh()
-
     # -------------------------------------------------------------- editing
 
     def selected_binding(self) -> Binding | None:
@@ -431,6 +437,8 @@ class BindingsPage(QWidget):
         finally:
             self._updating = False
         self._refresh()
+        if trigger.kind == TriggerKind.MOUSE_BUTTON:
+            self.button_observed.emit(int(trigger.code))
 
     def capture_trigger(self) -> CaptureDialog | None:
         """Open the capture dialog; returns it so callers can drive it in tests."""

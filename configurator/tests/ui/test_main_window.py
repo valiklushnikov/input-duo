@@ -96,6 +96,79 @@ def test_minimum_window_size_shows_every_control(qtbot, window):
         assert widget.height() >= widget.minimumSizeHint().height()
 
 
+def test_the_mouse_button_row_fits_the_minimum_window(qtbot, window, emulator):
+    """The detect button shares the row with the chooser and must still fit."""
+    from duo_input.generated.protocol import TriggerKind
+
+    _connect(qtbot, window, emulator)
+    window.resize(1024, 700)
+    window.show()
+    qtbot.waitExposed(window)
+    window.show_page(MainWindow.PAGE_MOUSE)
+    window.mouse.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+    qtbot.waitUntil(lambda: window.mouse.capture_button.isVisible(), timeout=5000)
+
+    for widget in (window.mouse.mouse_combo, window.mouse.capture_button):
+        assert widget.isVisible()
+        assert widget.width() >= widget.minimumSizeHint().width()
+    assert window.mouse.minimumSizeHint().width() <= window.mouse.width()
+
+
+def _capture_side_button(qtbot, window, button: int = 4) -> None:
+    """Bind a side button the way the detect dialog does."""
+    from duo_input.domain.models import Trigger
+    from duo_input.generated.protocol import ActionKind, TriggerKind
+
+    window.mouse.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+    window.mouse.select_action(ActionKind.TOGGLE_MOUSE_ROUTE, 0)
+    window.mouse.apply_captured_trigger(Trigger(TriggerKind.MOUSE_BUTTON, button, 0))
+    assert window.mouse.apply_button.isEnabled()
+    window.mouse.apply_button.click()
+
+
+def test_a_captured_side_button_survives_a_device_operation(qtbot, window, emulator):
+    """Writing to the device must not un-see a button the mouse reported.
+
+    Every successful operation re-reads what the device advertises, and the
+    protocol never advertises button 4. Losing the capture there left the page
+    warning that a button it was listing had never been reported.
+    """
+    _connect(qtbot, window, emulator)
+    _capture_side_button(qtbot, window)
+    assert window.mouse.existing_list.count() == 1
+
+    window._sync_device_state()
+
+    assert window.mouse.warning_label.text() == ""
+    assert window.mouse.mouse_combo.findData(4) >= 0
+
+
+def test_a_capture_on_one_page_is_seen_by_the_other(qtbot, window, emulator):
+    """One mouse is attached, so both editors must offer the same buttons."""
+    from duo_input.generated.protocol import TriggerKind
+
+    _connect(qtbot, window, emulator)
+    _capture_side_button(qtbot, window)
+
+    # The Bindings chooser fills itself when a mouse trigger is selected.
+    window.bindings.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+
+    assert window.bindings.mouse_combo.findData(4) >= 0
+
+
+def test_a_reconnect_has_to_see_the_side_button_again(qtbot, window, emulator):
+    """A different mouse may be on the other end, so observations do not carry."""
+    _connect(qtbot, window, emulator)
+    _capture_side_button(qtbot, window)
+
+    window.disconnect_device()
+    replacement = U1Emulator()
+    replacement.install_active(compile_project_to_binary(default_project()))
+    _connect(qtbot, window, replacement)
+
+    assert window.mouse.mouse_combo.findData(4) < 0
+
+
 def test_primary_controls_expose_translated_accessible_names(window):
     for widget in (
         window.nav,

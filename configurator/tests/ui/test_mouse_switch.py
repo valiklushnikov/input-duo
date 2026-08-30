@@ -5,6 +5,9 @@ from __future__ import annotations
 import pytest
 from PySide6.QtWidgets import QLabel
 
+from duo_input.device.emulator import U1Emulator
+from duo_input.device.qt_transport import SynchronousTransportLink
+from duo_input.device.service import DeviceService
 from duo_input.domain.models import Action, Binding, Trigger
 from duo_input.generated.protocol import (
     ActionKind,
@@ -17,7 +20,12 @@ from duo_input.ui.models.binding_table import (
     STANDARD_MOUSE_BUTTONS,
     MouseCapabilities,
 )
-from duo_input.ui.models.project_session import AddBinding, ProjectSession
+from duo_input.ui.bindings import CaptureDialog
+from duo_input.ui.models.project_session import (
+    AddBinding,
+    ProjectSession,
+    UpdateBinding,
+)
 from duo_input.ui.mouse import MouseSwitchPage
 from duo_input.ui import theme
 
@@ -157,6 +165,86 @@ def test_button_four_appears_only_after_the_device_reports_it(page):
     assert page.mouse_combo.findData(4) >= 0
 
 
+def test_mouse_buttons_have_names_a_person_can_recognise(page):
+    page.set_capabilities(
+        MouseCapabilities(advertised=True).observing(4).observing(5)
+    )
+    page.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+
+    assert [
+        page.mouse_combo.itemText(row) for row in range(page.mouse_combo.count())
+    ] == [
+        "Left button",
+        "Right button",
+        "Middle button (wheel)",
+        "Side button 1",
+        "Side button 2",
+    ]
+
+
+# -------------------------------------------------------------------- capture
+
+
+def test_detecting_a_button_needs_the_device_and_mouse_trigger(qtbot):
+    service = DeviceService(timeout_ms=5000)
+    page = MouseSwitchPage(service)
+    qtbot.addWidget(page)
+
+    page.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+    assert page.capture_button.isEnabled() is False
+
+    emulator = U1Emulator()
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(SynchronousTransportLink(emulator))
+    page.set_capabilities(MouseCapabilities(advertised=True))
+    assert page.capture_button.isEnabled() is True
+
+    page.select_trigger_kind(TriggerKind.KEYBOARD_USAGE)
+    assert page.capture_button.isEnabled() is False
+
+
+def test_a_detected_side_button_is_selected(qtbot):
+    service = DeviceService(timeout_ms=5000)
+    emulator = U1Emulator()
+    link = SynchronousTransportLink(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(link)
+    page = MouseSwitchPage(service)
+    qtbot.addWidget(page)
+    page.set_capabilities(MouseCapabilities(advertised=True))
+    page.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        dialog = page.capture_mouse_button()
+    assert isinstance(dialog, CaptureDialog)
+    assert emulator.queue_capture_event(
+        bytes((TriggerKind.MOUSE_BUTTON, 5, 0))
+    )
+
+    with qtbot.waitSignal(service.capture_received, timeout=5000):
+        link.poll()
+
+    assert page.mouse_combo.currentData() == 5
+    assert page.mouse_combo.currentText() == "Side button 2"
+
+
+def test_binding_a_new_button_replaces_the_old_mouse_switch(page):
+    old = _switch(4)
+    page.set_session(page.session.apply(AddBinding(1, old)))
+    page.apply_captured_trigger(Trigger(TriggerKind.MOUSE_BUTTON, 5, 0))
+    commands = []
+    page.command_requested.connect(commands.append)
+
+    page.apply_button.click()
+
+    assert len(commands) == 1
+    assert isinstance(commands[0], UpdateBinding)
+    assert commands[0].uuid == old.uuid
+    assert commands[0].binding.trigger == Trigger(
+        TriggerKind.MOUSE_BUTTON, 5, 0
+    )
+
+
 # ------------------------------------------------------ existing switch bindings
 
 
@@ -164,7 +252,7 @@ def test_the_page_lists_the_switch_bindings_of_the_active_profile(page):
     page.set_session(page.session.apply(AddBinding(1, _switch(3))))
 
     assert page.existing_list.count() == 1
-    assert "Button 3" in page.existing_list.item(0).text()
+    assert "Middle button (wheel)" in page.existing_list.item(0).text()
 
 
 def test_a_binding_that_is_not_about_the_mouse_route_is_not_listed(page):
@@ -181,7 +269,7 @@ def test_a_binding_that_is_not_about_the_mouse_route_is_not_listed(page):
 def test_a_button_the_current_mouse_lacks_is_reported_as_unavailable(page):
     page.set_session(page.session.apply(AddBinding(1, _switch(4))))
 
-    assert "Button 4" in page.warning_label.text()
+    assert "Side button 1" in page.warning_label.text()
 
 
 def test_the_warning_clears_once_the_device_reports_that_button(page):
@@ -204,13 +292,18 @@ def test_a_keyboard_switch_binding_is_never_reported_as_unavailable(page):
 # ------------------------------------------------------------------- conflicts
 
 
-def test_a_trigger_the_profile_already_uses_cannot_be_added(page):
-    page.set_session(page.session.apply(AddBinding(1, _switch(3))))
+def test_an_existing_mouse_switch_can_be_replaced(page):
+    old = _switch(3)
+    page.set_session(page.session.apply(AddBinding(1, old)))
     page.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
     page.mouse_combo.setCurrentIndex(page.mouse_combo.findData(3))
+    commands = []
+    page.command_requested.connect(commands.append)
 
-    assert page.apply_button.isEnabled() is False
-    assert "Button 3" in page.warning_label.text()
+    assert page.apply_button.isEnabled() is True
+    page.apply_button.click()
+    assert isinstance(commands[0], UpdateBinding)
+    assert commands[0].uuid == old.uuid
 
 
 def test_the_page_never_edits_the_session_itself(page):
@@ -228,6 +321,7 @@ def test_every_control_carries_an_accessible_name(page):
         page.trigger_kind,
         page.key_combo,
         page.mouse_combo,
+        page.capture_button,
         page.action_combo,
         page.mode_combo,
         page.apply_button,
@@ -249,11 +343,16 @@ def test_the_page_uses_the_shared_visual_hierarchy(page):
 
 
 def test_a_conflict_is_shown_as_an_error_not_a_warning(page):
+    other = Binding(
+        trigger=Trigger(TriggerKind.KEYBOARD_USAGE, 0x04, 0),
+        mode=BindingMode.REPLACE,
+        action=Action(ActionKind.TOGGLE_KEYBOARD_ROUTE, 0),
+    )
     page.set_session(
         page.session.apply(
             AddBinding(
                 page.session.project.active_profile_id,
-                _switch(0x04, kind=TriggerKind.KEYBOARD_USAGE),
+                other,
             )
         )
     )
