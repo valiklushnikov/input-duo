@@ -55,7 +55,7 @@ tests/vectors/                               shared JSON golden vectors
 **Interfaces:**
 - Produces: CMake target `duo_common`, CTest test `firmware_native`, Python package `duo_input`, pytest configuration.
 
-- [ ] **Step 1: Write failing smoke tests**
+- [x] **Step 1: Write failing smoke tests**
 
 ```cpp
 // tests/firmware_native/test_smoke.cpp
@@ -69,7 +69,7 @@ def test_package_version_exists():
     assert duo_input.__version__ == "0.1.0"
 ```
 
-- [ ] **Step 2: Verify red state**
+- [x] **Step 2: Verify red state**
 
 Run:
 
@@ -81,7 +81,7 @@ python -m pytest configurator/tests/test_smoke.py -q
 
 Expected: C++ configure/build fails because the native test target is absent; Python fails because `duo_input` is not installable.
 
-- [ ] **Step 3: Add minimal build/package files**
+- [x] **Step 3: Add minimal build/package files**
 
 Set C++17, enable CTest only under `DUO_NATIVE_TESTS`, and implement a dependency-free registrar in `test_support.hpp`/`test_main.cpp` providing `TEST_CASE(name)`, `CHECK(expr)`, `CHECK_FALSE(expr)` and `CHECK_EQ(actual, expected)`. The single `main()` iterates registered cases and returns nonzero on any failure. Also create:
 
@@ -92,18 +92,24 @@ __version__ = "0.1.0"
 
 `configurator/pyproject.toml` must use `setuptools`, `package-dir = {"" = "src"}`, Python `>=3.12,<3.13`, and pytest `pythonpath = ["src"]`.
 
-- [ ] **Step 4: Verify green state**
+- [x] **Step 4: Verify green state**
 
 Run `ctest --test-dir build/native --output-on-failure` and `python -m pytest configurator/tests -q`.
 
 Expected: both smoke suites pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add CMakeLists.txt firmware/common tests/firmware_native configurator
 git commit -m "build: add duo input native and Python test skeletons"
 ```
+
+> **DONE (2026-08-25):** `ea97f53..c33241f`, commit `c33241f` "build: add duo
+> input native and Python test skeletons". RED (no root `CMakeLists.txt`;
+> `ModuleNotFoundError: duo_input`) and GREEN (CTest 1/1, pytest 1) are both
+> recorded in `.superpowers/sdd/2026-08-25-duo-input-foundation/task-1-report.md`;
+> ledger: "Task 1: complete ... independent task review clean".
 
 ### Task 2: Protocol source-of-truth generator
 
@@ -119,7 +125,7 @@ git commit -m "build: add duo input native and Python test skeletons"
 - Produces: `ProtocolLimits`, `CdcMessageType`, `SpiMessageType`, `MacroStepType`, `Capability` in both languages.
 - Produces: command `python tools/generate_protocol.py --check` returning nonzero on stale generated files.
 
-- [ ] **Step 1: Write schema parity test**
+- [x] **Step 1: Write schema parity test**
 
 ```python
 def test_generated_values_match_schema():
@@ -129,13 +135,13 @@ def test_generated_values_match_schema():
     assert protocol.CdcMessageType.HELLO.value == schema["cdc_messages"]["HELLO"]
 ```
 
-- [ ] **Step 2: Verify failure**
+- [x] **Step 2: Verify failure**
 
 Run `python -m pytest configurator/tests/test_generated_protocol.py -q`.
 
 Expected: FAIL because schema and generated module do not exist.
 
-- [ ] **Step 3: Implement deterministic generation**
+- [x] **Step 3: Implement deterministic generation**
 
 `schema.json` must define protocol/schema major/minor, all message IDs from the spec, config limits, capability bits and macro step IDs. Generator must sort keys, include `// generated; do not edit` / `# generated; do not edit`, and write only when bytes differ.
 
@@ -147,7 +153,7 @@ def render_python(schema: dict[str, object]) -> str: ...
 def main(argv: list[str] | None = None) -> int: ...
 ```
 
-- [ ] **Step 4: Generate and verify parity**
+- [x] **Step 4: Generate and verify parity**
 
 Run:
 
@@ -161,12 +167,17 @@ ctest --test-dir build/native --output-on-failure
 
 Expected: all commands pass and second generator invocation produces no diff.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add protocol tools firmware/common/protocol configurator/src/duo_input/generated configurator/tests/test_generated_protocol.py
 git commit -m "feat: generate shared protocol identifiers"
 ```
+
+> **DONE (2026-08-25):** `c33241f..9855fcb`, commit `9855fcb` "feat: generate
+> shared protocol identifiers". RED/GREEN in `task-2-report.md`; ledger: "Task 2:
+> complete ... Frozen protocol ABI is generated from one JSON schema into C++ and
+> Python."
 
 ### Task 3: Shared COBS and CRC golden vectors
 
@@ -187,7 +198,7 @@ git commit -m "feat: generate shared protocol identifiers"
 - Produces C++: `bool cobs_encode(ByteView, MutableByteView, size_t&)`, `bool cobs_decode(...)`, `uint16_t crc16_ccitt(ByteView)`, `uint32_t crc32_ieee(ByteView)` where views are pointer+length structs compatible with C++17.
 - Produces Python: `cobs_encode(data: bytes) -> bytes`, `cobs_decode(data: bytes) -> bytes`, `crc16_ccitt(data: bytes) -> int`, `crc32_ieee(data: bytes) -> int`.
 
-- [ ] **Step 1: Add vectors and failing consumers**
+- [x] **Step 1: Add vectors and failing consumers**
 
 Include empty input, embedded zeroes, 254 nonzero bytes, malformed zero code, truncated block, `"123456789"` CRC-16 `0x29B1` and CRC-32 `0xCBF43926`.
 
@@ -199,24 +210,30 @@ def test_cobs_vector(case):
     assert cobs_decode(bytes.fromhex(case["encoded"])) == raw
 ```
 
-- [ ] **Step 2: Run both suites and confirm missing-symbol failures**
+- [x] **Step 2: Run both suites and confirm missing-symbol failures**
 
 Run `cmake --build build/native; ctest --test-dir build/native -R transport --output-on-failure` and `python -m pytest configurator/tests/test_transport_vectors.py -q`.
 
-- [ ] **Step 3: Implement allocation-free C++ and bounded Python codecs**
+- [x] **Step 3: Implement allocation-free C++ and bounded Python codecs**
 
 C++ `bytes.hpp` defines only `ByteView {const uint8_t* data; size_t size;}` and `MutableByteView {uint8_t* data; size_t size;}`. Codec functions accept caller-owned buffers and reject insufficient output capacity. Python decoder must raise `ValueError("invalid COBS frame")` for malformed input.
 
-- [ ] **Step 4: Run vector suites plus generator check**
+- [x] **Step 4: Run vector suites plus generator check**
 
 Expected: identical vector results in C++ and Python; `python tools/generate_protocol.py --check` passes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add tests/vectors firmware/common/protocol tests/firmware_native configurator/src/duo_input/protocol configurator/tests
 git commit -m "feat: add shared transport codecs"
 ```
+
+> **DONE (2026-08-25):** `9855fcb..ceda472` — `3650630` "feat: add shared
+> transport codecs", `f934c86` "fix: harden transport codec bounds", `ceda472`
+> "test: cover cobs boundary decode". RED/GREEN in `task-3-report.md`; ledger:
+> "Task 3: complete ... C++/Python COBS and CRC consume shared vectors with bounds
+> regressions covered."
 
 ### Task 4: CDC and SPI frame codecs
 
@@ -232,7 +249,7 @@ git commit -m "feat: add shared transport codecs"
 - Produces C++: `DecodeResult decode_cdc_frame(...)`, `DecodeResult decode_spi_frame(...)`, `bool encode_*`.
 - Produces Python: immutable `CdcFrame`, `SpiFrame`, `encode_cdc_frame`, `decode_cdc_frame`, `encode_spi_frame`, `decode_spi_frame`.
 
-- [ ] **Step 1: Write negative-first frame tests**
+- [x] **Step 1: Write negative-first frame tests**
 
 ```python
 def test_cdc_rejects_crc_damage(valid_cdc_bytes):
@@ -244,24 +261,29 @@ def test_spi_is_exactly_64_bytes():
     assert len(encode_spi_frame(SpiFrame(type=SpiMessageType.HEARTBEAT, sequence=7, payload=b""))) == 64
 ```
 
-- [ ] **Step 2: Verify failures for missing codecs**
+- [x] **Step 2: Verify failures for missing codecs**
 
 Run Python and native frame tests; expected missing imports/symbols.
 
-- [ ] **Step 3: Implement strict codecs**
+- [x] **Step 3: Implement strict codecs**
 
 Define explicit little-endian packing. Reject wrong magic, major, flags, declared length, CRC, nonzero SPI padding and CDC payload >1024. Preserve unknown minor only when required capability bits are supported.
 
-- [ ] **Step 4: Run shared vectors and malformed corpus**
+- [x] **Step 4: Run shared vectors and malformed corpus**
 
 Run all native/Python tests. Add one byte truncation test for every possible CDC frame boundary and lengths 0, 1, 1024, 1025.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add firmware/common/protocol tests/firmware_native tests/vectors configurator/src/duo_input/protocol configurator/tests
 git commit -m "feat: encode strict CDC and SPI frames"
 ```
+
+> **DONE (2026-08-25):** `ceda472..828ede0` — `9dbf759` "feat: encode strict CDC
+> and SPI frames", `828ede0` "fix: distinguish frame decode capacity errors".
+> RED/GREEN in `task-4-report.md`; ledger: "Task 4: complete ... Strict CDC/SPI
+> wire codecs now share vectors and malformed-frame contracts."
 
 ### Task 5: Binary configuration compiler and C++ validator
 
@@ -281,7 +303,7 @@ git commit -m "feat: encode strict CDC and SPI frames"
 - Produces Python: `compile_device_config(config: DeviceConfig) -> bytes`, `decode_device_config(data: bytes) -> DeviceConfig`.
 - Produces C++: `ValidationResult validate_config(ByteView)`, `ConfigView` with bounded iterators.
 
-- [ ] **Step 1: Write round-trip and limit failures**
+- [x] **Step 1: Write round-trip and limit failures**
 
 ```python
 def test_minimal_config_round_trip(minimal_config):
@@ -296,24 +318,30 @@ def test_rejects_129th_binding(profile_factory):
 
 C++ test must validate Python-produced minimal/full vectors and reject a vector with every length field independently corrupted.
 
-- [ ] **Step 2: Confirm red state in both languages**
+- [x] **Step 2: Confirm red state in both languages**
 
 Run `python -m pytest configurator/tests/test_config_binary.py -q` and native `config_validator` test.
 
-- [ ] **Step 3: Implement versioned offset-table format**
+- [x] **Step 3: Implement versioned offset-table format**
 
 Use fixed little-endian headers plus checked offset/length tables; never store raw C structs. Encode names/text as UTF-8. Store compiled HID text sequences in binary while source Unicode remains only in JSON. Enforce all spec limits and 360 KiB total.
 
-- [ ] **Step 4: Generate vectors and cross-validate**
+- [x] **Step 4: Generate vectors and cross-validate**
 
 Run compiler to regenerate the two committed vectors, then run all suites. Expected: `decode(encode(x)) == x`; C++ accepts both valid vectors and rejects all corruptions.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add protocol/config_format.md firmware/common/config tests/firmware_native tests/vectors/config_vectors configurator/src/duo_input/domain configurator/tests
 git commit -m "feat: define validated binary configuration"
 ```
+
+> **DONE (2026-08-25):** `828ede0..f9ba0b4` — `769027f` "feat: define validated
+> binary configuration", `f9ba0b4` "fix: harden config validation result".
+> RED/GREEN in `task-5-report.md`; ledger: "Task 5: complete ... Deterministic
+> Python compiler and allocation-free C++ validator cross-check committed binary
+> vectors."
 
 ### Task 6: U1 CDC emulator and compatibility contract
 
@@ -326,7 +354,7 @@ git commit -m "feat: define validated binary configuration"
 **Interfaces:**
 - Produces: `AbstractByteTransport.open/close/write`, `U1Emulator.feed(bytes) -> bytes`, stateful handlers for HELLO, status, read/write transaction, capture and stop.
 
-- [ ] **Step 1: Write transaction tests**
+- [x] **Step 1: Write transaction tests**
 
 ```python
 def test_power_loss_before_commit_keeps_old_config(emulator, config_a, config_b):
@@ -340,15 +368,15 @@ def test_major_mismatch_blocks_write(emulator):
     assert reply.error == ErrorCode.INCOMPATIBLE_MAJOR
 ```
 
-- [ ] **Step 2: Verify failures**
+- [x] **Step 2: Verify failures**
 
 Run `python -m pytest configurator/tests/test_device_emulator.py -q`.
 
-- [ ] **Step 3: Implement deterministic emulator**
+- [x] **Step 3: Implement deterministic emulator**
 
 Use in-memory slots A/B, generation counters, SHA-256, strict sequence matching and injectable timeout/CRC/disconnect faults. No Qt dependency is allowed in the emulator.
 
-- [ ] **Step 4: Run full foundation suite**
+- [x] **Step 4: Run full foundation suite**
 
 ```powershell
 python tools/generate_protocol.py --check
@@ -360,12 +388,18 @@ git diff --check
 
 Expected: all pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add configurator/src/duo_input/device configurator/tests/test_device_emulator.py docs/protocol/compatibility.md
 git commit -m "test: add deterministic U1 protocol emulator"
 ```
+
+> **DONE (2026-08-25):** `f9ba0b4..7b74c0a` — `8ced0ec` "test: add deterministic
+> U1 protocol emulator", `7b74c0a` "fix: harden emulator request validation
+> order". RED/GREEN in `task-6-report.md`; ledger: "Task 6: complete ... U1 CDC
+> emulator covers transactional A/B config, retries, faults and compatibility
+> without Qt/hardware."
 
 ### Task 7: Parser fuzz harnesses
 
@@ -380,11 +414,11 @@ git commit -m "test: add deterministic U1 protocol emulator"
 **Interfaces:**
 - Produces libFuzzer entry points `LLVMFuzzerTestOneInput` for CDC, SPI and binary config parsers.
 
-- [ ] **Step 1: Add one crashing seed test around an unchecked length mutation**
+- [x] **Step 1: Add one crashing seed test around an unchecked length mutation**
 
 Seed each corpus with its valid minimal vector plus variants whose declared length is `0`, maximum, maximum+1 and `0xFFFF`. Before parser hardening is complete, run under AddressSanitizer and record any failure as the red state.
 
-- [ ] **Step 2: Build fuzz targets with Clang sanitizers**
+- [x] **Step 2: Build fuzz targets with Clang sanitizers**
 
 ```powershell
 cmake -S . -B build/fuzz -DDUO_FUZZ_TESTS=ON -DCMAKE_CXX_COMPILER=clang++
@@ -393,11 +427,11 @@ cmake --build build/fuzz --parallel
 
 Expected: three fuzz executables build; any sanitizer crash is a failing test.
 
-- [ ] **Step 3: Enforce total/non-throwing parser behavior**
+- [x] **Step 3: Enforce total/non-throwing parser behavior**
 
 Every entry point calls only the public parser with `ByteView{data,size}` and asserts: accepted results expose views fully inside input; rejected results perform no callback/HID action. Fix parser bounds at the parser, never in the fuzz harness.
 
-- [ ] **Step 4: Run bounded fuzz campaign**
+- [x] **Step 4: Run bounded fuzz campaign**
 
 ```powershell
 build/fuzz/fuzz_cdc_frame.exe -max_total_time=60 tests/fuzz/corpus/cdc
@@ -407,12 +441,32 @@ build/fuzz/fuzz_config.exe -max_total_time=120 tests/fuzz/corpus/config
 
 Expected: no crash, timeout, OOM or sanitizer report. Commit any coverage-increasing corpus files under 4 KiB.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add tests/fuzz docs/testing/fuzzing.md firmware/common
 git commit -m "test: fuzz protocol and configuration parsers"
 ```
+
+> **DONE (2026-08-25 implementation, 2026-08-26 campaign):** `7b74c0a..f560a51` —
+> `f9d08c1` "test: fuzz protocol and configuration parsers", `fab923d` "test:
+> harden fuzz test configuration", `f560a51` "test: reject incompatible fuzz
+> options". `task-7-report.md` records the seed inventory: declared length 0,
+> legal maximum, maximum+1 and `0xFFFF`, each with valid and corrupt-CRC variants,
+> reproduced byte-exactly by `tests/fuzz/generate_corpus.py --check`.
+>
+> **Deviation on Step 1's RED, recorded rather than papered over.** The ledger's
+> pre-flight ruling stands: "Task 7 RED is the missing fuzz targets/build rather
+> than an intentionally crashing parser seed — Tasks 4/5 parsers were already
+> hardened and reviewed before fuzz harness work, so manufacturing a known crash
+> would regress the product." No sanitizer failure was ever observed, because none
+> was manufactured.
+>
+> **Steps 2 and 4 were closed later than the rest of the task**, at `c27a314`,
+> once a Clang/libFuzzer toolchain existed. Ledger, "Sanitizer campaign — re-run on
+> the clean committed corpus": cdc 2 249 901 runs / 61 s, spi 13 743 483 / 61 s,
+> config 7 440 331 / 121 s, all exit 0, artifact directories empty — no ASan/UBSan
+> finding, timeout or OOM. Parsers were unchanged between `8704956` and `c27a314`.
 
 ## Plan Completion Gate
 
@@ -422,3 +476,22 @@ git commit -m "test: fuzz protocol and configuration parsers"
 - Emulator demonstrates transactional config recovery and version rejection.
 - CDC, SPI and binary config fuzz targets complete bounded sanitizer runs without findings.
 - Only after this gate begin the firmware and configurator plans.
+
+> **GATE STATUS — MET, 2026-08-26 at `c27a314`.** Ledger, "FOUNDATION GATE": every
+> bullet above is satisfied in software. `generate_protocol.py --check` exit 0;
+> `tests/fuzz/generate_corpus.py --check` exit 0; configurator pytest 132;
+> repository pytest 8 + 6 subtests; a fresh MSVC/Ninja native build with CTest 7/7;
+> `git diff --check` clean; the three sanitizer campaigns clean. A whole-plan
+> review of `ea97f53..f560a51` found four ABI blockers, fixed in `8704956`, and
+> the re-review of `ea97f53..8704956` came back clean.
+>
+> One finding was recorded rather than closed at the time: `ErrorCode` was
+> hand-written in `configurator/src/duo_input/device/emulator.py` and absent from
+> `protocol/schema.json`. It did not violate this plan's constraint as worded (no
+> C++ copy existed yet) but would have the moment firmware gained an error table.
+> It was closed later as Task 10a of the configurator plan — commit `fe6fdfa`
+> added `cdc_errors` to the schema and the generator now emits both the Python
+> `ErrorCode(IntEnum)` and the C++ `enum class CdcError`.
+>
+> No hardware claim is made by this plan. HIL, real USB, CH375, hardware timing
+> and hardware acceptance are all the business of the plans below it.
