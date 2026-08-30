@@ -49,3 +49,10 @@ def test_starting_the_application_configures_the_log(tmp_path, monkeypatch):
 
     assert path.parent == log_directory()
     assert path.parent.is_dir()
+
+
+def test_the_program_carries_an_icon(qapp):
+    from duo_input.app import icon_path
+
+    assert icon_path().is_file()
+    assert icon_path().suffix == ".ico"

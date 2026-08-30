@@ -85,6 +85,12 @@ def test_the_chevron_the_interface_draws_ships(files):
     assert "chevron-down@2x.png" in names
 
 
+def test_the_application_icon_ships(files):
+    names = {path.name for path in files}
+
+    assert any(name.endswith("duo-input.ico") for name in names)
+
+
 def test_the_licence_notices_ship(files):
     names = {path.name for path in files}
 

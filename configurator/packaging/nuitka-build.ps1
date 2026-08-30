@@ -124,6 +124,9 @@ try {
         --include-qt-plugins=platforms,styles `
         --include-data-files="src/duo_input/resources/translations/*.qm=duo_input/resources/translations/" `
         --include-data-files="src/duo_input/resources/*.png=duo_input/resources/" `
+        --include-data-files="src/duo_input/resources/fonts/*.ttf=duo_input/resources/fonts/" `
+        --include-data-files="src/duo_input/resources/*.ico=duo_input/resources/" `
+        --windows-icon-from-ico="src/duo_input/resources/duo-input.ico" `
         --product-name='Duo Input Configurator' `
         --product-version=$version --file-version=$version `
         --file-description='Duo Input configurator' `
@@ -149,6 +152,7 @@ if (Test-Path $produced) {
 Write-Step 'Copying the third-party licence notices'
 if (-not (Test-Path $Licenses)) { throw "missing $Licenses" }
 Copy-Item $Licenses (Join-Path $OutputDir 'third-party-licenses.md')
+Copy-Item (Join-Path $Translations '..' 'fonts' 'OFL.txt') (Join-Path $OutputDir 'OFL-GolosText.txt')
 
 # --- the contract ------------------------------------------------------------
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from duo_input import __version__
@@ -33,6 +34,11 @@ def configure_application() -> Path:
     return configure_logging()
 
 
+def icon_path() -> Path:
+    """The application icon, as it sits beside the package."""
+    return Path(__file__).resolve().parent / "resources" / "duo-input.ico"
+
+
 def build_main_window(
     service: DeviceService | None = None,
     session: ProjectSession | None = None,
@@ -55,6 +61,12 @@ def main(argv: list[str] | None = None) -> int:
     application.setApplicationVersion(__version__)
     application.setOrganizationName(ORGANISATION_NAME)
     configure_application()
+
+    # Set before the first window exists, so nothing is ever shown wearing the
+    # platform's default icon and then corrected.
+    icon = icon_path()
+    if icon.is_file():
+        application.setWindowIcon(QIcon(str(icon)))
 
     # The look is installed before the first widget exists, so nothing is ever
     # built, shown and then restyled in front of the operator.
@@ -81,5 +93,6 @@ __all__ = [
     "ORGANISATION_NAME",
     "build_main_window",
     "configure_application",
+    "icon_path",
     "main",
 ]
