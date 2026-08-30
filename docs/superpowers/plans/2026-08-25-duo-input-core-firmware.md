@@ -275,10 +275,22 @@ Core 0 drains bounded commands, services `tud_task`, SPI and watchdog every loop
 
 Build release with pattern off and diagnostic build with pattern on. Confirm pattern routes exactly as compile-time target and no pauses >50 ms over 15 minutes.
 
-**Blocked, 2026-08-27.** Both builds exist and the release one has the pattern
-off, which the build contract checks. Running it needs a second computer to
-receive the PC2 half, and U2 cannot be connected to one yet. Nothing else
-stands in the way.
+> **NOT DONE, and no longer runnable as written (reassessed 2026-08-30).** This
+> step was blocked on 2026-08-27 for want of a second computer. A second computer
+> now exists - but the thing it was to receive no longer does. `16afc0b` ("Give
+> Core 1 the real input runtime instead of a test pattern") deleted the synthetic
+> producer this step builds against; `grep -r test_pattern firmware/` returns
+> nothing, and `tests/build/test_firmware_artifacts.py::test_a_release_image_cannot_generate_its_own_input`
+> now asserts that no such symbol can ever be linked into a release image. The
+> 15-minute two-PC pattern run was never performed and cannot be performed from
+> this tree.
+>
+> What the step existed to prove was proved later, by real input rather than
+> synthetic: routing to PC1, PC2 and Both across two computers passed on hardware
+> on 2026-08-29 (input/mapping plan Task 7 Step 4), and the HIL runs of
+> 2026-08-30 recorded no gap over 50 ms in 304 keyboard and 33 321 mouse samples.
+> Neither is a 15-minute continuous pattern run, so this box stays unticked: the
+> substitute is named here rather than credited to the step.
 
 - [x] **Step 5: Commit**
 
@@ -382,8 +394,11 @@ git commit -m "feat: add hardware recovery controls and diagnostics"
 ## Plan Completion Gate
 
 - Both UF2 build and enumerate with exact interface sets.
-- Synthetic keyboard/mouse input reaches PC1, PC2 and Both routes. **Blocked**
-  until U2 can be connected to a second computer.
+- Synthetic keyboard/mouse input reaches PC1, PC2 and Both routes. **NOT MET, and
+  now unreachable:** the synthetic producer was removed in `16afc0b` and a release
+  image is tested for its absence. *Real* keyboard and mouse input reached PC1,
+  PC2 and Both on hardware on 2026-08-29, which is the stronger claim but not this
+  one.
 - U2 releases within 100 ms after link loss.
 - CDC transaction survives injected power cuts.
 - ~~SW1/SW2~~ and watchdog work with invalid user config. Buttons dropped:
