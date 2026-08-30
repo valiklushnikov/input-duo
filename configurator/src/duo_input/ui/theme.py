@@ -27,8 +27,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics, QPainter
+from PySide6.QtCore import QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
@@ -377,6 +377,64 @@ class ElidingLabel(QLabel):
             elided,
             self.foregroundRole(),
         )
+
+
+class CountdownRing(QWidget):
+    """The seconds left, as an arc that empties and a numeral in the middle.
+
+    It owns no timer. Whatever is counting - a dialog waiting for a button
+    press - tells it what to show, so there is exactly one clock and the two
+    can never disagree.
+    """
+
+    DIAMETER = 76
+    THICKNESS = 5
+
+    def __init__(self, total: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._total = max(int(total), 1)
+        self._remaining = self._total
+        self.setFixedSize(QSize(self.DIAMETER, self.DIAMETER))
+        self._announce()
+
+    @property
+    def remaining(self) -> int:
+        return self._remaining
+
+    def set_remaining(self, seconds: int) -> None:
+        """Show ``seconds``, clamped to the range this ring was built for."""
+        self._remaining = max(0, min(int(seconds), self._total))
+        self._announce()
+        self.update()
+
+    def _announce(self) -> None:
+        self.setAccessibleName(self.tr("{0} s left").format(self._remaining))
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        inset = self.THICKNESS / 2 + 1
+        box = QRectF(inset, inset, self.width() - 2 * inset, self.height() - 2 * inset)
+
+        track = QPen(QColor(LINE), self.THICKNESS)
+        track.setCapStyle(Qt.PenCapStyle.FlatCap)
+        painter.setPen(track)
+        painter.drawEllipse(box)
+
+        if self._remaining > 0:
+            span = int(360 * 16 * self._remaining / self._total)
+            arc = QPen(QColor(ACCENT), self.THICKNESS)
+            arc.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(arc)
+            painter.drawArc(box, 90 * 16, -span)
+
+        painter.setPen(QColor(ACCENT))
+        painter.setFont(interface_font(TEXT_PAGE_TITLE, WEIGHT_MEDIUM))
+        painter.drawText(
+            self.rect(), Qt.AlignmentFlag.AlignCenter, str(self._remaining)
+        )
+        painter.end()
 
 
 def page_header(title: str, subtitle: str = "", parent: QWidget | None = None) -> QWidget:
@@ -766,6 +824,7 @@ __all__ = [
     "ACCENT",
     "CANVAS",
     "CONTROL_HEIGHT",
+    "CountdownRing",
     "DANGER",
     "ElidingLabel",
     "GRID",

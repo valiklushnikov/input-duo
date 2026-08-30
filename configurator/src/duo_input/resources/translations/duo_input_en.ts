@@ -22,175 +22,176 @@
 <context>
     <name>BindingsPage</name>
     <message>
-        <location filename="../../ui/bindings.py" line="194" />
+        <location filename="../../ui/bindings.py" line="196" />
         <source>Bindings</source>
+        <extracomment>A mouse button the device just reported, so the shell can remember it.</extracomment>
         <translation>Bindings</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="195" />
+        <location filename="../../ui/bindings.py" line="197" />
         <source>Choose what a key or mouse button does in this profile.</source>
         <translation>Choose what a key or mouse button does in this profile.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="202" />
+        <location filename="../../ui/bindings.py" line="204" />
         <source>Bindings of the active profile</source>
         <translation>Bindings of the active profile</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="217" />
+        <location filename="../../ui/bindings.py" line="219" />
         <source>Binding</source>
         <translation>Binding</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="225" />
+        <location filename="../../ui/bindings.py" line="227" />
         <source>Trigger kind</source>
         <translation>Trigger kind</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="226" />
-        <location filename="../../ui/bindings.py" line="232" />
+        <location filename="../../ui/bindings.py" line="228" />
+        <location filename="../../ui/bindings.py" line="234" />
         <source>Keyboard key</source>
         <translation>Keyboard key</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="227" />
-        <location filename="../../ui/bindings.py" line="240" />
+        <location filename="../../ui/bindings.py" line="229" />
+        <location filename="../../ui/bindings.py" line="242" />
         <source>Mouse button</source>
         <translation>Mouse button</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="229" />
+        <location filename="../../ui/bindings.py" line="231" />
         <source>Trigger:</source>
         <translation>Trigger:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="236" />
+        <location filename="../../ui/bindings.py" line="238" />
         <source>Key:</source>
         <translation>Key:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="242" />
+        <location filename="../../ui/bindings.py" line="244" />
         <source>Button:</source>
         <translation>Button:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="249" />
+        <location filename="../../ui/bindings.py" line="251" />
         <source>{0} modifier</source>
         <translation>{0} modifier</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="254" />
+        <location filename="../../ui/bindings.py" line="256" />
         <source>Modifiers:</source>
         <translation>Modifiers:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="257" />
+        <location filename="../../ui/bindings.py" line="259" />
         <source>Binding mode</source>
         <translation>Binding mode</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="258" />
+        <location filename="../../ui/bindings.py" line="260" />
         <source>Replace</source>
         <translation>Replace</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="259" />
-        <location filename="../../ui/bindings.py" line="287" />
+        <location filename="../../ui/bindings.py" line="261" />
+        <location filename="../../ui/bindings.py" line="289" />
         <source>Add</source>
         <translation>Add</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="260" />
+        <location filename="../../ui/bindings.py" line="262" />
         <source>Mode:</source>
         <translation>Mode:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="263" />
+        <location filename="../../ui/bindings.py" line="265" />
         <source>Action</source>
         <translation>Action</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="268" />
+        <location filename="../../ui/bindings.py" line="270" />
         <source>Action:</source>
         <translation>Action:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="271" />
+        <location filename="../../ui/bindings.py" line="273" />
         <source>Action target</source>
         <translation>Action target</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="273" />
+        <location filename="../../ui/bindings.py" line="275" />
         <source>Target:</source>
         <translation>Target:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="277" />
+        <location filename="../../ui/bindings.py" line="279" />
         <source>Why this binding cannot be used</source>
         <translation>Why this binding cannot be used</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="284" />
+        <location filename="../../ui/bindings.py" line="286" />
         <source>Detect</source>
         <translation>Detect</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="285" />
+        <location filename="../../ui/bindings.py" line="287" />
         <source>Detect the trigger on the device</source>
         <translation>Detect the trigger on the device</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="288" />
+        <location filename="../../ui/bindings.py" line="290" />
         <source>Add this binding</source>
         <translation>Add this binding</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="291" />
+        <location filename="../../ui/bindings.py" line="293" />
         <source>Apply</source>
         <translation>Apply</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="292" />
+        <location filename="../../ui/bindings.py" line="294" />
         <source>Apply the changes to the selected binding</source>
         <translation>Apply the changes to the selected binding</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="294" />
+        <location filename="../../ui/bindings.py" line="296" />
         <source>Remove</source>
         <translation>Remove</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="295" />
+        <location filename="../../ui/bindings.py" line="297" />
         <source>Remove the selected binding</source>
         <translation>Remove the selected binding</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="476" />
+        <location filename="../../ui/bindings.py" line="467" />
         <source>Button {0}</source>
         <translation>Button {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="535" />
+        <location filename="../../ui/bindings.py" line="526" />
         <source>No mouse is attached, so no mouse button can be bound.</source>
         <translation>No mouse is attached, so no mouse button can be bound.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="538" />
+        <location filename="../../ui/bindings.py" line="529" />
         <source>Choose a trigger first.</source>
         <translation>Choose a trigger first.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="541" />
+        <location filename="../../ui/bindings.py" line="532" />
         <source>This profile has no macros to run.</source>
         <translation>This profile has no macros to run.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="543" />
+        <location filename="../../ui/bindings.py" line="534" />
         <source>Choose what the trigger should do.</source>
         <translation>Choose what the trigger should do.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="548" />
+        <location filename="../../ui/bindings.py" line="539" />
         <source>{0} is already bound in this profile.</source>
         <translation>{0} is already bound in this profile.</translation>
     </message>
@@ -221,6 +222,15 @@
     <message>
         <location filename="../../ui/bindings.py" line="152" />
         <source>{0} s left</source>
+        <translation>{0} s left</translation>
+    </message>
+</context>
+<context>
+    <name>CountdownRing</name>
+    <message>
+        <location filename="../../ui/theme.py" line="411" />
+        <source>{0} s left</source>
+        <extracomment>Body text: headings, values, anything the operator reads to get an answer. Field labels and secondary text. Readable, deliberately not the loudest. Absence of data. Quieter than a label so ``unknown`` cannot pass for a value. Cards, tables and text inputs. The page behind the cards. Toolbar, state strip and status bar - the frame around the pages. Hairlines between and around things. The heavier line an input or a button draws around itself. The navigation rail: dark, so the chrome never competes with the content. Interactive. Save, selection, focus. Agreement: saved, in sync, connected. Divergence: unsaved edits, a device holding something else. Failure, and the one button that overwrites the device. Which wash sits behind each signal colour when it is used as a chip. Chips, captions and small print. Controls, labels and values - everything by default. The title of one card. The title of a page. Weights. Qt maps these onto the faces the family actually ships. What the interface is set in - bundled, not borrowed from the machine. Where digits have to line up: hashes, counters, byte sizes, IDs. Font files Windows ships that the offscreen database has to be handed. Everything that is a distance is a multiple of this. Minimum height of anything the operator clicks. Corner radius, one value for everything that has corners. Cards sit a little softer than the controls they contain. Object names the stylesheet reaches for by name rather than by role. Where the two image assets the stylesheet needs live on disk. The one drawn asset: a chevron for the combo boxes, at 1x and 2x.</extracomment>
         <translation>{0} s left</translation>
     </message>
 </context>
@@ -702,219 +712,219 @@
 <context>
     <name>MainWindow</name>
     <message>
-        <location filename="../../ui/main_window.py" line="151" />
+        <location filename="../../ui/main_window.py" line="153" />
         <source>Sections</source>
-        <extracomment>Navigation rows, in the order the sections appear.</extracomment>
+        <extracomment>Navigation rows, in the order the sections appear. Mouse buttons the attached device has actually reported.</extracomment>
         <translation>Sections</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="165" />
+        <location filename="../../ui/main_window.py" line="167" />
         <source>Overview</source>
         <translation>Overview</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="166" />
+        <location filename="../../ui/main_window.py" line="168" />
         <source>Profiles</source>
         <translation>Profiles</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="167" />
+        <location filename="../../ui/main_window.py" line="169" />
         <source>Bindings</source>
         <translation>Bindings</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="168" />
+        <location filename="../../ui/main_window.py" line="170" />
         <source>Macros</source>
         <translation>Macros</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="169" />
+        <location filename="../../ui/main_window.py" line="171" />
         <source>Mouse</source>
         <translation>Mouse</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="170" />
+        <location filename="../../ui/main_window.py" line="172" />
         <source>Diagnostics</source>
         <translation>Diagnostics</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="171" />
+        <location filename="../../ui/main_window.py" line="173" />
         <source>Settings</source>
         <translation>Settings</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="290" />
+        <location filename="../../ui/main_window.py" line="294" />
         <source>Problems that block a write</source>
         <translation>Problems that block a write</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="300" />
+        <location filename="../../ui/main_window.py" line="304" />
         <source>Transfer progress</source>
         <translation>Transfer progress</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="189" />
+        <location filename="../../ui/main_window.py" line="193" />
         <source>Ready</source>
         <translation>Ready</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="206" />
+        <location filename="../../ui/main_window.py" line="210" />
         <source>Profile:</source>
         <translation>Profile:</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="209" />
+        <location filename="../../ui/main_window.py" line="213" />
         <source>Active profile</source>
         <translation>Active profile</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="215" />
+        <location filename="../../ui/main_window.py" line="219" />
         <source>Device connection</source>
         <translation>Device connection</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="219" />
-        <location filename="../../ui/main_window.py" line="493" />
+        <location filename="../../ui/main_window.py" line="223" />
+        <location filename="../../ui/main_window.py" line="497" />
         <source>Connect</source>
         <translation>Connect</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="220" />
+        <location filename="../../ui/main_window.py" line="224" />
         <source>Connect or disconnect the device</source>
         <translation>Connect or disconnect the device</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="223" />
+        <location filename="../../ui/main_window.py" line="227" />
         <source>Save</source>
         <translation>Save</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="224" />
+        <location filename="../../ui/main_window.py" line="228" />
         <source>Save the project file</source>
         <translation>Save the project file</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="230" />
+        <location filename="../../ui/main_window.py" line="234" />
         <source>Write to device</source>
         <translation>Write to device</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="231" />
+        <location filename="../../ui/main_window.py" line="235" />
         <source>Write the configuration to the device</source>
         <translation>Write the configuration to the device</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="260" />
+        <location filename="../../ui/main_window.py" line="264" />
         <source>Local changes</source>
         <translation>Local changes</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="261" />
+        <location filename="../../ui/main_window.py" line="265" />
         <source>Project file</source>
         <translation>Project file</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="262" />
+        <location filename="../../ui/main_window.py" line="266" />
         <source>Configuration on the device</source>
         <translation>Configuration on the device</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="281" />
+        <location filename="../../ui/main_window.py" line="285" />
         <source>Fix these before writing to the device.</source>
         <translation>Fix these before writing to the device.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="399" />
+        <location filename="../../ui/main_window.py" line="403" />
         <source>a new project</source>
         <translation>a new project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="402" />
+        <location filename="../../ui/main_window.py" line="406" />
         <source>Unsaved work was found</source>
         <translation>Unsaved work was found</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="404" />
+        <location filename="../../ui/main_window.py" line="408" />
         <source>Duo Input closed with unsaved changes to {0} on {1}. Recover them?</source>
         <translation>Duo Input closed with unsaved changes to {0} on {1}. Recover them?</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="478" />
+        <location filename="../../ui/main_window.py" line="482" />
         <source>Untitled project</source>
         <translation>Untitled project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="487" />
+        <location filename="../../ui/main_window.py" line="491" />
         <source>Device: {0}</source>
         <translation>Device: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="493" />
+        <location filename="../../ui/main_window.py" line="497" />
         <source>Disconnect</source>
         <translation>Disconnect</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="503" />
+        <location filename="../../ui/main_window.py" line="507" />
         <source>Local changes: unsaved</source>
         <translation>Local changes: unsaved</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="505" />
+        <location filename="../../ui/main_window.py" line="509" />
         <source>Local changes: none</source>
         <translation>Local changes: none</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="511" />
+        <location filename="../../ui/main_window.py" line="515" />
         <source>Project file: not created yet</source>
         <translation>Project file: not created yet</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="514" />
+        <location filename="../../ui/main_window.py" line="518" />
         <source>Project file: {0}</source>
         <translation>Project file: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="519" />
+        <location filename="../../ui/main_window.py" line="523" />
         <source>Written to device: no link</source>
         <translation>Written to device: no link</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="522" />
+        <location filename="../../ui/main_window.py" line="526" />
         <source>Written to device: matches the project</source>
         <translation>Written to device: matches the project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="525" />
+        <location filename="../../ui/main_window.py" line="529" />
         <source>Written to device: differs from the project</source>
         <translation>Written to device: differs from the project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="557" />
+        <location filename="../../ui/main_window.py" line="575" />
         <source>Save project</source>
         <translation>Save project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="577" />
+        <location filename="../../ui/main_window.py" line="595" />
         <source>Save failed</source>
         <translation>Save failed</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="582" />
+        <location filename="../../ui/main_window.py" line="600" />
         <source>Project saved</source>
         <translation>Project saved</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="597" />
+        <location filename="../../ui/main_window.py" line="615" />
         <source>No Duo Input device was found</source>
         <translation>No Duo Input device was found</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="657" />
+        <location filename="../../ui/main_window.py" line="675" />
         <source>Unsaved changes</source>
         <translation>Unsaved changes</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="658" />
+        <location filename="../../ui/main_window.py" line="676" />
         <source>The project has unsaved changes. Save them before closing?</source>
         <translation>The project has unsaved changes. Save them before closing?</translation>
     </message>
@@ -922,201 +932,201 @@
 <context>
     <name>MouseSwitchPage</name>
     <message>
-        <location filename="../../ui/mouse.py" line="96" />
+        <location filename="../../ui/mouse.py" line="98" />
         <source>Mouse</source>
-        <extracomment>Every action this page can produce, in the order it offers them.</extracomment>
+        <extracomment>Every action this page can produce, in the order it offers them. A mouse button the device just reported, so the shell can remember it.</extracomment>
         <translation>Mouse</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="98" />
+        <location filename="../../ui/mouse.py" line="100" />
         <source>Choose the key or mouse button that sends the pointer to PC1 or PC2.</source>
         <translation>Choose the key or mouse button that sends the pointer to PC1 or PC2.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="124" />
+        <location filename="../../ui/mouse.py" line="126" />
         <source>Switch the mouse</source>
         <translation>Switch the mouse</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="131" />
+        <location filename="../../ui/mouse.py" line="133" />
         <source>Trigger kind</source>
         <translation>Trigger kind</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="132" />
+        <location filename="../../ui/mouse.py" line="134" />
         <source>Choose...</source>
         <translation>Choose...</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="133" />
-        <location filename="../../ui/mouse.py" line="139" />
+        <location filename="../../ui/mouse.py" line="135" />
+        <location filename="../../ui/mouse.py" line="141" />
         <source>Keyboard key</source>
         <translation>Keyboard key</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="134" />
-        <location filename="../../ui/mouse.py" line="146" />
+        <location filename="../../ui/mouse.py" line="136" />
+        <location filename="../../ui/mouse.py" line="148" />
         <source>Mouse button</source>
         <translation>Mouse button</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="136" />
+        <location filename="../../ui/mouse.py" line="138" />
         <source>1. What do you press?</source>
         <translation>1. What do you press?</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="143" />
+        <location filename="../../ui/mouse.py" line="145" />
         <source>Key:</source>
         <translation>Key:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="152" />
+        <location filename="../../ui/mouse.py" line="154" />
         <source>Detect button</source>
         <translation>Detect button</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="154" />
+        <location filename="../../ui/mouse.py" line="156" />
         <source>Detect a mouse button on the device</source>
         <translation>Detect a mouse button on the device</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="160" />
+        <location filename="../../ui/mouse.py" line="162" />
         <source>Button:</source>
         <translation>Button:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="166" />
+        <location filename="../../ui/mouse.py" line="168" />
         <source>{0} modifier</source>
         <translation>{0} modifier</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="173" />
+        <location filename="../../ui/mouse.py" line="175" />
         <source>Modifiers:</source>
         <translation>Modifiers:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="176" />
+        <location filename="../../ui/mouse.py" line="178" />
         <source>What the trigger does</source>
         <translation>What the trigger does</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="177" />
+        <location filename="../../ui/mouse.py" line="179" />
         <source>Toggle between PC1 and PC2</source>
         <translation>Toggle between PC1 and PC2</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="178" />
+        <location filename="../../ui/mouse.py" line="180" />
         <source>Always PC1</source>
         <translation>Always PC1</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="179" />
+        <location filename="../../ui/mouse.py" line="181" />
         <source>Always PC2</source>
         <translation>Always PC2</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="181" />
+        <location filename="../../ui/mouse.py" line="183" />
         <source>2. What should it do?</source>
         <translation>2. What should it do?</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="184" />
+        <location filename="../../ui/mouse.py" line="186" />
         <source>Binding mode</source>
         <translation>Binding mode</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="185" />
+        <location filename="../../ui/mouse.py" line="187" />
         <source>Replace the key</source>
         <translation>Replace the key</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="186" />
+        <location filename="../../ui/mouse.py" line="188" />
         <source>Add to the key</source>
         <translation>Add to the key</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="187" />
+        <location filename="../../ui/mouse.py" line="189" />
         <source>Mode:</source>
         <translation>Mode:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="191" />
+        <location filename="../../ui/mouse.py" line="193" />
         <source>Mouse switching warnings</source>
         <translation>Mouse switching warnings</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="198" />
+        <location filename="../../ui/mouse.py" line="200" />
         <source>Bind</source>
         <translation>Bind</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="199" />
+        <location filename="../../ui/mouse.py" line="201" />
         <source>Bind this trigger to the mouse route</source>
         <translation>Bind this trigger to the mouse route</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="208" />
+        <location filename="../../ui/mouse.py" line="210" />
         <source>Mouse switching in this profile</source>
         <translation>Mouse switching in this profile</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="211" />
+        <location filename="../../ui/mouse.py" line="213" />
         <source>Existing mouse switch bindings</source>
         <translation>Existing mouse switch bindings</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="342" />
+        <location filename="../../ui/mouse.py" line="347" />
         <source>Left button</source>
         <translation>Left button</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="343" />
+        <location filename="../../ui/mouse.py" line="348" />
         <source>Right button</source>
         <translation>Right button</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="344" />
+        <location filename="../../ui/mouse.py" line="349" />
         <source>Middle button (wheel)</source>
         <translation>Middle button (wheel)</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="345" />
+        <location filename="../../ui/mouse.py" line="350" />
         <source>Side button 1</source>
         <translation>Side button 1</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="346" />
+        <location filename="../../ui/mouse.py" line="351" />
         <source>Side button 2</source>
         <translation>Side button 2</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="348" />
+        <location filename="../../ui/mouse.py" line="353" />
         <source>Button {0}</source>
         <translation>Button {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="332" />
+        <location filename="../../ui/mouse.py" line="337" />
         <source>Toggle</source>
         <translation>Toggle</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="404" />
         <location filename="../../ui/mouse.py" line="409" />
+        <location filename="../../ui/mouse.py" line="414" />
         <source>Choose what you press first.</source>
         <translation>Choose what you press first.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="406" />
+        <location filename="../../ui/mouse.py" line="411" />
         <source>No mouse is attached, so no mouse button can be bound.</source>
         <translation>No mouse is attached, so no mouse button can be bound.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="413" />
+        <location filename="../../ui/mouse.py" line="418" />
         <source>{0} is already bound in this profile.</source>
         <translation>{0} is already bound in this profile.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="430" />
+        <location filename="../../ui/mouse.py" line="435" />
         <source>{0} is bound here but the attached mouse has not reported it.</source>
         <translation>{0} is bound here but the attached mouse has not reported it.</translation>
     </message>

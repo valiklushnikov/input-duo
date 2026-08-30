@@ -41,6 +41,7 @@ TRANSLATED_MODULES = (
     "ui/mouse.py",
     "ui/diagnostics.py",
     "ui/settings.py",
+    "ui/theme.py",
     "ui/models/binding_table.py",
     "ui/models/macro_steps.py",
 )

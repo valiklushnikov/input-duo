@@ -299,6 +299,45 @@ def test_a_placeholder_hash_label_carries_no_tooltip(qtbot):
     assert label.toolTip() == ""
 
 
+def test_a_countdown_ring_reports_the_seconds_it_was_given(qtbot):
+    ring = theme.CountdownRing(10)
+    qtbot.addWidget(ring)
+
+    ring.set_remaining(7)
+
+    assert ring.remaining == 7
+
+
+def test_a_countdown_ring_never_reports_past_its_ends(qtbot):
+    ring = theme.CountdownRing(10)
+    qtbot.addWidget(ring)
+
+    ring.set_remaining(-3)
+    assert ring.remaining == 0
+
+    ring.set_remaining(99)
+    assert ring.remaining == 10
+
+
+def test_a_countdown_ring_states_the_seconds_for_a_screen_reader(qtbot):
+    ring = theme.CountdownRing(10)
+    qtbot.addWidget(ring)
+
+    ring.set_remaining(4)
+
+    assert "4" in ring.accessibleName()
+
+
+def test_a_countdown_ring_paints_without_raising(qtbot):
+    """A paintEvent that throws takes the dialog down with it."""
+    ring = theme.CountdownRing(10)
+    qtbot.addWidget(ring)
+    ring.resize(76, 76)
+    ring.set_remaining(5)
+
+    ring.grab()
+
+
 # ------------------------------------------------------------------- fonts
 
 
