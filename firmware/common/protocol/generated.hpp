@@ -71,6 +71,21 @@ enum class MacroStepType : std::uint8_t {
     TEXT = 0x05,
 };
 
+enum class CdcError : std::uint8_t {
+    BadChunk = 0x08,
+    BadHash = 0x09,
+    BadSequence = 0x04,
+    BadSize = 0x07,
+    BadState = 0x06,
+    Busy = 0x05,
+    IncompatibleMajor = 0x02,
+    InvalidConfig = 0x0A,
+    InvalidRequest = 0x01,
+    Ok = 0x00,
+    PhysicalConfirmationRequired = 0x0B,
+    UnsupportedCapability = 0x03,
+};
+
 enum class KeyboardRoute : std::uint8_t {
     BOTH = 0x03,
     PC1 = 0x01,

@@ -37,21 +37,13 @@ enum class CaptureRequest : std::uint8_t {
     Cancel,
 };
 
-/// Errors the protocol defines. Mirrors the emulator, which is the reference.
-enum class CdcError : std::uint8_t {
-    Ok = 0,
-    InvalidRequest = 1,
-    IncompatibleMajor = 2,
-    UnsupportedCapability = 3,
-    BadSequence = 4,
-    Busy = 5,
-    BadState = 6,
-    BadSize = 7,
-    BadChunk = 8,
-    BadHash = 9,
-    InvalidConfig = 10,
-    PhysicalConfirmationRequired = 11,
-};
+/// Errors the protocol defines.
+///
+/// The enum itself is generated from `protocol/schema.json`, which is the one
+/// place a protocol identifier is allowed to exist; this alias only saves the
+/// call sites here from spelling the namespace out. A firmware that named its
+/// own numbers would drift from the host the moment either side edited one.
+using CdcError = protocol::CdcError;
 
 /// Counters the host can ask for.
 struct CdcDiagnostics {

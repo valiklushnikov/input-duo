@@ -24,6 +24,17 @@ def _limit_name(name: str) -> str:
     return name.upper()
 
 
+def _cpp_member(name: str) -> str:
+    """``BAD_SEQUENCE`` -> ``BadSequence``.
+
+    The schema names the error codes the way the wire and the Python enum do;
+    the firmware has always spelled them in upper camel case. The spelling is
+    a naming convention on each side, not a second definition, so it is applied
+    here rather than by hand in a header nobody regenerates.
+    """
+    return "".join(word.capitalize() for word in name.split("_"))
+
+
 def _cpp_enum(name: str, underlying_type: str, values: list[tuple[str, int]]) -> list[str]:
     lines = [f"enum class {name} : {underlying_type} {{"]
     lines.extend(f"    {key} = 0x{value:02X}," for key, value in values)
@@ -61,6 +72,14 @@ def render_cpp(schema: dict[str, object]) -> str:
     lines.extend(_cpp_enum("SpiMessageType", "std::uint8_t", _items(schema, "spi_messages")))
     lines.append("")
     lines.extend(_cpp_enum("MacroStepType", "std::uint8_t", _items(schema, "macro_steps")))
+    lines.append("")
+    lines.extend(
+        _cpp_enum(
+            "CdcError",
+            "std::uint8_t",
+            [(_cpp_member(name), value) for name, value in _items(schema, "cdc_errors")],
+        )
+    )
     lines.append("")
     for enum_name, schema_key in (
         ("KeyboardRoute", "keyboard_routes"),
@@ -112,6 +131,8 @@ def render_python(schema: dict[str, object]) -> str:
     lines.extend(_python_enum("SpiMessageType", "IntEnum", _items(schema, "spi_messages")))
     lines.append("")
     lines.extend(_python_enum("MacroStepType", "IntEnum", _items(schema, "macro_steps")))
+    lines.append("")
+    lines.extend(_python_enum("ErrorCode", "IntEnum", _items(schema, "cdc_errors")))
     lines.append("")
     for enum_name, schema_key in (
         ("KeyboardRoute", "keyboard_routes"),

@@ -74,6 +74,20 @@ class MacroStepType(IntEnum):
     SET_PROFILE = 0x09
     TEXT = 0x05
 
+class ErrorCode(IntEnum):
+    BAD_CHUNK = 0x08
+    BAD_HASH = 0x09
+    BAD_SEQUENCE = 0x04
+    BAD_SIZE = 0x07
+    BAD_STATE = 0x06
+    BUSY = 0x05
+    INCOMPATIBLE_MAJOR = 0x02
+    INVALID_CONFIG = 0x0A
+    INVALID_REQUEST = 0x01
+    OK = 0x00
+    PHYSICAL_CONFIRMATION_REQUIRED = 0x0B
+    UNSUPPORTED_CAPABILITY = 0x03
+
 class KeyboardRoute(IntEnum):
     BOTH = 0x03
     PC1 = 0x01

@@ -76,6 +76,20 @@
     "WRITE_COMMIT": 10,
     "WRITE_VERIFY": 9
   },
+  "cdc_errors": {
+    "BAD_CHUNK": 8,
+    "BAD_HASH": 9,
+    "BAD_SEQUENCE": 4,
+    "BAD_SIZE": 7,
+    "BAD_STATE": 6,
+    "BUSY": 5,
+    "INCOMPATIBLE_MAJOR": 2,
+    "INVALID_CONFIG": 10,
+    "INVALID_REQUEST": 1,
+    "OK": 0,
+    "PHYSICAL_CONFIRMATION_REQUIRED": 11,
+    "UNSUPPORTED_CAPABILITY": 3
+  },
   "limits": {
     "binary_config_max_bytes": 368640,
     "bindings_per_profile": 128,

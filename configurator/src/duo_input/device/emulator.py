@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import struct
 from dataclasses import dataclass
-from enum import IntEnum
 
 from duo_input.domain.config_binary import ConfigError, decode_device_config
 from duo_input.generated.protocol import (
@@ -16,27 +15,13 @@ from duo_input.generated.protocol import (
     PROTOCOL_VERSION_MINOR,
     Capability,
     CdcMessageType,
+    ErrorCode,
 )
 from duo_input.protocol.cobs import cobs_decode, cobs_encode
 from duo_input.protocol.crc import crc32_ieee
 from duo_input.protocol.frame import CdcFrame, FrameError, decode_cdc_frame, encode_cdc_frame
 
 from .transport import AbstractByteTransport
-
-
-class ErrorCode(IntEnum):
-    OK = 0
-    INVALID_REQUEST = 1
-    INCOMPATIBLE_MAJOR = 2
-    UNSUPPORTED_CAPABILITY = 3
-    BAD_SEQUENCE = 4
-    BUSY = 5
-    BAD_STATE = 6
-    BAD_SIZE = 7
-    BAD_CHUNK = 8
-    BAD_HASH = 9
-    INVALID_CONFIG = 10
-    PHYSICAL_CONFIRMATION_REQUIRED = 11
 
 
 DEVICE_CAPABILITIES = sum(int(capability) for capability in Capability)

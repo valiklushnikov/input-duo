@@ -13,12 +13,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from duo_input.domain.models import Trigger
-from duo_input.generated.protocol import CdcMessageType, TriggerKind
 
-# ErrorCode is defined exactly once, in the reference U1 implementation. It is
-# imported rather than restated so protocol error identifiers are never
-# hand-duplicated.
-from .emulator import ErrorCode
+# ErrorCode is defined exactly once, in protocol/schema.json, and reaches every
+# side of the link through generated code. Importing it here from the emulator -
+# which is test-support, not production - is how the host and the firmware would
+# come to disagree about an error code without either of them changing.
+from duo_input.generated.protocol import CdcMessageType, ErrorCode, TriggerKind
 
 _FRAME_DELIMITER = 0
 
