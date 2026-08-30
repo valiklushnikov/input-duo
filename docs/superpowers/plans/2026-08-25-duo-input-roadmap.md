@@ -168,6 +168,16 @@ git tag duo-input-v0.1.0-rc1
 
 - Four subordinate completion gates pass.
 - No open test failure is waived without a written spec change.
-- Two versioned UF2 and one Windows x64 installer are reproducible from clean checkout.
+- The two versioned UF2 images are byte-reproducible from a clean checkout of the
+  tagged commit: the same commit built in two trees produces identical SHA-256.
+  Their build date comes from `SOURCE_DATE_EPOCH`, else the commit, never the clock
+  (`cmake/source_date.cmake`).
+- The Windows x64 installer is built from that same commit and its hash is recorded,
+  but it is **not** byte-reproducible, and the gate does not claim it is. Two causes
+  were measured, both outside this repository: Nuitka stamps `DuoInput.exe`'s PE
+  header with the build clock, and Inno Setup stores each payload file's
+  modification time (back-to-back compiles of untouched input are identical;
+  changing one file's mtime changes the installer hash). Its SHA-256 therefore
+  identifies one build, not one commit.
 - Compatibility, latency and 24-hour soak results are attached to release notes.
 - Prototype RC may ship for private testing; commercial shipment remains blocked by legitimate USB VID/PID and Windows code-signing certificate.
