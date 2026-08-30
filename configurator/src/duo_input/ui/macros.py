@@ -69,6 +69,7 @@ from duo_input.ui.models.project_session import (
     SetMacroSteps,
     SetMacroTarget,
 )
+from duo_input.ui import motion
 from duo_input.ui.theme import (
     ROLE_BANNER,
     ROLE_PRIMARY,
@@ -701,6 +702,7 @@ class TestMacroDialog(QDialog):
 
         self.setWindowTitle(self.tr("Test run"))
         self.setModal(True)
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         layout = QVBoxLayout(self)
 
         layout.addWidget(
@@ -753,6 +755,7 @@ class TestMacroDialog(QDialog):
 
         self._service.state_changed.connect(self._on_state_changed)
         self._refresh()
+        motion.fade_in(self, motion.SCRIM)
 
     @property
     def session(self) -> ProjectSession:

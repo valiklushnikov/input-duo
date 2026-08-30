@@ -472,6 +472,14 @@ def test_the_test_dialog_never_edits_the_project(qtbot, service, emulator, sessi
     assert dialog.session.device_hash == session.device_hash
 
 
+def test_the_test_macro_dialog_matches_the_capture_dialog_shape(qtbot, service, session):
+    from PySide6.QtCore import Qt
+
+    dialog = _dialog(qtbot, service, session)
+
+    assert bool(dialog.windowFlags() & Qt.WindowType.FramelessWindowHint)
+
+
 def test_testing_is_offered_only_for_a_macro_on_a_connected_device(page, emulator, qtbot):
     assert page.test_button.isEnabled() is False
 
