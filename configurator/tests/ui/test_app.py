@@ -39,6 +39,41 @@ def test_build_main_window_produces_a_wired_shell(qtbot):
     assert window.session.dirty is False
 
 
+def test_starting_a_window_reopens_what_was_open_last(qtbot, tmp_path):
+    """The startup sequence is a function so it can be tested at all.
+
+    Both steps it performs - reopening the last project and offering an
+    autosave recovery - used to be reachable only from main(), where nothing
+    could check that they were still wired.
+    """
+    from PySide6.QtCore import QSettings
+
+    from duo_input.app import build_main_window, start_window
+    from duo_input.device.service import DeviceService
+    from duo_input.ui.models.project_session import RenameProfile
+
+    store = QSettings(str(tmp_path / "duo-input.ini"), QSettings.Format.IniFormat)
+    store.clear()
+    saved = tmp_path / "startup.duoinput.json"
+
+    first = build_main_window(
+        DeviceService(), transport_factory=lambda: None, settings=store
+    )
+    qtbot.addWidget(first)
+    first.set_session(first.session.apply(RenameProfile(1, "Remembered")))
+    assert first.save_project(saved) is True
+
+    later = build_main_window(
+        DeviceService(), transport_factory=lambda: None, settings=store
+    )
+    qtbot.addWidget(later)
+    later._confirm_close = lambda: None
+    start_window(later)
+
+    assert later.session.path == saved
+    assert later.session.active_profile.name == "Remembered"
+
+
 def test_starting_the_application_configures_the_log(tmp_path, monkeypatch):
     from duo_input.app import configure_application
     from duo_input.persistence.locations import log_directory

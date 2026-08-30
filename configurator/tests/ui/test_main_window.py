@@ -15,7 +15,12 @@ from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.generated.protocol import PROFILES
 from duo_input.ui.main_window import DIRTY_MARKER, MainWindow
 from duo_input.ui import theme
-from duo_input.ui.models.project_session import SetActiveProfile, default_project
+from duo_input.ui.models.project_session import (
+    ProjectSession,
+    RenameProfile,
+    SetActiveProfile,
+    default_project,
+)
 
 
 @pytest.fixture
@@ -43,11 +48,20 @@ def _discard_on_teardown(window: MainWindow) -> None:
 
 
 @pytest.fixture
-def window(qtbot, service) -> MainWindow:
+def settings(tmp_path) -> "QSettings":
+    from PySide6.QtCore import QSettings
+
+    store = QSettings(str(tmp_path / "duo-input.ini"), QSettings.Format.IniFormat)
+    store.clear()
+    return store
+
+
+@pytest.fixture
+def window(qtbot, service, settings) -> MainWindow:
     # The window attaches itself to whatever the factory offers. In the suite
     # that must be nothing at all: a factory left on its default would open
     # the operator's real device the moment any test built a window.
-    window = MainWindow(service, transport_factory=lambda: None)
+    window = MainWindow(service, transport_factory=lambda: None, settings=settings)
     qtbot.addWidget(window, before_close_func=_discard_on_teardown)
     return window
 
@@ -112,6 +126,65 @@ def test_an_absent_device_is_not_announced_over_and_over(qtbot, service):
         window.try_autoconnect()
 
     assert [line for line in window.overview.events() if "connect_device" in line] == []
+
+
+def test_the_shell_offers_a_way_to_open_a_project(window):
+    """Saving a file the program cannot open again is a one-way door."""
+    assert window.open_button.isEnabled()
+    assert window.open_button.accessibleName()
+
+
+def test_opening_a_project_reads_it_and_remembers_the_path(qtbot, window, tmp_path):
+    saved = tmp_path / "kept.duoinput.json"
+    window.set_session(window.session.apply(RenameProfile(1, "Nine")))
+    assert window.save_project(saved) is True
+    window.set_session(ProjectSession.new())
+    assert window.session.active_profile.name != "Nine"
+
+    assert window.open_project(saved) is True
+
+    assert window.session.active_profile.name == "Nine"
+    assert window.session.path == saved
+    assert window.last_project_path() == saved
+
+
+def test_a_project_that_cannot_be_read_is_reported_not_fatal(qtbot, window, tmp_path):
+    broken = tmp_path / "broken.duoinput.json"
+    broken.write_text("{ not json", encoding="utf-8")
+
+    assert window.open_project(broken) is False
+
+    assert window.session.path is None
+
+
+def test_the_last_project_is_reopened_on_the_next_run(qtbot, service, tmp_path, settings):
+    first = MainWindow(service, transport_factory=lambda: None, settings=settings)
+    qtbot.addWidget(first, before_close_func=_discard_on_teardown)
+    saved = tmp_path / "again.duoinput.json"
+    first.set_session(first.session.apply(RenameProfile(1, "Kept")))
+    assert first.save_project(saved) is True
+
+    later = MainWindow(DeviceService(timeout_ms=5000), transport_factory=lambda: None, settings=settings)
+    qtbot.addWidget(later, before_close_func=_discard_on_teardown)
+    later.reopen_last_project()
+
+    assert later.session.path == saved
+    assert later.session.active_profile.name == "Kept"
+
+
+def test_a_remembered_project_that_vanished_leaves_a_clean_start(qtbot, service, tmp_path, settings):
+    """A file moved or deleted between runs must not stop the program opening."""
+    gone = tmp_path / "gone.duoinput.json"
+    first = MainWindow(service, transport_factory=lambda: None, settings=settings)
+    qtbot.addWidget(first, before_close_func=_discard_on_teardown)
+    assert first.save_project(gone) is True
+    gone.unlink()
+
+    later = MainWindow(DeviceService(timeout_ms=5000), transport_factory=lambda: None, settings=settings)
+    qtbot.addWidget(later, before_close_func=_discard_on_teardown)
+    later.reopen_last_project()
+
+    assert later.session.path is None
 
 
 def test_minimum_window_size_shows_every_control(qtbot, window):

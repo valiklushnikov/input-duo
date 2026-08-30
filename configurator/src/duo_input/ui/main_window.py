@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QSettings, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -73,6 +73,10 @@ MINIMUM_HEIGHT = 700
 TransportFactory = Callable[[], object | None]
 
 
+#: Where the path of the last project is kept between runs, so the program
+#: opens what the operator was working on rather than an empty one.
+LAST_PROJECT_KEY = "projects/last"
+
 #: How often the shell looks for a device that is not attached yet. Short
 #: enough that plugging a board in feels immediate, long enough that the
 #: retry costs nothing while the socket stays empty.
@@ -121,12 +125,17 @@ class MainWindow(QMainWindow):
         session: ProjectSession | None = None,
         transport_factory: TransportFactory | None = None,
         translations: TranslationManager | None = None,
+        settings: QSettings | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = service
         self.translations = translations or TranslationManager()
         self._session = session if session is not None else ProjectSession.new()
+        # Injected so a test can point it at a temporary file. A default
+        # QSettings silently stores nothing until the application has been
+        # given an organisation name, which only app.main() does.
+        self._settings = settings if settings is not None else QSettings()
         #: Mouse buttons the attached device has actually reported.
         self._observed_buttons: frozenset[int] = frozenset()
         self.transport_factory = transport_factory or default_transport_factory
@@ -211,7 +220,8 @@ class MainWindow(QMainWindow):
 
         # Tab order follows the visual order: the toolbar row first, then the
         # section list and finally the page it selects.
-        self.setTabOrder(self.profile_selector, self.save_button)
+        self.setTabOrder(self.profile_selector, self.open_button)
+        self.setTabOrder(self.open_button, self.save_button)
         self.setTabOrder(self.save_button, self.write_button)
         self.setTabOrder(self.write_button, self.nav)
         self.setTabOrder(self.nav, self.pages)
@@ -236,6 +246,10 @@ class MainWindow(QMainWindow):
         set_role(self.connection_label, ROLE_CHIP)
         set_signal(self.connection_label, SIGNAL_MUTED)
 
+        self.open_button = QPushButton(self.tr("Open"), bar)
+        self.open_button.setAccessibleName(self.tr("Open a project file"))
+        self.open_button.clicked.connect(self._on_open_clicked)
+
         self.save_button = QPushButton(self.tr("Save"), bar)
         self.save_button.setAccessibleName(self.tr("Save the project file"))
         set_role(self.save_button, ROLE_PRIMARY)
@@ -253,6 +267,7 @@ class MainWindow(QMainWindow):
         row.addStretch(1)
         row.addWidget(self.connection_label)
         row.addSpacing(SPACE_MD)
+        row.addWidget(self.open_button)
         row.addWidget(self.save_button)
         row.addWidget(self.write_button)
         return bar
@@ -610,6 +625,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, self.tr("Save failed"), str(error))
             return False
         self.set_session(saved)
+        self._remember_project(saved.path)
         # The file on disk now holds everything the autosave was protecting.
         self.autosave.discard()
         self.statusBar().showMessage(self.tr("Project saved"))
@@ -617,6 +633,61 @@ class MainWindow(QMainWindow):
 
     def _on_save_clicked(self) -> None:
         self.save_project()
+
+    def _ask_open_path(self) -> Path | None:
+        name, _ = QFileDialog.getOpenFileName(
+            self, self.tr("Open project"), "", PROJECT_FILTER
+        )
+        return Path(name) if name else None
+
+    def _on_open_clicked(self) -> None:
+        path = self._ask_open_path()
+        if path is not None:
+            self.open_project(path)
+
+    def open_project(self, path: str | Path) -> bool:
+        """Read a project file into the session. False when it could not be read."""
+        try:
+            session = ProjectSession.load(path)
+        except (ProjectError, OSError) as error:
+            self.overview.append_event("open_project", type(error).__name__)
+            self.statusBar().showMessage(
+                self.tr("That project could not be opened: {0}").format(error)
+            )
+            return False
+        self.set_session(session)
+        self._remember_project(session.path)
+        # What is on screen is now what is on disk; the autosave was guarding
+        # the session this one replaced.
+        self.autosave.discard()
+        self.statusBar().showMessage(self.tr("Project opened"))
+        return True
+
+    def last_project_path(self) -> Path | None:
+        """The file this program had open when it was last used, if it is still there."""
+        stored = self._settings.value(LAST_PROJECT_KEY)
+        if not stored:
+            return None
+        path = Path(str(stored))
+        return path if path.is_file() else None
+
+    def _remember_project(self, path: Path | None) -> None:
+        if path is None:
+            return
+        self._settings.setValue(LAST_PROJECT_KEY, str(path))
+        self._settings.sync()
+
+    def reopen_last_project(self) -> bool:
+        """Open what was open last time, silently. False when there is nothing to open.
+
+        A file that has been moved or deleted since is not an error worth a
+        dialog: the operator gets an empty project and a line in the status
+        bar, which is what they would get from a first run anyway.
+        """
+        path = self.last_project_path()
+        if path is None:
+            return False
+        return self.open_project(path)
 
     # ----------------------------------------------------------------- device
 

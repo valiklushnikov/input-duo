@@ -44,6 +44,7 @@ def build_main_window(
     session: ProjectSession | None = None,
     translations: TranslationManager | None = None,
     transport_factory: object | None = None,
+    settings: object | None = None,
 ) -> MainWindow:
     """Create the shell with its device service and a clean project session.
 
@@ -56,7 +57,23 @@ def build_main_window(
         session if session is not None else ProjectSession.new(),
         translations=translations,
         transport_factory=transport_factory,
+        settings=settings,
     )
+
+
+def start_window(window: MainWindow) -> None:
+    """Show the shell and restore what the operator was working on.
+
+    This is a function rather than three lines inside ``main`` so that the
+    order can be tested: a step that only ``main`` performs is a step nothing
+    can prove is still wired.
+    """
+    window.show()
+    # The file first: a recovery is only offered when the autosave is newer
+    # than the project, and that comparison needs the project to be loaded.
+    window.reopen_last_project()
+    # Asked after the window exists, so the prompt has something to sit on.
+    window.offer_recovery()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -85,9 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     translations.load_saved()
 
     window = build_main_window(translations=translations)
-    window.show()
-    # Asked after the window exists, so the prompt has something to sit on.
-    window.offer_recovery()
+    start_window(window)
     return application.exec()
 
 
