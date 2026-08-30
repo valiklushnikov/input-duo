@@ -1112,3 +1112,57 @@ TEST_CASE(a_keyboard_that_declares_a_report_descriptor_is_still_not_asked) {
     CHECK(rig.setup.boot_protocol_selected());
     CHECK(rig.chip.boot_protocol_selected());
 }
+
+// --------------------------------------------------- what the device says it is
+//
+// The device descriptor is read on every enumeration and its two identifying
+// fields were being thrown away. They are the only way a compatibility matrix
+// can name the peripheral a row is about: a device plugged into U1's own USB
+// port is invisible to the computer at the other end of the CDC link, so
+// nothing else on either side can say what it was.
+
+TEST_CASE(the_device_descriptor_identifies_the_peripheral_that_answered) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_boot_mouse();
+
+    rig.begin(rig.chip.now_us());
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+
+    CHECK_EQ(rig.setup.vendor_id(), 0x1234u);
+    CHECK_EQ(rig.setup.product_id(), 0x5678u);
+}
+
+TEST_CASE(a_peripheral_that_never_answered_is_identified_as_nothing) {
+    Rig rig;
+
+    CHECK_EQ(rig.setup.vendor_id(), 0u);
+    CHECK_EQ(rig.setup.product_id(), 0u);
+}
+
+// The hash is what tells two devices with the same VID and PID apart, and what
+// catches a peripheral whose firmware changed between one run of the matrix and
+// the next. A device that gave up no report descriptor gets no hash rather than
+// the hash of nothing, which is a constant every such device would share.
+TEST_CASE(a_report_descriptor_that_was_read_is_hashed) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_boot_mouse();
+
+    rig.begin(rig.chip.now_us());
+    rig.settle();
+
+    bool any = false;
+    for (std::size_t index = 0; index < 32; ++index) {
+        any = any || rig.setup.report_descriptor_hash()[index] != 0;
+    }
+    CHECK_EQ(any, rig.setup.report_descriptor_bytes() != 0);
+}
+
+TEST_CASE(a_peripheral_with_no_report_descriptor_gets_no_hash) {
+    Rig rig;
+
+    for (std::size_t index = 0; index < 32; ++index) {
+        CHECK_EQ(rig.setup.report_descriptor_hash()[index], 0u);
+    }
+}

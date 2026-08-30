@@ -1005,6 +1005,95 @@ def test_a_latency_block_claiming_no_buckets_is_refused() -> None:
         parse_diagnostics(_diagnostics_head() + bytes((0,)))
 
 
+def _peripheral_block(*ports: tuple[int, int, int, int, int, int, int, bytes]) -> bytes:
+    import struct
+
+    out = b""
+    for attached, ready, kind, vid, pid, buttons, desc_bytes, digest in ports:
+        out += struct.pack(
+            "<BBBHHBH32s", attached, ready, kind, vid, pid, buttons, desc_bytes, digest
+        )
+    return out
+
+
+def _full_latency() -> bytes:
+    return _latency_block(
+        (250, 500, 1000, 2000, 5000, 10000, 20000, 50000),
+        (0, 0, (0,) * 9),
+        (0, 0, (0,) * 9),
+    )
+
+
+def test_the_device_names_the_peripherals_on_its_own_ports() -> None:
+    """A device plugged into U1 is on U1's bus, not either computer's, so no
+    host can enumerate it. This reply is the only place a compatibility matrix
+    can learn what a row is about."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        _diagnostics_head()
+        + _full_latency()
+        + _peripheral_block(
+            (1, 1, 1, 0x046D, 0xC31C, 0, 0, bytes(32)),
+            (1, 1, 2, 0x1234, 0x5678, 5, 67, bytes(range(32))),
+        )
+    )
+
+    ports = parse_diagnostics(payload).peripherals
+
+    assert ports is not None
+    assert len(ports) == 2
+    assert ports[0].vendor_id == 0x046D
+    assert ports[0].product_id == 0xC31C
+    assert ports[0].kind == "keyboard"
+    assert ports[1].kind == "mouse"
+    assert ports[1].buttons == 5
+    assert ports[1].descriptor_hash == bytes(range(32)).hex()
+
+
+def test_an_empty_port_is_reported_as_empty_not_omitted() -> None:
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        _diagnostics_head()
+        + _full_latency()
+        + _peripheral_block(
+            (0, 0, 0, 0, 0, 0, 0, bytes(32)),
+            (0, 0, 0, 0, 0, 0, 0, bytes(32)),
+        )
+    )
+
+    ports = parse_diagnostics(payload).peripherals
+
+    assert ports is not None
+    assert ports[0].attached is False
+    assert ports[0].kind == "none"
+    # No descriptor was read, so there is no hash - not the hash of nothing,
+    # which every such device would share.
+    assert ports[0].descriptor_hash is None
+
+
+def test_firmware_without_the_peripheral_block_still_parses() -> None:
+    from duo_input.device.transactions import parse_diagnostics
+
+    counters = parse_diagnostics(_diagnostics_head() + _full_latency())
+
+    assert counters.peripherals is None
+
+
+def test_a_truncated_peripheral_block_is_refused() -> None:
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        _diagnostics_head()
+        + _full_latency()
+        + _peripheral_block((0, 0, 0, 0, 0, 0, 0, bytes(32)))
+    )
+
+    with pytest.raises(PayloadError):
+        parse_diagnostics(payload)
+
+
 def test_diagnostics_without_the_endpoint_report_are_still_readable() -> None:
     import struct
 

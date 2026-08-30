@@ -1,5 +1,7 @@
 #include "ch375/descriptor_setup.hpp"
 
+#include "crypto/sha256.hpp"
+
 namespace duo_input::u1::ch375 {
 namespace {
 
@@ -114,6 +116,12 @@ SetupProgress DescriptorSetup::fail(std::uint8_t status) {
 SetupProgress DescriptorSetup::finish(std::uint8_t status) {
     step_ = Step::Idle;
     last_status_ = status;
+    // Once, here, rather than on every read of the accessor: this runs on the
+    // core that reads peripherals, and a SHA-256 per pass round its loop would
+    // be paid a thousand times a second to answer a question asked once.
+    if (report_received_ != 0) {
+        duo_input::crypto::sha256(report_buffer_, report_received_, report_hash_);
+    }
     // Whatever the device did about its report descriptor, it is up. The next
     // device to arrive on this channel gets the full three tries again.
     report_silences_ = 0;
@@ -360,6 +368,13 @@ SetupProgress DescriptorSetup::poll(std::uint32_t now_us, bool interrupted,
             // the size is what says which packet is the last one. Only the
             // four legal values are believed; anything else would either end
             // the transfer early or ask for a packet that never comes.
+            // idVendor and idProduct (USB 2.0 9.6.1, offsets 8 and 10). The
+            // only place this firmware ever learns what the peripheral is, and
+            // the only thing that can name a row of the compatibility matrix.
+            if (size >= 12) {
+                vendor_id_ = static_cast<std::uint16_t>(buffer[8] | (buffer[9] << 8));
+                product_id_ = static_cast<std::uint16_t>(buffer[10] | (buffer[11] << 8));
+            }
             const std::uint8_t declared = buffer[kMaxPacketSizeOffset];
             if (declared == 8 || declared == 16 || declared == 32 || declared == 64) {
                 control_packet_ = declared;

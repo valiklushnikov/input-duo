@@ -674,7 +674,7 @@ TEST_CASE(diagnostics_carry_the_latency_the_device_measured_of_itself) {
     CHECK_EQ(read_u32(p + mouse_at), 1u);
     CHECK_EQ(read_u32(p + mouse_at + 4), 80u);
     CHECK_EQ(read_u32(p + mouse_at + 8), 1u);
-    CHECK_EQ(mouse_at + 8 + 4 * buckets, duo_input::u1::kDiagnosticsPayloadSize);
+    CHECK_EQ(mouse_at + 8 + 4 * buckets, duo_input::u1::kPeripheralBlockOffset);
 }
 
 // A device that has been running and seen nothing must not look like a device
@@ -689,6 +689,69 @@ TEST_CASE(a_device_that_has_measured_nothing_reports_no_samples) {
     const std::size_t keyboard_at = 44 + 4 * (buckets - 1);
 
     CHECK_EQ(read_u32(reply.payload.data + keyboard_at), 0u);
+}
+
+// Which peripherals are on U1's own USB ports, and what they are.
+//
+// A device plugged into U1 is invisible to the computer at the other end of
+// this link, so without this a compatibility matrix has no way to name the
+// device a row is about - and "keyboard 3" is not something anyone can act on
+// six months later. Two ports, always both reported: a port with nothing on it
+// is a fact about the run, not an absence to be inferred.
+TEST_CASE(diagnostics_name_the_peripherals_on_the_two_ports) {
+    Link link;
+    link.hello();
+    duo_input::u1::PeripheralPort keyboard;
+    keyboard.attached = true;
+    keyboard.ready = true;
+    keyboard.kind = 1;
+    keyboard.vendor_id = 0x046D;
+    keyboard.product_id = 0xC31C;
+    keyboard.report_descriptor_bytes = 0;
+    duo_input::u1::PeripheralPort mouse;
+    mouse.attached = true;
+    mouse.ready = false;
+    mouse.kind = 2;
+    mouse.vendor_id = 0x1234;
+    mouse.product_id = 0x5678;
+    mouse.buttons = 5;
+    mouse.report_descriptor_bytes = 67;
+    for (std::size_t index = 0; index < 32; ++index) {
+        mouse.descriptor_hash[index] = static_cast<std::uint8_t>(index + 1);
+    }
+    link.service.set_peripherals(keyboard, mouse);
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::uint8_t* p = reply.payload.data;
+    const std::size_t at = duo_input::u1::kPeripheralBlockOffset;
+
+    CHECK_EQ(p[at], 1u);
+    CHECK_EQ(p[at + 1], 1u);
+    CHECK_EQ(p[at + 2], 1u);
+    CHECK_EQ(static_cast<std::uint16_t>(p[at + 3] | (p[at + 4] << 8)), 0x046Du);
+    CHECK_EQ(static_cast<std::uint16_t>(p[at + 5] | (p[at + 6] << 8)), 0xC31Cu);
+
+    const std::size_t second = at + duo_input::u1::kPeripheralPortBytes;
+    CHECK_EQ(p[second + 1], 0u);
+    CHECK_EQ(p[second + 2], 2u);
+    CHECK_EQ(static_cast<std::uint16_t>(p[second + 3] | (p[second + 4] << 8)), 0x1234u);
+    CHECK_EQ(p[second + 7], 5u);
+    CHECK_EQ(static_cast<std::uint16_t>(p[second + 8] | (p[second + 9] << 8)), 67u);
+    CHECK_EQ(p[second + 10], 1u);
+    CHECK_EQ(p[second + 41], 32u);
+    CHECK_EQ(second + duo_input::u1::kPeripheralPortBytes,
+             duo_input::u1::kDiagnosticsPayloadSize);
+}
+
+TEST_CASE(an_empty_port_is_reported_as_empty_rather_than_left_out) {
+    Link link;
+    link.hello();
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::size_t at = duo_input::u1::kPeripheralBlockOffset;
+
+    CHECK_EQ(reply.payload.data[at], 0u);
+    CHECK_EQ(reply.payload.data[at + duo_input::u1::kPeripheralPortBytes], 0u);
 }
 
 // The reply is one frame and the frame has a ceiling. This block grew the

@@ -73,6 +73,34 @@ duo_input::u1::StoredProfiles g_profiles;
 /// Everything between a peripheral report and a queued command.
 duo_input::u1::Core1Runtime g_runtime(g_commands, g_profiles);
 
+/// What one peripheral port has on it, as the host has to see it.
+///
+/// Read from the two objects that already know - the controller's state machine
+/// and the enumeration that configured whatever it found - rather than kept as
+/// a third copy that could disagree with either.
+duo_input::u1::PeripheralPort describe_port(
+    const duo_input::u1::ch375::Ch375Device& device,
+    const duo_input::u1::ch375::DescriptorSetup& setup) {
+    duo_input::u1::PeripheralPort port;
+    const duo_input::u1::ch375::Ch375State state = device.state();
+    port.attached = state != duo_input::u1::ch375::Ch375State::Absent;
+    port.ready = state == duo_input::u1::ch375::Ch375State::Ready;
+    port.kind = static_cast<std::uint8_t>(setup.kind());
+    port.vendor_id = setup.vendor_id();
+    port.product_id = setup.product_id();
+    // Only from a descriptor the device actually gave up. A boot-protocol
+    // mouse is read under an assumed three-button layout, and reporting that
+    // assumption as the device's own declaration would put a number in the
+    // matrix that the peripheral never said.
+    port.buttons = setup.has_mouse_layout()
+                       ? static_cast<std::uint8_t>(setup.mouse_layout().buttons.bits)
+                       : 0;
+    port.report_descriptor_bytes = setup.report_descriptor_bytes();
+    std::memcpy(port.descriptor_hash, setup.report_descriptor_hash(),
+                sizeof(port.descriptor_hash));
+    return port;
+}
+
 /// Where a normalized event goes.
 class RuntimeInput final : public duo_input::u1::input::IInputHandler {
 public:
@@ -989,6 +1017,14 @@ int main() {
         // being applied here - and not a keystroke's journey to a far screen,
         // which this board has no way to observe either end of.
         config.set_input_latency(g_outputs.keyboard_latency(), g_outputs.mouse_latency());
+
+        // What is on the two peripheral ports, published every pass. A device
+        // plugged into U1 is on U1's bus and not on either computer's, so this
+        // reply is the only place anything can learn what it was - which is
+        // what a compatibility matrix row needs and what nothing else can
+        // supply. Both ports always: an empty port is a fact about the run.
+        config.set_peripherals(describe_port(g_keyboard_device, g_keyboard_setup),
+                               describe_port(g_mouse_device, g_mouse_setup));
 
         show_link(link.status().answered);
 

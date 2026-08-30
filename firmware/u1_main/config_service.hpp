@@ -82,8 +82,37 @@ public:
     virtual bool clear() = 0;
 };
 
+/// One of U1's own USB ports, as the host has to see it.
+///
+/// A peripheral plugged in here is invisible to both computers - it is on U1's
+/// bus, not theirs - so this reply is the only place a compatibility matrix can
+/// learn what device a row is about. "Keyboard 3" is not something anyone can
+/// act on six months later; 046D:C31C with a descriptor hash is.
+struct PeripheralPort {
+    /// Something is on the port. Not the same as usable.
+    bool attached = false;
+    /// It was configured and its reports are being read.
+    bool ready = false;
+    /// What enumeration made of it: 0 unknown, 1 keyboard, 2 mouse. The same
+    /// numbering as ch375::DeviceKind, which is where the value comes from.
+    std::uint8_t kind = 0;
+    std::uint16_t vendor_id = 0;
+    std::uint16_t product_id = 0;
+    /// How many buttons this mouse declared. Zero for a keyboard, and for a
+    /// mouse that gave up no report descriptor to declare them in.
+    std::uint8_t buttons = 0;
+    /// How many bytes of report descriptor were read. Zero means none was.
+    std::uint16_t report_descriptor_bytes = 0;
+    /// SHA-256 of those bytes, or zeros when there were none.
+    std::uint8_t descriptor_hash[32] = {};
+};
+
 /// Largest wire frame: header, maximum payload, CRC, COBS overhead, delimiter.
 inline constexpr std::size_t kMaxWireFrame = 1100;
+
+/// One port on the wire: attached, ready, kind, VID, PID, buttons, descriptor
+/// length and its hash.
+inline constexpr std::size_t kPeripheralPortBytes = 1 + 1 + 1 + 2 + 2 + 1 + 2 + 32;
 
 /// How long a GET_DIAGNOSTICS reply is on the release build.
 ///
@@ -94,9 +123,12 @@ inline constexpr std::size_t kMaxWireFrame = 1100;
 ///
 /// Everything is appended and nothing is ever moved, so a host that stops
 /// reading at any earlier boundary still reads what it always read.
-inline constexpr std::size_t kDiagnosticsPayloadSize =
+inline constexpr std::size_t kPeripheralBlockOffset =
     43 + 1 + 4 * (diagnostics::kLatencyBucketCount - 1) +
     2 * (8 + 4 * diagnostics::kLatencyBucketCount);
+
+inline constexpr std::size_t kDiagnosticsPayloadSize =
+    kPeripheralBlockOffset + 2 * kPeripheralPortBytes;
 
 static_assert(kDiagnosticsPayloadSize <= protocol::ProtocolLimits::CDC_MAX_PAYLOAD,
               "the diagnostics reply has to fit in one frame");
@@ -159,6 +191,16 @@ public:
                            const diagnostics::LatencyHistogram& mouse) {
         keyboard_latency_ = keyboard;
         mouse_latency_ = mouse;
+    }
+
+    /// Publish what is on the two peripheral ports.
+    ///
+    /// Gathered by the main loop from enumeration, for the same reason as
+    /// everything else here: this class must not reach across to Core 1's
+    /// controllers, and the controllers must not know what a CDC frame is.
+    void set_peripherals(const PeripheralPort& keyboard, const PeripheralPort& mouse) {
+        keyboard_port_ = keyboard;
+        mouse_port_ = mouse;
     }
 
     /// Which profile the device is running.
@@ -327,6 +369,8 @@ private:
     LinkState link_state_{};
     diagnostics::LatencyHistogram keyboard_latency_{};
     diagnostics::LatencyHistogram mouse_latency_{};
+    PeripheralPort keyboard_port_{};
+    PeripheralPort mouse_port_{};
 
 #if DUO_SPI_DEBUG || DUO_CH375_PROBE
     // One byte short of what a CDC reply can carry, because the payload leads

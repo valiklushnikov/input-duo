@@ -37,6 +37,7 @@ _DROPPED_COMMANDS = struct.Struct("<I")
 _RUNTIME_FAULT = struct.Struct("<B")
 _LATENCY_HEAD = struct.Struct("<II")
 _U32 = struct.Struct("<I")
+_PERIPHERAL = struct.Struct("<BBBHHBH32s")
 _CHUNK_ACK = struct.Struct("<BI")
 _CAPTURE_EVENT = struct.Struct("<BBB")
 
@@ -173,6 +174,37 @@ class LatencyHistogram:
         return self.count > 0 and self.at_or_below(bound_us) >= -(-self.count * 95 // 100)
 
 
+#: What enumeration made of a port, by the number the firmware sends.
+_PERIPHERAL_KINDS = {0: "unknown", 1: "keyboard", 2: "mouse"}
+
+
+@dataclass(frozen=True)
+class PeripheralPort:
+    """One of U1's own USB ports and whatever is on it.
+
+    A peripheral here is on U1's bus and not on either computer's, so no host
+    can enumerate it and no operator transcription of it is a measurement. Every
+    field is what the device reported about the device it found.
+    """
+
+    attached: bool
+    ready: bool
+    #: "none", "unknown", "keyboard" or "mouse". "none" when nothing is
+    #: attached, which is different from a device that enumerated as nothing
+    #: recognisable.
+    kind: str
+    vendor_id: int
+    product_id: int
+    #: Buttons this mouse declared in its own report descriptor. ``None`` when
+    #: it declared none - a boot-protocol mouse is read under an assumed layout,
+    #: and the assumption is not something the device said.
+    buttons: int | None
+    report_descriptor_bytes: int
+    #: Hex SHA-256 of the report descriptor, or ``None`` when none was read.
+    #: Not the hash of an empty buffer, which every such device would share.
+    descriptor_hash: str | None
+
+
 @dataclass(frozen=True)
 class DeviceDiagnostics:
     bad_crc: int
@@ -227,6 +259,12 @@ class DeviceDiagnostics:
     # emulator: it has no input pipeline and no peripheral to time.
     keyboard_latency: LatencyHistogram | None = None
     mouse_latency: LatencyHistogram | None = None
+
+    # The two peripheral ports, in the order the firmware reports them: the
+    # keyboard channel and then the mouse channel. ``None`` when the firmware
+    # predates the block; a port with nothing on it is still a row, because an
+    # empty port is a fact about the run rather than an absence to infer.
+    peripherals: tuple[PeripheralPort, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -377,9 +415,10 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
         raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
     (runtime_fault,) = _RUNTIME_FAULT.unpack(fault) if fault else (None,)
 
-    keyboard_latency, mouse_latency = _parse_latency(
-        tail[_DROPPED_COMMANDS.size + _RUNTIME_FAULT.size :]
-    )
+    rest = tail[_DROPPED_COMMANDS.size + _RUNTIME_FAULT.size :]
+    latency_bytes = _latency_block_size(rest)
+    keyboard_latency, mouse_latency = _parse_latency(rest[:latency_bytes])
+    peripherals = _parse_peripherals(rest[latency_bytes:])
 
     return DeviceDiagnostics(
         bad_crc,
@@ -398,6 +437,7 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
         runtime_fault=runtime_fault,
         keyboard_latency=keyboard_latency,
         mouse_latency=mouse_latency,
+        peripherals=peripherals,
     )
 
 
@@ -440,6 +480,57 @@ def _parse_latency(
         at += stream_bytes
 
     return (histograms[0], histograms[1])
+
+
+def _latency_block_size(rest: bytes) -> int:
+    """How much of ``rest`` the latency block occupies.
+
+    The block leads with its own bucket count, so its length is readable from
+    the first byte. That is what lets a later block be appended behind it
+    without either end holding a hard-coded offset that the other can change.
+    """
+    if not rest:
+        return 0
+    bucket_count = rest[0]
+    if bucket_count < 2:
+        raise PayloadError(
+            "GET_DIAGNOSTICS latency block claims fewer than two buckets"
+        )
+    return 1 + 4 * (bucket_count - 1) + 2 * (_LATENCY_HEAD.size + 4 * bucket_count)
+
+
+def _parse_peripherals(block: bytes) -> tuple[PeripheralPort, ...] | None:
+    """Read the two peripheral ports, or report that the firmware sent none."""
+    if not block:
+        return None
+    if len(block) != 2 * _PERIPHERAL.size:
+        raise PayloadError("GET_DIAGNOSTICS peripheral block has the wrong size")
+
+    ports: list[PeripheralPort] = []
+    for index in range(2):
+        (
+            attached,
+            ready,
+            kind,
+            vendor_id,
+            product_id,
+            buttons,
+            descriptor_bytes,
+            digest,
+        ) = _PERIPHERAL.unpack_from(block, index * _PERIPHERAL.size)
+        ports.append(
+            PeripheralPort(
+                attached=bool(attached),
+                ready=bool(ready),
+                kind=_PERIPHERAL_KINDS.get(kind, "unknown") if attached else "none",
+                vendor_id=vendor_id,
+                product_id=product_id,
+                buttons=buttons or None,
+                report_descriptor_bytes=descriptor_bytes,
+                descriptor_hash=digest.hex() if descriptor_bytes else None,
+            )
+        )
+    return tuple(ports)
 
 
 def parse_capture_event(payload: bytes) -> Trigger:
@@ -508,6 +599,7 @@ __all__ = [
     "FrameAssembler",
     "FrameOverflowError",
     "LatencyHistogram",
+    "PeripheralPort",
     "OperationFailure",
     "OperationResult",
     "PayloadError",

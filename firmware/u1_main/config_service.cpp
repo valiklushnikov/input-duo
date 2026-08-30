@@ -58,6 +58,24 @@ std::size_t write_latency(std::uint8_t* out,
     return 8 + 4 * diagnostics::kLatencyBucketCount;
 }
 
+void put_u16(std::uint8_t* out, std::uint16_t value) {
+    out[0] = static_cast<std::uint8_t>(value);
+    out[1] = static_cast<std::uint8_t>(value >> 8);
+}
+
+/// One peripheral port on the wire.
+std::size_t write_peripheral(std::uint8_t* out, const PeripheralPort& port) {
+    out[0] = port.attached ? 1 : 0;
+    out[1] = port.ready ? 1 : 0;
+    out[2] = port.kind;
+    put_u16(out + 3, port.vendor_id);
+    put_u16(out + 5, port.product_id);
+    out[7] = port.buttons;
+    put_u16(out + 8, port.report_descriptor_bytes);
+    std::memcpy(out + 10, port.descriptor_hash, sizeof(port.descriptor_hash));
+    return kPeripheralPortBytes;
+}
+
 std::uint32_t take_u32(const std::uint8_t* data) {
     return static_cast<std::uint32_t>(data[0]) |
            (static_cast<std::uint32_t>(data[1]) << 8) |
@@ -386,6 +404,13 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
     }
     at += write_latency(out + at, keyboard_latency_);
     at += write_latency(out + at, mouse_latency_);
+
+    // And what is on the two peripheral ports. Both always, empty or not: a
+    // port with nothing on it is a fact about the run, and a reader inferring
+    // it from a shorter reply would be inferring it from the same absence that
+    // an older firmware produces.
+    at += write_peripheral(out + at, keyboard_port_);
+    at += write_peripheral(out + at, mouse_port_);
     return at;
 #endif
 }

@@ -136,6 +136,24 @@ public:
         return protocol::ByteView{report_buffer_, report_received_};
     }
 
+    /// What the device said it is, from its own device descriptor.
+    ///
+    /// Read on every enumeration and kept, because a peripheral plugged into
+    /// U1's own USB port is invisible to the computer at the other end of the
+    /// CDC link: nothing else on either side can say which device a row of a
+    /// compatibility matrix is about. Zero until a device has answered.
+    std::uint16_t vendor_id() const { return vendor_id_; }
+    std::uint16_t product_id() const { return product_id_; }
+
+    /// SHA-256 of the report descriptor this device gave up, or zeros.
+    ///
+    /// What tells two devices sharing a VID and PID apart, and what catches a
+    /// peripheral whose own firmware changed between one run of the matrix and
+    /// the next. All zeros means no report descriptor was read - a keyboard,
+    /// or a mouse that declined - rather than the hash of an empty buffer,
+    /// which is a constant every such device would share.
+    const std::uint8_t* report_descriptor_hash() const { return report_hash_; }
+
     /// Why the last attempt ended, for a bring-up build to report.
     std::uint8_t last_status() const { return last_status_; }
     ParseError last_parse_error() const { return last_parse_error_; }
@@ -207,6 +225,11 @@ private:
     std::uint8_t control_packet_ = 8;
     std::uint16_t report_wanted_ = 0;
     std::uint16_t report_received_ = 0;
+    /// Computed once, when a setup ends. Recomputing it per pass would be a
+    /// SHA-256 every millisecond to answer a question nobody asked twice.
+    std::uint8_t report_hash_[32] = {};
+    std::uint16_t vendor_id_ = 0;
+    std::uint16_t product_id_ = 0;
     bool report_toggle_data1_ = true;
     std::uint8_t report_buffer_[kMaxReportDescriptorBytes] = {};
 };
