@@ -123,6 +123,7 @@ try {
         --output-dir=dist --output-filename=DuoInput.exe `
         --include-qt-plugins=platforms,styles `
         --include-data-files="src/duo_input/resources/translations/*.qm=duo_input/resources/translations/" `
+        --include-data-files="src/duo_input/resources/*.png=duo_input/resources/" `
         --product-name='Duo Input Configurator' `
         --product-version=$version --file-version=$version `
         --file-description='Duo Input configurator' `

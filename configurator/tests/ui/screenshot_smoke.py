@@ -64,6 +64,12 @@ def main() -> int:
     from duo_input.device.service import DeviceService
     from duo_input.i18n import TranslationManager
     from duo_input.ui.main_window import MainWindow
+    from duo_input.ui.theme import apply_theme
+
+    # Without this the offscreen platform renders every glyph as an empty box:
+    # its font database starts empty, so the shipped interface has to hand it
+    # the faces Windows already has before anything is grabbed.
+    apply_theme(application)
 
     translations = TranslationManager(application)
     translations.set_language(arguments.language, remember=False)

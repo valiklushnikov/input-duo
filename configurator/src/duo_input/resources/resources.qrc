@@ -8,4 +8,8 @@
     <file>translations/duo_input_ru.qm</file>
     <file>translations/duo_input_en.qm</file>
   </qresource>
+  <qresource prefix="/theme">
+    <file>chevron-down.png</file>
+    <file>chevron-down@2x.png</file>
+  </qresource>
 </RCC>

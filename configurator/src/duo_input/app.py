@@ -17,6 +17,7 @@ from duo_input.i18n import TranslationManager
 from duo_input.persistence.locations import configure_logging
 from duo_input.ui.main_window import APPLICATION_NAME, MainWindow
 from duo_input.ui.models.project_session import ProjectSession
+from duo_input.ui.theme import apply_theme
 
 #: Console script target declared in ``pyproject.toml``.
 ENTRY_POINT = "duo_input.app:main"
@@ -54,6 +55,10 @@ def main(argv: list[str] | None = None) -> int:
     application.setApplicationVersion(__version__)
     application.setOrganizationName(ORGANISATION_NAME)
     configure_application()
+
+    # The look is installed before the first widget exists, so nothing is ever
+    # built, shown and then restyled in front of the operator.
+    apply_theme(application)
 
     # The language is installed before any widget exists, so every label is
     # built in the language the operator chose last time.

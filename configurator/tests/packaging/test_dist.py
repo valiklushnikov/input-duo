@@ -77,6 +77,14 @@ def test_both_compiled_catalogues_ship(files, language):
     assert f"duo_input_{language}.qm" in names
 
 
+def test_the_chevron_the_interface_draws_ships(files):
+    """The combo boxes point at this file; without it they lose their arrow."""
+    names = {path.name for path in files}
+
+    assert "chevron-down.png" in names
+    assert "chevron-down@2x.png" in names
+
+
 def test_the_licence_notices_ship(files):
     names = {path.name for path in files}
 
