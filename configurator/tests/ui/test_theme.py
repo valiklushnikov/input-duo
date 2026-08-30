@@ -110,6 +110,15 @@ def test_two_signals_are_never_mistaken_for_one_another(first, second):
     assert _distance(first, second) >= 100
 
 
+def test_the_accent_is_never_mistaken_for_the_destructive_colour():
+    """Blue means "you may act"; red means "this overwrites the device".
+
+    An accent that reads as red turns every ordinary button into the one
+    button the operator is supposed to hesitate over.
+    """
+    assert _distance(theme.ACCENT, theme.DANGER) >= 100
+
+
 def test_a_signal_is_never_carried_by_colour_alone():
     """Every signal has a tint behind it as well as a colour on the text."""
     tints = {theme.SIGNAL_TINTS[signal] for signal in (theme.OK, theme.WARN, theme.DANGER, theme.ACCENT)}

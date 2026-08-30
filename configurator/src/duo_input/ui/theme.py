@@ -44,33 +44,33 @@ from PySide6.QtWidgets import (
 # something". Nothing is coloured for decoration.
 
 #: Body text: headings, values, anything the operator reads to get an answer.
-INK = "#16191D"
+INK = "#17191C"
 #: Field labels and secondary text. Readable, deliberately not the loudest.
-INK_MUTED = "#5A626D"
+INK_MUTED = "#565B63"
 #: Absence of data. Quieter than a label so ``unknown`` cannot pass for a value.
-INK_FAINT = "#7F8794"
+INK_FAINT = "#7C838D"
 
 #: Cards, tables and text inputs.
 SURFACE = "#FFFFFF"
 #: The page behind the cards.
-CANVAS = "#F1F3F5"
+CANVAS = "#F2F2F0"
 #: Toolbar, state strip and status bar - the frame around the pages.
-CHROME = "#EDEFF3"
+CHROME = "#EDEDEA"
 #: Hairlines between and around things.
-LINE = "#D8DDE4"
+LINE = "#D9D9D4"
 #: The heavier line an input or a button draws around itself.
-LINE_STRONG = "#C3CAD3"
+LINE_STRONG = "#C6C6C0"
 
 #: The navigation rail: dark, so the chrome never competes with the content.
-RAIL = "#1E2530"
+RAIL = "#22242A"
 RAIL_INK = "#C3CAD4"
 RAIL_INK_ACTIVE = "#FFFFFF"
-RAIL_HOVER = "#2A3341"
+RAIL_HOVER = "#2E313A"
 
 #: Interactive. Save, selection, focus.
-ACCENT = "#1A63D8"
-ACCENT_STRONG = "#1450B4"
-ACCENT_TINT = "#EDF3FE"
+ACCENT = "#2A5C8A"
+ACCENT_STRONG = "#22496D"
+ACCENT_TINT = "#EBF0F5"
 
 #: Agreement: saved, in sync, connected.
 OK = "#16743F"
