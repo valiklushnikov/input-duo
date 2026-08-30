@@ -9,7 +9,7 @@ so the operator sees the reason next to the button instead of a failed write.
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -50,6 +50,7 @@ from duo_input.ui.models.project_session import (
     RemoveBinding,
     UpdateBinding,
 )
+from duo_input.ui import motion
 from duo_input.ui.theme import (
     ROLE_BANNER,
     ROLE_PRIMARY,
@@ -58,6 +59,7 @@ from duo_input.ui.theme import (
     SPACE_LG,
     SPACE_MD,
     SPACE_SM,
+    CountdownRing,
     fact_form,
     field_label,
     page_header,
@@ -99,6 +101,7 @@ class CaptureDialog(QDialog):
 
         self.setWindowTitle(self.tr("Detect a key or button"))
         self.setModal(True)
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         layout = QVBoxLayout(self)
         prompt = (
             self.tr("Press the mouse button you want to use.")
@@ -107,10 +110,9 @@ class CaptureDialog(QDialog):
         )
         self.prompt_label = QLabel(prompt, self)
         self.prompt_label.setWordWrap(True)
-        self.countdown_label = QLabel(self)
-        self.countdown_label.setAccessibleName(self.tr("Time left to press a key"))
         layout.addWidget(self.prompt_label)
-        layout.addWidget(self.countdown_label)
+        self.ring = CountdownRing(CAPTURE_SECONDS, self)
+        layout.addWidget(self.ring, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel, self)
         self.buttons.rejected.connect(self.reject)
@@ -121,6 +123,7 @@ class CaptureDialog(QDialog):
         self._timer.timeout.connect(self.tick)
         self._service.capture_received.connect(self._on_capture_received)
         self._refresh()
+        motion.fade_in(self, motion.SCRIM)
 
     @property
     def trigger(self) -> Trigger | None:
@@ -137,6 +140,7 @@ class CaptureDialog(QDialog):
         self._remaining = CAPTURE_SECONDS
         self._refresh()
         self._timer.start()
+        motion.lift_in(self)
         self._service.begin_capture()
 
     def tick(self) -> None:
@@ -148,9 +152,7 @@ class CaptureDialog(QDialog):
             self.reject()
 
     def _refresh(self) -> None:
-        self.countdown_label.setText(
-            self.tr("{0} s left").format(max(self._remaining, 0))
-        )
+        self.ring.set_remaining(max(self._remaining, 0))
 
     def _on_capture_received(self, payload: bytes) -> None:
         try:

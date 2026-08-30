@@ -23,176 +23,176 @@
 <context>
     <name>BindingsPage</name>
     <message>
-        <location filename="../../ui/bindings.py" line="196"/>
+        <location filename="../../ui/bindings.py" line="198"/>
         <source>Bindings</source>
         <extracomment>A mouse button the device just reported, so the shell can remember it.</extracomment>
         <translation>Назначения</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="197"/>
+        <location filename="../../ui/bindings.py" line="199"/>
         <source>Choose what a key or mouse button does in this profile.</source>
         <translation>Настройте действия клавиш и кнопок мыши в этом профиле.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="204"/>
+        <location filename="../../ui/bindings.py" line="206"/>
         <source>Bindings of the active profile</source>
         <translation>Назначения активного профиля</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="219"/>
+        <location filename="../../ui/bindings.py" line="221"/>
         <source>Binding</source>
         <translation>Назначение</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="227"/>
+        <location filename="../../ui/bindings.py" line="229"/>
         <source>Trigger kind</source>
         <translation>Вид триггера</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="228"/>
-        <location filename="../../ui/bindings.py" line="234"/>
+        <location filename="../../ui/bindings.py" line="230"/>
+        <location filename="../../ui/bindings.py" line="236"/>
         <source>Keyboard key</source>
         <translation>Клавиша клавиатуры</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="229"/>
-        <location filename="../../ui/bindings.py" line="242"/>
+        <location filename="../../ui/bindings.py" line="231"/>
+        <location filename="../../ui/bindings.py" line="244"/>
         <source>Mouse button</source>
         <translation>Кнопка мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="231"/>
+        <location filename="../../ui/bindings.py" line="233"/>
         <source>Trigger:</source>
         <translation>Триггер:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="238"/>
+        <location filename="../../ui/bindings.py" line="240"/>
         <source>Key:</source>
         <translation>Клавиша:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="244"/>
+        <location filename="../../ui/bindings.py" line="246"/>
         <source>Button:</source>
         <translation>Кнопка:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="251"/>
+        <location filename="../../ui/bindings.py" line="253"/>
         <source>{0} modifier</source>
         <translation>Модификатор {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="256"/>
+        <location filename="../../ui/bindings.py" line="258"/>
         <source>Modifiers:</source>
         <translation>Модификаторы:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="259"/>
+        <location filename="../../ui/bindings.py" line="261"/>
         <source>Binding mode</source>
         <translation>Режим назначения</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="260"/>
+        <location filename="../../ui/bindings.py" line="262"/>
         <source>Replace</source>
         <translation>Заменить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="261"/>
-        <location filename="../../ui/bindings.py" line="289"/>
+        <location filename="../../ui/bindings.py" line="263"/>
+        <location filename="../../ui/bindings.py" line="291"/>
         <source>Add</source>
         <translation>Добавить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="262"/>
+        <location filename="../../ui/bindings.py" line="264"/>
         <source>Mode:</source>
         <translation>Режим:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="265"/>
+        <location filename="../../ui/bindings.py" line="267"/>
         <source>Action</source>
         <translation>Действие</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="270"/>
+        <location filename="../../ui/bindings.py" line="272"/>
         <source>Action:</source>
         <translation>Действие:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="273"/>
+        <location filename="../../ui/bindings.py" line="275"/>
         <source>Action target</source>
         <translation>Цель действия</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="275"/>
+        <location filename="../../ui/bindings.py" line="277"/>
         <source>Target:</source>
         <translation>Цель:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="279"/>
+        <location filename="../../ui/bindings.py" line="281"/>
         <source>Why this binding cannot be used</source>
         <translation>Почему это назначение нельзя применить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="286"/>
+        <location filename="../../ui/bindings.py" line="288"/>
         <source>Detect</source>
         <translation>Определить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="287"/>
+        <location filename="../../ui/bindings.py" line="289"/>
         <source>Detect the trigger on the device</source>
         <translation>Определить триггер на устройстве</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="290"/>
+        <location filename="../../ui/bindings.py" line="292"/>
         <source>Add this binding</source>
         <translation>Добавить это назначение</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="293"/>
+        <location filename="../../ui/bindings.py" line="295"/>
         <source>Apply</source>
         <translation>Применить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="294"/>
+        <location filename="../../ui/bindings.py" line="296"/>
         <source>Apply the changes to the selected binding</source>
         <translation>Применить изменения к выбранному назначению</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="296"/>
+        <location filename="../../ui/bindings.py" line="298"/>
         <source>Remove</source>
         <translation>Удалить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="297"/>
+        <location filename="../../ui/bindings.py" line="299"/>
         <source>Remove the selected binding</source>
         <translation>Удалить выбранное назначение</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="467"/>
+        <location filename="../../ui/bindings.py" line="469"/>
         <source>Button {0}</source>
         <translation>Кнопка {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="526"/>
+        <location filename="../../ui/bindings.py" line="528"/>
         <source>No mouse is attached, so no mouse button can be bound.</source>
         <translation>Мышь не подключена, поэтому назначить кнопку мыши нельзя.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="529"/>
+        <location filename="../../ui/bindings.py" line="531"/>
         <source>Choose a trigger first.</source>
         <translation>Сначала выберите триггер.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="532"/>
+        <location filename="../../ui/bindings.py" line="534"/>
         <source>This profile has no macros to run.</source>
         <translation>В этом профиле нет макросов для запуска.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="534"/>
+        <location filename="../../ui/bindings.py" line="536"/>
         <source>Choose what the trigger should do.</source>
         <translation>Выберите, что должен делать триггер.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="539"/>
+        <location filename="../../ui/bindings.py" line="541"/>
         <source>{0} is already bound in this profile.</source>
         <translation>{0} уже назначен в этом профиле.</translation>
     </message>
@@ -200,30 +200,28 @@
 <context>
     <name>CaptureDialog</name>
     <message>
-        <location filename="../../ui/bindings.py" line="100"/>
+        <location filename="../../ui/bindings.py" line="102"/>
         <source>Detect a key or button</source>
         <extracomment>Seconds the device keeps capture mode open, mirrored from the design spec. Actions whose argument is fixed at zero.</extracomment>
         <translation>Определение клавиши или кнопки</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="104"/>
+        <location filename="../../ui/bindings.py" line="107"/>
         <source>Press the mouse button you want to use.</source>
         <translation>Нажмите кнопку мыши, которую хотите использовать.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="106"/>
+        <location filename="../../ui/bindings.py" line="109"/>
         <source>Press the key or mouse button you want to bind.</source>
         <translation>Нажмите клавишу или кнопку мыши, которую хотите назначить.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="111"/>
         <source>Time left to press a key</source>
-        <translation>Осталось времени на нажатие</translation>
+        <translation type="vanished">Осталось времени на нажатие</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="152"/>
         <source>{0} s left</source>
-        <translation>осталось {0} с</translation>
+        <translation type="vanished">осталось {0} с</translation>
     </message>
 </context>
 <context>

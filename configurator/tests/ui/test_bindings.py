@@ -403,7 +403,27 @@ def test_the_capture_dialog_counts_down_from_ten(qtbot, service):
     assert dialog.remaining_seconds == 10
     dialog.tick()
     assert dialog.remaining_seconds == 9
-    assert str(9) in dialog.countdown_label.text()
+    assert dialog.ring.remaining == 9
+
+
+def test_the_capture_dialog_shows_its_countdown_as_a_ring(qtbot, service):
+    dialog = CaptureDialog(service)
+    qtbot.addWidget(dialog)
+
+    assert dialog.ring.remaining == dialog.remaining_seconds
+
+    dialog.tick()
+
+    assert dialog.ring.remaining == dialog.remaining_seconds == 9
+
+
+def test_the_capture_dialog_has_no_window_frame(qtbot, service):
+    from PySide6.QtCore import Qt
+
+    dialog = CaptureDialog(service)
+    qtbot.addWidget(dialog)
+
+    assert bool(dialog.windowFlags() & Qt.WindowType.FramelessWindowHint)
 
 
 def test_the_capture_dialog_gives_up_when_the_countdown_ends(qtbot, service):

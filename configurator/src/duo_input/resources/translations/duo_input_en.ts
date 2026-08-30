@@ -22,176 +22,176 @@
 <context>
     <name>BindingsPage</name>
     <message>
-        <location filename="../../ui/bindings.py" line="196" />
+        <location filename="../../ui/bindings.py" line="198" />
         <source>Bindings</source>
         <extracomment>A mouse button the device just reported, so the shell can remember it.</extracomment>
         <translation>Bindings</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="197" />
+        <location filename="../../ui/bindings.py" line="199" />
         <source>Choose what a key or mouse button does in this profile.</source>
         <translation>Choose what a key or mouse button does in this profile.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="204" />
+        <location filename="../../ui/bindings.py" line="206" />
         <source>Bindings of the active profile</source>
         <translation>Bindings of the active profile</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="219" />
+        <location filename="../../ui/bindings.py" line="221" />
         <source>Binding</source>
         <translation>Binding</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="227" />
+        <location filename="../../ui/bindings.py" line="229" />
         <source>Trigger kind</source>
         <translation>Trigger kind</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="228" />
-        <location filename="../../ui/bindings.py" line="234" />
+        <location filename="../../ui/bindings.py" line="230" />
+        <location filename="../../ui/bindings.py" line="236" />
         <source>Keyboard key</source>
         <translation>Keyboard key</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="229" />
-        <location filename="../../ui/bindings.py" line="242" />
+        <location filename="../../ui/bindings.py" line="231" />
+        <location filename="../../ui/bindings.py" line="244" />
         <source>Mouse button</source>
         <translation>Mouse button</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="231" />
+        <location filename="../../ui/bindings.py" line="233" />
         <source>Trigger:</source>
         <translation>Trigger:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="238" />
+        <location filename="../../ui/bindings.py" line="240" />
         <source>Key:</source>
         <translation>Key:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="244" />
+        <location filename="../../ui/bindings.py" line="246" />
         <source>Button:</source>
         <translation>Button:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="251" />
+        <location filename="../../ui/bindings.py" line="253" />
         <source>{0} modifier</source>
         <translation>{0} modifier</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="256" />
+        <location filename="../../ui/bindings.py" line="258" />
         <source>Modifiers:</source>
         <translation>Modifiers:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="259" />
+        <location filename="../../ui/bindings.py" line="261" />
         <source>Binding mode</source>
         <translation>Binding mode</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="260" />
+        <location filename="../../ui/bindings.py" line="262" />
         <source>Replace</source>
         <translation>Replace</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="261" />
-        <location filename="../../ui/bindings.py" line="289" />
+        <location filename="../../ui/bindings.py" line="263" />
+        <location filename="../../ui/bindings.py" line="291" />
         <source>Add</source>
         <translation>Add</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="262" />
+        <location filename="../../ui/bindings.py" line="264" />
         <source>Mode:</source>
         <translation>Mode:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="265" />
+        <location filename="../../ui/bindings.py" line="267" />
         <source>Action</source>
         <translation>Action</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="270" />
+        <location filename="../../ui/bindings.py" line="272" />
         <source>Action:</source>
         <translation>Action:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="273" />
+        <location filename="../../ui/bindings.py" line="275" />
         <source>Action target</source>
         <translation>Action target</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="275" />
+        <location filename="../../ui/bindings.py" line="277" />
         <source>Target:</source>
         <translation>Target:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="279" />
+        <location filename="../../ui/bindings.py" line="281" />
         <source>Why this binding cannot be used</source>
         <translation>Why this binding cannot be used</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="286" />
+        <location filename="../../ui/bindings.py" line="288" />
         <source>Detect</source>
         <translation>Detect</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="287" />
+        <location filename="../../ui/bindings.py" line="289" />
         <source>Detect the trigger on the device</source>
         <translation>Detect the trigger on the device</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="290" />
+        <location filename="../../ui/bindings.py" line="292" />
         <source>Add this binding</source>
         <translation>Add this binding</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="293" />
+        <location filename="../../ui/bindings.py" line="295" />
         <source>Apply</source>
         <translation>Apply</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="294" />
+        <location filename="../../ui/bindings.py" line="296" />
         <source>Apply the changes to the selected binding</source>
         <translation>Apply the changes to the selected binding</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="296" />
+        <location filename="../../ui/bindings.py" line="298" />
         <source>Remove</source>
         <translation>Remove</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="297" />
+        <location filename="../../ui/bindings.py" line="299" />
         <source>Remove the selected binding</source>
         <translation>Remove the selected binding</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="467" />
+        <location filename="../../ui/bindings.py" line="469" />
         <source>Button {0}</source>
         <translation>Button {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="526" />
+        <location filename="../../ui/bindings.py" line="528" />
         <source>No mouse is attached, so no mouse button can be bound.</source>
         <translation>No mouse is attached, so no mouse button can be bound.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="529" />
+        <location filename="../../ui/bindings.py" line="531" />
         <source>Choose a trigger first.</source>
         <translation>Choose a trigger first.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="532" />
+        <location filename="../../ui/bindings.py" line="534" />
         <source>This profile has no macros to run.</source>
         <translation>This profile has no macros to run.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="534" />
+        <location filename="../../ui/bindings.py" line="536" />
         <source>Choose what the trigger should do.</source>
         <translation>Choose what the trigger should do.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="539" />
+        <location filename="../../ui/bindings.py" line="541" />
         <source>{0} is already bound in this profile.</source>
         <translation>{0} is already bound in this profile.</translation>
     </message>
@@ -199,28 +199,26 @@
 <context>
     <name>CaptureDialog</name>
     <message>
-        <location filename="../../ui/bindings.py" line="100" />
+        <location filename="../../ui/bindings.py" line="102" />
         <source>Detect a key or button</source>
         <extracomment>Seconds the device keeps capture mode open, mirrored from the design spec. Actions whose argument is fixed at zero.</extracomment>
         <translation>Detect a key or button</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="104" />
+        <location filename="../../ui/bindings.py" line="107" />
         <source>Press the mouse button you want to use.</source>
         <translation>Press the mouse button you want to use.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="106" />
+        <location filename="../../ui/bindings.py" line="109" />
         <source>Press the key or mouse button you want to bind.</source>
         <translation>Press the key or mouse button you want to bind.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="111" />
         <source>Time left to press a key</source>
         <translation>Time left to press a key</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="152" />
         <source>{0} s left</source>
         <translation>{0} s left</translation>
     </message>
