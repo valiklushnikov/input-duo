@@ -98,6 +98,19 @@ endif()
 
 add_test(NAME link_drop_log COMMAND duo_link_drop_log_test)
 
+add_executable(duo_latency_test
+    test_main.cpp
+    test_latency.cpp
+)
+
+target_link_libraries(duo_latency_test PRIVATE duo_common)
+
+if(MSVC)
+    target_compile_options(duo_latency_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME latency COMMAND duo_latency_test)
+
 add_executable(duo_output_runtime_test
     test_main.cpp
     test_output_runtime.cpp
