@@ -1,0 +1,189 @@
+{
+  "checks": {
+    "every_device_enumerated": true,
+    "keyboard_p95_within_budget": true,
+    "mouse_p95_within_budget": true,
+    "no_gap_over_50ms": true
+  },
+  "complete": false,
+  "control_link_gaps_over_50ms": [],
+  "control_link_latency": [
+    {
+      "budget_ms": 20.0,
+      "count": 1,
+      "kind": "cdc_round_trip",
+      "max_ms": 2.632,
+      "p50_ms": 2.632,
+      "p95_ms": 2.632,
+      "passed": true
+    }
+  ],
+  "coverage": {
+    "devices_exercised": 2,
+    "devices_required": 10,
+    "devices_required_by_role": {
+      "keyboard": 5,
+      "mouse": 5
+    },
+    "note": "2 device(s) verified of 10 the scenario requires. U1 has two peripheral ports, so one run can exercise at most one keyboard and one mouse; the rest need further runs with other devices."
+  },
+  "finished_at": "2026-08-30T12:49:11+0300",
+  "measurements": {
+    "dropped_commands": 0,
+    "elapsed_hours": 8.6869,
+    "endpoint_drops": 7,
+    "endpoint_release_ms": 100,
+    "keyboard_latency_since_boot": {
+      "bucket_edges_ms": [
+        0.25,
+        0.5,
+        1.0,
+        2.0,
+        5.0,
+        10.0,
+        20.0,
+        50.0
+      ],
+      "buckets": [
+        0,
+        0,
+        0,
+        304,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "max_ms": 1.899,
+      "p95_at_or_below_ms": 2.0,
+      "samples": 304
+    },
+    "keyboard_latency_this_run": {
+      "bucket_edges_ms": [
+        0.25,
+        0.5,
+        1.0,
+        2.0,
+        5.0,
+        10.0,
+        20.0,
+        50.0
+      ],
+      "buckets": [
+        0,
+        0,
+        0,
+        304,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "max_ms": 1.899,
+      "p95_at_or_below_ms": 2.0,
+      "samples": 304
+    },
+    "link_crc_errors": 1,
+    "mouse_latency_since_boot": {
+      "bucket_edges_ms": [
+        0.25,
+        0.5,
+        1.0,
+        2.0,
+        5.0,
+        10.0,
+        20.0,
+        50.0
+      ],
+      "buckets": [
+        0,
+        0,
+        9268,
+        24053,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "max_ms": 1.916,
+      "p95_at_or_below_ms": 2.0,
+      "samples": 33321
+    },
+    "mouse_latency_this_run": {
+      "bucket_edges_ms": [
+        0.25,
+        0.5,
+        1.0,
+        2.0,
+        5.0,
+        10.0,
+        20.0,
+        50.0
+      ],
+      "buckets": [
+        0,
+        0,
+        9268,
+        24053,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "max_ms": 1.916,
+      "p95_at_or_below_ms": 2.0,
+      "samples": 33321
+    },
+    "runtime_fault": 0
+  },
+  "measures": "firmware-internal latency: from a peripheral report reaching U1's input core to the command it produced being applied on U1's output core. Not end-to-end keystroke latency, which this rig cannot measure - there is no clock on a human finger and nothing injects HID into U1's peripheral ports.",
+  "notes": [
+    "firmware-internal latency: from a peripheral report reaching U1's input core to the command it produced being applied on U1's output core. Not end-to-end keystroke latency, which this rig cannot measure - there is no clock on a human finger and nothing injects HID into U1's peripheral ports.",
+    "the role of each peripheral row is the kind the device reported in its own descriptor, not the U1 channel it was plugged into; the channel is the separate `port` field. On this bench the two are crossed: the mouse is on the keyboard channel. These two rows were relabelled from the values the device supplied in the 2026-08-30 run; no device was re-read to produce them."
+  ],
+  "passed": true,
+  "peripherals": [
+    {
+      "buttons": 5,
+      "descriptor_hash": "f93525fdfa9ca2d7c1639bf5bf2b1b06452a52f3fdc858f5ba198fb5d74ad7c8",
+      "passed": true,
+      "port": "keyboard channel",
+      "product_id": "0x0005",
+      "reason": "enumerated as mouse, 75 bytes of report descriptor, 5 buttons declared",
+      "role": "mouse",
+      "vendor_id": "0x1BCF"
+    },
+    {
+      "buttons": 0,
+      "descriptor_hash": "",
+      "passed": true,
+      "port": "mouse channel",
+      "product_id": "0x010C",
+      "reason": "enumerated as keyboard, boot protocol, no report descriptor read",
+      "role": "keyboard",
+      "vendor_id": "0x258A"
+    }
+  ],
+  "samples": [
+    {
+      "injected_ns": 351158046111300,
+      "kind": "cdc_round_trip",
+      "latency_ms": 2.632,
+      "observed_ns": 351158048743400
+    }
+  ],
+  "scenario": "peripherals",
+  "started_at": "2026-08-30T12:49:11+0300",
+  "unmeasured": [
+    {
+      "check": "no_stuck_keys",
+      "needs": "a logger on PC1 and PC2 recording what each actually received, which this rig does not have",
+      "reason": "whether a computer is still holding a key can only be seen at that computer"
+    }
+  ],
+  "verdict": "partial"
+}

@@ -167,8 +167,18 @@ class PeripheralRow:
 
     ``reason`` is mandatory even on a pass. "It worked" is not a result anyone
     can act on six months later; "enumerated as boot keyboard, 6KRO" is.
+
+    ``role`` is what the **device** said it is - ``DescriptorSetup::kind()``,
+    read out of its own descriptor during enumeration - and never where it was
+    plugged in. ``port`` is the channel it came off, which U1's firmware calls
+    the keyboard channel and the mouse channel after the pins they use. The two
+    are independent: a mouse on the keyboard channel is an ordinary bench, and
+    a matrix that took the channel for the role would print `keyboard` beside a
+    reason reading "enumerated as mouse". Keep the channel, because a crossed
+    or dead cable is diagnosed from it; never let it name the device.
     """
 
+    port: str
     role: str
     vendor_id: str
     product_id: str
@@ -653,19 +663,33 @@ def evaluate(scenario: dict, now, baseline=None, elapsed_seconds: float | None =
     return checks, unmeasured
 
 
+#: What U1's firmware calls each of its two CH375 channels, after the pins each
+#: uses. A channel name says where a cable goes and nothing at all about what is
+#: on the other end of it.
+CHANNEL_NAMES = ("keyboard channel", "mouse channel")
+
+
 def peripheral_rows(now) -> list[PeripheralRow]:
-    """One row per port U1 has, whether or not anything is on it."""
+    """One row per port U1 has, whether or not anything is on it.
+
+    The role of each row is the device's own answer - the kind enumeration read
+    out of its descriptor - and the channel it arrived on is a separate field.
+    """
     ports = getattr(now, "peripherals", None)
     if not ports:
         return []
-    roles = ("keyboard", "mouse")
     rows: list[PeripheralRow] = []
     for index, port in enumerate(ports):
-        role = roles[index] if index < len(roles) else f"port {index}"
+        channel = (
+            CHANNEL_NAMES[index] if index < len(CHANNEL_NAMES) else f"channel {index}"
+        )
         if not port.attached:
             rows.append(
                 PeripheralRow(
-                    role=role,
+                    port=channel,
+                    # Not the channel's name: an empty channel holds no device,
+                    # and naming one would be a claim about nothing.
+                    role="none",
                     vendor_id="",
                     product_id="",
                     descriptor_hash="",
@@ -689,7 +713,8 @@ def peripheral_rows(now) -> list[PeripheralRow]:
             reason = f"attached but never reached ready; enumeration saw it as {port.kind}"
         rows.append(
             PeripheralRow(
-                role=role,
+                port=channel,
+                role=port.kind,
                 vendor_id=f"0x{port.vendor_id:04X}",
                 product_id=f"0x{port.product_id:04X}",
                 descriptor_hash=port.descriptor_hash or "",

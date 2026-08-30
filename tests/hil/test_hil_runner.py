@@ -176,6 +176,7 @@ def test_a_report_records_every_sample_it_derived_from():
 
 def test_a_peripheral_row_states_a_reason_even_when_it_passed():
     row = PeripheralRow(
+        port="keyboard channel",
         role="keyboard",
         vendor_id="0x046D",
         product_id="0xC31C",
@@ -549,11 +550,65 @@ def test_each_port_becomes_a_row_naming_the_device_the_firmware_found():
     )
 
     assert [row.role for row in rows] == ["keyboard", "mouse"]
+    assert [row.port for row in rows] == ["keyboard channel", "mouse channel"]
     assert rows[0].vendor_id == "0x046D"
     assert rows[1].buttons == 5
     assert rows[1].descriptor_hash == "ab" * 32
     for row in rows:
         assert row.reason
+
+
+def test_a_row_takes_its_role_from_the_descriptor_and_not_from_the_channel():
+    # This bench has the mouse on the channel the firmware calls "keyboard" and
+    # the keyboard on the one it calls "mouse". A role read off the channel name
+    # would print `role: keyboard` beside a reason reading "enumerated as
+    # mouse" - the row contradicting itself, in the one artifact whose whole
+    # job is to say which device is which. The descriptor is the authority.
+    rows = peripheral_rows(
+        _diagnostics(
+            peripherals=(
+                _port(kind="mouse", vendor_id=0x1BCF, product_id=0x0005, buttons=5),
+                _port(kind="keyboard", vendor_id=0x258A, product_id=0x010C),
+            )
+        )
+    )
+
+    assert [row.role for row in rows] == ["mouse", "keyboard"]
+    assert rows[0].vendor_id == "0x1BCF"
+    assert rows[1].vendor_id == "0x258A"
+    # And each row still says which channel it came off, because that is how a
+    # crossed cable is diagnosed - it is just never the role.
+    assert [row.port for row in rows] == ["keyboard channel", "mouse channel"]
+    for row in rows:
+        assert row.role in row.reason
+
+
+def test_a_role_and_a_reason_can_never_disagree_in_a_row():
+    # The two are now read from the same field, so there is no pair of readings
+    # that could drift apart.
+    for kind in ("keyboard", "mouse", "unknown"):
+        row = peripheral_rows(_diagnostics(peripherals=(_port(kind=kind),)))[0]
+        assert row.role == kind
+        assert f"enumerated as {kind}" in row.reason
+
+
+def test_an_unenumerated_port_still_reports_the_role_enumeration_saw():
+    row = peripheral_rows(_diagnostics(peripherals=(_port(kind="mouse", ready=False),)))[0]
+
+    assert row.role == "mouse"
+    assert row.port == "keyboard channel"
+    assert row.passed is False
+
+
+def test_an_empty_port_claims_no_role_rather_than_the_channels_name():
+    # "keyboard" on an empty port would be a claim about a device that is not
+    # there. The channel is still named, because the empty channel is the fact.
+    row = peripheral_rows(
+        _diagnostics(peripherals=(_port(attached=False, ready=False, kind="none"),))
+    )[0]
+
+    assert row.role == "none"
+    assert row.port == "keyboard channel"
 
 
 def test_an_empty_port_is_a_row_that_says_so_rather_than_a_missing_row():
