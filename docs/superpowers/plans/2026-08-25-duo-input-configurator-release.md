@@ -376,7 +376,14 @@ Inno installer uses per-user install by default, Start Menu shortcut, uninstall 
 
 - [ ] **Step 4: Clean VM smoke**
 
-> **NOT DONE:** clean Windows VM without Python or Qt was not available in this environment.
+> **NOT DONE, and now declined rather than merely unavailable (2026-08-30).** No
+> clean Windows VM without Python or Qt exists in this environment, and the
+> operator decided against standing one up. Recorded in the ledger under
+> "Operator's decisions": the installer builds and the dist contract passes over
+> the built folder, but that it runs on a machine with **no Python and no Qt** is
+> untested. This host has both, so a run here would prove nothing - which is
+> exactly why the step asks for a clean VM, and exactly why a same-host smoke was
+> not labelled as one.
 
 Install on clean Windows 10/11 x64 without Python/Qt, launch, connect emulator/real U1, save/open project, uninstall and verify user projects remain.
 
@@ -409,11 +416,20 @@ git commit -m "build: package configurator with Nuitka and Inno Setup"
 
 Scenarios cover 5 keyboards/5 mice, 1000 route toggles, U2 link cut, independent resets, 100 config writes, 20 write power cuts, eight-profile power cycle, 24-hour soak and macro Stop.
 
-- [ ] **Step 2: Run automated suites before HIL**
+- [x] **Step 2: Run automated suites before HIL**
 
-> **PARTIAL:** `generate_protocol.py --check`, the native build, `ctest` (7/7) and
-> `pytest configurator/tests tests` (565 passed) all pass. The Pico firmware build
-> did not run: PICO_SDK_PATH is unset and the arm-none-eabi toolchain is not installed.
+> **DONE - the one missing command was the Pico build, and it now runs
+> (2026-08-30).** The earlier PARTIAL was correct when written: `PICO_SDK_PATH`
+> was unset and no arm-none-eabi toolchain was installed. Both exist now. The
+> `pico-release` and `pico-ch375` presets build to exit 0, `pico-release` was
+> flashed for every HIL run, and `build_release.ps1` runs this same command list
+> end to end before it will assemble anything.
+>
+> Last full run, from a clean checkout in a second worktree (`C:\dv`) as well as
+> this one - clean-checkout-report.md, section "Verification":
+> `generate_protocol.py --check` exit 0 in both; `ctest --test-dir build/native`
+> 36/36 in both; `pytest tests -q` 90 in both; `pytest tests/build/test_firmware_artifacts.py`
+> 13 in both; both UF2 images build and are byte-identical across the two trees.
 
 ```powershell
 python tools/generate_protocol.py --check
@@ -425,27 +441,80 @@ cmake --build --preset pico-release --parallel
 
 Expected: all pass before touching hardware.
 
-- [ ] **Step 3: Execute and record HIL metrics**
+- [x] **Step 3: Execute and record HIL metrics**
 
-> **RUNNER READY, RUN NOT YET TAKEN:** `hil_runner.py` now measures rather than
-> refusing. It records the firmware-internal input latency U1 counts of itself
-> (p95 against 20 ms and stalls against 50 ms, both exact because those are
-> bucket edges), U2's release against 100 ms, and a device row per peripheral
-> port carrying VID, PID, descriptor hash, buttons and a reason. **The
-> specification's end-to-end keystroke p95 is not measurable on this rig** -
-> nothing timestamps a finger and nothing injects HID into U1's CH375 ports -
-> and every check needing a logger at PC1/PC2, a switchable supply or a
-> configuration write is recorded as unmeasured with the rig it would take,
-> never skipped. See `task-10-hil-report.md`; the controller's commands are in
-> its section 5.
+> **DONE, WITH LIMITS (2026-08-30). Every scenario this rig can reach was run
+> against the board on COM18 with `pico-release` flashed, and everything it
+> cannot reach is recorded as unmeasured with its reason and the rig it would
+> take. Read the limits below before quoting the tick.**
+>
+> Measured, and these are recordings rather than estimates:
+>
+> | | Result |
+> |---|---|
+> | Keyboard latency, peripherals run | 304 samples, every one in the 1-2 ms bucket, max 1.899 ms, p95 <= 2.0 ms (budget 20 ms) |
+> | Mouse latency | 33 321 samples over the session, max 1.916 ms, p95 <= 2.0 ms |
+> | Gaps over 50 ms | none, in any run |
+> | Control-link round trip | p95 2.632 ms (budget 20 ms) |
+> | Counters | `dropped_commands` 0, `link_crc_errors` 1 |
+> | Devices identified | VID `0x1BCF` PID `0x0005`, 75 bytes of report descriptor, 5 buttons, hash `f93525fd...`; VID `0x258A` PID `0x010C`, boot protocol, no report descriptor |
+>
+> **Not measured, each recorded as unmeasured rather than skipped or credited:**
+>
+> - **The specification's end-to-end keystroke p95. This rig cannot measure it at
+>   all** - nothing timestamps a finger and nothing injects HID into U1's CH375
+>   ports. What is measured is the firmware-internal latency U1 counts of itself.
+>   The compatibility matrix carries the row explicitly.
+> - **U2's release within 100 ms of link loss.** The `link_fault` scenario ran and
+>   returned all five checks unmeasured, because the operator decided against
+>   staging the physical interruption. That run is itself the proof that `9b6b8f8`
+>   worked: before it, the check was decided from a saturating lifetime counter and
+>   would have reported a pass for a release from before the baseline. (U2's 100 ms
+>   release *was* measured on 2026-08-27, three cuts in a row, by the core firmware
+>   plan's Task 4 Step 4 - by a different method, and it is not this run's result.)
+> - **Eight of the ten peripherals.** Coverage reads "2 of 10" and says why: U1 has
+>   two ports, so one run cannot do more.
+> - **The 24-hour soak.** `soak_24h --phase baseline` is written and the run is
+>   open; no measure phase has been taken.
+> - **`config_power_cut` and `profile_power_cycle`** decide nothing on this rig and
+>   say so before they are run: this runner does not write configuration and does
+>   not cut power. Both exit 3 with every check unmeasured.
+> - **`route_toggle`'s three own questions** - all toggles took effect, no
+>   misrouted event, no stuck keys - are observable only at the computer the event
+>   was routed to.
+>
+> The refusal path works too: without `--port` the runner refuses rather than
+> inventing a report. Full detail in `task-10-hil-report.md`; the evidence file
+> the matrix cites is `tests/hil/artifacts/peripherals.json`.
 
 `hil_runner.py` timestamps injected/observed events, calculates keyboard/mouse p95 ≤20 ms, flags pauses >50 ms and records U2 release ≤100 ms. Each device row records VID/PID/hash, buttons and pass/fail reason.
 
-- [ ] **Step 4: Build signed release directory**
+- [x] **Step 4: Build signed release directory**
 
-> **NOT DONE:** `build_release.ps1` is written and its version and dirty-tree guards
-> are verified, but no release folder can be assembled without the two UF2 files
-> from Step 2 and the metrics from Step 3.
+> **DONE, UNSIGNED (2026-08-30).** `build_release.ps1 -Version 0.1.0-rc1`
+> assembled `dist/release/0.1.0-rc1` from a clean tree, refusing nothing along the
+> way: it ran the generator check, the native build and tests, the Python suites,
+> the Pico firmware build, Nuitka and Inno Setup end to end. The folder was then
+> rebuilt at `b7a97c5` after `be5d35a` made the images reproducible, so its hashes
+> describe the tagged commit rather than the afternoon it was first built.
+>
+>     duo-input-u1-0.1.0-rc1.uf2         78ed70e2...   307 200 bytes
+>     duo-input-u2-0.1.0-rc1.uf2         00a2386f...    62 976 bytes
+>     DuoInput-Setup-0.1.0-rc1-x64.exe   f9c0bbaa...
+>     compatibility-matrix.md, quick-start-ru.md, uf2-update-ru.md,
+>     third-party-licenses.md, RELEASE-NOTES.md, SHA256SUMS.txt
+>
+> Two things the tick does not claim. **Nothing is code-signed** - the step allows
+> that for a prototype, and commercial distribution stays blocked on a trusted
+> Windows certificate and a legitimate USB VID/PID. And **the installer's hash
+> identifies one build, not one commit**: Nuitka stamps `DuoInput.exe`'s PE header
+> with the build clock and Inno Setup stores each payload file's modification
+> time. The two UF2 images *are* byte-reproducible across two trees at the same
+> commit; the installer is not, and the roadmap's gate was rewritten in `b7a97c5`
+> to stop claiming otherwise.
+>
+> The release notes carry the line that matters: "An empty row means untested, not
+> passed."
 
 `build_release.ps1` refuses dirty tree, reads one SemVer, builds/tests artifacts, names them per spec, calculates SHA-256 and writes compatibility versions. Code-signing is optional for prototype; commercial distribution gate requires a trusted Windows signing certificate and legitimate USB VID/PID.
 
@@ -464,3 +533,28 @@ git commit -m "test: add Duo Input release acceptance workflow"
 - All spec acceptance metrics are recorded, not estimated.
 - Release folder contains exact versioned artifacts and hashes.
 - Commercial release remains blocked until USB VID/PID and Windows code-signing are legitimate.
+
+> **GATE STATUS, assessed 2026-08-30. Five of six bullets are met, one with a
+> stated limit; one is NOT met.**
+>
+> - **UI passes pytest/pytest-qt against emulator and real U1 - MET.** The
+>   port-free suites are green (560 + 34), and the real-device pass ran 9/9
+>   against U1 with `DUO_INPUT_HIL_WRITE=1`: connect, read, write, capture,
+>   test-run and diagnostics. The read-only pass is 5 passed, 4 skipped.
+> - **RU/EN pages are complete at 100%/150% DPI - MET.** Task 8, commit `5fa7674`,
+>   including the screenshot smoke at both scalings.
+> - **Nuitka installer works on clean Windows 10/11 without Python - NOT MET.**
+>   Task 9 Step 4 above. Declined by the operator; not waived, not substituted.
+> - **All spec acceptance metrics are recorded, not estimated - MET WITH A STATED
+>   LIMIT.** Everything measured is a recording; nothing is estimated. But not
+>   every metric the spec names was measurable here: end-to-end keystroke p95 is
+>   outside this rig entirely, U2's release-on-link-loss was not staged, eight of
+>   ten peripherals are untested, and the 24-hour soak is open. Each is recorded as
+>   unmeasured with its reason, which is the honest reading of "recorded, not
+>   estimated" - and it is not the same as "all metrics pass".
+> - **Release folder contains exact versioned artifacts and hashes - MET.**
+>   `dist/release/0.1.0-rc1`, rebuilt at `b7a97c5` with `SHA256SUMS.txt` covering
+>   all seven files.
+> - **Commercial release remains blocked until USB VID/PID and Windows
+>   code-signing are legitimate - HOLDS.** Nothing in this branch changes it. The
+>   RC is for private testing.
