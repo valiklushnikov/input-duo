@@ -12,6 +12,7 @@ from duo_input.generated.protocol import (
     PROTOCOL_VERSION_MAJOR,
     PROTOCOL_VERSION_MINOR,
 )
+from duo_input.ui import theme
 from duo_input.ui.models.project_session import ProjectSession, SetActiveProfile, default_project
 from duo_input.ui.overview import IN_SYNC, OUT_OF_SYNC, UNKNOWN, OverviewPage
 
@@ -171,3 +172,76 @@ def test_recent_events_are_capped_and_newest_first(page):
 
     assert len(events) <= 50
     assert "59" in events[0]
+
+
+# --------------------------------------------------------- how a fact reads
+
+
+def test_a_value_the_device_never_reports_reads_as_absence(page):
+    """``unknown`` is not a value in a lighter colour; it is a different kind."""
+    assert page.value("u1_firmware_version") == UNKNOWN
+    assert page.role("u1_firmware_version") == theme.ROLE_PLACEHOLDER
+
+
+def test_a_value_that_arrives_stops_reading_as_absence(qtbot, page, service, emulator):
+    assert page.role("device_generation") == theme.ROLE_PLACEHOLDER
+
+    _connected(qtbot, service, emulator)
+    page.update_from(ProjectSession.new(), service)
+
+    assert page.value("device_generation") != UNKNOWN
+    assert page.role("device_generation") == theme.ROLE_MONO
+
+
+def test_numbers_and_identifiers_are_set_where_columns_line_up(page, service):
+    page.update_from(ProjectSession.new(), service)
+
+    for key in ("keyboard_route", "mouse_route", "text_layout", "compiled_hash"):
+        assert page.role(key) == theme.ROLE_MONO, key
+
+
+def test_a_hash_never_widens_the_page_it_sits_on(page):
+    """Sixty-four characters with nowhere to wrap used to push a scrollbar."""
+    for key in ("file_hash", "compiled_hash", "device_hash"):
+        label = page.label(key)
+        assert isinstance(label, theme.ElidingLabel), key
+        assert label.minimumSizeHint().width() == 0, key
+
+
+def test_the_hash_is_still_the_whole_hash_to_anything_that_reads_it(page, service):
+    session = ProjectSession.new()
+
+    page.update_from(session, service)
+
+    assert page.value("compiled_hash") == session.compiled_hash
+    assert page.label("compiled_hash").toolTip() == session.compiled_hash
+
+
+def test_agreement_and_divergence_are_signalled_not_only_worded(qtbot, page, service, emulator, tmp_path):
+    session = ProjectSession.new()
+    page.update_from(session, service)
+    assert page.signal("device_sync") == theme.SIGNAL_MUTED
+
+    _connected(qtbot, service, emulator)
+    aligned = session.with_connection(True).with_device_hash(service.device_hash)
+    page.update_from(aligned, service)
+    assert page.value("device_sync") == IN_SYNC
+    assert page.signal("device_sync") == theme.SIGNAL_OK
+
+    stale = aligned.apply(SetActiveProfile(4))
+    page.update_from(stale, service)
+    assert page.value("device_sync") == OUT_OF_SYNC
+    assert page.signal("device_sync") == theme.SIGNAL_WARN
+
+
+def test_the_page_opens_by_saying_what_it_is(page):
+    from PySide6.QtWidgets import QLabel
+
+    titles = [
+        label.text()
+        for label in page.findChildren(QLabel)
+        if label.property("role") == theme.ROLE_PAGE_TITLE
+    ]
+
+    assert len(titles) == 1
+    assert titles[0]

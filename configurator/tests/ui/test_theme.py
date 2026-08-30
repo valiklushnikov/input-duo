@@ -336,3 +336,45 @@ def test_the_drawn_assets_stay_small_enough_not_to_matter():
     )
 
     assert total < 4096
+
+
+# ------------------------------------------------------------- page furniture
+
+
+def test_a_page_header_is_a_title_over_a_caption(qtbot):
+    header = theme.page_header("Overview", "What the device reports.")
+    qtbot.addWidget(header)
+
+    from PySide6.QtWidgets import QLabel
+
+    labels = header.findChildren(QLabel)
+    assert [label.text() for label in labels] == ["Overview", "What the device reports."]
+    assert labels[0].property("role") == theme.ROLE_PAGE_TITLE
+    assert labels[1].property("role") == theme.ROLE_PAGE_SUBTITLE
+
+
+def test_a_page_header_without_a_caption_is_just_the_title(qtbot):
+    header = theme.page_header("Settings")
+    qtbot.addWidget(header)
+
+    from PySide6.QtWidgets import QLabel
+
+    assert len(header.findChildren(QLabel)) == 1
+
+
+def test_every_fact_table_is_spaced_the_same_way():
+    """Two pages of facts have to line up, or neither is scannable."""
+    first, second = theme.fact_form(), theme.fact_form()
+
+    assert first.horizontalSpacing() == second.horizontalSpacing()
+    assert first.verticalSpacing() == second.verticalSpacing()
+    assert first.verticalSpacing() % theme.GRID == 0
+    assert first.horizontalSpacing() % theme.GRID == 0
+
+
+def test_a_field_label_is_marked_as_one(qtbot):
+    label = theme.field_label("Chip ID:")
+    qtbot.addWidget(label)
+
+    assert label.text() == "Chip ID:"
+    assert label.property("role") == theme.ROLE_FIELD_LABEL

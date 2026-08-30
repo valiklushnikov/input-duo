@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QFormLayout,
     QGroupBox,
     QGridLayout,
     QLabel,
@@ -28,6 +27,22 @@ from duo_input.generated.protocol import (
     Capability,
 )
 from duo_input.ui.models.project_session import ProjectSession
+from duo_input.ui.theme import (
+    ROLE_MONO,
+    ROLE_VALUE,
+    SIGNAL_MUTED,
+    SIGNAL_OK,
+    SIGNAL_WARN,
+    SPACE_LG,
+    SPACE_MD,
+    ElidingLabel,
+    fact_form,
+    field_label,
+    mark_placeholder,
+    monospace_font,
+    page_header,
+    set_signal,
+)
 
 #: Shown wherever the device or the project genuinely does not supply a value.
 UNKNOWN = "unknown"
@@ -35,6 +50,27 @@ IN_SYNC = "in sync"
 OUT_OF_SYNC = "out of sync"
 
 MAX_EVENTS = 50
+
+#: Fields whose value is a number, a version or a protocol identifier. They
+#: are set in the fixed-width face so a column of them can be read downwards.
+MONOSPACED_FIELDS = frozenset(
+    {
+        "u1_protocol_version",
+        "u1_firmware_version",
+        "u2_firmware_version",
+        "device_generation",
+        "device_active_profile",
+        "keyboard_route",
+        "mouse_route",
+        "text_layout",
+        "file_hash",
+        "compiled_hash",
+        "device_hash",
+    }
+)
+
+#: Fields holding a SHA-256 digest: sixty-four characters with nowhere to wrap.
+HASH_FIELDS = frozenset({"file_hash", "compiled_hash", "device_hash"})
 
 
 class OverviewPage(QWidget):
@@ -48,9 +84,25 @@ class OverviewPage(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         body = QWidget(scroll)
-        grid = QGridLayout(body)
-        grid.setContentsMargins(12, 12, 12, 12)
-        grid.setSpacing(12)
+        column = QVBoxLayout(body)
+        column.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
+        column.setSpacing(SPACE_LG)
+        column.addWidget(
+            page_header(
+                self.tr("Overview"),
+                self.tr(
+                    "What the device reports, and what this project would send it."
+                ),
+                body,
+            )
+        )
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(SPACE_MD)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        column.addLayout(grid)
 
         grid.addWidget(
             self._card(
@@ -120,12 +172,15 @@ class OverviewPage(QWidget):
 
         events_box = QGroupBox(self.tr("Recent events"), body)
         events_layout = QVBoxLayout(events_box)
+        events_layout.setContentsMargins(0, 0, 0, 0)
         self._events = QListWidget(events_box)
         self._events.setAccessibleName(self.tr("Recent device events"))
         self._events.setMinimumHeight(90)
+        # Every line here is a protocol identifier, so it is set in the face
+        # that keeps them aligned rather than the one that reads prettily.
+        self._events.setFont(monospace_font())
         events_layout.addWidget(self._events)
-        grid.addWidget(events_box, 3, 0, 1, 2)
-        grid.setRowStretch(3, 1)
+        column.addWidget(events_box, 1)
 
         scroll.setWidget(body)
         outer = QVBoxLayout(self)
@@ -139,16 +194,29 @@ class OverviewPage(QWidget):
     def _card(self, title: str, rows: tuple[tuple[str, str], ...]) -> QGroupBox:
         box = QGroupBox(title, self)
         box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-        form = QFormLayout(box)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form = fact_form()
+        box.setLayout(form)
         for key, label in rows:
-            value = QLabel(UNKNOWN, box)
-            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+            value = self._value_label(key, box)
             value.setAccessibleName(label)
-            value.setWordWrap(True)
             self._values[key] = value
-            form.addRow(QLabel(label + ":", box), value)
+            form.addRow(field_label(label + ":", box), value)
         return box
+
+    def _value_label(self, key: str, parent: QWidget) -> QLabel:
+        """The answer half of one row, told apart by what kind of answer it is."""
+        if key in HASH_FIELDS:
+            value = ElidingLabel(UNKNOWN, parent)
+        else:
+            value = QLabel(UNKNOWN, parent)
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+            value.setWordWrap(True)
+        if key in MONOSPACED_FIELDS:
+            value.setFont(monospace_font())
+        return value
+
+    def _role_of(self, key: str) -> str:
+        return ROLE_MONO if key in MONOSPACED_FIELDS else ROLE_VALUE
 
     # ----------------------------------------------------------------- access
 
@@ -156,13 +224,25 @@ class OverviewPage(QWidget):
         """Current text of one field, by its stable key."""
         return self._values[key].text()
 
+    def label(self, key: str) -> QLabel:
+        """The widget one field is painted in, by its stable key."""
+        return self._values[key]
+
+    def role(self, key: str) -> str:
+        """How one field currently reads: a value, or the absence of one."""
+        return str(self._values[key].property("role") or "")
+
+    def signal(self, key: str) -> str:
+        """What one field currently means: agreement, divergence, or nothing."""
+        return str(self._values[key].property("signal") or "")
+
     def events(self) -> tuple[str, ...]:
         """Recent events, newest first."""
         return tuple(self._events.item(row).text() for row in range(self._events.count()))
 
     def clear(self) -> None:
-        for label in self._values.values():
-            label.setText(UNKNOWN)
+        for key in self._values:
+            self._set(key, UNKNOWN)
 
     def append_event(self, subject: str, detail: str = "") -> None:
         """Record one event. ``subject``/``detail`` are protocol identifiers."""
@@ -237,11 +317,26 @@ class OverviewPage(QWidget):
         self._set("device_hash", session.device_hash or UNKNOWN)
         if not session.device_hash:
             self._set("device_sync", UNKNOWN)
+            set_signal(self._values["device_sync"], SIGNAL_MUTED)
         else:
-            self._set("device_sync", IN_SYNC if session.device_matches else OUT_OF_SYNC)
+            matches = session.device_matches
+            self._set("device_sync", IN_SYNC if matches else OUT_OF_SYNC)
+            set_signal(self._values["device_sync"], SIGNAL_OK if matches else SIGNAL_WARN)
 
     def _set(self, key: str, text: str) -> None:
-        self._values[key].setText(text)
+        label = self._values[key]
+        label.setText(text)
+        # A field that has no answer says so by looking different, not by
+        # printing a lighter-coloured value.
+        mark_placeholder(label, text == UNKNOWN, self._role_of(key))
 
 
-__all__ = ["IN_SYNC", "MAX_EVENTS", "OUT_OF_SYNC", "UNKNOWN", "OverviewPage"]
+__all__ = [
+    "HASH_FIELDS",
+    "IN_SYNC",
+    "MAX_EVENTS",
+    "MONOSPACED_FIELDS",
+    "OUT_OF_SYNC",
+    "UNKNOWN",
+    "OverviewPage",
+]

@@ -14,7 +14,6 @@ from PySide6.QtCore import QT_TRANSLATE_NOOP, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
-    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -32,6 +31,21 @@ from duo_input.persistence.diagnostic_export import (
     build_diagnostic_zip,
 )
 from duo_input.ui.models.project_session import ProjectSession
+from duo_input.ui.theme import (
+    ROLE_BANNER,
+    ROLE_MONO,
+    SIGNAL_WARN,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+    fact_form,
+    field_label,
+    mark_placeholder,
+    monospace_font,
+    page_header,
+    set_role,
+    set_signal,
+)
 
 ARCHIVE_FILTER = "Diagnostic report (*.zip)"
 
@@ -104,14 +118,23 @@ class DiagnosticsPage(QWidget):
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         body = QWidget(scroll)
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(12, 12, 12, 12)
-        for title, rows in self._FIELDS:
-            layout.addWidget(self._card(body, title, rows))
-        layout.addStretch(1)
+        layout.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
+        layout.setSpacing(SPACE_LG)
+        layout.addWidget(
+            page_header(
+                self.tr("Diagnostics"),
+                self.tr(
+                    "What the device reports about itself, and how to send it on."
+                ),
+                body,
+            )
+        )
+        layout.addLayout(self._build_cards(body), 1)
         scroll.setWidget(body)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
         outer.addWidget(scroll, 1)
         outer.addLayout(self._build_actions())
 
@@ -122,22 +145,51 @@ class DiagnosticsPage(QWidget):
 
     # ---------------------------------------------------------------- layout
 
+    def _build_cards(self, parent: QWidget) -> QHBoxLayout:
+        """Two columns, because Health alone is as tall as the other three.
+
+        Stacked in one column the page was two screens of scrolling for facts
+        that are read together; side by side the versions, the configuration
+        and the link counters fit beside the health table on one screen.
+        """
+        columns = QHBoxLayout()
+        columns.setContentsMargins(0, 0, 0, 0)
+        columns.setSpacing(SPACE_MD)
+
+        left, right = QVBoxLayout(), QVBoxLayout()
+        for side in (left, right):
+            side.setContentsMargins(0, 0, 0, 0)
+            side.setSpacing(SPACE_MD)
+        tallest = max(self._FIELDS, key=lambda entry: len(entry[1]))
+        for title, rows in self._FIELDS:
+            side = right if (title, rows) == tallest else left
+            side.addWidget(self._card(parent, title, rows))
+        left.addStretch(1)
+        right.addStretch(1)
+        columns.addLayout(left, 1)
+        columns.addLayout(right, 1)
+        return columns
+
     def _card(self, parent: QWidget, title: str, rows: tuple[tuple[str, str], ...]) -> QGroupBox:
         box = QGroupBox(self.tr(title), parent)
-        form = QFormLayout(box)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form = fact_form()
+        box.setLayout(form)
         for key, label in rows:
+            # Every value on this page is a version, a count or an identifier,
+            # so all of them are set where a column of digits lines up.
             value = QLabel(UNKNOWN, box)
             value.setAccessibleName(self.tr(label))
             value.setWordWrap(True)
+            value.setFont(monospace_font())
             value.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
             self._values[key] = value
-            form.addRow(QLabel(self.tr(label) + ":", box), value)
+            form.addRow(field_label(self.tr(label) + ":", box), value)
         return box
 
     def _build_actions(self) -> QVBoxLayout:
         outer = QVBoxLayout()
-        outer.setContentsMargins(12, 0, 12, 12)
+        outer.setContentsMargins(SPACE_LG, 0, SPACE_LG, SPACE_LG)
+        outer.setSpacing(SPACE_SM)
 
         # A checkbox does not wrap, so the reason to think twice lives beside
         # it in a label that does.
@@ -149,9 +201,11 @@ class DiagnosticsPage(QWidget):
             self,
         )
         self.privacy_label.setWordWrap(True)
+        set_role(self.privacy_label, ROLE_BANNER)
         outer.addWidget(self.privacy_label)
 
         row = QHBoxLayout()
+        row.setSpacing(SPACE_SM)
 
         self.refresh_button = QPushButton(self.tr("Refresh"), self)
         self.refresh_button.setAccessibleName(self.tr("Ask the device for its counters"))
@@ -161,6 +215,7 @@ class DiagnosticsPage(QWidget):
         self.include_config_box.setAccessibleName(
             self.tr("Include the saved project in the report")
         )
+        self.include_config_box.toggled.connect(self._refresh_privacy_note)
 
         self.export_button = QPushButton(self.tr("Export report..."), self)
         self.export_button.setAccessibleName(self.tr("Save a diagnostic report"))
@@ -193,15 +248,35 @@ class DiagnosticsPage(QWidget):
         """Current text of one field, by its stable key."""
         return self._values[key].text()
 
+    def field_keys(self) -> tuple[str, ...]:
+        """Every field this page reports, in the order it lists them."""
+        return tuple(self._values)
+
+    def role(self, key: str) -> str:
+        """How one field currently reads: a counter, or the absence of one."""
+        return str(self._values[key].property("role") or "")
+
     def refresh(self) -> None:
         """Repaint from whatever the service already knows."""
         snapshot = self.snapshot()
         for key, label in self._values.items():
-            label.setText(_as_text(getattr(snapshot, key, UNKNOWN)))
+            text = _as_text(getattr(snapshot, key, UNKNOWN))
+            label.setText(text)
+            # Nothing here is invented: a counter the device never sent looks
+            # like an empty slot rather than like a reading of zero.
+            mark_placeholder(label, text == UNKNOWN, ROLE_MONO)
         self.refresh_button.setEnabled(self._service.is_connected)
         self.include_config_box.setEnabled(self._session.path is not None)
         if self._session.path is None:
             self.include_config_box.setChecked(False)
+        self._refresh_privacy_note()
+
+    def _refresh_privacy_note(self, *_args: object) -> None:
+        """The note only shouts once it describes what is about to happen."""
+        set_signal(
+            self.privacy_label,
+            SIGNAL_WARN if self.include_config_box.isChecked() else None,
+        )
 
     def request_counters(self) -> None:
         if self._service.is_connected:

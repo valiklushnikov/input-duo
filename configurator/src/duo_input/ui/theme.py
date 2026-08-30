@@ -27,7 +27,14 @@ from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics, QPainter
-from PySide6.QtWidgets import QLabel, QSizePolicy, QStyleOption, QWidget
+from PySide6.QtWidgets import (
+    QFormLayout,
+    QLabel,
+    QSizePolicy,
+    QStyleOption,
+    QVBoxLayout,
+    QWidget,
+)
 
 # --------------------------------------------------------------------- palette
 #
@@ -313,7 +320,9 @@ class ElidingLabel(QLabel):
 
     def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
         super().__init__(text, parent)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        # Expanding, not Ignored: a form layout hands an ignored field zero
+        # width and the digest disappears entirely instead of being shortened.
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
         self._sync_tooltip(text)
 
@@ -346,6 +355,54 @@ class ElidingLabel(QLabel):
             elided,
             self.foregroundRole(),
         )
+
+
+def page_header(title: str, subtitle: str = "", parent: QWidget | None = None) -> QWidget:
+    """The two lines every page opens with.
+
+    The title repeats the word in the navigation rail on purpose - it is the
+    anchor for the eye once the rail is out of focus - and the line under it
+    says what the page is *for*, which the rail has no room to.
+    """
+    holder = QWidget(parent)
+    layout = QVBoxLayout(holder)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(SPACE_XS)
+
+    heading = QLabel(title, holder)
+    set_role(heading, ROLE_PAGE_TITLE)
+    layout.addWidget(heading)
+
+    if subtitle:
+        caption = QLabel(subtitle, holder)
+        caption.setWordWrap(True)
+        set_role(caption, ROLE_PAGE_SUBTITLE)
+        layout.addWidget(caption)
+    return holder
+
+
+def fact_form() -> QFormLayout:
+    """A label-and-value table: one column of names, one of answers.
+
+    Every fact table in the program uses this, so a row on Overview and a row
+    on Diagnostics sit at the same height with the same gap beside them and
+    the eye can run down a column without re-aiming.
+    """
+    form = QFormLayout()
+    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    form.setHorizontalSpacing(SPACE_XL)
+    form.setVerticalSpacing(SPACE_SM)
+    form.setContentsMargins(0, 0, 0, 0)
+    return form
+
+
+def field_label(text: str, parent: QWidget | None = None) -> QLabel:
+    """The name half of a fact row."""
+    label = QLabel(text, parent)
+    set_role(label, ROLE_FIELD_LABEL)
+    return label
 
 
 # -------------------------------------------------------------- the stylesheet
@@ -729,10 +786,13 @@ __all__ = [
     "WARN",
     "apply_theme",
     "build_stylesheet",
+    "fact_form",
+    "field_label",
     "install_fonts",
     "interface_font",
     "mark_placeholder",
     "monospace_font",
+    "page_header",
     "rgb",
     "set_role",
     "set_signal",

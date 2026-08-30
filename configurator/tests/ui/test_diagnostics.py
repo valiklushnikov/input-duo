@@ -16,6 +16,7 @@ from duo_input.persistence.diagnostic_export import (
     PROJECT_MEMBER,
     UNKNOWN,
 )
+from duo_input.ui import theme
 from duo_input.ui.diagnostics import DiagnosticsPage
 from duo_input.ui.main_window import MainWindow
 from duo_input.ui.models.macro_steps import text_step
@@ -220,3 +221,48 @@ def test_an_autosave_that_cannot_be_written_is_reported_not_raised(window, monke
     window.autosave_now()
 
     assert any("autosave" in event for event in window.overview.events())
+
+
+# --------------------------------------------------------- how a fact reads
+
+
+def test_the_page_opens_by_saying_what_it_is(page):
+    from PySide6.QtWidgets import QLabel
+
+    titles = [
+        label.text()
+        for label in page.findChildren(QLabel)
+        if label.property("role") == theme.ROLE_PAGE_TITLE
+    ]
+
+    assert len(titles) == 1
+    assert titles[0]
+
+
+def test_a_counter_nobody_has_asked_for_reads_as_absence(page):
+    assert page.value("chip_id") == UNKNOWN
+    assert page.role("chip_id") == theme.ROLE_PLACEHOLDER
+
+
+def test_a_counter_that_arrives_reads_as_a_number(page, emulator, qtbot):
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.service.connect_device(emulator)
+    page.refresh()
+
+    assert page.value("protocol_version") == "1.0"
+    assert page.role("protocol_version") == theme.ROLE_MONO
+
+
+def test_every_counter_is_set_where_columns_line_up(page):
+    """A page of numbers is only scannable when the digits align."""
+    for key in page.field_keys():
+        assert page.role(key) in (theme.ROLE_MONO, theme.ROLE_PLACEHOLDER), key
+
+
+def test_the_privacy_note_gets_louder_only_once_it_applies(page, tmp_path):
+    assert page.privacy_label.property("signal") != theme.SIGNAL_WARN
+
+    page.set_session(ProjectSession.new().save(tmp_path / "p.duoinput.json"))
+    page.include_config_box.setChecked(True)
+
+    assert page.privacy_label.property("signal") == theme.SIGNAL_WARN
