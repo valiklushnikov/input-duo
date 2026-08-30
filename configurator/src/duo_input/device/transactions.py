@@ -35,6 +35,8 @@ _LINK_STATE = struct.Struct("<BBIII")
 _ENDPOINT_REPORT = struct.Struct("<BH")
 _DROPPED_COMMANDS = struct.Struct("<I")
 _RUNTIME_FAULT = struct.Struct("<B")
+_LATENCY_HEAD = struct.Struct("<II")
+_U32 = struct.Struct("<I")
 _CHUNK_ACK = struct.Struct("<BI")
 _CAPTURE_EVENT = struct.Struct("<BBB")
 
@@ -110,6 +112,68 @@ class ActiveConfigInfo:
 
 
 @dataclass(frozen=True)
+class LatencyHistogram:
+    """One stream of input, timed by the device and counted into buckets.
+
+    The device cannot keep every sample and cannot send a percentile it did not
+    compute, so it sends counts. A count answers "p95 <= 20 ms" exactly, as long
+    as 20 ms is one of the edges; it does not answer "what is the p95" with a
+    number, and this class refuses to invent one. Everything here brackets the
+    answer between two edges the device actually reported.
+
+    ``edges_us`` are the inclusive upper bounds of every bucket but the last,
+    and they arrive from the device rather than being held here, so a host and a
+    firmware cannot drift into disagreeing about what a bucket means.
+    """
+
+    edges_us: tuple[int, ...]
+    buckets: tuple[int, ...]
+    count: int
+    max_us: int
+
+    def at_or_below(self, bound_us: int) -> int:
+        """How many samples were at or below ``bound_us``.
+
+        Only a bucket edge has an exact answer. Anything else would need a
+        distribution the device never reported, so it is refused.
+        """
+        total = 0
+        for index, edge in enumerate(self.edges_us):
+            total += self.buckets[index]
+            if edge == bound_us:
+                return total
+        raise ValueError(
+            f"{bound_us} us is not one of the bucket edges the device reported "
+            f"({', '.join(str(edge) for edge in self.edges_us)}); "
+            "there is no exact answer for a bound inside a bucket"
+        )
+
+    def p95_upper_bound_us(self) -> int | None:
+        """The tightest edge the p95 is known to be at or below.
+
+        ``None`` means the p95 lies in the overflow bucket - above the last edge
+        - and this data cannot say where. That is a real answer and it is not a
+        pass; ``max_us`` is the only other thing known about it.
+
+        Nearest rank, matching the runner: p95 <= E exactly when at least
+        ceil(0.95 * count) samples were at or below E.
+        """
+        if self.count == 0:
+            raise ValueError("no samples were measured, so there is no percentile")
+        needed = -(-self.count * 95 // 100)
+        total = 0
+        for index, edge in enumerate(self.edges_us):
+            total += self.buckets[index]
+            if total >= needed:
+                return edge
+        return None
+
+    def within(self, bound_us: int) -> bool:
+        """Did the p95 meet ``bound_us``? Exact, for a bound that is an edge."""
+        return self.count > 0 and self.at_or_below(bound_us) >= -(-self.count * 95 // 100)
+
+
+@dataclass(frozen=True)
 class DeviceDiagnostics:
     bad_crc: int
     disconnect: int
@@ -149,6 +213,20 @@ class DeviceDiagnostics:
     # that has passed from one that is still going on. ``None`` when the
     # firmware predates the field.
     runtime_fault: int | None = None
+
+    # How long U1 itself took, counted into buckets by the device.
+    #
+    # This is the interval inside U1 - a peripheral report reaching its input
+    # core, against the command that report produced being applied on its
+    # output core - and nothing else. It is not the journey from a finger to a
+    # far screen: neither end of that is visible to a board that sees only its
+    # own clock, and anything presenting these figures as end-to-end latency is
+    # presenting them as something they are not.
+    #
+    # ``None`` when the firmware predates the block, which includes the
+    # emulator: it has no input pipeline and no peripheral to time.
+    keyboard_latency: LatencyHistogram | None = None
+    mouse_latency: LatencyHistogram | None = None
 
 
 @dataclass(frozen=True)
@@ -294,10 +372,14 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
         raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
     (dropped_commands,) = _DROPPED_COMMANDS.unpack(dropped) if dropped else (None,)
 
-    fault = tail[_DROPPED_COMMANDS.size :]
+    fault = tail[_DROPPED_COMMANDS.size : _DROPPED_COMMANDS.size + _RUNTIME_FAULT.size]
     if fault and len(fault) != _RUNTIME_FAULT.size:
         raise PayloadError("GET_DIAGNOSTICS payload has the wrong size")
     (runtime_fault,) = _RUNTIME_FAULT.unpack(fault) if fault else (None,)
+
+    keyboard_latency, mouse_latency = _parse_latency(
+        tail[_DROPPED_COMMANDS.size + _RUNTIME_FAULT.size :]
+    )
 
     return DeviceDiagnostics(
         bad_crc,
@@ -314,7 +396,50 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
         endpoint_release_ms=release_ms,
         dropped_commands=dropped_commands,
         runtime_fault=runtime_fault,
+        keyboard_latency=keyboard_latency,
+        mouse_latency=mouse_latency,
     )
+
+
+def _parse_latency(
+    block: bytes,
+) -> tuple[LatencyHistogram | None, LatencyHistogram | None]:
+    """Read the two histograms, or report that the firmware sent none.
+
+    A short block is refused rather than half-read: a histogram missing its
+    last buckets would still answer questions, and every answer would be
+    computed over samples the device never sent.
+    """
+    if not block:
+        return (None, None)
+
+    bucket_count = block[0]
+    if bucket_count < 2:
+        raise PayloadError(
+            "GET_DIAGNOSTICS latency block claims fewer than two buckets"
+        )
+
+    edge_bytes = 4 * (bucket_count - 1)
+    stream_bytes = _LATENCY_HEAD.size + 4 * bucket_count
+    if len(block) != 1 + edge_bytes + 2 * stream_bytes:
+        raise PayloadError("GET_DIAGNOSTICS latency block has the wrong size")
+
+    edges = tuple(
+        _U32.unpack_from(block, 1 + 4 * index)[0] for index in range(bucket_count - 1)
+    )
+
+    histograms: list[LatencyHistogram] = []
+    at = 1 + edge_bytes
+    for _ in range(2):
+        count, max_us = _LATENCY_HEAD.unpack_from(block, at)
+        buckets = tuple(
+            _U32.unpack_from(block, at + _LATENCY_HEAD.size + 4 * index)[0]
+            for index in range(bucket_count)
+        )
+        histograms.append(LatencyHistogram(edges, buckets, count, max_us))
+        at += stream_bytes
+
+    return (histograms[0], histograms[1])
 
 
 def parse_capture_event(payload: bytes) -> Trigger:
@@ -382,6 +507,7 @@ __all__ = [
     "FailureReason",
     "FrameAssembler",
     "FrameOverflowError",
+    "LatencyHistogram",
     "OperationFailure",
     "OperationResult",
     "PayloadError",

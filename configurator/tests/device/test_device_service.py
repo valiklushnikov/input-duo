@@ -13,7 +13,7 @@ from PySide6.QtCore import QTimer
 from duo_input.device.emulator import ErrorCode, U1Emulator
 from duo_input.device.qt_transport import SynchronousTransportLink
 from duo_input.device.service import DeviceService, DeviceState
-from duo_input.device.transactions import FailureReason
+from duo_input.device.transactions import FailureReason, PayloadError
 from duo_input.device.transport import AbstractByteTransport
 from duo_input.domain.config_binary import compile_device_config, decode_device_config
 from duo_input.domain.models import Macro, MacroStep, TargetMode
@@ -843,6 +843,166 @@ def test_diagnostics_say_whether_the_output_queue_is_refusing_commands_now() -> 
     older = parse_diagnostics(payload[:-1])
     assert older.dropped_commands == 12
     assert older.runtime_fault is None
+
+
+# ------------------------------------------------- the latency the device knows
+
+
+def _latency_block(
+    edges: tuple[int, ...],
+    keyboard: tuple[int, int, tuple[int, ...]],
+    mouse: tuple[int, int, tuple[int, ...]],
+) -> bytes:
+    import struct
+
+    out = bytes((len(edges) + 1,)) + b"".join(struct.pack("<I", edge) for edge in edges)
+    for count, max_us, buckets in (keyboard, mouse):
+        out += struct.pack("<II", count, max_us)
+        out += b"".join(struct.pack("<I", value) for value in buckets)
+    return out
+
+
+def _diagnostics_head() -> bytes:
+    import struct
+
+    return (
+        struct.pack("<BIIIII", 0, 0, 0, 0, 0, 0)
+        + struct.pack("<BBIII", 1, 1, 900, 0, 0)
+        + struct.pack("<BH", 0, 0)
+        + struct.pack("<I", 0)
+        + struct.pack("<B", 0)
+    )
+
+
+def test_the_device_reports_its_own_latency_as_counts_not_as_a_number() -> None:
+    """A percentile cannot be recovered from a mean, and the device has no room
+    to keep every sample. It counts them into buckets instead, and sends the
+    bucket edges with them so the host cannot be wrong about what a bucket
+    means."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = _diagnostics_head() + _latency_block(
+        (250, 500, 1000, 2000, 5000, 10000, 20000, 50000),
+        (100, 30000, (0, 0, 0, 96, 0, 0, 0, 4, 0)),
+        (50, 700, (0, 50, 0, 0, 0, 0, 0, 0, 0)),
+    )
+
+    counters = parse_diagnostics(payload)
+
+    assert counters.keyboard_latency is not None
+    assert counters.keyboard_latency.count == 100
+    assert counters.keyboard_latency.max_us == 30000
+    assert counters.keyboard_latency.edges_us[-1] == 50000
+    assert counters.mouse_latency is not None
+    assert counters.mouse_latency.count == 50
+    assert counters.mouse_latency.max_us == 700
+
+
+def test_the_p95_is_reported_as_the_bucket_it_falls_in_not_a_point() -> None:
+    """A histogram brackets a percentile between two edges. Naming a single
+    number from inside a bucket would be an estimate dressed as a measurement,
+    which is the one thing this acceptance path exists to prevent."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = _diagnostics_head() + _latency_block(
+        (250, 500, 1000, 2000, 5000, 10000, 20000, 50000),
+        (100, 30000, (0, 0, 0, 96, 0, 0, 0, 4, 0)),
+        (0, 0, (0,) * 9),
+    )
+
+    keyboard = parse_diagnostics(payload).keyboard_latency
+    assert keyboard is not None
+
+    # 96 of 100 at or below 2 ms, so 95 of them are: the p95 is bounded by the
+    # 2 ms edge and by nothing tighter.
+    assert keyboard.p95_upper_bound_us() == 2000
+    assert keyboard.at_or_below(2000) == 96
+
+
+def test_a_p95_past_every_edge_is_reported_as_past_them_rather_than_guessed() -> None:
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = _diagnostics_head() + _latency_block(
+        (250, 500, 1000, 2000, 5000, 10000, 20000, 50000),
+        (100, 120000, (0, 0, 0, 90, 0, 0, 0, 0, 10)),
+        (0, 0, (0,) * 9),
+    )
+
+    keyboard = parse_diagnostics(payload).keyboard_latency
+    assert keyboard is not None
+
+    # Ten samples in the overflow bucket is more than five, so the p95 is
+    # somewhere above 50 ms and this data cannot say where.
+    assert keyboard.p95_upper_bound_us() is None
+
+
+def test_a_bound_that_is_not_a_bucket_edge_is_refused() -> None:
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = _diagnostics_head() + _latency_block(
+        (250, 500, 1000, 2000, 5000, 10000, 20000, 50000),
+        (10, 100, (10, 0, 0, 0, 0, 0, 0, 0, 0)),
+        (0, 0, (0,) * 9),
+    )
+
+    keyboard = parse_diagnostics(payload).keyboard_latency
+    assert keyboard is not None
+    with pytest.raises(ValueError):
+        keyboard.at_or_below(17500)
+
+
+def test_a_percentile_of_no_samples_is_refused_rather_than_reported_as_fast() -> None:
+    """A device that saw no input would otherwise look like the fastest device
+    ever built."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = _diagnostics_head() + _latency_block(
+        (250, 500, 1000, 2000, 5000, 10000, 20000, 50000),
+        (0, 0, (0,) * 9),
+        (0, 0, (0,) * 9),
+    )
+
+    keyboard = parse_diagnostics(payload).keyboard_latency
+    assert keyboard is not None
+    assert keyboard.count == 0
+    with pytest.raises(ValueError):
+        keyboard.p95_upper_bound_us()
+
+
+def test_firmware_without_the_latency_block_still_parses() -> None:
+    """The emulator has no input pipeline and no peripheral clock, so it sends
+    no latency at all. Refusing that reply would make the emulator unreadable
+    by the code that reads the device."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    counters = parse_diagnostics(_diagnostics_head())
+
+    assert counters.keyboard_latency is None
+    assert counters.mouse_latency is None
+
+
+def test_a_truncated_latency_block_is_refused_rather_than_half_read() -> None:
+    """Half a histogram read as a whole one would report a p95 over a sample
+    count that was never sent."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = _diagnostics_head() + _latency_block(
+        (250, 500, 1000, 2000, 5000, 10000, 20000, 50000),
+        (10, 100, (10, 0, 0, 0, 0, 0, 0, 0, 0)),
+        (0, 0, (0,) * 9),
+    )
+
+    with pytest.raises(PayloadError):
+        parse_diagnostics(payload[:-4])
+
+
+def test_a_latency_block_claiming_no_buckets_is_refused() -> None:
+    """A device that says it has zero buckets is a device this cannot read, and
+    dividing by its sample count later would be worse than saying so now."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    with pytest.raises(PayloadError):
+        parse_diagnostics(_diagnostics_head() + bytes((0,)))
 
 
 def test_diagnostics_without_the_endpoint_report_are_still_readable() -> None:
