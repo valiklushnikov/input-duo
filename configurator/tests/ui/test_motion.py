@@ -7,6 +7,8 @@ would be waiting on timers it cannot see.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 from PySide6.QtWidgets import QWidget
 
@@ -173,6 +175,48 @@ def test_a_stopped_fade_does_not_strand_its_effect(widget, monkeypatch):
     animation.stop()
 
     assert widget.graphicsEffect() is None
+
+
+def test_a_window_closed_mid_fade_raises_nothing(monkeypatch, qtbot):
+    """Cleanup on ``stateChanged`` also runs while the widget is being freed.
+
+    The animation is parented to the widget it fades, so a window destroyed
+    mid-fade destroys the animation with it - and ``~QAbstractAnimation``
+    emits ``stateChanged`` on the way out, into a slot whose widget is
+    already gone. ``finished`` was never emitted there, so this hazard
+    arrived with the move to ``stateChanged`` and has to be answered by it.
+
+    The widget is deliberately not registered with ``qtbot``: this test
+    destroys it itself, and a second teardown of the same object would fail
+    for a reason that has nothing to do with the fade.
+    """
+    monkeypatch.setattr(motion, "animations_enabled", lambda: True)
+    doomed = QWidget()
+    animation = motion.fade_in(doomed, duration=5000)
+    assert animation is not None
+    raised: list[BaseException] = []
+    monkeypatch.setattr(sys, "excepthook", lambda kind, value, tb: raised.append(value))
+
+    doomed.deleteLater()
+    qtbot.wait(50)
+
+    assert raised == []
+
+
+def test_a_page_destroyed_mid_fade_raises_nothing(monkeypatch, qtbot):
+    """The same, for the child path a page change uses."""
+    monkeypatch.setattr(motion, "animations_enabled", lambda: True)
+    holder = QWidget()
+    doomed = QWidget(holder)
+    animation = motion.fade_in(doomed, duration=5000)
+    assert animation is not None
+    raised: list[BaseException] = []
+    monkeypatch.setattr(sys, "excepthook", lambda kind, value, tb: raised.append(value))
+
+    doomed.deleteLater()
+    qtbot.wait(50)
+
+    assert raised == []
 
 
 def test_a_disabled_lift_leaves_the_widget_where_it_belongs(widget, monkeypatch):

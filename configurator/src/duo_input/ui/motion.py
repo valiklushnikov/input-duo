@@ -77,8 +77,18 @@ def _fade_window_in(widget: QWidget, duration: int) -> QPropertyAnimation:
     def _restore(state: QAbstractAnimation.State, _previous) -> None:
         # A fade that is stopped part-way would otherwise leave a window the
         # operator cannot see and cannot dismiss.
-        if state is not QAbstractAnimation.State.Running:
+        if state is QAbstractAnimation.State.Running:
+            return
+        try:
             widget.setWindowOpacity(1.0)
+        except RuntimeError:
+            # Qt emits this from ~QAbstractAnimation as well, and the
+            # animation is a child of the widget: a window closed mid-fade
+            # takes its animation down with it, so by the time this runs the
+            # widget behind the wrapper can already be gone. There is then
+            # nothing to restore, and raising here would only print a
+            # traceback out of a closing window.
+            pass
 
     animation.stateChanged.connect(_restore)
     animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
@@ -108,8 +118,14 @@ def _fade_child_in(widget: QWidget, duration: int) -> QPropertyAnimation:
         # already someone else's.
         if state is QAbstractAnimation.State.Running:
             return
-        if widget.graphicsEffect() is effect:
-            widget.setGraphicsEffect(None)
+        try:
+            if widget.graphicsEffect() is effect:
+                widget.setGraphicsEffect(None)
+        except RuntimeError:
+            # See ``_fade_window_in``: a widget destroyed mid-fade reaches
+            # here through the animation's own destructor, with nothing left
+            # to clean up.
+            pass
 
     animation.stateChanged.connect(_clear_effect)
     animation.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
