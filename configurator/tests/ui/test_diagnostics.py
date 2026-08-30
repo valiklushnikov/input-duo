@@ -58,6 +58,17 @@ def page(qtbot, service) -> DiagnosticsPage:
 # ---------------------------------------------------------------- the page
 
 
+def test_diagnostics_does_not_offer_a_firmware_version(page):
+    """Protocol v1 carries no firmware version, from either microcontroller.
+
+    A row that can only ever read "unknown" reads as a fault in the device,
+    when the truth is that nothing is asked and nothing answers.
+    """
+    for key in ("u1_firmware_version", "u2_firmware_version"):
+        with pytest.raises(KeyError):
+            page.value(key)
+
+
 def test_everything_is_unknown_without_a_device(page):
     assert page.value("protocol_version") == UNKNOWN
     assert page.value("reset_reason") == UNKNOWN
@@ -71,7 +82,6 @@ def test_connecting_fills_in_what_the_device_reports(page, emulator, qtbot):
 
     assert page.value("protocol_version") == "1.0"
     # Protocol v1 carries neither of these, and the page keeps saying so.
-    assert page.value("u1_firmware_version") == UNKNOWN
     assert page.value("reset_reason") == UNKNOWN
 
 

@@ -64,8 +64,6 @@ class DiagnosticsPage(QWidget):
             (
                 ("application_version", QT_TRANSLATE_NOOP("DiagnosticsPage", "Configurator")),
                 ("protocol_version", QT_TRANSLATE_NOOP("DiagnosticsPage", "CDC protocol")),
-                ("u1_firmware_version", QT_TRANSLATE_NOOP("DiagnosticsPage", "U1 firmware")),
-                ("u2_firmware_version", QT_TRANSLATE_NOOP("DiagnosticsPage", "U2 firmware")),
                 ("chip_id", QT_TRANSLATE_NOOP("DiagnosticsPage", "Chip ID")),
             ),
         ),

@@ -56,16 +56,11 @@ MAX_EVENTS = 50
 MONOSPACED_FIELDS = frozenset(
     {
         "u1_protocol_version",
-        "u1_firmware_version",
-        "u2_firmware_version",
         "device_generation",
         "device_active_profile",
         "keyboard_route",
         "mouse_route",
         "text_layout",
-        "file_hash",
-        "compiled_hash",
-        "device_hash",
     }
 )
 
@@ -109,8 +104,6 @@ class OverviewPage(QWidget):
                 self.tr("Device"),
                 (
                     ("u1_protocol_version", self.tr("U1 protocol version")),
-                    ("u1_firmware_version", self.tr("U1 firmware version")),
-                    ("u2_firmware_version", self.tr("U2 firmware version")),
                     ("device_generation", self.tr("Configuration generation")),
                     ("device_active_profile", self.tr("Profile active on device")),
                 ),
@@ -142,32 +135,6 @@ class OverviewPage(QWidget):
             ),
             1,
             0,
-        )
-        grid.addWidget(
-            self._card(
-                self.tr("Memory usage"),
-                (
-                    ("project_config_size", self.tr("Project package")),
-                    ("device_config_size", self.tr("Package on device")),
-                ),
-            ),
-            1,
-            1,
-        )
-        grid.addWidget(
-            self._card(
-                self.tr("Configuration state"),
-                (
-                    ("file_hash", self.tr("Saved file")),
-                    ("compiled_hash", self.tr("Compiled project")),
-                    ("device_hash", self.tr("On device")),
-                    ("device_sync", self.tr("Device")),
-                ),
-            ),
-            2,
-            0,
-            1,
-            2,
         )
 
         events_box = QGroupBox(self.tr("Recent events"), body)
@@ -268,8 +235,6 @@ class OverviewPage(QWidget):
             "u1_protocol_version",
             f"{info.protocol_major}.{info.protocol_minor}" if connected else UNKNOWN,
         )
-        self._set("u1_firmware_version", UNKNOWN)
-        self._set("u2_firmware_version", UNKNOWN)
         self._set("device_generation", str(info.active_generation) if connected else UNKNOWN)
 
         active = status.active_profile if connected and status is not None else None
@@ -289,10 +254,6 @@ class OverviewPage(QWidget):
             else:
                 self._set(key, self.tr("not advertised"))
 
-        # The device never reports how large its stored package is outside a
-        # read transaction, so this stays unknown instead of guessing.
-        self._set("device_config_size", UNKNOWN)
-
     def _update_project(self, session: ProjectSession) -> None:
         profile = session.active_profile
         self._set("active_profile", f"{profile.id} - {profile.name}")
@@ -300,28 +261,6 @@ class OverviewPage(QWidget):
         self._set("mouse_route", profile.mouse_route.name)
         self._set("text_layout", profile.text_layout.name)
 
-        size = session.compiled_size
-        if size is None:
-            self._set("project_config_size", UNKNOWN)
-        else:
-            percent = size * 100.0 / BINARY_CONFIG_MAX_BYTES
-            self._set(
-                "project_config_size",
-                self.tr("{0} of {1} bytes ({2:.1f}%)").format(
-                    size, BINARY_CONFIG_MAX_BYTES, percent
-                ),
-            )
-
-        self._set("file_hash", session.file_hash or UNKNOWN)
-        self._set("compiled_hash", session.compiled_hash or UNKNOWN)
-        self._set("device_hash", session.device_hash or UNKNOWN)
-        if not session.device_hash:
-            self._set("device_sync", UNKNOWN)
-            set_signal(self._values["device_sync"], SIGNAL_MUTED)
-        else:
-            matches = session.device_matches
-            self._set("device_sync", IN_SYNC if matches else OUT_OF_SYNC)
-            set_signal(self._values["device_sync"], SIGNAL_OK if matches else SIGNAL_WARN)
 
     def _set(self, key: str, text: str) -> None:
         label = self._values[key]
