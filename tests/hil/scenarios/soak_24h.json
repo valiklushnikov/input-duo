@@ -7,6 +7,7 @@
     "PC1 and PC2 both able to log for 24 hours",
     "An uninterrupted supply"
   ],
+  "on_this_rig": "Opened with --phase baseline and finished a day later with --phase measure against the same state file. A measure phase taken sooner than the 24 hours the scenario names records every check as unmeasured and prints the elapsed hours, so the soak cannot be passed on an afternoon of evidence. After 24 hours it decides error_counters_stable and the three latency and stall checks from counters scoped to the run by the baseline. no_watchdog_reset stays unmeasured - the firmware counts resets but GET_DIAGNOSTICS does not carry the count - and no_stuck_keys needs a logger at each computer. The runner does not perform the write_config step, so the profiles and the macro the scenario describes have to be on the device already.",
   "steps": [
     {"action": "connect"},
     {"action": "write_config", "note": "two profiles, a toggle binding, and one macro long enough to be stopped mid-run"},

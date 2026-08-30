@@ -272,7 +272,12 @@ class ScenarioResult:
 # --- scenarios ---------------------------------------------------------------
 
 
-REQUIRED_SCENARIO_KEYS = ("name", "description", "requires", "steps")
+#: ``on_this_rig`` is mandatory. A scenario file listing ten steps and five
+#: checks reads as runnable; on a bench with two peripheral ports and no logger
+#: at either computer, most of them decide nothing. The report says so in its
+#: ``unmeasured`` list, but by then an afternoon has been spent, so the scenario
+#: file says it too, in its own terms, before anybody starts.
+REQUIRED_SCENARIO_KEYS = ("name", "description", "requires", "on_this_rig", "steps")
 
 
 def load_scenario(path: str | Path) -> dict:
@@ -437,26 +442,76 @@ def _check_no_gap(context: _Context):
     return (True, "", "")
 
 
-def _check_u2_release(context: _Context):
-    """U2 let go within the budget of the link going quiet.
+def _drops_this_run(context: _Context):
+    """How many times U2 let go between the baseline and now, or why unknown.
 
-    U2 records the silence that caused its own release and reports it when the
-    link comes back, which is the only way this is observable at all: the link
-    that would carry the news live is the one that went away.
+    Both of U2's fields are lifetime values - ``drops`` is a saturating count
+    since U2 booted, ``last_release_ms`` is whichever release happened last,
+    whenever that was. Neither says anything about this run on its own, and
+    this bench proved it: a scenario that never went near SPI1 read
+    ``endpoint_drops: 7, endpoint_release_ms: 100`` and would have reported a
+    release within budget for a fault nobody caused.
     """
-    release_ms = getattr(context.now, "endpoint_release_ms", None)
     drops = getattr(context.now, "endpoint_drops", None)
-    if release_ms is None or drops is None:
+    if drops is None:
         return (
             None,
             "this firmware does not report what the endpoint saw when the link died",
             "a U1 whose GET_DIAGNOSTICS carries the endpoint report",
         )
-    if not drops:
+    if context.baseline is None:
         return (
             None,
-            "U2 has not released anything, so there is no release to time",
-            "the SPI1 link physically interrupted while a key is held",
+            "no baseline reading, so a lifetime drop count says nothing about "
+            "whether the link was interrupted during this run",
+            "a --phase baseline run before the link was cut",
+        )
+    before = getattr(context.baseline, "endpoint_drops", None)
+    if before is None:
+        return (
+            None,
+            "the baseline reading carries no endpoint drop count to subtract",
+            "a --phase baseline run against a U1 that reports the endpoint block",
+        )
+    return (drops - before, "", "")
+
+
+def _check_u2_release(context: _Context):
+    """U2 let go within the budget of the link going quiet, during this run.
+
+    U2 records the silence that caused its own release and reports it when the
+    link comes back, which is the only way this is observable at all: the link
+    that would carry the news live is the one that went away. It records the
+    *last* one, so a run that cut the link more than once has one time for
+    several cuts and cannot answer "every held key, within 100 ms of the cut".
+    """
+    release_ms = getattr(context.now, "endpoint_release_ms", None)
+    if release_ms is None:
+        return (
+            None,
+            "this firmware does not report what the endpoint saw when the link died",
+            "a U1 whose GET_DIAGNOSTICS carries the endpoint report",
+        )
+    grew, reason, needs = _drops_this_run(context)
+    if grew is None:
+        return (None, reason, needs)
+    if grew <= 0:
+        return (
+            None,
+            "U2 did not release anything between the two readings, so this run "
+            "caused no release to time; the count and the time on the device are "
+            "from before it",
+            "the SPI1 link physically interrupted while a key is held, between "
+            "the baseline and the measure phase",
+        )
+    if grew > 1:
+        return (
+            None,
+            f"U2 released {grew} times during this run and records only the last "
+            "one, so every held key being released within 100 ms of its own cut "
+            "cannot be decided from a single time",
+            "one interruption per measure phase, or a U2 that records every "
+            "release rather than the last",
         )
     return (release_ms <= U2_RELEASE_BUDGET_MS, "", "")
 
@@ -472,6 +527,16 @@ def _counter_grew(context: _Context, attribute: str):
 
 
 def _check_crc_counter(context: _Context):
+    """A corrupted frame was counted - decidable only when one was counted.
+
+    Nothing here can see whether the operator grounded MOSI. A run in which no
+    frame was corrupted and a firmware that counts no corruption produce the
+    same reading, so zero growth is undecided rather than failed: calling it a
+    failure would fail every honest run that skipped the step, and the
+    scenario's other checks would then sit under a "failed" verdict. The cost
+    is stated rather than hidden - a firmware that stopped counting is recorded
+    as unmeasured here, and catching that needs a rig that corrupts on command.
+    """
     if context.baseline is None:
         return (
             None,
@@ -481,16 +546,42 @@ def _check_crc_counter(context: _Context):
     grew = _counter_grew(context, "link_crc_errors")
     if grew is None:
         return (None, "this firmware does not report the link CRC counter", "a newer U1 build")
-    return (grew > 0, "", "")
+    if grew <= 0:
+        return (
+            None,
+            "no CRC error was counted between the two readings, and this rig "
+            "cannot tell a frame that was never corrupted from one that was "
+            "corrupted and not counted",
+            "a rig that corrupts a frame on command, so that the absence of a "
+            "count is attributable to the firmware rather than to the bench",
+        )
+    return (True, "", "")
 
 
 def _check_link_recovered(context: _Context):
+    """The link answers again after something interrupted it in this run.
+
+    A link that answers now is only evidence of a recovery if it went away
+    first. Without a drop during the run this reads "the link is up", which was
+    also true before the run started and proves nothing about recovering.
+    """
     answering = getattr(context.now, "endpoint_answering", None)
     if answering is None:
         return (
             None,
             "this firmware does not say whether the endpoint is answering",
             "a U1 whose GET_DIAGNOSTICS carries the link state",
+        )
+    grew, reason, needs = _drops_this_run(context)
+    if grew is None:
+        return (None, reason, needs)
+    if grew <= 0:
+        return (
+            None,
+            "nothing interrupted the link during this run, so the link answering "
+            "now is the state it was already in and not a recovery",
+            "the SPI1 link physically interrupted and restored between the "
+            "baseline and the measure phase",
         )
     return (bool(answering), "", "")
 
@@ -838,6 +929,9 @@ def measure(scenario: dict, session, baseline=None, elapsed_seconds=None) -> Sce
     if elapsed_seconds is not None:
         result.measurements["elapsed_hours"] = round(elapsed_seconds / 3600, 4)
     result.notes.append(MEASUREMENT_SCOPE)
+    on_this_rig = scenario.get("on_this_rig")
+    if on_this_rig:
+        result.notes.append(on_this_rig)
     if baseline is None:
         result.notes.append(
             "no baseline: every counter here is since the device booted, not since "

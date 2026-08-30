@@ -6,6 +6,7 @@
     "A way to corrupt one frame in flight, such as grounding MOSI for one transfer",
     "PC2 observing what U2 emits"
   ],
+  "on_this_rig": "Worth running only if SPI1 is actually interrupted between the two phases, and worth running once per interruption. U2's drop count and release time are both lifetime values - the count saturates upward and the time is whichever release happened last - so the runner subtracts the baseline and decides u2_released_within_budget only when this run caused exactly one release. No release in this run leaves it unmeasured rather than passing on a fault from before the baseline; more than one leaves it unmeasured because U2 keeps only the last time. link_recovered is decided the same way: a link that answers now is evidence of a recovery only if something took it away first. crc_counter_incremented is decided only when the counter grew, since nothing here can tell a frame nobody corrupted from one that was corrupted and not counted. no_report_from_damaged_frame and resets_are_independent need PC2 and are always unmeasured.",
   "steps": [
     {"action": "connect"},
     {"action": "inject", "kind": "keyboard", "event": "key_a_down", "note": "leave it held"},

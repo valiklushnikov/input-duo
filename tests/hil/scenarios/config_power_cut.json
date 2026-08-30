@@ -5,6 +5,7 @@
     "U1 on a switchable supply",
     "A host running the configurator or its CDC client"
   ],
+  "on_this_rig": "Nothing in this scenario is decidable here, and a run says exactly that: all four checks come back unmeasured and the verdict is 'nothing measured' with exit code 3. The runner does not write configuration - a write replaces the operator's own, and a read-only acceptance run must not - and it does not cut power. Running it is still worth the minute it takes: it confirms the four checks are recorded as unasked rather than skipped into silence. It needs U1 on a switchable supply the runner can command, and a run permitted to replace the configuration on the device.",
   "steps": [
     {"action": "connect"},
     {

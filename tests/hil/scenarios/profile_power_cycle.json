@@ -6,6 +6,7 @@
     "A keyboard and a mouse attached",
     "PC1 and PC2 observing"
   ],
+  "on_this_rig": "Nothing in this scenario is decidable here either: all three checks come back unmeasured, verdict 'nothing measured', exit code 3. Reading the active profile back would prove nothing about a power cycle this runner did not cause, and what a binding or a route produced is observed at the computer it was routed to. It needs a switchable supply and a logger at each computer.",
   "steps": [
     {"action": "connect"},
     {"action": "write_config", "note": "eight distinct profiles: different routes, bindings and macros"},

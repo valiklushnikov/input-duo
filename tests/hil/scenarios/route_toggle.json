@@ -6,6 +6,7 @@
     "U2 on SPI1",
     "PC1 and PC2 both logged in and observing"
   ],
+  "on_this_rig": "On this bench this scenario decides none of its own three questions. A route change is only observable as an event arriving at the other computer, and nothing here watches PC1 or PC2, so all_toggles_took_effect, no_misrouted_event and no_stuck_keys are all recorded as unmeasured. The runner also does not perform the write_config step, so the toggle binding has to be in the configuration already or the tap does nothing - which changes no verdict here, because none of the toggle checks is decided either way. What a run does decide is the three latency and stall checks, over whatever input flowed between the two phases. Run it for those; do not read a partial verdict here as 1000 toggles verified.",
   "steps": [
     {"action": "connect"},
     {"action": "write_config", "note": "one profile, Button 3 bound to TOGGLE_MOUSE_ROUTE"},

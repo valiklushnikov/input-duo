@@ -8,6 +8,7 @@
     "5 USB keyboards of different vendors, at least one behind a built-in hub",
     "5 USB mice of different vendors, at least one with 5 buttons and one with 3"
   ],
+  "on_this_rig": "On the two-port bench this scenario is the one that pays: both channels are read, every device row carries the VID, PID, descriptor hash and declared button count the device itself supplied, and the latency and stall checks are decided from the device's own histograms. Two of the ten devices it asks for is all one run can reach, and the coverage block says so rather than leaving eight blank rows. no_stuck_keys needs a logger at PC1 and PC2 and is recorded as unmeasured. The role in each row is the kind the device reported in its own descriptor; the channel it was plugged into is the separate 'port' field, and on this bench the two are crossed.",
   "device_requirements": {
     "keyboard": 5,
     "mouse": 5

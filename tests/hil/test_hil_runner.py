@@ -212,6 +212,53 @@ def test_every_committed_scenario_is_loadable(name):
     assert scenario["checks"]
 
 
+@pytest.mark.parametrize(
+    "name",
+    (
+        "peripherals",
+        "route_toggle",
+        "link_fault",
+        "config_power_cut",
+        "profile_power_cycle",
+        "soak_24h",
+    ),
+)
+def test_every_committed_scenario_says_what_it_decides_on_this_rig(name):
+    # A scenario file that lists ten steps and five checks reads as runnable.
+    # On a two-port bench with no logger at either computer most of them decide
+    # nothing, and the reader of the file - not only the reader of a report -
+    # is entitled to know which before spending an afternoon on it.
+    scenario = load_scenario(SCENARIOS / f"{name}.json")
+
+    assert scenario["on_this_rig"].strip()
+
+
+def test_the_report_carries_the_scenarios_own_account_of_this_rig():
+    scenario = load_scenario(SCENARIOS / "link_fault.json")
+
+    result = measure(scenario, FakeSession(_diagnostics()))
+
+    assert scenario["on_this_rig"] in result.notes
+
+
+def test_a_scenario_that_does_not_say_what_it_decides_here_is_refused(tmp_path):
+    path = tmp_path / "silent.json"
+    path.write_text(
+        json.dumps(
+            {
+                "name": "x",
+                "description": "",
+                "requires": [],
+                "steps": [{"action": "connect"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        load_scenario(path)
+
+
 def test_a_scenario_missing_a_key_is_refused(tmp_path):
     path = tmp_path / "broken.json"
     path.write_text(json.dumps({"name": "x", "steps": []}), encoding="utf-8")
@@ -417,29 +464,104 @@ def test_no_stall_passes_when_every_sample_is_inside_the_threshold():
     assert checks == {"no_gap_over_50ms": True}
 
 
+def _release(checks, now, baseline):
+    return evaluate(_scenario(checks={checks: ""}), now, baseline=baseline)
+
+
 def test_the_u2_release_is_measured_against_the_hundred_millisecond_budget():
-    inside = evaluate(
-        _scenario(checks={"u2_released_within_budget": ""}),
-        _diagnostics(endpoint_drops=1, endpoint_release_ms=88),
+    inside = _release(
+        "u2_released_within_budget",
+        _diagnostics(endpoint_drops=8, endpoint_release_ms=88),
+        _diagnostics(endpoint_drops=7, endpoint_release_ms=100),
     )[0]
     assert inside == {"u2_released_within_budget": True}
 
-    outside = evaluate(
-        _scenario(checks={"u2_released_within_budget": ""}),
-        _diagnostics(endpoint_drops=1, endpoint_release_ms=104),
+    outside = _release(
+        "u2_released_within_budget",
+        _diagnostics(endpoint_drops=8, endpoint_release_ms=104),
+        _diagnostics(endpoint_drops=7, endpoint_release_ms=100),
     )[0]
     assert outside == {"u2_released_within_budget": False}
     assert U2_RELEASE_BUDGET_MS == 100.0
 
 
 def test_a_release_that_never_happened_is_not_a_release_within_budget():
-    checks, unmeasured = evaluate(
-        _scenario(checks={"u2_released_within_budget": ""}),
+    checks, unmeasured = _release(
+        "u2_released_within_budget",
+        _diagnostics(endpoint_drops=0, endpoint_release_ms=0),
         _diagnostics(endpoint_drops=0, endpoint_release_ms=0),
     )
 
     assert checks == {}
     assert "no release to time" in unmeasured[0].reason
+
+
+def test_a_release_from_before_the_run_is_not_a_release_this_run_caused():
+    # This bench read `endpoint_drops: 7, endpoint_release_ms: 100` during a
+    # scenario that never went near SPI1. Both are lifetime values: the count
+    # saturates upward and the time is whichever release happened last, whenever
+    # that was. Deciding the check from them would report a pass for a fault
+    # nobody caused, which is exactly a scenario that looks runnable and proves
+    # nothing.
+    checks, unmeasured = _release(
+        "u2_released_within_budget",
+        _diagnostics(endpoint_drops=7, endpoint_release_ms=100),
+        _diagnostics(endpoint_drops=7, endpoint_release_ms=100),
+    )
+
+    assert checks == {}
+    assert "did not release anything between the two readings" in unmeasured[0].reason
+
+
+def test_a_release_cannot_be_attributed_to_a_run_that_took_no_baseline():
+    checks, unmeasured = evaluate(
+        _scenario(checks={"u2_released_within_budget": ""}),
+        _diagnostics(endpoint_drops=7, endpoint_release_ms=100),
+    )
+
+    assert checks == {}
+    assert "baseline" in unmeasured[0].reason
+
+
+def test_several_drops_in_one_run_leave_only_the_last_release_timed():
+    # U2 keeps `last_release_ms`, not every release. "Every held key released
+    # within 100 ms of the cut" is not decidable from one of three cuts.
+    checks, unmeasured = _release(
+        "u2_released_within_budget",
+        _diagnostics(endpoint_drops=10, endpoint_release_ms=88),
+        _diagnostics(endpoint_drops=7, endpoint_release_ms=100),
+    )
+
+    assert checks == {}
+    assert "3 times" in unmeasured[0].reason
+    assert "last" in unmeasured[0].reason
+
+
+def test_a_link_that_was_never_cut_answering_now_is_not_a_recovery():
+    checks, unmeasured = _release(
+        "link_recovered",
+        _diagnostics(endpoint_answering=True, endpoint_drops=7),
+        _diagnostics(endpoint_answering=True, endpoint_drops=7),
+    )
+
+    assert checks == {}
+    assert "nothing interrupted the link" in unmeasured[0].reason
+
+
+def test_a_link_that_answers_after_a_drop_in_this_run_has_recovered():
+    up = _release(
+        "link_recovered",
+        _diagnostics(endpoint_answering=True, endpoint_drops=8),
+        _diagnostics(endpoint_answering=True, endpoint_drops=7),
+    )[0]
+    assert up == {"link_recovered": True}
+
+    down = _release(
+        "link_recovered",
+        _diagnostics(endpoint_answering=False, endpoint_drops=8),
+        _diagnostics(endpoint_answering=True, endpoint_drops=7),
+    )[0]
+    assert down == {"link_recovered": False}
 
 
 def test_a_counter_that_only_climbs_says_nothing_about_a_run_with_no_baseline():
@@ -460,6 +582,21 @@ def test_with_a_baseline_the_crc_counter_answers_for_the_run():
     )
 
     assert checks == {"crc_counter_incremented": True}
+
+
+def test_no_crc_error_counted_is_not_a_failure_to_count_one():
+    # The runner cannot see whether anybody grounded MOSI. A run where no frame
+    # was corrupted and a firmware that counts no corruption look identical from
+    # here, and calling the pair "failed" fails every honest run that skipped
+    # the step.
+    checks, unmeasured = evaluate(
+        _scenario(checks={"crc_counter_incremented": ""}),
+        _diagnostics(link_crc_errors=7),
+        baseline=_diagnostics(link_crc_errors=7),
+    )
+
+    assert checks == {}
+    assert "never corrupted" in unmeasured[0].reason
 
 
 # ----------------------------------------------------- what it cannot measure
