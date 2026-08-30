@@ -187,6 +187,7 @@ ASSET_DIRECTORY = Path(__file__).resolve().parent.parent / "resources"
 
 #: The one drawn asset: a chevron for the combo boxes, at 1x and 2x.
 CHEVRON_ASSET = "chevron-down.png"
+CHEVRON_UP_ASSET = "chevron-up.png"
 
 
 def asset_url(name: str) -> str:
@@ -353,6 +354,7 @@ class ElidingLabel(QLabel):
 def build_stylesheet(interface_family: str, mono_family: str) -> str:
     """The whole look, as one Qt style sheet."""
     chevron = asset_url(CHEVRON_ASSET)
+    chevron_up = asset_url(CHEVRON_UP_ASSET)
     # Styling the drop-down at all replaces the platform's arrow, so the rule
     # is only written when there is something to put back in its place.
     chevron_rules = (
@@ -365,8 +367,18 @@ QComboBox::drop-down {{
     background: transparent;
 }}
 QComboBox::down-arrow {{ image: {chevron}; width: {SPACE_MD}px; height: {SPACE_MD}px; }}
+QSpinBox::up-button, QSpinBox::down-button {{
+    subcontrol-origin: border;
+    width: {SPACE_XL}px;
+    border: none;
+    background: transparent;
+}}
+QSpinBox::up-button {{ subcontrol-position: top right; }}
+QSpinBox::down-button {{ subcontrol-position: bottom right; }}
+QSpinBox::up-arrow {{ image: {chevron_up}; width: {SPACE_MD}px; height: {SPACE_MD}px; }}
+QSpinBox::down-arrow {{ image: {chevron}; width: {SPACE_MD}px; height: {SPACE_MD}px; }}
 """
-        if chevron
+        if chevron and chevron_up
         else ""
     )
     return f"""
@@ -433,18 +445,19 @@ QGroupBox {{
     background-color: {SURFACE};
     border: 1px solid {LINE};
     border-radius: {RADIUS}px;
-    margin-top: {SPACE_MD}px;
-    padding: {SPACE_LG}px {SPACE_LG}px {SPACE_MD}px {SPACE_LG}px;
+    margin-top: 0px;
+    padding: {2 * SPACE_XL - SPACE_SM}px {SPACE_LG}px {SPACE_LG}px {SPACE_LG}px;
     font-size: {TEXT_CARD_TITLE}pt;
     font-weight: {WEIGHT_MEDIUM};
 }}
 QGroupBox::title {{
-    subcontrol-origin: margin;
+    subcontrol-origin: border;
     subcontrol-position: top left;
-    left: {SPACE_MD}px;
-    padding: 0px {SPACE_XS}px;
+    left: {SPACE_LG}px;
+    top: {SPACE_MD}px;
+    padding: 0px;
     color: {INK};
-    background-color: {CANVAS};
+    background: transparent;
 }}
 
 /* ------------------------------------------------------------------- text */

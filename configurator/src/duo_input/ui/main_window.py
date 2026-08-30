@@ -14,6 +14,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -42,6 +43,25 @@ from duo_input.ui.mouse import MouseSwitchPage
 from duo_input.ui.overview import OverviewPage
 from duo_input.ui.profiles import ProfilesPage
 from duo_input.ui.settings import SettingsPage
+from duo_input.ui.theme import (
+    NAME_RAIL,
+    NAME_STATE_STRIP,
+    NAME_TOOLBAR,
+    ROLE_BANNER,
+    ROLE_CHIP,
+    ROLE_DESTRUCTIVE,
+    ROLE_FIELD_LABEL,
+    ROLE_PRIMARY,
+    SIGNAL_ERROR,
+    SIGNAL_MUTED,
+    SIGNAL_OK,
+    SIGNAL_WARN,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SM,
+    set_role,
+    set_signal,
+)
 
 APPLICATION_NAME = "Duo Input"
 DIRTY_MARKER = "*"
@@ -116,14 +136,20 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget(self)
         outer = QVBoxLayout(central)
-        outer.setContentsMargins(8, 8, 8, 8)
-        outer.setSpacing(8)
+        # The chrome runs edge to edge; every inset below is a decision the
+        # rows and the pages make for themselves.
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        outer.addLayout(self._build_toolbar(central))
+        outer.addWidget(self._build_toolbar(central))
+        outer.addWidget(self._build_state_strip(central))
 
         splitter = QSplitter(Qt.Orientation.Horizontal, central)
+        splitter.setHandleWidth(0)
         self.nav = QListWidget(splitter)
+        self.nav.setObjectName(NAME_RAIL)
         self.nav.setAccessibleName(self.tr("Sections"))
+        self.nav.setFrameShape(QListWidget.Shape.NoFrame)
         self.nav.setMaximumWidth(240)
         self.nav.setMinimumWidth(160)
 
@@ -157,22 +183,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         outer.addWidget(splitter, 1)
 
-        self.issues_list = QListWidget(central)
-        self.issues_list.setAccessibleName(self.tr("Problems that block a write"))
-        self.issues_list.setMaximumHeight(110)
-        self.issues_list.setVisible(False)
-        self.issues_list.currentRowChanged.connect(self.open_issue)
-        self.issues_list.itemActivated.connect(
-            lambda item: self.open_issue(self.issues_list.row(item))
-        )
-        outer.addWidget(self.issues_list)
-
-        self.progress = QProgressBar(central)
-        self.progress.setAccessibleName(self.tr("Transfer progress"))
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress.setVisible(False)
-        outer.addWidget(self.progress)
+        outer.addWidget(self._build_footer(central))
 
         self.setCentralWidget(central)
         self.statusBar().showMessage(self.tr("Ready"))
@@ -185,40 +196,113 @@ class MainWindow(QMainWindow):
         self.setTabOrder(self.write_button, self.nav)
         self.setTabOrder(self.nav, self.pages)
 
-    def _build_toolbar(self, parent: QWidget) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setSpacing(8)
+    def _build_toolbar(self, parent: QWidget) -> QWidget:
+        bar = QFrame(parent)
+        bar.setObjectName(NAME_TOOLBAR)
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(SPACE_LG, SPACE_SM, SPACE_LG, SPACE_SM)
+        row.setSpacing(SPACE_SM)
 
-        profile_label = QLabel(self.tr("Profile:"), parent)
-        self.profile_selector = QComboBox(parent)
+        profile_label = QLabel(self.tr("Profile:"), bar)
+        set_role(profile_label, ROLE_FIELD_LABEL)
+        self.profile_selector = QComboBox(bar)
         self.profile_selector.setAccessibleName(self.tr("Active profile"))
         self.profile_selector.setMinimumWidth(220)
         profile_label.setBuddy(self.profile_selector)
         self.profile_selector.currentIndexChanged.connect(self._on_profile_selected)
 
-        self.connection_label = QLabel(parent)
+        self.connection_label = QLabel(bar)
         self.connection_label.setAccessibleName(self.tr("Device connection"))
+        set_role(self.connection_label, ROLE_CHIP)
+        set_signal(self.connection_label, SIGNAL_MUTED)
 
-        self.connect_button = QPushButton(self.tr("Connect"), parent)
+        self.connect_button = QPushButton(self.tr("Connect"), bar)
         self.connect_button.setAccessibleName(self.tr("Connect or disconnect the device"))
         self.connect_button.clicked.connect(self._on_connect_clicked)
 
-        self.save_button = QPushButton(self.tr("Save"), parent)
+        self.save_button = QPushButton(self.tr("Save"), bar)
         self.save_button.setAccessibleName(self.tr("Save the project file"))
+        set_role(self.save_button, ROLE_PRIMARY)
         self.save_button.clicked.connect(self._on_save_clicked)
 
-        self.write_button = QPushButton(self.tr("Write to device"), parent)
+        # Save writes a file that can be thrown away; this one overwrites what
+        # the hardware is running. The weight is the warning.
+        self.write_button = QPushButton(self.tr("Write to device"), bar)
         self.write_button.setAccessibleName(self.tr("Write the configuration to the device"))
+        set_role(self.write_button, ROLE_DESTRUCTIVE)
         self.write_button.clicked.connect(self.write_to_device)
 
         row.addWidget(profile_label)
         row.addWidget(self.profile_selector)
         row.addStretch(1)
         row.addWidget(self.connection_label)
+        row.addSpacing(SPACE_MD)
         row.addWidget(self.connect_button)
         row.addWidget(self.save_button)
         row.addWidget(self.write_button)
-        return row
+        return bar
+
+    def _build_state_strip(self, parent: QWidget) -> QWidget:
+        """The three states of specification section 18.5, always all three.
+
+        They sit side by side on purpose. Any one of them alone invites the
+        wrong conclusion - a saved file says nothing about what the device is
+        holding - so the strip never hides the two that happen to be settled.
+        """
+        strip = QFrame(parent)
+        strip.setObjectName(NAME_STATE_STRIP)
+        row = QHBoxLayout(strip)
+        row.setContentsMargins(SPACE_LG, SPACE_SM, SPACE_LG, SPACE_SM)
+        row.setSpacing(SPACE_SM)
+
+        self.state_chips: dict[str, QLabel] = {}
+        for key, name in (
+            ("changes", self.tr("Local changes")),
+            ("file", self.tr("Project file")),
+            ("device", self.tr("Configuration on the device")),
+        ):
+            chip = QLabel(strip)
+            chip.setAccessibleName(name)
+            set_role(chip, ROLE_CHIP)
+            set_signal(chip, SIGNAL_MUTED)
+            self.state_chips[key] = chip
+            row.addWidget(chip)
+        row.addStretch(1)
+        return strip
+
+    def _build_footer(self, parent: QWidget) -> QWidget:
+        """What only appears when something is wrong, or something is running."""
+        holder = QWidget(parent)
+        layout = QVBoxLayout(holder)
+        layout.setContentsMargins(SPACE_LG, SPACE_SM, SPACE_LG, SPACE_SM)
+        layout.setSpacing(SPACE_SM)
+
+        self.issues_banner = QLabel(
+            self.tr("Fix these before writing to the device."), holder
+        )
+        set_role(self.issues_banner, ROLE_BANNER)
+        set_signal(self.issues_banner, SIGNAL_ERROR)
+        self.issues_banner.setWordWrap(True)
+        self.issues_banner.setVisible(False)
+        layout.addWidget(self.issues_banner)
+
+        self.issues_list = QListWidget(holder)
+        self.issues_list.setAccessibleName(self.tr("Problems that block a write"))
+        self.issues_list.setMaximumHeight(110)
+        self.issues_list.setVisible(False)
+        self.issues_list.currentRowChanged.connect(self.open_issue)
+        self.issues_list.itemActivated.connect(
+            lambda item: self.open_issue(self.issues_list.row(item))
+        )
+        layout.addWidget(self.issues_list)
+
+        self.progress = QProgressBar(holder)
+        self.progress.setAccessibleName(self.tr("Transfer progress"))
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+        return holder
 
     def _connect_service(self) -> None:
         self._service.state_changed.connect(self._on_state_changed)
@@ -369,6 +453,7 @@ class MainWindow(QMainWindow):
         finally:
             self.issues_list.blockSignals(False)
         self.issues_list.setVisible(bool(issues))
+        self.issues_banner.setVisible(bool(issues))
 
     def _refresh_profile_selector(self) -> None:
         self._updating_selector = True
@@ -397,10 +482,48 @@ class MainWindow(QMainWindow):
     def _refresh_actions(self) -> None:
         self.write_button.setEnabled(self._session.can_write)
         state = self._service.state
+        # The state itself is a protocol identifier and stays in one language,
+        # so a screenshot means the same thing to whoever reads it next.
         self.connection_label.setText(self.tr("Device: {0}").format(state.value))
+        set_signal(
+            self.connection_label,
+            SIGNAL_OK if self._service.is_connected else SIGNAL_MUTED,
+        )
         self.connect_button.setText(
             self.tr("Disconnect") if self._service.is_connected else self.tr("Connect")
         )
+        self._refresh_state_strip()
+
+    def _refresh_state_strip(self) -> None:
+        """Say where the project stands, in each of the three places it exists."""
+        session = self._session
+
+        changes = self.state_chips["changes"]
+        changes.setText(
+            self.tr("Local changes: unsaved")
+            if session.dirty
+            else self.tr("Local changes: none")
+        )
+        set_signal(changes, SIGNAL_WARN if session.dirty else SIGNAL_OK)
+
+        stored = self.state_chips["file"]
+        if session.path is None:
+            stored.setText(self.tr("Project file: not created yet"))
+            set_signal(stored, SIGNAL_MUTED)
+        else:
+            stored.setText(self.tr("Project file: {0}").format(session.path.name))
+            set_signal(stored, SIGNAL_OK)
+
+        device = self.state_chips["device"]
+        if not session.device_hash:
+            device.setText(self.tr("Written to device: no link"))
+            set_signal(device, SIGNAL_MUTED)
+        elif session.device_matches:
+            device.setText(self.tr("Written to device: matches the project"))
+            set_signal(device, SIGNAL_OK)
+        else:
+            device.setText(self.tr("Written to device: differs from the project"))
+            set_signal(device, SIGNAL_WARN)
 
     def _sync_device_state(self) -> None:
         connected = self._service.is_connected

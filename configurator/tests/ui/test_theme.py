@@ -308,6 +308,8 @@ def test_the_chevron_the_combo_boxes_need_actually_ships():
     """Styling the drop-down replaces the platform arrow; something must return."""
     assert (theme.ASSET_DIRECTORY / theme.CHEVRON_ASSET).is_file()
     assert (theme.ASSET_DIRECTORY / "chevron-down@2x.png").is_file()
+    assert (theme.ASSET_DIRECTORY / theme.CHEVRON_UP_ASSET).is_file()
+    assert (theme.ASSET_DIRECTORY / "chevron-up@2x.png").is_file()
 
 
 def test_the_stylesheet_points_the_drop_down_at_that_chevron():
@@ -324,13 +326,13 @@ def test_a_missing_asset_leaves_the_platform_arrow_alone(monkeypatch, tmp_path):
 
     assert "QComboBox::drop-down" not in sheet
     assert "QComboBox::down-arrow" not in sheet
+    assert "QSpinBox::up-arrow" not in sheet
 
 
 def test_the_drawn_assets_stay_small_enough_not_to_matter():
     """Two chevrons may not become a reason the installer grew."""
     total = sum(
-        (theme.ASSET_DIRECTORY / name).stat().st_size
-        for name in (theme.CHEVRON_ASSET, "chevron-down@2x.png")
+        path.stat().st_size for path in theme.ASSET_DIRECTORY.glob("chevron-*.png")
     )
 
     assert total < 4096

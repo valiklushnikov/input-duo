@@ -14,7 +14,8 @@ from duo_input.device.service import DeviceService, DeviceState
 from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.generated.protocol import PROFILES
 from duo_input.ui.main_window import DIRTY_MARKER, MainWindow
-from duo_input.ui.models.project_session import default_project
+from duo_input.ui import theme
+from duo_input.ui.models.project_session import SetActiveProfile, default_project
 
 
 @pytest.fixture
@@ -288,3 +289,94 @@ def test_close_is_cancelled_when_saving_is_cancelled(window):
 
     assert _close(window) is False
     assert window.session.dirty is True
+
+
+# ------------------------------------------------- the three project states
+
+
+def test_the_strip_shows_all_three_states_of_the_specification(window):
+    """Section 18.5 names three; the shell shows three, always, side by side."""
+    assert set(window.state_chips) == {"changes", "file", "device"}
+    for chip in window.state_chips.values():
+        assert chip.text()
+        assert chip.property("signal")
+
+
+def test_a_clean_untouched_project_says_so_in_all_three(window):
+    changes, file_chip, device = (window.state_chips[key] for key in ("changes", "file", "device"))
+
+    assert changes.property("signal") == theme.SIGNAL_OK
+    assert file_chip.property("signal") == theme.SIGNAL_MUTED
+    assert device.property("signal") == theme.SIGNAL_MUTED
+
+
+def test_an_edit_turns_the_changes_chip_and_nothing_else(window):
+    before = window.state_chips["file"].text()
+
+    window.apply_command(SetActiveProfile(4))
+
+    assert window.state_chips["changes"].property("signal") == theme.SIGNAL_WARN
+    assert window.state_chips["file"].text() == before
+
+
+def test_saving_names_the_file_and_settles_the_changes_chip(window, tmp_path):
+    window.apply_command(SetActiveProfile(4))
+
+    assert window.save_project(tmp_path / "work.duoinput.json") is True
+
+    assert window.state_chips["changes"].property("signal") == theme.SIGNAL_OK
+    assert window.state_chips["file"].property("signal") == theme.SIGNAL_OK
+    assert "work.duoinput.json" in window.state_chips["file"].text()
+
+
+def test_a_device_holding_the_same_package_reads_as_agreement(qtbot, window, emulator):
+    _connect(qtbot, window, emulator)
+
+    assert window.session.device_matches is True
+    assert window.state_chips["device"].property("signal") == theme.SIGNAL_OK
+
+
+def test_a_device_holding_something_else_reads_as_divergence(qtbot, window, emulator):
+    _connect(qtbot, window, emulator)
+
+    window.apply_command(SetActiveProfile(4))
+
+    assert window.session.device_matches is False
+    assert window.state_chips["device"].property("signal") == theme.SIGNAL_WARN
+
+
+def test_losing_the_link_leaves_the_device_chip_with_nothing_to_claim(qtbot, window, emulator):
+    _connect(qtbot, window, emulator)
+
+    window.disconnect_device()
+
+    assert window.state_chips["device"].property("signal") == theme.SIGNAL_MUTED
+
+
+def test_the_save_and_write_buttons_carry_different_weight(window):
+    """Write overwrites the device; Save writes a file. They may not look alike."""
+    assert window.save_button.property("role") == theme.ROLE_PRIMARY
+    assert window.write_button.property("role") == theme.ROLE_DESTRUCTIVE
+
+
+def test_the_connection_indicator_is_a_chip_that_changes_signal(qtbot, window, emulator):
+    assert window.connection_label.property("role") == theme.ROLE_CHIP
+    assert window.connection_label.property("signal") == theme.SIGNAL_MUTED
+
+    _connect(qtbot, window, emulator)
+
+    assert window.connection_label.property("signal") == theme.SIGNAL_OK
+
+
+def test_the_navigation_rail_is_the_one_the_stylesheet_dresses(window):
+    assert window.nav.objectName() == theme.NAME_RAIL
+
+
+def test_the_issue_banner_appears_with_the_issues_and_leaves_with_them(window):
+    assert window.issues_banner.isVisibleTo(window) is False
+
+    broken = replace(window.session.project, active_profile_id=99)
+    window.set_session(replace(window.session, project=broken))
+
+    assert window.issues_banner.isVisibleTo(window) is True
+    assert window.issues_banner.property("signal") == theme.SIGNAL_ERROR
