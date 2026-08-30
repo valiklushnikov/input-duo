@@ -52,6 +52,30 @@ rather than by make or model, deliberately. Every user's peripherals are
 different, and a document that named one bench's hardware would invite a reader
 to read the absence of their own device as incompatibility, which it is not.
 
+### A channel's name is not the device on it
+
+**U1's two CH375 channels are called the keyboard channel and the mouse
+channel after the pins they use, and neither name is a claim about what is
+plugged into it.** `kPinKeyboardTx/Rx` and `kPinMouseTx/Rx` name the wiring;
+`describe_port` fills `keyboard_port_` and `mouse_port_` from whatever
+enumerated there. On this bench the two are crossed - the mouse is on the
+keyboard channel - and that is an ordinary bench, not a fault to correct.
+
+What a device *is* comes from one place only: `DescriptorSetup::kind()`, read
+out of the device's own configuration descriptor during enumeration and
+reported per port in `GET_DIAGNOSTICS`. Anything that wants to know whether a
+keyboard is attached reads that field. Nothing may infer it from the channel.
+
+This is written down because the crossing has now misled three separate pieces
+of work: a diagnostic read as "the keyboard is not enumerating" when the
+keyboard was enumerating on the other channel, a wiring check that went looking
+for a fault that was not there, and a HIL report whose `role` column was taken
+from the channel and so printed `role: keyboard` beside `reason: enumerated as
+mouse`, in the artifact whose whole purpose is to say which device is which.
+The HIL runner now reports the descriptor's answer as `role` and the channel as
+a separate `port` field, and keeps both: the channel is how a crossed or dead
+cable is diagnosed, so it is worth reporting - it is simply never the identity.
+
 ### What was exercised
 
 The whole chain, on both devices at once, with the operator using them normally
