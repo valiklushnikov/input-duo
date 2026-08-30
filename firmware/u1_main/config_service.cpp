@@ -43,6 +43,21 @@ void put_u32(std::uint8_t* out, std::uint32_t value) {
     out[3] = static_cast<std::uint8_t>(value >> 24);
 }
 
+/// One histogram on the wire: how many, the worst, then every bucket.
+///
+/// The count is here so a reader can tell "nothing was measured" from "nothing
+/// was slow" - a device that saw no input at all would otherwise look like the
+/// fastest device ever built.
+std::size_t write_latency(std::uint8_t* out,
+                          const diagnostics::LatencyHistogram& histogram) {
+    put_u32(out, histogram.count());
+    put_u32(out + 4, histogram.max_us());
+    for (std::size_t index = 0; index < diagnostics::kLatencyBucketCount; ++index) {
+        put_u32(out + 8 + 4 * index, histogram.bucket(index));
+    }
+    return 8 + 4 * diagnostics::kLatencyBucketCount;
+}
+
 std::uint32_t take_u32(const std::uint8_t* data) {
     return static_cast<std::uint32_t>(data[0]) |
            (static_cast<std::uint32_t>(data[1]) << 8) |
@@ -357,7 +372,21 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
     // refusing commands *now*, which is the difference between a burst that
     // has passed and one that is still going on.
     out[42] = static_cast<std::uint8_t>(runtime_fault_);
-    return 43;
+
+    // And the latency block, appended for the same reason as everything above
+    // it. It leads with its own bucket edges rather than relying on the host
+    // holding a matching copy: two copies of eight numbers agree right up to
+    // the moment somebody edits one of them, and the failure would be a report
+    // that quietly attributes samples to the wrong bucket.
+    std::size_t at = 43;
+    out[at++] = static_cast<std::uint8_t>(diagnostics::kLatencyBucketCount);
+    for (std::size_t index = 0; index + 1 < diagnostics::kLatencyBucketCount; ++index) {
+        put_u32(out + at, diagnostics::kLatencyBucketEdgesUs[index]);
+        at += 4;
+    }
+    at += write_latency(out + at, keyboard_latency_);
+    at += write_latency(out + at, mouse_latency_);
+    return at;
 #endif
 }
 

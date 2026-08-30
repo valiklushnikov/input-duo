@@ -264,7 +264,8 @@ struct Board {
             // pop and the next rather than only between whole passes.
             while (outputs.pending() != 0) {
                 const std::size_t applied =
-                    outputs.drain(static_cast<std::uint32_t>(now_us / 1000), 1);
+                    outputs.drain(static_cast<std::uint32_t>(now_us / 1000),
+                                  static_cast<std::uint32_t>(now_us), 1);
                 now_us += kPopUs;
                 if (now_us >= next_core1) {
                     core1.tick(static_cast<std::uint32_t>(now_us / 1000));

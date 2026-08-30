@@ -68,6 +68,20 @@ struct OutputCommand {
     std::int16_t delta_y = 0;
     std::int8_t wheel = 0;
     std::int8_t pan = 0;
+
+    /// When the peripheral report behind this command arrived, in microseconds
+    /// on the device's own clock, or zero when nothing arrived.
+    ///
+    /// This is the only reason the device can say anything about its own
+    /// latency. Both ends of the interval - this stamp, taken on Core 1 as the
+    /// controller hands over a report, and the moment Core 0 applies the
+    /// command - are on the same board and the same clock, so the difference is
+    /// a measurement rather than an estimate.
+    ///
+    /// Zero means "no report caused this": a macro step emitted on a schedule,
+    /// a button on the case, a release the host asked for. Those are timed
+    /// against nothing, because the delay in them is one somebody chose.
+    std::uint32_t origin_us = 0;
 };
 
 /// Something that went wrong badly enough that the output state is suspect.

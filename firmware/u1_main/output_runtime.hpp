@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "diagnostics/latency.hpp"
 #include "hid/state_manager.hpp"
 #include "hid/types.hpp"
 #include "runtime/output_command.hpp"
@@ -66,7 +67,11 @@ public:
     /// ``may_change_keyboard`` - because this class keeps a state and not a
     /// queue of reports, so a state replaced before it was published is a
     /// letter nobody typed, or a release nobody made.
-    std::size_t drain(std::uint32_t now_ms, std::size_t budget = kDefaultDrainBudget);
+    /// ``now_us`` is the same instant as ``now_ms``, read from the microsecond
+    /// clock, and is what every command applied in this pass is timed against.
+    /// Milliseconds are too coarse for a budget of twenty of them.
+    std::size_t drain(std::uint32_t now_ms, std::uint32_t now_us,
+                      std::size_t budget = kDefaultDrainBudget);
 
     /// Apply one command immediately, without the queue.
     ///
@@ -110,11 +115,31 @@ public:
     /// How many commands are waiting.
     std::size_t pending() const { return queue_.size(); }
 
+    /// How long the device itself took, counted since boot.
+    ///
+    /// From the microsecond a peripheral report reached Core 1 to the
+    /// microsecond Core 0 applied the command it produced. That is the whole
+    /// of U1's own contribution and none of anybody else's: not the peripheral
+    /// polling interval ahead of it, not USB or the SPI link behind it, and
+    /// certainly not the far computer's compositor. A report quoting these as
+    /// end-to-end latency would be quoting them as something they are not.
+    const diagnostics::LatencyHistogram& keyboard_latency() const {
+        return keyboard_latency_;
+    }
+    const diagnostics::LatencyHistogram& mouse_latency() const { return mouse_latency_; }
+
 private:
     void apply_to(hid::Target target, const runtime::OutputCommand& command);
 
     /// Would this command change what a keyboard report says?
     static bool touches_keyboard(const runtime::OutputCommand& command);
+
+    /// Count one applied command against the stream it came from.
+    ///
+    /// Only the commands a peripheral report caused, and only the kinds that
+    /// belong to one stream or the other: a ReleaseAll is a safety action that
+    /// touches both, so counting it as either would be arbitrary.
+    void record_latency(const runtime::OutputCommand& command, std::uint32_t now_us);
 
     /// May the keyboard state move on yet?
     ///
@@ -126,6 +151,10 @@ private:
 
     runtime::SpscQueue<runtime::OutputCommand, runtime::kOutputQueueCapacity> queue_;
     hid::HidStateManager outputs_;
+
+    /// Core 0 only: written in the drain, copied out for the host to read.
+    diagnostics::LatencyHistogram keyboard_latency_;
+    diagnostics::LatencyHistogram mouse_latency_;
 
     /// Written by the producer, read by the consumer. The only cross-core
     /// field here, and atomic because of it - which is what makes the

@@ -946,3 +946,70 @@ TEST_CASE(a_release_is_asked_for_once_and_not_repeated_every_tick) {
 
     CHECK_EQ(sink.count_of(CommandKind::ReleaseAll), 1);
 }
+
+// ------------------------------------------------------- timing the input
+//
+// The device cannot see a finger or a far screen, so it cannot measure the
+// journey between them. What it can measure is its own part: the microsecond
+// the controller handed over a report, carried on every command that report
+// produced, so Core 0 can subtract it from the microsecond it applied the
+// command. The stamp is set by Core 1's loop from the event it is about to
+// feed in, and cleared afterwards, so that only what a peripheral caused
+// carries one.
+
+TEST_CASE(a_command_carries_the_stamp_of_the_report_that_caused_it) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    Core1Runtime runtime(sink, profiles);
+    runtime.set_profile_now(0);
+
+    runtime.set_event_origin_us(4321);
+    runtime.handle_input(key(InputEventKind::KeyDown, 0x04), 10);
+
+    CHECK_EQ(sink.commands.size(), 1u);
+    CHECK_EQ(sink.commands[0].origin_us, 4321u);
+}
+
+TEST_CASE(a_macro_step_emitted_on_a_schedule_carries_no_stamp) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    MacroStep steps[1] = {tap_step(0x05)};
+    profiles.profile_zero.push_back(run_macro_on(0x04, 1));
+
+    Core1Runtime runtime(sink, profiles);
+    runtime.set_profile_now(0);
+    runtime.define_macro(1, MacroDefinition{steps, 1});
+
+    // The binding replaces the key, so the press itself reaches nothing; every
+    // command below is the scheduler's own output, emitted after the stamp was
+    // cleared. The delay in those is one the macro asked for, and counting it
+    // as latency would let a slow macro make the input path look slow.
+    runtime.set_event_origin_us(900);
+    runtime.handle_input(key(InputEventKind::KeyDown, 0x04), 10);
+    runtime.set_event_origin_us(0);
+    for (std::uint32_t now = 11; now < 40; ++now) {
+        runtime.tick(now);
+    }
+
+    CHECK(sink.commands.size() > 0u);
+    for (const OutputCommand& command : sink.commands) {
+        CHECK_EQ(command.origin_us, 0u);
+    }
+}
+
+// A stamp left standing would be attached to whatever the device did next, and
+// the further from the report that happened, the worse the reading. Clearing
+// it is the loop's job; this proves the runtime honours the clearing.
+TEST_CASE(a_cleared_stamp_stays_cleared) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    Core1Runtime runtime(sink, profiles);
+    runtime.set_profile_now(0);
+
+    runtime.set_event_origin_us(4321);
+    runtime.set_event_origin_us(0);
+    runtime.handle_input(key(InputEventKind::KeyDown, 0x04), 10);
+
+    CHECK_EQ(sink.commands.size(), 1u);
+    CHECK_EQ(sink.commands[0].origin_us, 0u);
+}

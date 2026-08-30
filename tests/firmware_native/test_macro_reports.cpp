@@ -88,7 +88,7 @@ struct Board {
         // The clock the drain needs is the one that decides how long it may
         // wait for a computer that has stopped answering; publish is what
         // answers for PC1.
-        outputs.drain(now_ms);
+        outputs.drain(now_ms, now_ms * 1000);
         usb.publish(outputs);
         ++now_ms;
     }

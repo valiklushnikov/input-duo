@@ -117,6 +117,16 @@ struct Ch375Event {
     Ch375EventKind kind = Ch375EventKind::None;
     std::uint8_t report[kMaxBlockSize] = {};
     std::size_t report_size = 0;
+
+    /// When this report was read out of the controller, in microseconds on the
+    /// device's own clock. Zero for everything that is not a report.
+    ///
+    /// The earliest instant U1 can honestly claim to have known about the
+    /// keystroke. Everything before it - the peripheral's own polling interval,
+    /// the CH375's USB transaction - happened where this board has no clock and
+    /// no visibility, and a latency figure that pretended otherwise would be
+    /// measuring from a moment nobody observed.
+    std::uint32_t received_us = 0;
 };
 
 enum class SetupProgress : std::uint8_t {
@@ -500,7 +510,8 @@ private:
 
     void enter(Ch375State state, std::uint32_t now_us);
     void publish(Ch375EventKind kind);
-    void publish_report(const std::uint8_t* data, std::size_t size);
+    void publish_report(const std::uint8_t* data, std::size_t size,
+                        std::uint32_t now_us);
     void fail(std::uint32_t now_us);
     void handle_detach(std::uint32_t now_us);
 

@@ -632,7 +632,70 @@ TEST_CASE(diagnostics_carry_every_counter_the_host_expects) {
     const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
 
     CHECK_EQ(error_of(reply), CdcError::Ok);
-    CHECK_EQ(reply.payload.size, 43u);
+    CHECK_EQ(reply.payload.size, duo_input::u1::kDiagnosticsPayloadSize);
+    // Appended, never rearranged: a host reading only the first 43 bytes still
+    // reads exactly what it always read.
+    CHECK(duo_input::u1::kDiagnosticsPayloadSize > 43u);
+}
+
+// The device's own latency, and the only latency it is in a position to know.
+//
+// A histogram rather than a number, because "p95 <= 20 ms" is a question about
+// how many samples were at or below 20 ms and nothing else answers it exactly.
+// The edges travel with the counts so a host can never be wrong about what a
+// bucket means - the alternative is two copies of eight numbers that agree
+// until somebody edits one of them.
+TEST_CASE(diagnostics_carry_the_latency_the_device_measured_of_itself) {
+    Link link;
+    link.hello();
+    duo_input::diagnostics::LatencyHistogram keyboard;
+    duo_input::diagnostics::LatencyHistogram mouse;
+    keyboard.record(300);
+    keyboard.record(30000);
+    mouse.record(80);
+    link.service.set_input_latency(keyboard, mouse);
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::uint8_t* p = reply.payload.data;
+
+    const std::size_t buckets = duo_input::diagnostics::kLatencyBucketCount;
+    CHECK_EQ(p[43], static_cast<std::uint8_t>(buckets));
+    for (std::size_t index = 0; index + 1 < buckets; ++index) {
+        CHECK_EQ(read_u32(p + 44 + 4 * index),
+                 duo_input::diagnostics::kLatencyBucketEdgesUs[index]);
+    }
+
+    const std::size_t keyboard_at = 44 + 4 * (buckets - 1);
+    CHECK_EQ(read_u32(p + keyboard_at), 2u);
+    CHECK_EQ(read_u32(p + keyboard_at + 4), 30000u);
+    CHECK_EQ(read_u32(p + keyboard_at + 8 + 4 * 1), 1u);
+
+    const std::size_t mouse_at = keyboard_at + 8 + 4 * buckets;
+    CHECK_EQ(read_u32(p + mouse_at), 1u);
+    CHECK_EQ(read_u32(p + mouse_at + 4), 80u);
+    CHECK_EQ(read_u32(p + mouse_at + 8), 1u);
+    CHECK_EQ(mouse_at + 8 + 4 * buckets, duo_input::u1::kDiagnosticsPayloadSize);
+}
+
+// A device that has been running and seen nothing must not look like a device
+// that is fast. Nothing measured is nothing measured, and a host reading zero
+// samples has to say so rather than report a p95 of zero.
+TEST_CASE(a_device_that_has_measured_nothing_reports_no_samples) {
+    Link link;
+    link.hello();
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::size_t buckets = duo_input::diagnostics::kLatencyBucketCount;
+    const std::size_t keyboard_at = 44 + 4 * (buckets - 1);
+
+    CHECK_EQ(read_u32(reply.payload.data + keyboard_at), 0u);
+}
+
+// The reply is one frame and the frame has a ceiling. This block grew the
+// payload by nearly three times; the next thing appended must not be the one
+// that runs off the end without anybody noticing.
+TEST_CASE(the_diagnostics_reply_still_fits_in_one_frame) {
+    CHECK(duo_input::u1::kDiagnosticsPayloadSize <= ProtocolLimits::CDC_MAX_PAYLOAD);
 }
 
 TEST_CASE(the_diagnostics_say_whether_the_output_queue_is_overflowing_now) {

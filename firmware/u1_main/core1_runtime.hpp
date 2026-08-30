@@ -164,6 +164,18 @@ public:
         release_all_requested_.store(true, std::memory_order_release);
     }
 
+    /// Stamp every command produced from here on with ``origin_us``.
+    ///
+    /// Set by Core 1's loop from the report it is about to feed in, and set
+    /// back to zero once that report has been dealt with. This is one end of
+    /// the only latency the device is in a position to measure: the other is
+    /// the microsecond Core 0 applies the command, on the same clock.
+    ///
+    /// Core 1's own, written and read on that core only. It is not a mailbox
+    /// and must not become one - a second writer would attach one peripheral's
+    /// timestamp to another peripheral's keystroke.
+    void set_event_origin_us(std::uint32_t origin_us) { event_origin_us_ = origin_us; }
+
     /// How many commands the queue refused. Nonzero means what is held on a
     /// computer no longer matches what the operator did.
     std::uint32_t dropped_commands() const {
@@ -227,6 +239,9 @@ private:
     /// Which mouse buttons are held. The report carries them all at once, so
     /// every change resends the whole mask.
     std::uint8_t buttons_ = 0;
+
+    /// The report being processed, or zero between reports. Core 1 only.
+    std::uint32_t event_origin_us_ = 0;
 
     std::atomic<std::uint32_t> dropped_{0};
 };

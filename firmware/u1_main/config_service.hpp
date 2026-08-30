@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "diagnostics/latency.hpp"
 #include "mapping/capture.hpp"
 #include "protocol/frame.hpp"
 #include "protocol/generated.hpp"
@@ -84,6 +85,22 @@ public:
 /// Largest wire frame: header, maximum payload, CRC, COBS overhead, delimiter.
 inline constexpr std::size_t kMaxWireFrame = 1100;
 
+/// How long a GET_DIAGNOSTICS reply is on the release build.
+///
+/// One error byte, five counters, the link state, the endpoint report, the
+/// dropped-command count, the runtime fault - and then the latency block, which
+/// carries its own bucket edges so that a host can never disagree with the
+/// device about what a bucket means.
+///
+/// Everything is appended and nothing is ever moved, so a host that stops
+/// reading at any earlier boundary still reads what it always read.
+inline constexpr std::size_t kDiagnosticsPayloadSize =
+    43 + 1 + 4 * (diagnostics::kLatencyBucketCount - 1) +
+    2 * (8 + 4 * diagnostics::kLatencyBucketCount);
+
+static_assert(kDiagnosticsPayloadSize <= protocol::ProtocolLimits::CDC_MAX_PAYLOAD,
+              "the diagnostics reply has to fit in one frame");
+
 /// What the link to U2 is doing, as the host needs to see it.
 ///
 /// The counters beside this one all count failures, and a link that never
@@ -126,6 +143,23 @@ public:
     void set_link_state(const LinkState& state) { link_state_ = state; }
 
     const LinkState& link_state() const { return link_state_; }
+
+    /// Publish how long the device itself has been taking.
+    ///
+    /// Owned by the output runtime and copied here each pass, for the same
+    /// reason the link state is: this class must not reach into Core 0's
+    /// output state, and the output runtime must not know what a CDC frame is.
+    ///
+    /// What these count is the interval inside U1 - a peripheral report
+    /// reaching Core 1, against the command it produced being applied on Core
+    /// 0. Not a keystroke's journey from a finger to a far screen: the device
+    /// cannot see either end of that, and nothing that reads this may present
+    /// it as if it could.
+    void set_input_latency(const diagnostics::LatencyHistogram& keyboard,
+                           const diagnostics::LatencyHistogram& mouse) {
+        keyboard_latency_ = keyboard;
+        mouse_latency_ = mouse;
+    }
 
     /// Which profile the device is running.
     ///
@@ -291,6 +325,8 @@ private:
 
     CdcDiagnostics diagnostics_{};
     LinkState link_state_{};
+    diagnostics::LatencyHistogram keyboard_latency_{};
+    diagnostics::LatencyHistogram mouse_latency_{};
 
 #if DUO_SPI_DEBUG || DUO_CH375_PROBE
     // One byte short of what a CDC reply can carry, because the payload leads

@@ -394,7 +394,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 std::uint8_t buffer[kMaxBlockSize];
                 std::size_t size = 0;
                 if (transport_.read_block(buffer, sizeof(buffer), size) && size > 0) {
-                    publish_report(buffer, size);
+                    publish_report(buffer, size, now_us);
                 }
                 // One transaction succeeded, so the device will send the other
                 // packet type next. Told only after a success: a transaction
@@ -960,9 +960,11 @@ void Ch375Device::publish(Ch375EventKind kind) {
     ++count_;
 }
 
-void Ch375Device::publish_report(const std::uint8_t* data, std::size_t size) {
+void Ch375Device::publish_report(const std::uint8_t* data, std::size_t size,
+                                std::uint32_t now_us) {
     Ch375Event event;
     event.kind = Ch375EventKind::Report;
+    event.received_us = now_us;
     event.report_size = size > kMaxBlockSize ? kMaxBlockSize : size;
     std::memcpy(event.report, data, event.report_size);
 

@@ -364,8 +364,20 @@ void core1_entry() {
                 // A detach synthesises the releases the peripheral never sent,
                 // which is the only thing standing between a yanked cable and
                 // a computer that types until it is rebooted.
+                // The moment this report was read out of the controller, so
+                // every command it produces carries it and Core 0 can subtract
+                // it from the moment it applies them. Set from the event rather
+                // than from the clock here: the report may have been queued a
+                // pass or two ago, and timing it from now would hide exactly
+                // the backlog worth knowing about.
+                g_runtime.set_event_origin_us(event.received_us);
                 pipelines[index]->on_event(event, setups[index]->kind(),
                                            setups[index]->mouse_layout(), now_ms);
+                // Cleared immediately. A stamp left standing would be attached
+                // to whatever the device did next - a macro step, a timeout's
+                // release - and the further from the report that happened, the
+                // worse the reading it would produce.
+                g_runtime.set_event_origin_us(0);
             }
         }
 
@@ -935,7 +947,12 @@ int main() {
         // held at the keyboard state that has not reached both computers yet,
         // which is why it needs the clock. The publish and the poll below are
         // what release it.
-        g_outputs.drain(now_ms);
+        // The microsecond clock alongside the millisecond one, because every
+        // command applied in this pass is timed against it and the budget it
+        // is measured against is twenty milliseconds. Read here, immediately
+        // before the drain, so the interval it closes is as short as the code
+        // allows.
+        g_outputs.drain(now_ms, time_us_32());
 
         usb.publish(g_outputs);
 
@@ -964,6 +981,14 @@ int main() {
         // itself once a pass goes by with nothing refused, so what the host
         // reads is a live condition rather than a latch.
         config.set_runtime_fault(g_outputs.fault());
+
+        // Published every pass, like the link state and for the same reason:
+        // the output runtime owns these and the CDC service reports them, and
+        // neither reaches into the other. What they hold is U1's own interval -
+        // a peripheral report reaching Core 1 against the command it produced
+        // being applied here - and not a keystroke's journey to a far screen,
+        // which this board has no way to observe either end of.
+        config.set_input_latency(g_outputs.keyboard_latency(), g_outputs.mouse_latency());
 
         show_link(link.status().answered);
 

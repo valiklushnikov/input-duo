@@ -61,7 +61,12 @@ Route Core1Runtime::keyboard_route() const { return route_of(engine_.keyboard_ro
 Route Core1Runtime::mouse_route() const { return route_of(engine_.mouse_route()); }
 
 void Core1Runtime::submit(const OutputCommand& command) {
-    if (!sink_.submit(command)) {
+    // Stamped here rather than at each of the places a command is built, so
+    // there is one line to be wrong instead of a dozen, and so a command added
+    // later cannot be forgotten and silently drop out of the measurement.
+    OutputCommand stamped = command;
+    stamped.origin_us = event_origin_us_;
+    if (!sink_.submit(stamped)) {
         // Core 1 cannot wait for Core 0, which is waiting for the host. What
         // it can do is record that the output state no longer matches what
         // actually happened, so somebody can be told.

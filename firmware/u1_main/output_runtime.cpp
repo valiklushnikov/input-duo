@@ -93,7 +93,8 @@ bool OutputRuntime::may_change_keyboard(std::uint32_t now_ms) {
     return true;
 }
 
-std::size_t OutputRuntime::drain(std::uint32_t now_ms, std::size_t budget) {
+std::size_t OutputRuntime::drain(std::uint32_t now_ms, std::uint32_t now_us,
+                                 std::size_t budget) {
     const std::uint32_t refused = refused_.load(std::memory_order_acquire);
     if (refused != seen_refusals_) {
         // Something was dropped since the last pass. Half a macro is worse
@@ -137,9 +138,44 @@ std::size_t OutputRuntime::drain(std::uint32_t now_ms, std::size_t budget) {
         }
         queue_.pop(command);
         process(command);
+        // After the state actually moved, not when the command was queued. A
+        // command that waited behind an unacknowledged state had genuinely not
+        // reached anyone yet, and timing it any earlier would report a latency
+        // nobody experienced.
+        record_latency(command, now_us);
         ++applied;
     }
     return applied;
+}
+
+void OutputRuntime::record_latency(const OutputCommand& command, std::uint32_t now_us) {
+    if (command.origin_us == 0) {
+        return;
+    }
+    // Unsigned subtraction, because the microsecond clock wraps every seventy
+    // minutes and an interval that straddles the wrap is still the right
+    // number of microseconds. LatencyHistogram deals with the one difference
+    // this cannot produce honestly - a clock read that raced the other core's
+    // push - rather than this deciding it twice.
+    const std::uint32_t elapsed = now_us - command.origin_us;
+
+    switch (command.kind) {
+        case CommandKind::KeyPress:
+        case CommandKind::KeyRelease:
+        case CommandKind::ModifiersPress:
+        case CommandKind::ModifiersRelease:
+        case CommandKind::ConsumerTap:
+            keyboard_latency_.record(elapsed);
+            return;
+        case CommandKind::MouseButtons:
+        case CommandKind::MouseDelta:
+            mouse_latency_.record(elapsed);
+            return;
+        default:
+            // ReleaseRoute, ReleaseMacro and ReleaseAll reach both streams or
+            // neither, so there is no stream to count them against.
+            return;
+    }
 }
 
 void OutputRuntime::apply_to(hid::Target target, const OutputCommand& command) {
