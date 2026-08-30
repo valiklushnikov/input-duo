@@ -520,6 +520,78 @@ def test_a_mouse_only_capture_rearms_after_a_keyboard_event(
     assert dialog.trigger == Trigger(TriggerKind.MOUSE_BUTTON, 4, 0)
 
 
+def test_escape_stops_the_countdown_and_binds_nothing(qtbot, service):
+    """Escape is a dismissal, and a dismissed dialog must stop listening.
+
+    ``QDialog.reject()`` - which is what Escape reaches - delivers no close
+    event, so a dialog that only stops its timer in ``closeEvent`` keeps
+    counting down and keeps its capture slot connected after the operator
+    has walked away from it.
+    """
+    from PySide6.QtCore import Qt
+
+    dialog = CaptureDialog(service)
+    qtbot.addWidget(dialog)
+    dialog.open()
+    dialog.start()
+    assert dialog._timer.isActive() is True
+
+    qtbot.keyClick(dialog, Qt.Key.Key_Escape)
+
+    assert dialog._timer.isActive() is False
+    assert dialog.trigger is None
+    assert dialog.isVisible() is False
+
+
+def test_cancel_stops_the_countdown(qtbot, service):
+    """The only button the dialog offers must also end the capture."""
+    from PySide6.QtWidgets import QDialogButtonBox
+
+    dialog = CaptureDialog(service)
+    qtbot.addWidget(dialog)
+    dialog.open()
+    dialog.start()
+    assert dialog._timer.isActive() is True
+
+    dialog.buttons.button(QDialogButtonBox.StandardButton.Cancel).click()
+
+    assert dialog._timer.isActive() is False
+    assert dialog.trigger is None
+    assert dialog.isVisible() is False
+
+
+def test_a_payload_after_a_dismissal_neither_binds_nor_rearms(
+    qtbot, service, emulator, monkeypatch
+):
+    """A device still in capture mode must not reach a dismissed dialog.
+
+    The device keeps its own ten-second window, so a press can arrive after
+    the operator cancelled. A dialog still connected to ``capture_received``
+    would take that press as the answer and rewrite the binding under edit -
+    or, on the mouse-only path, arm the hardware again from a dialog nobody
+    is looking at.
+    """
+    link = SynchronousTransportLink(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(link)
+    dialog = CaptureDialog(service, accepted_kind=TriggerKind.MOUSE_BUTTON)
+    qtbot.addWidget(dialog)
+    dialog.open()
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        dialog.start()
+
+    dialog.reject()
+
+    rearms: list[int] = []
+    monkeypatch.setattr(service, "begin_capture", lambda: rearms.append(1))
+    service.capture_received.emit(bytes((TriggerKind.KEYBOARD_USAGE, 0x04, 0)))
+    service.capture_received.emit(bytes((TriggerKind.MOUSE_BUTTON, 5, 0)))
+
+    assert dialog.trigger is None
+    assert rearms == []
+    assert dialog._timer.isActive() is False
+
+
 def test_capture_is_offered_only_while_the_device_is_connected(page, emulator, qtbot):
     assert page.capture_button.isEnabled() is False
 

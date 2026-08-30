@@ -98,6 +98,7 @@ class CaptureDialog(QDialog):
         self._accepted_kind = accepted_kind
         self._trigger: Trigger | None = None
         self._remaining = CAPTURE_SECONDS
+        self._listening = False
 
         self.setWindowTitle(self.tr("Detect a key or button"))
         self.setModal(True)
@@ -121,7 +122,7 @@ class CaptureDialog(QDialog):
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self.tick)
-        self._service.capture_received.connect(self._on_capture_received)
+        self._listen()
         self._refresh()
         motion.fade_in(self, motion.SCRIM)
 
@@ -139,6 +140,7 @@ class CaptureDialog(QDialog):
         self._trigger = None
         self._remaining = CAPTURE_SECONDS
         self._refresh()
+        self._listen()
         self._timer.start()
         motion.lift_in(self)
         self._service.begin_capture()
@@ -148,7 +150,7 @@ class CaptureDialog(QDialog):
         self._remaining -= 1
         self._refresh()
         if self._remaining <= 0:
-            self._timer.stop()
+            # ``reject`` stops the countdown through ``done``.
             self.reject()
 
     def _refresh(self) -> None:
@@ -168,12 +170,40 @@ class CaptureDialog(QDialog):
             if self._service.is_connected:
                 self._service.begin_capture()
             return
-        self._timer.stop()
         self.accept()
 
-    def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+    def done(self, result: int) -> None:  # noqa: N802 - Qt override
+        """Stop listening, whichever way the dialog is being dismissed.
+
+        Every exit funnels through here - ``accept``, ``reject``, Escape,
+        the Cancel button and ``close`` - which ``closeEvent`` does not:
+        ``QDialog.reject()`` delivers no close event at all, so Escape and
+        Cancel used to leave the countdown running and this dialog still
+        connected to ``capture_received``. The device keeps its own capture
+        window open for ten seconds either way, so the next press would have
+        arrived at a dialog the operator had already dismissed and rewritten
+        the binding under edit - or armed the hardware again, on the
+        mouse-only path.
+        """
+        self._stop_listening()
+        super().done(result)
+
+    def _listen(self) -> None:
+        """Hear the device's capture events; connecting twice would double them."""
+        if self._listening:
+            return
+        self._service.capture_received.connect(self._on_capture_received)
+        self._listening = True
+
+    def _stop_listening(self) -> None:
         self._timer.stop()
-        super().closeEvent(event)
+        self._listening = False
+        try:
+            self._service.capture_received.disconnect(self._on_capture_received)
+        except (RuntimeError, TypeError):
+            # Already disconnected: a second dismissal, or a service that was
+            # torn down first. Nothing left to do either way.
+            pass
 
 
 class BindingsPage(QWidget):
