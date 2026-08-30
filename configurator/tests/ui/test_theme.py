@@ -316,6 +316,41 @@ def test_resolving_fonts_twice_returns_the_same_answer(qapp):
     assert theme.install_fonts() == theme.install_fonts()
 
 
+def test_the_interface_face_ships_with_the_program(qapp):
+    """The face is bundled, not borrowed from the operating system."""
+    from duo_input.ui.theme import bundled_font_files
+
+    files = bundled_font_files()
+
+    assert files, "no font files were found beside the package"
+    for path in files:
+        assert path.is_file(), path
+        assert path.suffix == ".ttf", path
+
+
+def test_the_bundled_face_is_the_one_the_interface_uses(qapp):
+    theme._resolved_families = None
+    try:
+        interface, _mono = theme.install_fonts()
+    finally:
+        theme._resolved_families = None
+
+    assert interface == theme.UI_FAMILY
+
+
+def test_a_missing_bundle_still_leaves_a_readable_interface(qapp, monkeypatch):
+    """A font file that did not travel must not blank the program out."""
+    monkeypatch.setattr(theme, "bundled_font_files", lambda: ())
+    theme._resolved_families = None
+    try:
+        interface, mono = theme.install_fonts()
+    finally:
+        theme._resolved_families = None
+
+    assert interface
+    assert mono
+
+
 # ------------------------------------------------------------------- assets
 
 

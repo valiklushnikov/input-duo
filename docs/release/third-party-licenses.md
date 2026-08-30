@@ -11,6 +11,7 @@ project happens to have installed for development.
 | Qt for Python (PySide6) | 6.10.1 | LGPLv3 / GPLv3 / commercial | The Python bindings the interface is written against. |
 | Qt (Widgets, Core, Gui, SerialPort, and the platform and style plugins) | 6.10.1 | LGPLv3 / GPLv3 / commercial | The toolkit itself, shipped as the DLLs beside `DuoInput.exe`. |
 | CPython runtime | 3.12 | PSF License 2.0 | The interpreter Nuitka links into the build. |
+| Golos Text | v7 | SIL Open Font License 1.1 | The interface typeface, shipped as `.ttf` files in `duo_input/resources/fonts`. |
 
 Nuitka itself is **not** bundled. It is a build-time compiler
 (Apache License 2.0) and none of its code ends up in `dist/DuoInput`.
@@ -43,6 +44,12 @@ distributed commercially, one of the two must be true and recorded here:
 Prototype builds for private testing are not affected by this. Public or
 commercial distribution is blocked until this section names a route and the
 person who reviewed it.
+
+## Golos Text
+
+Interface typeface, bundled in `duo_input/resources/fonts`.
+Copyright the Golos Text Project Authors.
+SIL Open Font License 1.1 — the full text ships beside the fonts as `OFL.txt`.
 
 ## Full licence texts
 

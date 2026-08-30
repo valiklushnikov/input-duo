@@ -11,13 +11,15 @@ The rules the design commits to are written down in
 ``docs/user/configurator-visual-design.md`` and asserted, where they are
 measurable, in ``configurator/tests/ui/test_theme.py``.
 
-Fonts are resolved, never bundled. Windows already ships Segoe UI and
-Consolas; loading them from ``%SystemRoot%\\Fonts`` costs the installer
-nothing and gives the same faces the rest of the operating system uses. The
-loading matters beyond taste: Qt's ``offscreen`` platform starts with an
-*empty* font database, so a screenshot taken without this step renders every
-glyph as an empty box - which is exactly what "шрифты не подключены" looks
-like.
+The interface face, Golos Text, ships with the program: it is not one the
+operating system has, so its files travel in ``resources/fonts`` and are
+loaded from there before anything asks for the family by name. The monospace
+face is still resolved rather than bundled - Windows already ships Consolas,
+loading it from ``%SystemRoot%\\Fonts`` costs the installer nothing, and
+Golos Text has no monospaced companion anyway. The loading matters beyond
+taste: Qt's ``offscreen`` platform starts with an *empty* font database, so a
+screenshot taken without this step renders every glyph as an empty box -
+which is exactly what "шрифты не подключены" looks like.
 """
 
 from __future__ import annotations
@@ -112,12 +114,11 @@ WEIGHT_NORMAL = 400
 WEIGHT_MEDIUM = 600
 WEIGHT_BOLD = 700
 
-#: What the interface is set in, when the machine has it.
-UI_FAMILY = "Segoe UI"
+#: What the interface is set in - bundled, not borrowed from the machine.
+UI_FAMILY = "Golos Text"
+UI_FALLBACK_FAMILY = "Segoe UI"
 #: Where digits have to line up: hashes, counters, byte sizes, IDs.
 MONO_FAMILY = "Consolas"
-#: What a machine without those falls back to.
-UI_FALLBACK_FAMILY = "sans-serif"
 MONO_FALLBACK_FAMILY = "monospace"
 
 #: Font files Windows ships that the offscreen database has to be handed.
@@ -222,21 +223,33 @@ def rgb(colour: str) -> tuple[int, int, int]:
 # ------------------------------------------------------------------- fonts
 
 
+def bundled_font_files() -> tuple[Path, ...]:
+    """The interface faces that travel with the program, lowest weight first."""
+    directory = Path(__file__).resolve().parent.parent / "resources" / "fonts"
+    return tuple(sorted(directory.glob("*.ttf")))
+
+
 def install_fonts() -> tuple[str, str]:
     """Make the interface and monospace families available, and name them.
 
-    The families are loaded from the operating system's own font directory
-    when Qt cannot already see them, which is what happens under the
-    ``offscreen`` platform. Nothing is shipped, so this costs the installer
-    nothing; on a machine that has neither face the generic fallbacks are
-    returned and the layout still holds.
+    The interface face ships with the program: it is not one the operating
+    system has, so it is loaded from ``resources/fonts`` before anything asks
+    for it. The monospace face is still the system's own Consolas, because
+    Golos Text has no monospaced companion and hashes only need to line up.
+
+    Nothing here may fail loudly. A font file that did not travel leaves the
+    fallbacks in place and the layout still holds - a blank interface is a
+    worse outcome than the wrong typeface.
     """
     global _resolved_families
     if _resolved_families is not None:
         return _resolved_families
 
+    for path in bundled_font_files():
+        QFontDatabase.addApplicationFont(str(path))
+
     families = set(QFontDatabase.families())
-    if UI_FAMILY not in families or MONO_FAMILY not in families:
+    if MONO_FAMILY not in families:
         directory = Path(os.environ.get("SystemRoot", "C:/Windows")) / "Fonts"
         for name in _SYSTEM_FONT_FILES:
             candidate = directory / name
@@ -244,8 +257,15 @@ def install_fonts() -> tuple[str, str]:
                 QFontDatabase.addApplicationFont(str(candidate))
         families = set(QFontDatabase.families())
 
-    interface = UI_FAMILY if UI_FAMILY in families else _generic(QFontDatabase.SystemFont.GeneralFont, UI_FALLBACK_FAMILY)
-    fixed = MONO_FAMILY if MONO_FAMILY in families else _generic(QFontDatabase.SystemFont.FixedFont, MONO_FALLBACK_FAMILY)
+    if UI_FAMILY in families:
+        interface = UI_FAMILY
+    elif UI_FALLBACK_FAMILY in families:
+        interface = UI_FALLBACK_FAMILY
+    else:
+        interface = _generic(QFontDatabase.SystemFont.GeneralFont, UI_FALLBACK_FAMILY)
+    fixed = MONO_FAMILY if MONO_FAMILY in families else _generic(
+        QFontDatabase.SystemFont.FixedFont, MONO_FALLBACK_FAMILY
+    )
     _resolved_families = (interface, fixed)
     return _resolved_families
 
