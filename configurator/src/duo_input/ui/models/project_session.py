@@ -171,6 +171,33 @@ class SetProfileColor:
 
 
 @dataclass(frozen=True)
+class SetProfileRoutes:
+    """Choose the routes one profile starts in.
+
+    Spec section 11: a profile stores where its keyboard and its mouse point
+    when it becomes the active one, and the firmware applies them at boot and
+    at every profile change. A pristine profile starts on PC1, so this exists
+    for the projects that mean something else - and for the ones that mean PC1
+    and would rather say so than inherit it.
+    """
+
+    profile_id: int
+    keyboard_route: KeyboardRoute
+    mouse_route: MouseRoute
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        return _replace_profile(
+            project,
+            self.profile_id,
+            lambda profile: replace(
+                profile,
+                keyboard_route=KeyboardRoute(self.keyboard_route),
+                mouse_route=MouseRoute(self.mouse_route),
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class CopyProfile:
     """Duplicate one slot into another, keeping the target's own ID.
 
@@ -547,6 +574,7 @@ __all__ = [
     "SetMacroSteps",
     "SetMacroTarget",
     "SetProfileColor",
+    "SetProfileRoutes",
     "UpdateBinding",
     "default_project",
 ]

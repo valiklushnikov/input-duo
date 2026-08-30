@@ -24,6 +24,7 @@ from duo_input.ui.models.project_session import (
     ProjectSession,
     RemoveBinding,
     SetProfileColor,
+    SetProfileRoutes,
     UpdateBinding,
     default_project,
 )
@@ -52,6 +53,33 @@ def test_set_profile_color_changes_only_that_profile():
     assert _profile(changed, 3).color_rgb == (1, 2, 3)
     assert _profile(changed, 4).color_rgb == _profile(session, 4).color_rgb
     assert validate_project(changed.project) == ()
+
+
+def test_set_profile_routes_changes_where_that_profile_starts():
+    # A profile stores the routes it starts in and the firmware applies them
+    # when the profile becomes the active one, so this is the only way a
+    # project can say which computer the device comes up pointing at.
+    session = ProjectSession.new()
+
+    changed = session.apply(SetProfileRoutes(2, KeyboardRoute.PC2, MouseRoute.PC2))
+
+    assert _profile(changed, 2).keyboard_route == KeyboardRoute.PC2
+    assert _profile(changed, 2).mouse_route == MouseRoute.PC2
+    assert validate_project(changed.project) == ()
+
+
+def test_set_profile_routes_leaves_every_other_profile_where_it_was():
+    session = ProjectSession.new()
+
+    changed = session.apply(SetProfileRoutes(2, KeyboardRoute.BOTH, MouseRoute.PC2))
+
+    assert _profile(changed, 3).keyboard_route == _profile(session, 3).keyboard_route
+    assert _profile(changed, 3).mouse_route == _profile(session, 3).mouse_route
+
+
+def test_set_profile_routes_refuses_a_profile_that_does_not_exist():
+    with pytest.raises(ValueError):
+        ProjectSession.new().apply(SetProfileRoutes(9, KeyboardRoute.PC1, MouseRoute.PC1))
 
 
 def test_copy_profile_duplicates_content_but_keeps_the_target_id():
