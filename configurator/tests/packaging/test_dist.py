@@ -91,6 +91,76 @@ def test_the_application_icon_ships(files):
     assert any(name.endswith("duo-input.ico") for name in names)
 
 
+def test_the_executable_carries_a_stamped_icon(dist):
+    # ``test_the_application_icon_ships`` above only proves a duo-input.ico
+    # file landed somewhere under the dist folder, which happens through
+    # ``--include-data-files`` and has nothing to do with the icon a user
+    # actually sees. That icon comes from the exe's own PE resource table,
+    # stamped in by the independent ``--windows-icon-from-ico`` flag. A build
+    # that dropped that flag would still pass the test above while shipping
+    # an exe with the generic default icon, so this test reads the resource
+    # table directly instead of trusting a file's mere presence.
+    import ctypes
+    from ctypes import wintypes
+
+    LOAD_LIBRARY_AS_DATAFILE = 0x00000002
+    RT_GROUP_ICON = 14
+    ERROR_RESOURCE_TYPE_NOT_FOUND = 1813
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.LoadLibraryExW.restype = wintypes.HMODULE
+    kernel32.LoadLibraryExW.argtypes = [wintypes.LPCWSTR, wintypes.HANDLE, wintypes.DWORD]
+    kernel32.FreeLibrary.argtypes = [wintypes.HMODULE]
+
+    exe_path = dist / "DuoInput.exe"
+    handle = kernel32.LoadLibraryExW(str(exe_path), None, LOAD_LIBRARY_AS_DATAFILE)
+    if not handle:
+        raise OSError(f"could not load {exe_path}: error {ctypes.get_last_error()}")
+
+    try:
+        found_icon_groups = []
+
+        # ``resource_type`` and ``name`` below arrive as integer ordinals
+        # (MAKEINTRESOURCE) for RT_GROUP_ICON, not real string pointers.
+        # Declaring them LPCWSTR/LPWSTR would make ctypes auto-decode the
+        # raw ordinal as a wide-string pointer on every callback
+        # invocation -- an access violation for small values that hangs
+        # the process outright (Windows Error Reporting blocks with
+        # nothing to dismiss it in a headless run). Keep them as opaque
+        # pointer-sized values instead; only their truthiness matters here.
+        enum_resource_names_proc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HMODULE, wintypes.LPARAM, wintypes.LPARAM, wintypes.LPARAM
+        )
+
+        def on_resource_found(module, resource_type, name, param):  # noqa: ARG001
+            found_icon_groups.append(name)
+            return True
+
+        callback = enum_resource_names_proc(on_resource_found)
+
+        kernel32.EnumResourceNamesW.restype = wintypes.BOOL
+        kernel32.EnumResourceNamesW.argtypes = [
+            wintypes.HMODULE,
+            wintypes.LPCWSTR,
+            enum_resource_names_proc,
+            wintypes.LPARAM,
+        ]
+        ok = kernel32.EnumResourceNamesW(
+            handle, ctypes.cast(RT_GROUP_ICON, wintypes.LPCWSTR), callback, 0
+        )
+        if not ok:
+            error = ctypes.get_last_error()
+            if error != ERROR_RESOURCE_TYPE_NOT_FOUND:
+                raise OSError(f"EnumResourceNamesW failed: error {error}")
+    finally:
+        kernel32.FreeLibrary(handle)
+
+    assert found_icon_groups, (
+        "DuoInput.exe has no RT_GROUP_ICON resource; "
+        "--windows-icon-from-ico was not applied to this build"
+    )
+
+
 def test_the_licence_notices_ship(files):
     names = {path.name for path in files}
 

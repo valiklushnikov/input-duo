@@ -152,7 +152,8 @@ if (Test-Path $produced) {
 Write-Step 'Copying the third-party licence notices'
 if (-not (Test-Path $Licenses)) { throw "missing $Licenses" }
 Copy-Item $Licenses (Join-Path $OutputDir 'third-party-licenses.md')
-Copy-Item (Join-Path $Translations '..' 'fonts' 'OFL.txt') (Join-Path $OutputDir 'OFL-GolosText.txt')
+$FontsDir = Join-Path (Split-Path -Parent $Translations) 'fonts'
+Copy-Item (Join-Path $FontsDir 'OFL.txt') (Join-Path $OutputDir 'OFL-GolosText.txt')
 
 # --- the contract ------------------------------------------------------------
 
