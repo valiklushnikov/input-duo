@@ -8,19 +8,55 @@
     "5 USB keyboards of different vendors, at least one behind a built-in hub",
     "5 USB mice of different vendors, at least one with 5 buttons and one with 3"
   ],
+  "device_requirements": {
+    "keyboard": 5,
+    "mouse": 5
+  },
   "steps": [
-    {"action": "connect", "note": "open the U1 CDC port and read DEVICE_INFO"},
+    {
+      "action": "connect",
+      "note": "open the U1 CDC port and read DEVICE_INFO"
+    },
     {
       "action": "for_each_peripheral",
-      "roles": ["keyboard", "mouse"],
+      "roles": [
+        "keyboard",
+        "mouse"
+      ],
       "steps": [
-        {"action": "attach", "settle_ms": 3000},
-        {"action": "record_identity", "fields": ["vendor_id", "product_id", "descriptor_hash", "buttons"]},
-        {"action": "assert_enumerated", "timeout_ms": 5000},
-        {"action": "inject_and_observe", "count": 200, "note": "every key or button the device has, once each"},
-        {"action": "assert_normalized_events_match_trace"},
-        {"action": "detach", "settle_ms": 2000},
-        {"action": "assert_all_released", "note": "a detach must never leave a key held on either PC"}
+        {
+          "action": "attach",
+          "settle_ms": 3000
+        },
+        {
+          "action": "record_identity",
+          "fields": [
+            "vendor_id",
+            "product_id",
+            "descriptor_hash",
+            "buttons"
+          ]
+        },
+        {
+          "action": "assert_enumerated",
+          "timeout_ms": 5000
+        },
+        {
+          "action": "inject_and_observe",
+          "count": 200,
+          "note": "every key or button the device has, once each"
+        },
+        {
+          "action": "assert_normalized_events_match_trace"
+        },
+        {
+          "action": "detach",
+          "settle_ms": 2000
+        },
+        {
+          "action": "assert_all_released",
+          "note": "a detach must never leave a key held on either PC"
+        }
       ]
     }
   ],

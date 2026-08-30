@@ -1,19 +1,40 @@
 """Hardware-in-the-loop acceptance: measure what the device actually does.
 
-Nothing in this file estimates. Every number it reports comes from a timestamp
-taken around a real event on real hardware, and a scenario that cannot reach
-the hardware fails rather than returning a plausible-looking result. That rule
-is the entire point of the file: a latency figure produced by a simulator is
-not evidence about a device, and treating one as the other is how a product
-ships with a defect its own test suite said was fine.
+Nothing in this file estimates. Every number it reports comes from a clock at
+both ends of the interval it describes, and a check whose interval this rig
+cannot see is recorded as unmeasured, with the reason, rather than filled in
+with something plausible. That rule is the entire point of the file: a latency
+figure produced by a simulator is not evidence about a device, and a check
+quietly skipped is worse than one that failed, because a skipped check leaves a
+report that looks complete.
 
-Usage:
+**What this measures is the interval inside U1**: from a peripheral report
+reaching its input core to the command that report produced being applied on
+its output core. Both ends are on the same board and on the same clock, so the
+difference is a measurement. It is *not* the journey from a finger to a far
+screen. This rig has no way to timestamp a human keypress and nothing that
+injects HID into U1's peripheral ports, so the end-to-end figure the
+specification names cannot be produced here at all, and no report from this
+file may be read as if it had been.
+
+Usage, in two phases:
 
     python tests/hil/hil_runner.py tests/hil/scenarios/route_toggle.json \\
-        --port COM7 --output artifacts/route_toggle.json
+        --port COM7 --phase baseline --state artifacts/route_toggle.state.json
 
-Each run writes one JSON report: the scenario it ran, every sample it took,
-the derived statistics, and a verdict per requirement.
+    ... exercise the device as the scenario describes ...
+
+    python tests/hil/hil_runner.py tests/hil/scenarios/route_toggle.json \\
+        --port COM7 --phase measure --state artifacts/route_toggle.state.json \\
+        --output artifacts/route_toggle.json
+
+The baseline is what turns a counter that only ever climbs into a statement
+about one run, and what lets a scenario measured over hours be started now and
+finished later.
+
+Exit codes: 0 every check measured and passed, 1 something measured failed,
+2 no hardware, 3 everything measured passed but some checks could not be
+measured on this rig.
 """
 
 from __future__ import annotations
@@ -37,6 +58,20 @@ MAX_ACCEPTABLE_GAP_MS = 50.0
 #: U2 must release every held key within this of losing the link.
 U2_RELEASE_BUDGET_MS = 100.0
 
+#: What this runner can see, said once so every report can point at it.
+MEASUREMENT_SCOPE = (
+    "firmware-internal latency: from a peripheral report reaching U1's input "
+    "core to the command it produced being applied on U1's output core. Not "
+    "end-to-end keystroke latency, which this rig cannot measure - there is no "
+    "clock on a human finger and nothing injects HID into U1's peripheral ports."
+)
+
+#: Why the rig cannot see a computer at the far end of the link.
+NEEDS_SECOND_COMPUTER = (
+    "a logger on PC1 and PC2 recording what each actually received, which this "
+    "rig does not have"
+)
+
 
 class HardwareRequired(RuntimeError):
     """The scenario needs hardware that is not attached.
@@ -48,7 +83,14 @@ class HardwareRequired(RuntimeError):
 
 @dataclass(frozen=True)
 class Sample:
-    """One injected event and the moment it was observed on the far side."""
+    """One request sent and the moment its reply came back.
+
+    Both timestamps are taken on the host, around a real exchange with a real
+    device, which is what makes this a measurement rather than a guess. It is
+    the *configuration link's* round trip and nothing else: it says the board
+    is answering and how quickly. It is not the input path, and reporting it as
+    keystroke latency would be reporting the wrong journey entirely.
+    """
 
     kind: str
     injected_ns: int
@@ -80,7 +122,8 @@ def percentile(values: list[float], fraction: float) -> float:
 
     Nearest rank rather than interpolation: with a few hundred samples an
     interpolated p95 can land between two real measurements and report a
-    latency the device never actually produced.
+    latency the device never actually produced. The device's own histogram
+    uses the same convention, so the two agree about what p95 means.
     """
     if not values:
         raise ValueError("percentile of no samples")
@@ -135,6 +178,20 @@ class PeripheralRow:
     reason: str
 
 
+@dataclass(frozen=True)
+class Unmeasured:
+    """A check this rig could not decide, and precisely what it would take.
+
+    Recorded rather than skipped. A skipped check leaves a report that looks
+    complete, and the whole value of an acceptance report is that its silences
+    are visible.
+    """
+
+    check: str
+    reason: str
+    needs: str
+
+
 @dataclass
 class ScenarioResult:
     """Everything one scenario run produced."""
@@ -145,22 +202,55 @@ class ScenarioResult:
     samples: list[Sample] = field(default_factory=list)
     peripherals: list[PeripheralRow] = field(default_factory=list)
     checks: dict[str, bool] = field(default_factory=dict)
+    unmeasured: list[Unmeasured] = field(default_factory=list)
+    measurements: dict[str, object] = field(default_factory=dict)
+    coverage: dict[str, object] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
         return bool(self.checks) and all(self.checks.values())
 
+    @property
+    def complete(self) -> bool:
+        """Was every check the scenario names actually decided?"""
+        return not self.unmeasured
+
+    @property
+    def verdict(self) -> str:
+        """Three outcomes, never two.
+
+        Collapsing "partial" into "passed" is how a report comes to imply that
+        ten devices were tried when two were, and collapsing it into "failed"
+        would make an honest partial run indistinguishable from a defect.
+        """
+        if self.checks and not self.passed:
+            return "failed"
+        if not self.checks:
+            return "nothing measured"
+        return "passed" if self.complete else "partial"
+
     def to_json(self) -> str:
-        latencies = [latency_report(kind, self.samples) for kind in ("keyboard", "mouse")]
+        kinds = sorted({sample.kind for sample in self.samples})
+        latencies = [latency_report(kind, self.samples) for kind in kinds]
         document = {
             "scenario": self.scenario,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "measures": MEASUREMENT_SCOPE,
+            "verdict": self.verdict,
             "passed": self.passed,
+            "complete": self.complete,
             "checks": self.checks,
-            "latency": [asdict(report) | {"passed": report.passed} for report in latencies],
-            "gaps_over_50ms": gaps([sample.observed_ns for sample in self.samples]),
+            "unmeasured": [asdict(entry) for entry in self.unmeasured],
+            "measurements": self.measurements,
+            "coverage": self.coverage,
+            "control_link_latency": [
+                asdict(report) | {"passed": report.passed} for report in latencies
+            ],
+            "control_link_gaps_over_50ms": gaps(
+                [sample.observed_ns for sample in self.samples]
+            ),
             "peripherals": [asdict(row) for row in self.peripherals],
             "samples": [asdict(sample) | {"latency_ms": round(sample.latency_ms, 3)}
                         for sample in self.samples],
@@ -189,44 +279,610 @@ def load_scenario(path: str | Path) -> dict:
     return document
 
 
+def scenario_hours(scenario: dict) -> float:
+    """How long the scenario says its run lasts, from the scenario itself."""
+    for step in scenario.get("steps", ()):
+        if step.get("action") == "run_for":
+            return float(step.get("hours", 0.0))
+    return 0.0
+
+
+# --- the device ---------------------------------------------------------------
+
+
 def open_device(port: str | None):
-    """Open the U1 named by ``port``, or discover one.
+    """Open the U1 named by ``port``, or refuse.
 
     There is no fallback to the emulator here, deliberately. The emulator is
-    the right tool for the UI tests and the wrong tool for this file.
+    the right tool for the UI tests and the wrong tool for this file: it has no
+    input pipeline, no peripheral ports and no clock on either, so every number
+    it could produce would be a number about a Python object.
     """
     if port is None:
         raise HardwareRequired(
             "no --port given; HIL scenarios run against a real U1, never the emulator"
         )
     try:
-        from duo_input.device.qt_transport import QSerialPortTransport
-    except ImportError as error:  # pragma: no cover - the configurator is a sibling
-        raise HardwareRequired(
-            "the configurator package is not importable; install it first"
-        ) from error
+        from cdc_session import CdcSession
+    except ImportError:  # pragma: no cover - running as a module
+        from .cdc_session import CdcSession  # type: ignore[import-not-found]
 
-    transport = QSerialPortTransport(port)
-    if not transport.open():
-        raise HardwareRequired(f"{port} did not open; is the U1 attached?")
-    return transport
+    session = CdcSession(port)
+    session.open()
+    return session
 
 
-def run(scenario_path: str | Path, port: str | None) -> ScenarioResult:
-    """Execute one scenario against real hardware."""
-    scenario = load_scenario(scenario_path)
+# --- turning what the device reports into the checks the scenario names -------
+
+
+def _histogram_json(histogram) -> dict:
+    """One of the device's histograms, as a report can print it."""
+    p95 = histogram.p95_upper_bound_us() if histogram.count else None
+    return {
+        "samples": histogram.count,
+        "max_ms": round(histogram.max_us / 1000, 3),
+        "p95_at_or_below_ms": None if p95 is None else round(p95 / 1000, 3),
+        "bucket_edges_ms": [round(edge / 1000, 3) for edge in histogram.edges_us],
+        "buckets": list(histogram.buckets),
+    }
+
+
+def _difference(histogram, earlier):
+    """The samples taken between two readings of the same counter.
+
+    Bucket counts only ever climb, so subtracting them is exact and gives the
+    run rather than the lifetime. The maximum is not subtractable - a maximum
+    is not a sum - so it is left as the lifetime value and labelled as one.
+    """
+    if earlier is None:
+        return histogram
+    from duo_input.device.transactions import LatencyHistogram
+
+    return LatencyHistogram(
+        edges_us=histogram.edges_us,
+        buckets=tuple(
+            later - before for later, before in zip(histogram.buckets, earlier.buckets)
+        ),
+        count=histogram.count - earlier.count,
+        max_us=histogram.max_us,
+    )
+
+
+@dataclass
+class _Context:
+    """Everything the checks are decided from."""
+
+    scenario: dict
+    now: object
+    baseline: object | None
+    elapsed_seconds: float | None
+
+
+def _latency_check(context: _Context, stream: str):
+    """Did this stream's p95 meet the budget, as the device counted it?"""
+    histogram = getattr(context.now, f"{stream}_latency", None)
+    if histogram is None:
+        return (
+            None,
+            "this firmware does not report input latency",
+            "a U1 running a build that carries the latency block in GET_DIAGNOSTICS",
+        )
+    measured = _difference(histogram, getattr(context.baseline, f"{stream}_latency", None)
+                           if context.baseline is not None else None)
+    if measured.count == 0:
+        return (
+            None,
+            "the device measured no "
+            + stream
+            + " events, so there is no percentile to report",
+            "a "
+            + stream
+            + " attached to U1 and exercised between the baseline and this reading",
+        )
+    return (measured.within(int(INPUT_P95_BUDGET_MS * 1000)), "", "")
+
+
+def _check_keyboard_p95(context: _Context):
+    return _latency_check(context, "keyboard")
+
+
+def _check_mouse_p95(context: _Context):
+    return _latency_check(context, "mouse")
+
+
+def _check_no_gap(context: _Context):
+    """No input took longer than the stall threshold.
+
+    Expressed as a maximum of the same measurement rather than as a gap between
+    two events: the gap between one keystroke and the next is mostly the
+    operator thinking, and calling that a stall would fail every honest run.
+    """
+    bound_us = int(MAX_ACCEPTABLE_GAP_MS * 1000)
+    decided = False
+    for stream in ("keyboard", "mouse"):
+        histogram = getattr(context.now, f"{stream}_latency", None)
+        if histogram is None:
+            return (
+                None,
+                "this firmware does not report input latency",
+                "a U1 running a build that carries the latency block in GET_DIAGNOSTICS",
+            )
+        measured = _difference(
+            histogram,
+            getattr(context.baseline, f"{stream}_latency", None)
+            if context.baseline is not None
+            else None,
+        )
+        if measured.count == 0:
+            continue
+        decided = True
+        if measured.at_or_below(bound_us) != measured.count:
+            return (False, "", "")
+    if not decided:
+        return (
+            None,
+            "the device measured no input at all, so nothing can be said about stalls",
+            "a keyboard or a mouse attached to U1 and exercised during the run",
+        )
+    return (True, "", "")
+
+
+def _check_u2_release(context: _Context):
+    """U2 let go within the budget of the link going quiet.
+
+    U2 records the silence that caused its own release and reports it when the
+    link comes back, which is the only way this is observable at all: the link
+    that would carry the news live is the one that went away.
+    """
+    release_ms = getattr(context.now, "endpoint_release_ms", None)
+    drops = getattr(context.now, "endpoint_drops", None)
+    if release_ms is None or drops is None:
+        return (
+            None,
+            "this firmware does not report what the endpoint saw when the link died",
+            "a U1 whose GET_DIAGNOSTICS carries the endpoint report",
+        )
+    if not drops:
+        return (
+            None,
+            "U2 has not released anything, so there is no release to time",
+            "the SPI1 link physically interrupted while a key is held",
+        )
+    return (release_ms <= U2_RELEASE_BUDGET_MS, "", "")
+
+
+def _counter_grew(context: _Context, attribute: str):
+    now = getattr(context.now, attribute, None)
+    before = getattr(context.baseline, attribute, None) if context.baseline else None
+    if now is None:
+        return None
+    if before is None:
+        return now
+    return now - before
+
+
+def _check_crc_counter(context: _Context):
+    if context.baseline is None:
+        return (
+            None,
+            "no baseline reading, so a counter that only climbs says nothing about this run",
+            "a --phase baseline run before the frames were corrupted",
+        )
+    grew = _counter_grew(context, "link_crc_errors")
+    if grew is None:
+        return (None, "this firmware does not report the link CRC counter", "a newer U1 build")
+    return (grew > 0, "", "")
+
+
+def _check_link_recovered(context: _Context):
+    answering = getattr(context.now, "endpoint_answering", None)
+    if answering is None:
+        return (
+            None,
+            "this firmware does not say whether the endpoint is answering",
+            "a U1 whose GET_DIAGNOSTICS carries the link state",
+        )
+    return (bool(answering), "", "")
+
+
+def _check_error_counters_stable(context: _Context):
+    if context.baseline is None:
+        return (
+            None,
+            "no baseline reading, so a counter that only climbs says nothing about this run",
+            "a --phase baseline run before the soak began",
+        )
+    grew = [
+        name
+        for name in ("bad_crc", "timeout", "link_crc_errors")
+        if (_counter_grew(context, name) or 0) > 0
+    ]
+    return (not grew, "", "")
+
+
+def _check_every_device_enumerated(context: _Context):
+    """Every peripheral U1 has a port for reached the ready state.
+
+    This decides the ports that exist. How many devices the scenario asks for
+    is a separate question, answered by the coverage block, and the two must
+    not be confused: two ports both ready is not ten devices verified.
+    """
+    ports = getattr(context.now, "peripherals", None)
+    if ports is None:
+        return (
+            None,
+            "this firmware does not report what is on its peripheral ports",
+            "a U1 whose GET_DIAGNOSTICS carries the peripheral block",
+        )
+    attached = [port for port in ports if port.attached]
+    if not attached:
+        return (
+            None,
+            "nothing is attached to either peripheral port",
+            "a keyboard and a mouse plugged into U1",
+        )
+    return (all(port.ready for port in attached), "", "")
+
+
+#: Which checks this rig can decide, and how.
+MEASURABLE_CHECKS = {
+    "keyboard_p95_within_budget": _check_keyboard_p95,
+    "mouse_p95_within_budget": _check_mouse_p95,
+    "no_gap_over_50ms": _check_no_gap,
+    "u2_released_within_budget": _check_u2_release,
+    "crc_counter_incremented": _check_crc_counter,
+    "link_recovered": _check_link_recovered,
+    "error_counters_stable": _check_error_counters_stable,
+    "every_device_enumerated": _check_every_device_enumerated,
+}
+
+#: Checks nothing on this rig can decide, and exactly what each would take.
+#:
+#: Written out one by one rather than defaulted, because a default would let a
+#: check added to a scenario later fall silently into "not measurable" without
+#: anyone deciding that it is.
+UNMEASURABLE_CHECKS = {
+    "no_stuck_keys": (
+        "whether a computer is still holding a key can only be seen at that computer",
+        NEEDS_SECOND_COMPUTER,
+    ),
+    "no_misrouted_event": (
+        "which computer an event arrived at can only be seen at that computer",
+        NEEDS_SECOND_COMPUTER,
+    ),
+    "all_toggles_took_effect": (
+        "a route change is observable as an event arriving somewhere else",
+        NEEDS_SECOND_COMPUTER,
+    ),
+    "no_report_from_damaged_frame": (
+        "whether a HID report followed a corrupted frame can only be seen at PC2",
+        NEEDS_SECOND_COMPUTER,
+    ),
+    "resets_are_independent": (
+        "whether one board kept serving while the other restarted is observed at the computers",
+        NEEDS_SECOND_COMPUTER,
+    ),
+    "bindings_match_profile": (
+        "what a binding produced is observed at the computer it was routed to",
+        NEEDS_SECOND_COMPUTER,
+    ),
+    "routes_match_profile": (
+        "which computer an event reached is observed at that computer",
+        NEEDS_SECOND_COMPUTER,
+    ),
+    "active_profile_survives_power_cycle": (
+        "this runner does not cut power, and reading the profile back proves nothing "
+        "about a power cycle it did not cause",
+        "U1 on a switchable supply the runner can command",
+    ),
+    "all_writes_verified": (
+        "this runner does not write configuration; a write replaces what is on the "
+        "device, and a read-only acceptance run must not",
+        "a write-enabled run against a device whose configuration may be replaced",
+    ),
+    "no_torn_configuration": (
+        "this runner does not cut power mid-write",
+        "U1 on a switchable supply the runner can command",
+    ),
+    "never_unconfigured": (
+        "this runner does not cut power mid-write",
+        "U1 on a switchable supply the runner can command",
+    ),
+    "generation_monotonic": (
+        "this runner does not write configuration, so there is no generation to watch",
+        "a write-enabled run against a device whose configuration may be replaced",
+    ),
+    "no_watchdog_reset": (
+        "the reset record is counted inside the firmware and GET_DIAGNOSTICS does not carry it",
+        "a U1 build that reports its reset reason and watchdog count over CDC",
+    ),
+}
+
+
+def evaluate(scenario: dict, now, baseline=None, elapsed_seconds: float | None = None):
+    """Decide every check the scenario names, or say why it could not be.
+
+    Returns ``(checks, unmeasured)``. A check the scenario names that appears in
+    neither table is unmeasured with a reason saying so: an unknown check must
+    never quietly become a pass.
+    """
+    context = _Context(scenario, now, baseline, elapsed_seconds)
+    checks: dict[str, bool] = {}
+    unmeasured: list[Unmeasured] = []
+
+    required_hours = scenario_hours(scenario)
+    short_run = (
+        required_hours > 0
+        and elapsed_seconds is not None
+        and elapsed_seconds < required_hours * 3600
+    )
+
+    for name in scenario.get("checks", {}):
+        if short_run:
+            covered = 0.0 if elapsed_seconds is None else elapsed_seconds / 3600
+            unmeasured.append(
+                Unmeasured(
+                    name,
+                    f"the scenario specifies {required_hours:g} hours and this run "
+                    f"covered {covered:.2f}",
+                    f"a measure phase taken at least {required_hours:g} hours after "
+                    "the baseline",
+                )
+            )
+            continue
+        if name in UNMEASURABLE_CHECKS:
+            reason, needs = UNMEASURABLE_CHECKS[name]
+            unmeasured.append(Unmeasured(name, reason, needs))
+            continue
+        decider = MEASURABLE_CHECKS.get(name)
+        if decider is None:
+            unmeasured.append(
+                Unmeasured(
+                    name,
+                    "this runner has no way to decide this check and no record of why not",
+                    "a decision about how it is measured, added to hil_runner.py",
+                )
+            )
+            continue
+        verdict, reason, needs = decider(context)
+        if verdict is None:
+            unmeasured.append(Unmeasured(name, reason, needs))
+        else:
+            checks[name] = bool(verdict)
+
+    return checks, unmeasured
+
+
+def peripheral_rows(now) -> list[PeripheralRow]:
+    """One row per port U1 has, whether or not anything is on it."""
+    ports = getattr(now, "peripherals", None)
+    if not ports:
+        return []
+    roles = ("keyboard", "mouse")
+    rows: list[PeripheralRow] = []
+    for index, port in enumerate(ports):
+        role = roles[index] if index < len(roles) else f"port {index}"
+        if not port.attached:
+            rows.append(
+                PeripheralRow(
+                    role=role,
+                    vendor_id="",
+                    product_id="",
+                    descriptor_hash="",
+                    buttons=0,
+                    passed=False,
+                    reason="nothing attached to this port during the run",
+                )
+            )
+            continue
+        if port.ready:
+            reason = (
+                f"enumerated as {port.kind}"
+                + (
+                    f", {port.report_descriptor_bytes} bytes of report descriptor"
+                    if port.report_descriptor_bytes
+                    else ", boot protocol, no report descriptor read"
+                )
+                + (f", {port.buttons} buttons declared" if port.buttons else "")
+            )
+        else:
+            reason = f"attached but never reached ready; enumeration saw it as {port.kind}"
+        rows.append(
+            PeripheralRow(
+                role=role,
+                vendor_id=f"0x{port.vendor_id:04X}",
+                product_id=f"0x{port.product_id:04X}",
+                descriptor_hash=port.descriptor_hash or "",
+                buttons=port.buttons or 0,
+                passed=bool(port.ready),
+                reason=reason,
+            )
+        )
+    return rows
+
+
+def coverage_of(scenario: dict, rows: list[PeripheralRow]) -> dict:
+    """How much of what the scenario asks for this run actually touched.
+
+    Separate from the checks on purpose. Two ports both working is a pass for
+    the ports that exist and is not ten devices verified, and a report that
+    ran the two together would imply the eight it never saw.
+    """
+    required = scenario.get("device_requirements")
+    if not required:
+        return {}
+    total = sum(int(value) for value in required.values())
+    exercised = sum(1 for row in rows if row.passed)
+    return {
+        "devices_required": total,
+        "devices_required_by_role": dict(required),
+        "devices_exercised": exercised,
+        "note": (
+            f"{exercised} device(s) verified of {total} the scenario requires. "
+            "U1 has two peripheral ports, so one run can exercise at most one "
+            "keyboard and one mouse; the rest need further runs with other devices."
+        ),
+    }
+
+
+# --- running one scenario -----------------------------------------------------
+
+
+def _read_state(path: Path | None) -> dict | None:
+    if path is None or not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _diagnostics_from_state(state: dict | None):
+    """Rebuild the baseline reading from what the baseline phase wrote."""
+    if state is None:
+        return None, None
+    from duo_input.device.transactions import DeviceDiagnostics, LatencyHistogram
+
+    raw = state["diagnostics"]
+    fields = dict(raw)
+    for stream in ("keyboard_latency", "mouse_latency"):
+        value = fields.get(stream)
+        fields[stream] = (
+            None
+            if value is None
+            else LatencyHistogram(
+                edges_us=tuple(value["edges_us"]),
+                buckets=tuple(value["buckets"]),
+                count=value["count"],
+                max_us=value["max_us"],
+            )
+        )
+    fields.pop("peripherals", None)
+    return DeviceDiagnostics(**fields), state.get("taken_at")
+
+
+def _state_document(diagnostics, taken_at: float) -> dict:
+    raw = {
+        key: value
+        for key, value in asdict(diagnostics).items()
+        if key != "peripherals"
+    }
+    for stream in ("keyboard_latency", "mouse_latency"):
+        value = raw.get(stream)
+        if value is not None:
+            raw[stream] = {
+                "edges_us": list(value["edges_us"]),
+                "buckets": list(value["buckets"]),
+                "count": value["count"],
+                "max_us": value["max_us"],
+            }
+    return {"taken_at": taken_at, "diagnostics": raw}
+
+
+def measure(scenario: dict, session, baseline=None, elapsed_seconds=None) -> ScenarioResult:
+    """Read the device and decide what the scenario asks, against a fake or a board."""
     result = ScenarioResult(
         scenario=scenario["name"],
         started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     )
-    # Opening the device is what makes this a measurement rather than an
-    # assertion about nothing.
-    open_device(port)
-    raise HardwareRequired(
-        f"{scenario['name']} needs the two-board rig described in its "
-        f"'requires' field: {', '.join(scenario['requires'])}. "
-        "Wire it up and run this again; this runner will not invent results."
+
+    started_ns = time.perf_counter_ns()
+    now = session.diagnostics()
+    result.samples.append(
+        Sample("cdc_round_trip", started_ns, time.perf_counter_ns())
     )
+
+    result.peripherals = peripheral_rows(now)
+    result.coverage = coverage_of(scenario, result.peripherals)
+    result.checks, result.unmeasured = evaluate(scenario, now, baseline, elapsed_seconds)
+
+    for stream in ("keyboard", "mouse"):
+        histogram = getattr(now, f"{stream}_latency", None)
+        if histogram is None:
+            continue
+        measured = _difference(
+            histogram,
+            getattr(baseline, f"{stream}_latency", None) if baseline else None,
+        )
+        result.measurements[f"{stream}_latency_this_run"] = _histogram_json(measured)
+        result.measurements[f"{stream}_latency_since_boot"] = _histogram_json(histogram)
+
+    for name in ("endpoint_release_ms", "endpoint_drops", "link_crc_errors",
+                 "dropped_commands", "runtime_fault"):
+        value = getattr(now, name, None)
+        if value is not None:
+            result.measurements[name] = value
+
+    if elapsed_seconds is not None:
+        result.measurements["elapsed_hours"] = round(elapsed_seconds / 3600, 4)
+    result.notes.append(MEASUREMENT_SCOPE)
+    if baseline is None:
+        result.notes.append(
+            "no baseline: every counter here is since the device booted, not since "
+            "this run began."
+        )
+    result.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    return result
+
+
+def run(
+    scenario_path: str | Path,
+    port: str | None,
+    *,
+    phase: str = "measure",
+    state: str | Path | None = None,
+    session=None,
+) -> ScenarioResult:
+    """Execute one scenario phase against real hardware."""
+    scenario = load_scenario(scenario_path)
+    state_path = Path(state) if state is not None else None
+
+    owned = session is None
+    if owned:
+        # Opening the device is what makes this a measurement rather than an
+        # assertion about nothing.
+        session = open_device(port)
+    try:
+        if phase == "baseline":
+            taken_at = time.time()
+            document = _state_document(session.diagnostics(), taken_at)
+            if state_path is None:
+                raise ValueError("--phase baseline needs --state to write the reading to")
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(
+                json.dumps(document, indent=2, sort_keys=True), encoding="utf-8"
+            )
+            result = ScenarioResult(
+                scenario=scenario["name"],
+                started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            )
+            result.notes.append(
+                f"baseline written to {state_path}; exercise the device as the "
+                "scenario describes, then run --phase measure with the same --state."
+            )
+            result.finished_at = result.started_at
+            return result
+
+        baseline, taken_at = _diagnostics_from_state(_read_state(state_path))
+        elapsed = None if taken_at is None else max(0.0, time.time() - taken_at)
+        return measure(scenario, session, baseline, elapsed)
+    finally:
+        if owned:
+            close = getattr(session, "close", None)
+            if close is not None:
+                close()
+
+
+EXIT_PASSED = 0
+EXIT_FAILED = 1
+EXIT_NO_HARDWARE = 2
+EXIT_PARTIAL = 3
+
+
+def exit_code(result: ScenarioResult) -> int:
+    """Three outcomes get three codes, so a caller cannot conflate them."""
+    if result.checks and not result.passed:
+        return EXIT_FAILED
+    if not result.complete:
+        return EXIT_PARTIAL
+    return EXIT_PASSED if result.checks else EXIT_PARTIAL
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -234,6 +890,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("scenario", type=Path, help="scenario JSON to run")
     parser.add_argument("--port", help="serial port of the U1, e.g. COM7")
     parser.add_argument("--output", type=Path, help="where to write the report")
+    parser.add_argument(
+        "--phase",
+        choices=("baseline", "measure"),
+        default="measure",
+        help="take the reading a run is measured against, or take the run's own",
+    )
+    parser.add_argument(
+        "--state",
+        type=Path,
+        help="where the baseline reading is kept between the two phases",
+    )
     parser.add_argument(
         "--validate-only",
         action="store_true",
@@ -244,19 +911,26 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.validate_only:
         scenario = load_scenario(arguments.scenario)
         print(f"{scenario['name']}: {len(scenario['steps'])} steps, valid")
-        return 0
+        return EXIT_PASSED
 
     try:
-        result = run(arguments.scenario, arguments.port)
+        result = run(
+            arguments.scenario,
+            arguments.port,
+            phase=arguments.phase,
+            state=arguments.state,
+        )
     except HardwareRequired as error:
         print(f"hardware required: {error}", file=sys.stderr)
-        return 2
+        return EXIT_NO_HARDWARE
 
     if arguments.output:
         arguments.output.parent.mkdir(parents=True, exist_ok=True)
         arguments.output.write_text(result.to_json(), encoding="utf-8")
     print(result.to_json())
-    return 0 if result.passed else 1
+    if arguments.phase == "baseline":
+        return EXIT_PASSED
+    return exit_code(result)
 
 
 if __name__ == "__main__":

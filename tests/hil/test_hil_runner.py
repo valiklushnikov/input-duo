@@ -18,15 +18,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hil_runner import (  # noqa: E402
     INPUT_P95_BUDGET_MS,
     MAX_ACCEPTABLE_GAP_MS,
+    MEASURABLE_CHECKS,
     U2_RELEASE_BUDGET_MS,
+    UNMEASURABLE_CHECKS,
     HardwareRequired,
     PeripheralRow,
     Sample,
     ScenarioResult,
+    Unmeasured,
+    coverage_of,
+    evaluate,
+    exit_code,
     gaps,
     latency_report,
     load_scenario,
+    measure,
     percentile,
+    peripheral_rows,
     run,
 )
 
@@ -157,7 +165,13 @@ def test_a_report_records_every_sample_it_derived_from():
     document = json.loads(result.to_json())
 
     assert len(document["samples"]) == 2
-    assert {report["kind"] for report in document["latency"]} == {"keyboard", "mouse"}
+    # Named for the link they were taken over. The device's own input latency
+    # is reported separately and under its own heading, because a host-side
+    # round trip and a firmware-internal interval are different journeys.
+    assert {report["kind"] for report in document["control_link_latency"]} == {
+        "keyboard",
+        "mouse",
+    }
 
 
 def test_a_peripheral_row_states_a_reason_even_when_it_passed():
@@ -245,3 +259,467 @@ def test_the_refusal_names_what_the_scenario_needs():
         run(SCENARIOS / "link_fault.json", port=None)
 
     assert "port" in str(error.value).lower()
+
+
+# ------------------------------------------------- what the device reports
+#
+# Everything below drives the runner with a stand-in for the board. That is not
+# a way of pretending to have hardware: no number in these tests reaches a
+# report, and what is under test is the arithmetic and the honesty of the
+# verdict, both of which have to be right before a real reading is worth taking.
+
+
+def _histogram(counts, edges=(250, 500, 1000, 2000, 5000, 10000, 20000, 50000), max_us=0):
+    from duo_input.device.transactions import LatencyHistogram
+
+    return LatencyHistogram(
+        edges_us=tuple(edges), buckets=tuple(counts), count=sum(counts), max_us=max_us
+    )
+
+
+def _port(**overrides):
+    from duo_input.device.transactions import PeripheralPort
+
+    fields = {
+        "attached": True,
+        "ready": True,
+        "kind": "keyboard",
+        "vendor_id": 0x046D,
+        "product_id": 0xC31C,
+        "buttons": None,
+        "report_descriptor_bytes": 0,
+        "descriptor_hash": None,
+    }
+    fields.update(overrides)
+    return PeripheralPort(**fields)
+
+
+def _diagnostics(**overrides):
+    from duo_input.device.transactions import DeviceDiagnostics
+
+    fields = {
+        "bad_crc": 0,
+        "disconnect": 0,
+        "timeout": 0,
+        "bad_sequence": 0,
+        "aborted_staging": 0,
+    }
+    fields.update(overrides)
+    return DeviceDiagnostics(**fields)
+
+
+class FakeSession:
+    """A U1 that answers exactly one question, with whatever it was given."""
+
+    def __init__(self, diagnostics):
+        self._diagnostics = diagnostics
+        self.reads = 0
+
+    def diagnostics(self):
+        self.reads += 1
+        return self._diagnostics
+
+
+def _scenario(name="x", checks=None, steps=None, **extra):
+    document = {
+        "name": name,
+        "description": "",
+        "requires": ["a U1"],
+        "steps": steps or [{"action": "connect"}],
+        "checks": checks or {},
+    }
+    document.update(extra)
+    return document
+
+
+def test_a_p95_inside_the_budget_passes_on_counts_the_device_supplied():
+    fast = _histogram((0, 0, 100, 0, 0, 0, 0, 0, 0), max_us=900)
+
+    checks, unmeasured = evaluate(
+        _scenario(checks={"keyboard_p95_within_budget": ""}),
+        _diagnostics(keyboard_latency=fast),
+    )
+
+    assert checks == {"keyboard_p95_within_budget": True}
+    assert unmeasured == []
+
+
+def test_a_p95_over_the_budget_fails():
+    slow = _histogram((0, 0, 0, 0, 0, 0, 90, 10, 0), max_us=45000)
+
+    checks, _ = evaluate(
+        _scenario(checks={"keyboard_p95_within_budget": ""}),
+        _diagnostics(keyboard_latency=slow),
+    )
+
+    assert checks == {"keyboard_p95_within_budget": False}
+
+
+def test_a_device_that_measured_nothing_is_not_a_device_that_was_fast():
+    empty = _histogram((0,) * 9)
+
+    checks, unmeasured = evaluate(
+        _scenario(checks={"keyboard_p95_within_budget": ""}),
+        _diagnostics(keyboard_latency=empty),
+    )
+
+    assert checks == {}
+    assert [entry.check for entry in unmeasured] == ["keyboard_p95_within_budget"]
+    assert "no keyboard events" in unmeasured[0].reason
+
+
+def test_a_baseline_makes_the_counters_describe_this_run_and_not_the_lifetime():
+    # A thousand fast samples were already on the device when the run began, and
+    # every one of the ten that arrived during it was over budget. Judged over
+    # the lifetime the old samples drown the new ones and this passes; judged
+    # over the run it fails, and the run is the question being asked.
+    before = _histogram((0, 0, 1000, 0, 0, 0, 0, 0, 0))
+    after = _histogram((0, 0, 1000, 0, 0, 0, 0, 10, 0), max_us=45000)
+
+    # The lifetime reading really does pass, so this test fails for the reason
+    # it says rather than because the numbers were slow either way.
+    assert evaluate(
+        _scenario(checks={"keyboard_p95_within_budget": ""}),
+        _diagnostics(keyboard_latency=after),
+    )[0] == {"keyboard_p95_within_budget": True}
+
+    checks, _ = evaluate(
+        _scenario(checks={"keyboard_p95_within_budget": ""}),
+        _diagnostics(keyboard_latency=after),
+        baseline=_diagnostics(keyboard_latency=before),
+    )
+
+    assert checks == {"keyboard_p95_within_budget": False}
+
+
+def test_a_stall_is_a_slow_sample_and_not_a_pause_between_two_keystrokes():
+    # 50 ms is a bucket edge, so "nothing took longer than 50 ms" is a count and
+    # not an estimate. One sample past the edge decides it.
+    stalled = _histogram((0, 0, 99, 0, 0, 0, 0, 0, 1), max_us=90000)
+
+    checks, _ = evaluate(
+        _scenario(checks={"no_gap_over_50ms": ""}),
+        _diagnostics(keyboard_latency=stalled),
+    )
+
+    assert checks == {"no_gap_over_50ms": False}
+
+
+def test_no_stall_passes_when_every_sample_is_inside_the_threshold():
+    fine = _histogram((0, 0, 100, 0, 0, 0, 0, 0, 0))
+
+    checks, _ = evaluate(
+        _scenario(checks={"no_gap_over_50ms": ""}),
+        _diagnostics(keyboard_latency=fine, mouse_latency=_histogram((0,) * 9)),
+    )
+
+    assert checks == {"no_gap_over_50ms": True}
+
+
+def test_the_u2_release_is_measured_against_the_hundred_millisecond_budget():
+    inside = evaluate(
+        _scenario(checks={"u2_released_within_budget": ""}),
+        _diagnostics(endpoint_drops=1, endpoint_release_ms=88),
+    )[0]
+    assert inside == {"u2_released_within_budget": True}
+
+    outside = evaluate(
+        _scenario(checks={"u2_released_within_budget": ""}),
+        _diagnostics(endpoint_drops=1, endpoint_release_ms=104),
+    )[0]
+    assert outside == {"u2_released_within_budget": False}
+    assert U2_RELEASE_BUDGET_MS == 100.0
+
+
+def test_a_release_that_never_happened_is_not_a_release_within_budget():
+    checks, unmeasured = evaluate(
+        _scenario(checks={"u2_released_within_budget": ""}),
+        _diagnostics(endpoint_drops=0, endpoint_release_ms=0),
+    )
+
+    assert checks == {}
+    assert "no release to time" in unmeasured[0].reason
+
+
+def test_a_counter_that_only_climbs_says_nothing_about_a_run_with_no_baseline():
+    checks, unmeasured = evaluate(
+        _scenario(checks={"crc_counter_incremented": ""}),
+        _diagnostics(link_crc_errors=7),
+    )
+
+    assert checks == {}
+    assert "baseline" in unmeasured[0].reason
+
+
+def test_with_a_baseline_the_crc_counter_answers_for_the_run():
+    checks, _ = evaluate(
+        _scenario(checks={"crc_counter_incremented": ""}),
+        _diagnostics(link_crc_errors=57),
+        baseline=_diagnostics(link_crc_errors=7),
+    )
+
+    assert checks == {"crc_counter_incremented": True}
+
+
+# ----------------------------------------------------- what it cannot measure
+
+
+def test_a_check_that_needs_the_far_computer_is_recorded_not_skipped():
+    checks, unmeasured = evaluate(
+        _scenario(checks={"no_stuck_keys": "", "no_misrouted_event": ""}),
+        _diagnostics(),
+    )
+
+    assert checks == {}
+    assert {entry.check for entry in unmeasured} == {"no_stuck_keys", "no_misrouted_event"}
+    for entry in unmeasured:
+        assert entry.reason
+        assert entry.needs
+
+
+def test_an_unknown_check_is_never_quietly_a_pass():
+    # The failure this prevents: a check added to a scenario later, matched by
+    # nothing, and silently absent from a report that says everything passed.
+    checks, unmeasured = evaluate(
+        _scenario(checks={"something_nobody_taught_this_runner": ""}), _diagnostics()
+    )
+
+    assert checks == {}
+    assert unmeasured[0].check == "something_nobody_taught_this_runner"
+
+
+def test_every_check_in_every_committed_scenario_is_accounted_for():
+    # Either it is measured or the runner says why not. There is no third state,
+    # and a scenario check falling through both tables is a silence nobody chose.
+    for path in sorted(SCENARIOS.glob("*.json")):
+        for name in load_scenario(path)["checks"]:
+            assert name in MEASURABLE_CHECKS or name in UNMEASURABLE_CHECKS, (
+                f"{path.name} asks for {name} and hil_runner.py has no ruling on it"
+            )
+
+
+def test_a_run_with_an_unmeasured_check_is_partial_and_not_a_pass():
+    result = ScenarioResult(scenario="x", started_at="now")
+    result.checks = {"keyboard_p95_within_budget": True}
+
+    assert result.verdict == "passed"
+    assert exit_code(result) == 0
+
+    result.unmeasured = [Unmeasured("no_stuck_keys", "reason", "needs")]
+
+    assert result.verdict == "partial"
+    assert result.complete is False
+    assert exit_code(result) == 3
+
+
+def test_a_failure_outranks_an_unmeasured_check():
+    result = ScenarioResult(scenario="x", started_at="now")
+    result.checks = {"a": False}
+    result.unmeasured = [Unmeasured("b", "reason", "needs")]
+
+    assert result.verdict == "failed"
+    assert exit_code(result) == 1
+
+
+def test_a_run_that_decided_nothing_is_not_a_pass():
+    result = ScenarioResult(scenario="x", started_at="now")
+
+    assert result.verdict == "nothing measured"
+    assert exit_code(result) == 3
+
+
+# --------------------------------------------------------- the device rows
+
+
+def test_each_port_becomes_a_row_naming_the_device_the_firmware_found():
+    rows = peripheral_rows(
+        _diagnostics(
+            peripherals=(
+                _port(),
+                _port(
+                    kind="mouse",
+                    vendor_id=0x1234,
+                    product_id=0x5678,
+                    buttons=5,
+                    report_descriptor_bytes=67,
+                    descriptor_hash="ab" * 32,
+                ),
+            )
+        )
+    )
+
+    assert [row.role for row in rows] == ["keyboard", "mouse"]
+    assert rows[0].vendor_id == "0x046D"
+    assert rows[1].buttons == 5
+    assert rows[1].descriptor_hash == "ab" * 32
+    for row in rows:
+        assert row.reason
+
+
+def test_an_empty_port_is_a_row_that_says_so_rather_than_a_missing_row():
+    rows = peripheral_rows(_diagnostics(peripherals=(_port(attached=False, ready=False),)))
+
+    assert len(rows) == 1
+    assert rows[0].passed is False
+    assert "nothing attached" in rows[0].reason
+
+
+def test_a_device_that_never_enumerated_fails_its_row_with_the_reason():
+    rows = peripheral_rows(_diagnostics(peripherals=(_port(ready=False),)))
+
+    assert rows[0].passed is False
+    assert "never reached ready" in rows[0].reason
+
+
+def test_two_ports_working_is_not_ten_devices_verified():
+    # The whole point of the coverage block. A report that ran the ports and the
+    # requirement together would imply the eight devices nobody saw.
+    scenario = _scenario(device_requirements={"keyboard": 5, "mouse": 5})
+    rows = peripheral_rows(_diagnostics(peripherals=(_port(), _port(kind="mouse"))))
+
+    coverage = coverage_of(scenario, rows)
+
+    assert coverage["devices_required"] == 10
+    assert coverage["devices_exercised"] == 2
+    assert "2 device(s) verified of 10" in coverage["note"]
+
+
+def test_a_scenario_that_names_no_device_requirement_gets_no_coverage_claim():
+    assert coverage_of(_scenario(), []) == {}
+
+
+# ------------------------------------------------------- long runs, resumed
+
+
+def test_a_long_scenario_measured_too_soon_records_every_check_as_unmeasured():
+    scenario = _scenario(
+        name="soak",
+        checks={"error_counters_stable": ""},
+        steps=[{"action": "run_for", "hours": 24, "steps": []}],
+    )
+
+    checks, unmeasured = evaluate(
+        scenario, _diagnostics(), baseline=_diagnostics(), elapsed_seconds=600
+    )
+
+    assert checks == {}
+    assert "24 hours" in unmeasured[0].reason
+    assert "0.17" in unmeasured[0].reason
+
+
+def test_a_long_scenario_measured_after_its_full_span_is_decided_normally():
+    scenario = _scenario(
+        name="soak",
+        checks={"error_counters_stable": ""},
+        steps=[{"action": "run_for", "hours": 24, "steps": []}],
+    )
+
+    checks, unmeasured = evaluate(
+        scenario,
+        _diagnostics(bad_crc=0),
+        baseline=_diagnostics(bad_crc=0),
+        elapsed_seconds=25 * 3600,
+    )
+
+    assert checks == {"error_counters_stable": True}
+    assert unmeasured == []
+
+
+def test_the_baseline_phase_writes_a_reading_and_measures_nothing(tmp_path):
+    state = tmp_path / "soak.state.json"
+    session = FakeSession(
+        _diagnostics(keyboard_latency=_histogram((0, 0, 5, 0, 0, 0, 0, 0, 0)))
+    )
+
+    result = run(
+        SCENARIOS / "soak_24h.json",
+        port=None,
+        phase="baseline",
+        state=state,
+        session=session,
+    )
+
+    assert state.exists()
+    assert result.checks == {}
+    assert "baseline written" in result.notes[0]
+
+
+def test_a_measure_phase_reads_the_baseline_the_earlier_phase_left(tmp_path):
+    state = tmp_path / "link.state.json"
+    run(
+        SCENARIOS / "link_fault.json",
+        port=None,
+        phase="baseline",
+        state=state,
+        session=FakeSession(_diagnostics(link_crc_errors=3)),
+    )
+
+    result = run(
+        SCENARIOS / "link_fault.json",
+        port=None,
+        phase="measure",
+        state=state,
+        session=FakeSession(_diagnostics(link_crc_errors=9, endpoint_answering=True)),
+    )
+
+    assert result.checks["crc_counter_incremented"] is True
+
+
+def test_a_baseline_phase_with_nowhere_to_write_refuses():
+    with pytest.raises(ValueError):
+        run(
+            SCENARIOS / "link_fault.json",
+            port=None,
+            phase="baseline",
+            state=None,
+            session=FakeSession(_diagnostics()),
+        )
+
+
+# ------------------------------------------------------------- the report
+
+
+def test_the_report_says_what_it_measured_and_what_it_did_not():
+    session = FakeSession(
+        _diagnostics(
+            keyboard_latency=_histogram((0, 0, 100, 0, 0, 0, 0, 0, 0), max_us=900),
+            mouse_latency=_histogram((0,) * 9),
+            peripherals=(_port(), _port(kind="mouse", attached=False, ready=False)),
+        )
+    )
+
+    result = measure(load_scenario(SCENARIOS / "peripherals.json"), session)
+    document = json.loads(result.to_json())
+
+    # The sentence that stops the report being read as something it is not.
+    assert "firmware-internal latency" in document["measures"]
+    assert "end-to-end" in document["measures"]
+    assert document["verdict"] == "partial"
+    assert document["unmeasured"]
+    assert document["measurements"]["keyboard_latency_since_boot"]["samples"] == 100
+    assert document["coverage"]["devices_required"] == 10
+
+
+def test_the_report_times_the_round_trip_it_actually_made():
+    session = FakeSession(_diagnostics())
+
+    result = measure(_scenario(), session)
+    document = json.loads(result.to_json())
+
+    assert session.reads == 1
+    assert len(document["samples"]) == 1
+    # Named for what it is. It is the configuration link, not the input path,
+    # and the two must never be reported under one heading.
+    assert document["samples"][0]["kind"] == "cdc_round_trip"
+    assert document["control_link_latency"][0]["kind"] == "cdc_round_trip"
+
+
+def test_a_report_with_no_baseline_says_its_numbers_are_since_boot():
+    session = FakeSession(
+        _diagnostics(keyboard_latency=_histogram((5, 0, 0, 0, 0, 0, 0, 0, 0)))
+    )
+
+    result = measure(_scenario(), session)
+
+    assert any("since the device booted" in note for note in result.notes)
+
