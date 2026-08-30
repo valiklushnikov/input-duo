@@ -525,7 +525,15 @@ QWidget {{
     font-size: {TEXT_BODY}pt;
     color: {INK};
 }}
-QMainWindow, QDialog {{ background-color: {CANVAS}; }}
+QMainWindow {{ background-color: {CANVAS}; }}
+/* A frameless dialog has no border and no shadow from the desktop, so in
+   the page's own colour it was an invisible rectangle with controls in it.
+   Given a surface and an edge it reads as a card raised off the page. */
+QDialog {{
+    background-color: {SURFACE};
+    border: 1px solid {LINE_STRONG};
+    border-radius: {RADIUS_CARD}px;
+}}
 QStackedWidget, QStackedWidget > QWidget {{ background-color: {CANVAS}; }}
 QScrollArea {{ background: transparent; border: none; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}

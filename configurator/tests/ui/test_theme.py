@@ -10,6 +10,8 @@ that are actually distinguishable.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from duo_input.ui import theme
@@ -201,6 +203,34 @@ def test_the_stylesheet_carries_the_resolved_font_families():
 
     assert "Segoe UI" in sheet
     assert "Consolas" in sheet
+
+
+def test_a_dialog_is_a_raised_card_with_an_edge_of_its_own():
+    """A frameless dialog on a CANVAS page needs a border to be a dialog.
+
+    Going frameless took away the window border and the shadow the desktop
+    drew with it, and the sheet painted dialogs in CANVAS - the same colour
+    as the page underneath - so a modal was an invisible rectangle with
+    controls floating in it. It reads as a card instead: SURFACE, a strong
+    line around it, and the card radius.
+    """
+    sheet = theme.build_stylesheet(theme.UI_FALLBACK_FAMILY, theme.MONO_FALLBACK_FAMILY)
+    rule = re.search(r"QDialog \{(.*?)\}", sheet, re.DOTALL)
+
+    assert rule is not None, "the sheet says nothing about a QDialog"
+    body = rule.group(1)
+    assert f"background-color: {theme.SURFACE}" in body
+    assert f"border: 1px solid {theme.LINE_STRONG}" in body
+    assert f"border-radius: {theme.RADIUS_CARD}px" in body
+
+
+def test_the_main_window_keeps_the_page_colour_behind_everything():
+    """Only the dialog changed: the window itself is still the CANVAS page."""
+    sheet = theme.build_stylesheet(theme.UI_FALLBACK_FAMILY, theme.MONO_FALLBACK_FAMILY)
+    rule = re.search(r"QMainWindow \{(.*?)\}", sheet, re.DOTALL)
+
+    assert rule is not None
+    assert f"background-color: {theme.CANVAS}" in rule.group(1)
 
 
 def test_applying_the_theme_dresses_the_application(qapp):
