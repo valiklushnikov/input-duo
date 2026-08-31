@@ -862,6 +862,14 @@ class MainWindow(QMainWindow):
             # with nothing on screen to show it had happened. Re-agree the
             # baseline, which is all this read had to offer, and keep the
             # representation that still knows what the operator wrote.
+            #
+            # Re-agreeing has one visible consequence worth naming: typing a
+            # TEXT step's source back in leaves the project dirty, because it
+            # has moved past what was written, but the next read of that same
+            # board clears the marker. Same project, same board, two answers
+            # depending on whether a read happened to occur. That is accepted
+            # rather than overlooked - once the packages match there is
+            # nothing outstanding the board could ever be given.
             self.set_session(self._session.agreeing_with_device())
             return
         if self._session.dirty:

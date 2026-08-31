@@ -1417,8 +1417,10 @@ def test_the_marker_and_the_chip_agree_on_an_edit_the_binary_cannot_see(
     )
     emulator.install_active(compile_project_to_binary(typed))
 
-    # The startup read is the baseline: the window adopts what the board is
-    # running, so nothing is outstanding before the edit under test.
+    # This read is the baseline: the window adopts what the board is running,
+    # so nothing is outstanding before the edit under test. Not a startup
+    # read - the fixture's factory offers no device, and this connect is
+    # driven by hand.
     _connect(qtbot, window, emulator)
     on_screen = window.session.project.profiles[0].macros[0]
     assert on_screen.steps[0].source_text is None
