@@ -481,9 +481,11 @@ def test_the_table_says_what_each_binding_does(page):
 def test_every_key_the_device_can_report_has_a_legend(page):
     """A binding read back from the device must not read as "usage 0x68".
 
-    The device reports HID usages, and it will report ones nobody typed on
-    this page - F13 upwards exist on real keyboards and are exactly what a
-    switch box gets bound to, because nothing else uses them.
+    The device reports HID usages, and it can report ones this page never
+    offered - a configuration written by another build, or by hand. Naming
+    them is about reading the device, not about what a keyboard has: F13
+    exists in the HID tables and on a few extended keyboards, and on almost
+    none of the ones this program will meet.
     """
     from duo_input.ui.models.binding_table import key_name
 
@@ -493,6 +495,24 @@ def test_every_key_the_device_can_report_has_a_legend(page):
     assert key_name(0x48) == "Pause"
     assert key_name(0x59) == "Num1"
     assert key_name(0x58) == "NumEnter"
+
+
+def test_the_chooser_offers_only_keys_a_keyboard_actually_has(page):
+    """Naming a key and offering it are different jobs.
+
+    F13 upwards must be nameable, because the device can report it. It must
+    not be offerable, because a binding on a key the operator cannot press is
+    a binding that silently never fires - which is exactly how one arrived on
+    the test board.
+    """
+    from duo_input.ui.models.binding_table import SELECTABLE_USAGES, key_name
+
+    offered = {key_name(usage) for usage in SELECTABLE_USAGES}
+
+    assert "F12" in offered
+    for absent in ("F13", "F24"):
+        assert absent not in offered, f"{absent} is not on an ordinary keyboard"
+    assert key_name(0x68) == "F13", "still has to be nameable when read back"
 
 
 def test_an_unknown_usage_still_reads_as_a_number(page):

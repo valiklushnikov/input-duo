@@ -83,11 +83,11 @@ def _key_names() -> dict[int, str]:
         }
     )
     names.update({0x3A + index: f"F{index + 1}" for index in range(12)})
-    # The keys a switch box actually gets bound to. F13 upwards exist on real
-    # keyboards and collide with nothing, which is exactly why an operator
-    # picks them - and the device reports them back as usages this table has
-    # to be able to name, or a binding read from the device reads as
-    # "usage 0x68" and tells them nothing.
+    # Named so a configuration read off the device can be read, not so anyone
+    # can choose them: F13 upwards are in the HID tables and on a handful of
+    # extended keyboards, and on almost none of the ones this program meets.
+    # A binding arriving from elsewhere still has to say "F13" rather than
+    # "usage 0x68". See UNREACHABLE_USAGES.
     names.update({0x68 + index: f"F{index + 13}" for index in range(12)})
     names.update(
         {
@@ -115,8 +115,24 @@ def _key_names() -> dict[int, str]:
 #: HID usage to the legend the operator sees. Missing usages read as a number.
 KEY_NAMES: dict[int, str] = _key_names()
 
+#: Usages this program can name but must not offer. A binding on a key the
+#: operator has no way to press is one that silently never fires, and the
+#: chooser is where that mistake would be made. They stay in KEY_NAMES so a
+#: configuration read back from the device is still legible.
+UNREACHABLE_USAGES: frozenset[int] = frozenset(
+    # F13 to F24: in the HID tables, absent from ordinary keyboards.
+    set(range(0x68, 0x74))
+    | {
+        0x32,  # Non-US "\", on ISO layouts only
+        0x64,  # Non-US "\", the other one
+        0x67,  # keypad "=", on almost nothing
+    }
+)
+
 #: Usages the key chooser offers, in HID order.
-SELECTABLE_USAGES: tuple[int, ...] = tuple(sorted(KEY_NAMES))
+SELECTABLE_USAGES: tuple[int, ...] = tuple(
+    usage for usage in sorted(KEY_NAMES) if usage not in UNREACHABLE_USAGES
+)
 
 
 def key_name(usage: int) -> str:
