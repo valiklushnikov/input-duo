@@ -131,6 +131,69 @@ def test_device_matches_only_when_the_device_holds_the_compiled_package():
     assert stale.device_matches is False
 
 
+def test_pending_is_one_answer_for_the_title_and_the_chip():
+    """``pending`` is what both readers of "is anything unwritten?" ask.
+
+    They used to ask separately - the title compared the project against the
+    baseline, the chip compared the compiled package against the device - and
+    the two diverge, always with the title under-reporting.
+    """
+    fresh = ProjectSession.new()
+    # No board: nothing is being held elsewhere, and nothing has moved.
+    assert fresh.pending is False
+    # Still no board, but the project has moved past the last agreement.
+    assert fresh.apply(SetActiveProfile(5)).pending is True
+
+    agreed = fresh.with_device_hash(bytes.fromhex(fresh.compiled_hash))
+    assert agreed.pending is False
+    # An edit: both readers already agreed about this one.
+    assert agreed.apply(SetActiveProfile(5)).pending is True
+
+    # A board holding something else while the project has *not* moved - the
+    # state a refused adoption leaves behind. ``dirty`` alone calls this
+    # clean; ``pending`` does not.
+    holding_something_else = fresh.with_device_hash(bytes([0x11]) * 32)
+    assert holding_something_else.dirty is False
+    assert holding_something_else.device_matches is False
+    assert holding_something_else.pending is True
+
+
+def test_pending_stays_true_when_only_untranslated_detail_changed():
+    """The known corner, decided in the operator's favour.
+
+    The binary format stores keystrokes, never the text they were typed from,
+    so an edited macro source with identical keystrokes compiles to the same
+    package: the device *does* match. The project has still moved past what
+    the board was given, so this reads as pending - and the title and the
+    chip say the same thing about it, which is the whole point.
+    """
+    written, retyped = _a_macro_source_edited_to_the_same_keystrokes()
+    assert compile_project_to_binary(written) == compile_project_to_binary(retyped)
+
+    session = ProjectSession(project=written)
+    agreed = session.with_device_hash(bytes.fromhex(session.compiled_hash))
+    moved = replace(agreed, project=retyped)
+
+    assert moved.device_matches is True
+    assert moved.dirty is True
+    assert moved.pending is True
+
+
+def _a_macro_source_edited_to_the_same_keystrokes() -> tuple[DeviceProject, DeviceProject]:
+    """Two projects: same keystrokes, different source text."""
+    from duo_input.domain.models import Macro, MacroStep
+    from duo_input.generated.protocol import MacroStepType, TargetMode
+
+    def build(source_text: str) -> DeviceProject:
+        project = default_project()
+        step = MacroStep(type=MacroStepType.KEY_TAP, payload=bytes([0, 4]), source_text=source_text)
+        macro = Macro(id=1, name="M", target=TargetMode.INHERIT, steps=(step,))
+        first = replace(project.profiles[0], macros=(macro,))
+        return replace(project, profiles=(first,) + project.profiles[1:])
+
+    return build("a"), build("A")
+
+
 def test_disconnecting_clears_the_device_hash():
     session = ProjectSession.new().with_device_hash(b"\x22" * 32).with_connection(True)
 

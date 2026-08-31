@@ -487,9 +487,10 @@ class MainWindow(QMainWindow):
 
         No file name: there is no open document to name. The marker means
         "not yet written to the device", which is the only kind of pending
-        change there is now.
+        change there is now - and it reads ``pending``, the same predicate
+        the state chip reads, so the two cannot answer that differently.
         """
-        marker = f" {DIRTY_MARKER}" if self._session.dirty else ""
+        marker = f" {DIRTY_MARKER}" if self._session.pending else ""
         self.setWindowTitle(f"{APPLICATION_NAME}{marker}")
 
     def _refresh_actions(self) -> None:
@@ -509,15 +510,19 @@ class MainWindow(QMainWindow):
         session = self._session
 
         device = self.state_chips["device"]
+        # Three states, but the warning one is driven by ``pending`` - the
+        # predicate the title's marker reads too. Reading ``device_matches``
+        # here and ``dirty`` there made the two answer the same question
+        # differently, and the title was the one that under-reported.
         if not session.device_hash:
             device.setText(self.tr("Written to device: no link"))
             set_signal(device, SIGNAL_MUTED)
-        elif session.device_matches:
-            device.setText(self.tr("Written to device: matches the project"))
-            set_signal(device, SIGNAL_OK)
-        else:
+        elif session.pending:
             device.setText(self.tr("Written to device: differs from the project"))
             set_signal(device, SIGNAL_WARN)
+        else:
+            device.setText(self.tr("Written to device: matches the project"))
+            set_signal(device, SIGNAL_OK)
 
     def _on_button_observed(self, button: int) -> None:
         """Remember a button the device reported and tell both editors."""

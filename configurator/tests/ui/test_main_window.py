@@ -903,6 +903,117 @@ def test_losing_the_link_leaves_the_device_chip_with_nothing_to_claim(qtbot, win
     assert window.state_chips["device"].property("signal") == theme.SIGNAL_MUTED
 
 
+def _assert_the_marker_and_the_chip_agree(window) -> None:
+    """One question, one answer, in both of the places that answer it.
+
+    The title used to read ``dirty`` and the chip ``device_matches``. Those
+    are different questions and they diverge on ordinary paths - always with
+    the title under-reporting, which is the dangerous direction.
+    """
+    session = window.session
+    marked = DIRTY_MARKER in window.windowTitle()
+    signal = window.state_chips["device"].property("signal")
+
+    assert marked is session.pending
+    # The chip may only claim agreement when there is nothing outstanding.
+    assert (signal == theme.SIGNAL_OK) is (bool(session.device_hash) and not session.pending)
+    assert (signal == theme.SIGNAL_WARN) is (bool(session.device_hash) and session.pending)
+
+
+def test_the_marker_and_the_chip_agree_when_no_read_reconciles_a_new_board(
+    qtbot, window, emulator
+):
+    """A board that turns up holding something else, with nothing edited.
+
+    The startup read is spent on the first connect, so a second board is
+    never read: the project has not moved since the last agreement -
+    ``dirty`` is False - while the board in front of the operator is holding
+    a different package. The chip warned about that and the title stayed
+    clean, which is the divergence, in the direction that under-reports.
+    """
+    _connect(qtbot, window, emulator)
+    assert window.session.dirty is False
+    assert window.session.device_matches is True
+    _assert_the_marker_and_the_chip_agree(window)
+
+    window.disconnect_device()
+    later = U1Emulator()
+    later.install_active(
+        compile_project_to_binary(
+            ProjectSession.new().apply(RenameProfile(1, "Другая плата")).project
+        )
+    )
+    _connect(qtbot, window, later)
+
+    assert window.session.dirty is False
+    assert window.session.device_matches is False
+    assert DIRTY_MARKER in window.windowTitle()
+    _assert_the_marker_and_the_chip_agree(window)
+
+
+def test_the_marker_and_the_chip_agree_after_an_edit_during_a_write(
+    qtbot, window, emulator
+):
+    """The edit that went nowhere shows in the title as well as the chip."""
+    _connect(qtbot, window, emulator)
+
+    edited: list[bool] = []
+
+    def _edit_mid_write(_percent: int) -> None:
+        if edited:
+            return
+        edited.append(True)
+        window.set_session(window.session.apply(RenameProfile(2, "Typed mid-write")))
+
+    window.service.progress_changed.connect(_edit_mid_write)
+    try:
+        with qtbot.waitSignal(window.service.operation_succeeded, timeout=20000):
+            window.write_to_device()
+    finally:
+        window.service.progress_changed.disconnect(_edit_mid_write)
+
+    assert edited == [True]
+    assert DIRTY_MARKER in window.windowTitle()
+    _assert_the_marker_and_the_chip_agree(window)
+
+
+def test_the_marker_and_the_chip_agree_on_an_edit_the_binary_cannot_see(
+    qtbot, window, emulator
+):
+    """The known corner: same keystrokes, different source text.
+
+    The binary format stores keystrokes and never the text they were typed
+    from, so this compiles to the package the board is already holding. The
+    project has still moved past what was written, and both readers say so.
+    """
+    from duo_input.domain.models import Macro, MacroStep
+    from duo_input.generated.protocol import MacroStepType, TargetMode
+
+    def _with_source(project, source_text: str):
+        step = MacroStep(
+            type=MacroStepType.KEY_TAP, payload=bytes([0, 4]), source_text=source_text
+        )
+        macro = Macro(id=1, name="M", target=TargetMode.INHERIT, steps=(step,))
+        first = replace(project.profiles[0], macros=(macro,))
+        return replace(project, profiles=(first,) + project.profiles[1:])
+
+    written = _with_source(default_project(), "a")
+    emulator.install_active(compile_project_to_binary(written))
+    window.set_session(replace(window.session, project=written))
+    _connect(qtbot, window, emulator)
+    assert window.session.device_matches is True
+    _assert_the_marker_and_the_chip_agree(window)
+
+    window.set_session(
+        replace(window.session, project=_with_source(default_project(), "A"))
+    )
+
+    assert window.session.device_matches is True
+    assert window.session.dirty is True
+    assert DIRTY_MARKER in window.windowTitle()
+    _assert_the_marker_and_the_chip_agree(window)
+
+
 def test_the_save_and_write_buttons_carry_different_weight(window):
     """Write overwrites the device; Save writes a file. They may not look alike."""
     assert window.save_button.property("role") == theme.ROLE_PRIMARY

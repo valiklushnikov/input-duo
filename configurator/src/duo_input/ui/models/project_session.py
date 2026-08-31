@@ -509,6 +509,18 @@ class ProjectSession:
         return bool(self.device_hash) and self.device_hash == self.compiled_hash
 
     @property
+    def pending(self) -> bool:
+        """Is there anything the board has not been given?
+
+        One predicate for the two places that answer this - the title's
+        marker and the state chip - because they were answering it
+        differently and disagreeing in the operator's favour only by luck.
+        True when the project has moved since the board last agreed, and
+        also when the board is there and holding something else.
+        """
+        return self.dirty or (bool(self.device_hash) and not self.device_matches)
+
+    @property
     def can_write(self) -> bool:
         """A write is offered only for a valid project on a connected device."""
         return self.connected and self.is_valid and bool(self.compiled_hash)
