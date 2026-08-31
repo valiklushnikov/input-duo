@@ -21,7 +21,6 @@ from PySide6.QtCore import (
     QAbstractListModel,
     QCoreApplication,
     QModelIndex,
-    QT_TRANSLATE_NOOP,
     Qt,
     Signal,
 )
@@ -152,7 +151,7 @@ def step_label(step: MacroStep) -> str:
         if step.source_text is None:
             keystrokes = len(step.payload) // 2
             origin = QCoreApplication.translate(
-                "MacroSteps", QT_TRANSLATE_NOOP("MacroSteps", "From the device: {0} keystrokes")
+                "MacroSteps", "From the device: {0} keystrokes"
             ).format(keystrokes)
             return f"{name} {origin}"
         text = step.source_text

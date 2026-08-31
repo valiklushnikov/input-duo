@@ -57,6 +57,11 @@ def _source_strings() -> set[str]:
             target = node.func
             if isinstance(target, ast.Attribute) and target.attr == "tr":
                 argument = node.args[0]
+            elif isinstance(target, ast.Attribute) and target.attr == "translate":
+                # QCoreApplication.translate(context, literal). Its context
+                # argument is a literal too, so the message is args[1]; calls
+                # that pass a variable there are skipped by the check below.
+                argument = node.args[1] if len(node.args) > 1 else None
             elif isinstance(target, ast.Name) and target.id == "QT_TRANSLATE_NOOP":
                 argument = node.args[1] if len(node.args) > 1 else None
             else:

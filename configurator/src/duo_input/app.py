@@ -77,6 +77,15 @@ def start_window(window: MainWindow) -> None:
     can prove is still wired.
     """
     window.show()
+    # Called here, synchronously, rather than left to the window's own
+    # deferred attach: the port has to be open before the next line asks
+    # about the file, or the fallback below is never actually exercised.
+    # test_startup_falls_back_to_the_file_when_the_device_never_answers
+    # asserts straight after start_window() without pumping the event loop,
+    # so with only the deferred attach no device would be in play at all by
+    # then and the test would pass without proving anything. Blocking on a
+    # port open before the first paint is the price of that proof; it is a
+    # local enumeration, not a handshake, which still happens on the loop.
     window.try_autoconnect()
     # The file first: a recovery is only offered when the autosave is newer
     # than the project, and that comparison needs the project to be loaded.

@@ -268,6 +268,8 @@ def test_a_text_step_read_from_the_device_says_where_it_came_from(qtbot):
     assert summary
     assert summary != ""
     assert "устройств" in summary.lower() or "device" in summary.lower()
+    # Four bytes are two (modifier, usage) pairs, so two keystrokes.
+    assert "2" in summary
 
 
 def test_the_text_limit_blocks_the_apply(page):
