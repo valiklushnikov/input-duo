@@ -97,3 +97,68 @@ def test_a_string_blob_that_does_not_start_at_the_profile_table_end_is_refused()
 
     with pytest.raises(ProjectError):
         parse_header(_recrc(package))
+
+
+# ------------------------------------------------------------- the round trip
+
+
+@pytest.mark.parametrize(
+    "name", ("valid_full.bin", "valid_minimal.bin", "valid_wide_usages.bin")
+)
+def test_a_package_survives_being_read_and_written_again(name):
+    """Byte-identical output is the only proof that nothing was dropped.
+
+    valid_full.bin is the hard case: Cyrillic and emoji in names, a macro with
+    nine steps, and the maximum macro ID.
+    """
+    from duo_input.domain.config_binary import compile_device_config
+    from duo_input.domain.config_reader import parse_device_config
+
+    original = _vector(name)
+
+    config = parse_device_config(original)
+
+    assert compile_device_config(config) == original
+
+
+def test_the_names_come_back_as_the_operator_typed_them():
+    from duo_input.domain.config_reader import parse_device_config
+
+    config = parse_device_config(_vector("valid_full.bin"))
+
+    names = [profile.name for profile in config.profiles]
+    assert any(name.strip() for name in names), "every profile name came back empty"
+    for profile in config.profiles:
+        assert isinstance(profile.name, str)
+
+
+def test_a_project_can_be_built_from_a_package():
+    from duo_input.domain.config_reader import binary_to_project
+
+    project = binary_to_project(_vector("valid_full.bin"))
+
+    assert len(project.profiles) == 8
+    assert 1 <= project.active_profile_id <= 8
+
+
+def test_a_binding_table_that_overflows_its_package_is_refused():
+    from duo_input.domain.config_reader import parse_device_config
+
+    package = bytearray(_vector("valid_full.bin"))
+    # The first profile descriptor sits at HEADER_SIZE; its binding count is at
+    # descriptor offset 14. A count this large cannot fit whatever follows.
+    struct.pack_into("<H", package, HEADER_SIZE + 14, 0xFFFF)
+
+    with pytest.raises(ProjectError):
+        parse_device_config(_recrc(package))
+
+
+def test_a_name_that_is_not_utf8_is_refused():
+    from duo_input.domain.config_reader import parse_device_config
+
+    package = bytearray(_vector("valid_full.bin"))
+    header = parse_header(bytes(package))
+    package[header.string_blob_offset] = 0xFF  # a lone continuation byte
+
+    with pytest.raises(ProjectError):
+        parse_device_config(_recrc(package))
