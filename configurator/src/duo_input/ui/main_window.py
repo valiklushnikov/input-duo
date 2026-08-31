@@ -730,6 +730,13 @@ class MainWindow(QMainWindow):
         """
         if not self._service.is_connected:
             return
+        if self._reading_device:
+            # The startup sequence and the connect signal can both ask for
+            # this same read - DeviceService.read_config is not reentrant,
+            # so a second call here would fail BUSY, and that failure would
+            # be indistinguishable from the real read's outcome. Make the
+            # second call a no-op instead of something to recover from.
+            return
         self._reading_device = True
         self._service.read_config()
 

@@ -493,6 +493,46 @@ def test_a_read_that_lands_late_does_not_discard_unsaved_edits(
     assert window.session.active_profile.name == "Being typed"
 
 
+def test_calling_read_device_project_twice_in_a_row_issues_one_read(
+    qtbot, service, emulator, settings
+):
+    """A second call while the first is still in flight must be a no-op -
+    not a second read whose BUSY failure gets mistaken for the real read's
+    outcome and silently discards it. (Fix round 1 of task 3: this overlap
+    is exactly what Task 4's startup sequence introduces alongside the
+    connect-triggered auto-read - both ask for the same read.)
+    """
+    from duo_input.domain.text_compiler import compile_project_to_binary
+    from duo_input.ui.models.project_session import RenameProfile
+
+    wanted = ProjectSession.new().apply(RenameProfile(1, "On the board")).project
+    emulator.install_active(compile_project_to_binary(wanted))
+
+    window = MainWindow(service, transport_factory=lambda: emulator, settings=settings)
+    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.waitUntil(lambda: service.state is DeviceState.READY, timeout=5000)
+
+    read_calls: list[None] = []
+    original_read_config = service.read_config
+
+    def _counting_read_config() -> None:
+        read_calls.append(None)
+        original_read_config()
+
+    service.read_config = _counting_read_config
+
+    # Two calls back to back, with no event-loop turn in between: nothing
+    # queued elsewhere (the connect-triggered auto-read included) can have
+    # run yet, so this counts exactly what these two calls themselves did.
+    window.read_device_project()
+    window.read_device_project()
+    assert len(read_calls) == 1
+
+    qtbot.waitUntil(
+        lambda: window.session.active_profile.name == "On the board", timeout=5000
+    )
+
+
 # --------------------------------------------------------------- close flow
 
 
