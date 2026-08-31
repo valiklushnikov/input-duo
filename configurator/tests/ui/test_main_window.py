@@ -618,6 +618,41 @@ def test_a_device_plugged_in_after_startup_leaves_the_open_project_alone(
     assert "read_config" not in operations
 
 
+def test_a_disconnect_during_a_read_does_not_disable_reading_for_good(
+    qtbot, window, emulator
+):
+    """A read in flight when the link goes away must not wedge the window.
+
+    ``DeviceService.disconnect_device`` clears its operation before tearing
+    the link down, deliberately reporting no failure - so nothing on the
+    service side ever clears the window's own in-flight flag. Left set, it
+    makes ``read_device_project`` refuse every later read for the life of the
+    window, silently and permanently.
+    """
+    from duo_input.ui.models.project_session import RenameProfile
+
+    _connect(qtbot, window, emulator)
+    window.read_device_project()
+    assert window._reading_device is True
+
+    window.disconnect_device()
+
+    assert window._reading_device is False
+
+    later = U1Emulator()
+    later.install_active(
+        compile_project_to_binary(
+            ProjectSession.new().apply(RenameProfile(1, "Second board")).project
+        )
+    )
+    _connect(qtbot, window, later)
+    window.read_device_project()
+
+    qtbot.waitUntil(
+        lambda: window.session.active_profile.name == "Second board", timeout=5000
+    )
+
+
 # --------------------------------------------------------------- close flow
 
 
