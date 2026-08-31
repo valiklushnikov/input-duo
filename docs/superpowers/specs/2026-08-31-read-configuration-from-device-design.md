@@ -139,7 +139,7 @@ SHA-256 digest against what the device declared before reporting success. The
 package arrives through `operation_succeeded`.
 
 So the device side needs no work. What is missing is the parse, and the wiring
-at startup.
+on the connect that carries the answer back.
 
 ## 5. How this is verified
 
