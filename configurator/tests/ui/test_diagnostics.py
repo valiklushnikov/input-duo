@@ -31,10 +31,6 @@ from duo_input.ui.models.project_session import (
 SECRET = "correct horse battery staple"
 
 
-def _discard_on_teardown(window: MainWindow) -> None:
-    window._confirm_close = lambda: QMessageBox.StandardButton.Discard
-
-
 @pytest.fixture
 def emulator() -> U1Emulator:
     emulator = U1Emulator()
@@ -155,7 +151,7 @@ def test_every_control_carries_an_accessible_name(page):
 def window(qtbot, tmp_path, monkeypatch) -> MainWindow:
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
     window = MainWindow(DeviceService(timeout_ms=5000), transport_factory=lambda: None)
-    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(window)
     return window
 
 

@@ -67,7 +67,6 @@ def test_starting_a_window_reopens_what_was_open_last(qtbot, tmp_path):
         DeviceService(), transport_factory=lambda: None, settings=store
     )
     qtbot.addWidget(later)
-    later._confirm_close = lambda: None
     start_window(later)
 
     assert later.session.path == saved
@@ -113,7 +112,6 @@ def test_startup_prefers_the_device_over_the_last_file(qtbot, tmp_path):
         settings=store,
     )
     qtbot.addWidget(window)
-    window._confirm_close = lambda: None
     start_window(window)
 
     qtbot.waitUntil(
@@ -162,7 +160,6 @@ def test_startup_falls_back_to_the_file_when_the_device_never_answers(qtbot, tmp
         settings=store,
     )
     qtbot.addWidget(window)
-    window._confirm_close = lambda: None
     start_window(window)
 
     assert window.session.path == saved

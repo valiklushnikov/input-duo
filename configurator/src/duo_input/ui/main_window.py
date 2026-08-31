@@ -167,6 +167,9 @@ class MainWindow(QMainWindow):
         #: the device and the project disagree, the mismatch stays visible
         #: in the state strip instead.
         self._connect_may_adopt = False
+        #: Set once ``try_autoconnect`` has told the operator no device
+        #: answered, so that message is said once rather than on every retry.
+        self._said_no_device = False
         self.autosave = AutosaveService(parent=self)
         self.autosave.timer.timeout.connect(self.autosave_now)
         self.autosave.timer.start()
@@ -732,18 +735,31 @@ class MainWindow(QMainWindow):
         self._service.connect_device(link)
 
     def try_autoconnect(self) -> None:
-        """Attach to the device if one is there, and say nothing if it is not.
+        """Attach to the device if one is there, and say once if it is not.
 
         This runs on a timer, so an empty socket is the ordinary state rather
-        than an event worth reporting: announcing it would fill the log with a
-        line every two seconds and tell the operator nothing they cannot see
-        in the connection label.
+        than an event worth reporting on every retry: announcing it every two
+        seconds would fill the log and tell the operator nothing they cannot
+        see in the connection label. But the first time - an operator looking
+        at an empty window right after startup - does need to know why it is
+        empty and what to do about it, so that much is said once.
         """
         if self._service.is_connected:
             return
         link = self.transport_factory()
         if link is None:
+            # Said once, not every two seconds: an empty socket is the normal
+            # state to retry through, but an operator looking at an empty
+            # window needs to know why it is empty and what to do about it.
+            if not self._said_no_device:
+                self._said_no_device = True
+                self.statusBar().showMessage(
+                    self.tr(
+                        "No device found. Load a copy from a file, or plug the device in."
+                    )
+                )
             return
+        self._said_no_device = False
         self._note_whether_this_connect_may_adopt()
         self._service.connect_device(link)
 
@@ -836,10 +852,13 @@ class MainWindow(QMainWindow):
             # connect, and the operator's ordinary workflow - start with no
             # device, work, save, plug a board in to write to it - makes
             # that first connect happen long after startup, with a saved
-            # project already open and the dirty guard below powerless
-            # (they just saved). ``_connect_may_adopt`` was snapshotted
-            # before this handshake began, so it reflects the session at
-            # that moment even though it may have changed by now.
+            # project already open. Saving does not clear ``dirty`` - a file
+            # is a copy, not the truth - so the dirty half of the guard below
+            # still holds in that scenario; the path half is what also has to
+            # cover a project that was opened or saved without ever being
+            # edited, which ``dirty`` alone would miss. ``_connect_may_adopt``
+            # was snapshotted before this handshake began, so it reflects the
+            # session at that moment even though it may have changed by now.
             if self._connect_may_adopt:
                 # The read is deferred to the next tick: this handler runs
                 # inside DeviceService's own unwind of "connect_device", and
@@ -890,28 +909,14 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ close
 
-    def _confirm_close(self) -> QMessageBox.StandardButton:
-        return QMessageBox.warning(
-            self,
-            self.tr("Unsaved changes"),
-            self.tr("The project has unsaved changes. Save them before closing?"),
-            QMessageBox.StandardButton.Save
-            | QMessageBox.StandardButton.Discard
-            | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Save,
-        )
-
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
-        if not self._session.dirty:
-            event.accept()
-            return
-        answer = self._confirm_close()
-        if answer == QMessageBox.StandardButton.Cancel:
-            event.ignore()
-            return
-        if answer == QMessageBox.StandardButton.Save and not self.save_project():
-            event.ignore()
-            return
+        """Close without asking. The configuration lives on the device.
+
+        There was a prompt here about unsaved changes. It belonged to a
+        document model where the file was the truth; now an edit that was
+        never written to the board is simply an edit that was never written,
+        and the title bar says so while the window is open.
+        """
         event.accept()
 
 

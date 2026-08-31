@@ -1,13 +1,11 @@
-"""Application shell: three-state UX, write transaction and close confirmation."""
+"""Application shell: three-state UX, write transaction and closing."""
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import replace
 
 import pytest
 from PySide6.QtGui import QCloseEvent
-from PySide6.QtWidgets import QMessageBox
 
 from duo_input.device.emulator import U1Emulator
 from duo_input.device.service import DeviceService, DeviceState
@@ -35,18 +33,6 @@ def service(qtbot) -> DeviceService:
     return DeviceService(timeout_ms=5000)
 
 
-def _discard_on_teardown(window: MainWindow) -> None:
-    """Answer the close prompt for pytest-qt.
-
-    pytest-qt closes every registered widget during teardown, before fixture
-    finalizers run. A test that leaves the session dirty would open the real
-    modal save prompt there with no event loop left to answer it, blocking the
-    run. The prompt itself is exercised by the close-flow tests below, which
-    install their own answer.
-    """
-    window._confirm_close = lambda: QMessageBox.StandardButton.Discard  # type: ignore[method-assign]
-
-
 @pytest.fixture
 def settings(tmp_path) -> "QSettings":
     from PySide6.QtCore import QSettings
@@ -62,7 +48,7 @@ def window(qtbot, service, settings) -> MainWindow:
     # that must be nothing at all: a factory left on its default would open
     # the operator's real device the moment any test built a window.
     window = MainWindow(service, transport_factory=lambda: None, settings=settings)
-    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(window)
     return window
 
 
@@ -126,7 +112,7 @@ def test_the_shell_offers_no_connect_button(window):
 def test_the_window_attaches_itself_to_a_device_that_is_present(qtbot, service, emulator):
     """A device already plugged in is connected without being asked."""
     window = MainWindow(service, transport_factory=lambda: emulator)
-    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(window)
 
     qtbot.waitUntil(lambda: service.state is DeviceState.READY, timeout=5000)
 
@@ -135,7 +121,7 @@ def test_the_window_attaches_to_a_device_that_arrives_later(qtbot, service, emul
     """Plugging the board in after startup must not require a restart."""
     offered: list[object] = [None]
     window = MainWindow(service, transport_factory=lambda: offered[0])
-    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(window)
     assert service.is_connected is False
 
     offered[0] = emulator
@@ -147,12 +133,23 @@ def test_the_window_attaches_to_a_device_that_arrives_later(qtbot, service, emul
 def test_an_absent_device_is_not_announced_over_and_over(qtbot, service):
     """The retry is silent: an empty socket is the normal state, not an event."""
     window = MainWindow(service, transport_factory=lambda: None)
-    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(window)
 
     for _ in range(5):
         window.try_autoconnect()
 
     assert [line for line in window.overview.events() if "connect_device" in line] == []
+
+
+def test_an_empty_start_says_where_a_configuration_comes_from(qtbot, service, settings):
+    """With no board there is nothing to show, so say what to do about it."""
+    window = MainWindow(service, transport_factory=lambda: None, settings=settings)
+    qtbot.addWidget(window)
+    window.try_autoconnect()
+
+    message = window.statusBar().currentMessage()
+    assert message
+    assert "копи" in message.lower() or "copy" in message.lower()
 
 
 def test_the_shell_offers_a_way_to_open_a_project(window):
@@ -186,13 +183,13 @@ def test_a_project_that_cannot_be_read_is_reported_not_fatal(qtbot, window, tmp_
 
 def test_the_last_project_is_reopened_on_the_next_run(qtbot, service, tmp_path, settings):
     first = MainWindow(service, transport_factory=lambda: None, settings=settings)
-    qtbot.addWidget(first, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(first)
     saved = tmp_path / "again.duoinput.json"
     first.set_session(first.session.apply(RenameProfile(1, "Kept")))
     assert first.save_project(saved) is True
 
     later = MainWindow(DeviceService(timeout_ms=5000), transport_factory=lambda: None, settings=settings)
-    qtbot.addWidget(later, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(later)
     later.reopen_last_project()
 
     assert later.session.path == saved
@@ -203,12 +200,12 @@ def test_a_remembered_project_that_vanished_leaves_a_clean_start(qtbot, service,
     """A file moved or deleted between runs must not stop the program opening."""
     gone = tmp_path / "gone.duoinput.json"
     first = MainWindow(service, transport_factory=lambda: None, settings=settings)
-    qtbot.addWidget(first, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(first)
     assert first.save_project(gone) is True
     gone.unlink()
 
     later = MainWindow(DeviceService(timeout_ms=5000), transport_factory=lambda: None, settings=settings)
-    qtbot.addWidget(later, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(later)
     later.reopen_last_project()
 
     assert later.session.path is None
@@ -478,7 +475,7 @@ def test_a_device_that_answers_supplies_the_project(qtbot, service, emulator, se
     emulator.install_active(compile_project_to_binary(wanted))
 
     window = MainWindow(service, transport_factory=lambda: emulator, settings=settings)
-    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(window)
     qtbot.waitUntil(lambda: service.state is DeviceState.READY, timeout=5000)
     window.read_device_project()
 
@@ -490,7 +487,7 @@ def test_a_device_that_answers_supplies_the_project(qtbot, service, emulator, se
 
 def test_a_project_read_from_the_device_reads_as_unchanged(qtbot, service, emulator, settings):
     window = MainWindow(service, transport_factory=lambda: emulator, settings=settings)
-    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(window)
     qtbot.waitUntil(lambda: service.state is DeviceState.READY, timeout=5000)
     window.read_device_project()
     qtbot.waitUntil(lambda: window.session.dirty is False, timeout=5000)
@@ -509,7 +506,7 @@ def test_a_read_that_lands_late_does_not_discard_unsaved_edits(
     emulator.install_active(compile_project_to_binary(on_board))
 
     window = MainWindow(service, transport_factory=lambda: emulator, settings=settings)
-    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(window)
     qtbot.waitUntil(lambda: service.state is DeviceState.READY, timeout=5000)
 
     window.set_session(window.session.apply(RenameProfile(1, "Being typed")))
@@ -537,7 +534,7 @@ def test_calling_read_device_project_twice_in_a_row_issues_one_read(
     emulator.install_active(compile_project_to_binary(wanted))
 
     window = MainWindow(service, transport_factory=lambda: emulator, settings=settings)
-    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(window)
     qtbot.waitUntil(lambda: service.state is DeviceState.READY, timeout=5000)
 
     read_calls: list[None] = []
@@ -577,7 +574,7 @@ def test_a_device_present_at_startup_still_supplies_the_project(
     emulator.install_active(compile_project_to_binary(wanted))
 
     window = MainWindow(service, transport_factory=lambda: emulator, settings=settings)
-    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(window)
 
     qtbot.waitUntil(
         lambda: window.session.active_profile.name == "On the board", timeout=5000
@@ -606,7 +603,7 @@ def test_a_device_plugged_in_after_startup_leaves_the_open_project_alone(
 
     # Startup, with a device attached: the board's configuration is adopted.
     window = MainWindow(service, transport_factory=lambda: emulator, settings=settings)
-    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(window)
     qtbot.waitUntil(
         lambda: window.session.active_profile.name == "On the board", timeout=5000
     )
@@ -736,49 +733,13 @@ def test_a_disconnect_during_a_read_does_not_disable_reading_for_good(
 # --------------------------------------------------------------- close flow
 
 
-def test_closing_a_clean_project_never_asks(window):
-    asked: list[int] = []
-    window._confirm_close = lambda: asked.append(1)  # type: ignore[method-assign]
-
-    assert _close(window) is True
-    assert asked == []
-
-
-def test_close_with_unsaved_changes_can_be_cancelled(window):
-    window.profile_selector.setCurrentIndex(2)
-    window._confirm_close = lambda: QMessageBox.StandardButton.Cancel  # type: ignore[method-assign]
-
-    assert _close(window) is False
+def test_closing_never_asks_about_saving(window):
+    """There is no document to lose: the configuration lives on the board."""
+    window.set_session(window.session.apply(RenameProfile(1, "Unwritten")))
     assert window.session.dirty is True
-
-
-def test_close_with_unsaved_changes_can_discard(window):
-    window.profile_selector.setCurrentIndex(2)
-    window._confirm_close = lambda: QMessageBox.StandardButton.Discard  # type: ignore[method-assign]
+    assert not hasattr(window, "_confirm_close")
 
     assert _close(window) is True
-    assert window.session.dirty is True  # discarded, not written anywhere
-
-
-def test_close_with_unsaved_changes_can_save_first(window, tmp_path):
-    path = tmp_path / "profile.duoinput.json"
-    window.set_session(replace(window.session, path=path))
-    window.profile_selector.setCurrentIndex(2)
-    window._confirm_close = lambda: QMessageBox.StandardButton.Save  # type: ignore[method-assign]
-
-    assert _close(window) is True
-    assert window.session.dirty is False
-    assert path.exists()
-    assert window.session.file_hash == hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def test_close_is_cancelled_when_saving_is_cancelled(window):
-    window.profile_selector.setCurrentIndex(2)
-    window._confirm_close = lambda: QMessageBox.StandardButton.Save  # type: ignore[method-assign]
-    window._ask_save_path = lambda: None  # type: ignore[method-assign]
-
-    assert _close(window) is False
-    assert window.session.dirty is True
 
 
 # ------------------------------------------------- the three project states

@@ -3,59 +3,59 @@
 <context>
     <name>BindingTable</name>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="120" />
+        <location filename="../../ui/models/binding_table.py" line="162" />
         <source>Switch the keyboard between PC1 and PC2</source>
-        <extracomment>Modifier key of the editor, in the order the labels are joined. Buttons every HID mouse reports; 4 and 5 have to be seen before they exist. Highest button number the binary format can store, mirrored from validation. HID usage to the legend the operator sees. Missing usages read as a number. Usages the key chooser offers, in HID order. What each action does, said the way the operator would say it. The protocol name stays available in a tooltip: a screenshot has to be readable against the diagnostics and the documentation, which both speak in identifiers.</extracomment>
+        <extracomment>Modifier key of the editor, in the order the labels are joined. Buttons every HID mouse reports; 4 and 5 have to be seen before they exist. Highest button number the binary format can store, mirrored from validation. HID usage to the legend the operator sees. Missing usages read as a number. Usages this program can name but must not offer. A binding on a key the operator has no way to press is one that silently never fires, and the chooser is where that mistake would be made. They stay in KEY_NAMES so a configuration read back from the device is still legible. Usages the key chooser offers, in HID order. What each action does, said the way the operator would say it. The protocol name stays available in a tooltip: a screenshot has to be readable against the diagnostics and the documentation, which both speak in identifiers.</extracomment>
         <translation>Switch the keyboard between PC1 and PC2</translation>
     </message>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="121" />
+        <location filename="../../ui/models/binding_table.py" line="163" />
         <source>Each press sends the keyboard to the other computer.</source>
         <translation>Each press sends the keyboard to the other computer.</translation>
     </message>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="127" />
+        <location filename="../../ui/models/binding_table.py" line="169" />
         <source>Switch the mouse between PC1 and PC2</source>
         <translation>Switch the mouse between PC1 and PC2</translation>
     </message>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="128" />
+        <location filename="../../ui/models/binding_table.py" line="170" />
         <source>Each press sends the mouse to the other computer.</source>
         <translation>Each press sends the mouse to the other computer.</translation>
     </message>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="133" />
+        <location filename="../../ui/models/binding_table.py" line="175" />
         <source>Send the keyboard to one computer</source>
         <translation>Send the keyboard to one computer</translation>
     </message>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="134" />
-        <location filename="../../ui/models/binding_table.py" line="141" />
+        <location filename="../../ui/models/binding_table.py" line="176" />
+        <location filename="../../ui/models/binding_table.py" line="183" />
         <source>Always the same computer, whichever one was being used before.</source>
         <translation>Always the same computer, whichever one was being used before.</translation>
     </message>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="140" />
+        <location filename="../../ui/models/binding_table.py" line="182" />
         <source>Send the mouse to one computer</source>
         <translation>Send the mouse to one computer</translation>
     </message>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="147" />
+        <location filename="../../ui/models/binding_table.py" line="189" />
         <source>Switch to another profile</source>
         <translation>Switch to another profile</translation>
     </message>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="148" />
+        <location filename="../../ui/models/binding_table.py" line="190" />
         <source>Loads a different set of bindings on the device.</source>
         <translation>Loads a different set of bindings on the device.</translation>
     </message>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="153" />
+        <location filename="../../ui/models/binding_table.py" line="195" />
         <source>Run a macro</source>
         <translation>Run a macro</translation>
     </message>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="154" />
+        <location filename="../../ui/models/binding_table.py" line="196" />
         <source>Plays a recorded sequence of keys and pauses.</source>
         <translation>Plays a recorded sequence of keys and pauses.</translation>
     </message>
@@ -63,17 +63,17 @@
 <context>
     <name>BindingTableModel</name>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="316" />
+        <location filename="../../ui/models/binding_table.py" line="358" />
         <source>Trigger</source>
         <translation>Trigger</translation>
     </message>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="316" />
+        <location filename="../../ui/models/binding_table.py" line="358" />
         <source>Mode</source>
         <translation>Mode</translation>
     </message>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="316" />
+        <location filename="../../ui/models/binding_table.py" line="358" />
         <source>Action</source>
         <translation>Action</translation>
     </message>
@@ -511,7 +511,7 @@
 <context>
     <name>MacroSteps</name>
     <message>
-        <location filename="../../ui/models/macro_steps.py" line="155" />
+        <location filename="../../ui/models/macro_steps.py" line="153" />
         <source>From the device: {0} keystrokes</source>
         <extracomment>How much of a text step is shown in the list before it is elided. A default step of every type, so the editor can offer all of them.</extracomment>
         <translation>From the device: {0} keystrokes</translation>
@@ -776,83 +776,83 @@
 <context>
     <name>MainWindow</name>
     <message>
-        <location filename="../../ui/main_window.py" line="184" />
+        <location filename="../../ui/main_window.py" line="210" />
         <source>Sections</source>
-        <extracomment>Where the path of the last project is kept between runs, so the program opens what the operator was working on rather than an empty one. How often the shell looks for a device that is not attached yet. Short enough that plugging a board in feels immediate, long enough that the retry costs nothing while the socket stays empty. Navigation rows, in the order the sections appear. Mouse buttons the attached device has actually reported. Set while a device-initiated read is in flight, so its answer - which arrives on ``operation_succeeded`` several chunks later - is only adopted when it is actually the read this window asked for.</extracomment>
+        <extracomment>Where the path of the last project is kept between runs, so the program opens what the operator was working on rather than an empty one. How often the shell looks for a device that is not attached yet. Short enough that plugging a board in feels immediate, long enough that the retry costs nothing while the socket stays empty. Navigation rows, in the order the sections appear. Mouse buttons the attached device has actually reported. Set while a device-initiated read is in flight, so its answer - which arrives on ``operation_succeeded`` several chunks later - is only adopted when it is actually the read this window asked for. Set once the connect hook has queued its read. The device wins at startup and only at startup: the autoconnect timer runs for the life of the window, so a read on every connect would replace the operator's open project with the board's the moment they plug a board in to write that project to it - saved, so the dirty guard below lets it through - and drop the file path with it. DECISION (not an oversight): the spec says the device always wins. Narrowed to "the device wins when there is nothing of the operator's to lose" - no file opened or saved, no unsaved edits - because the alternative was replacing a saved project the moment a board is plugged in to receive it. Snapshotted at the moment a connection attempt begins, not when its read is queued or lands: ``start_window`` opens the port before it reopens the last project, so checking the session at either later point would see that reopen's path already set and wrongly refuse the very read the startup case depends on (a bare ``session.path`` guard was tried before and rejected for exactly this reason). What has to be untouched is the session at the moment this attempt began, not at whatever point another synchronous step gets to run next. When the device and the project disagree, the mismatch stays visible in the state strip instead. Set once ``try_autoconnect`` has told the operator no device answered, so that message is said once rather than on every retry.</extracomment>
         <translation>Sections</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="198" />
+        <location filename="../../ui/main_window.py" line="224" />
         <source>Overview</source>
         <translation>Overview</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="199" />
+        <location filename="../../ui/main_window.py" line="225" />
         <source>Profiles</source>
         <translation>Profiles</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="200" />
+        <location filename="../../ui/main_window.py" line="226" />
         <source>Bindings</source>
         <translation>Bindings</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="201" />
+        <location filename="../../ui/main_window.py" line="227" />
         <source>Macros</source>
         <translation>Macros</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="202" />
+        <location filename="../../ui/main_window.py" line="228" />
         <source>Mouse</source>
         <translation>Mouse</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="203" />
+        <location filename="../../ui/main_window.py" line="229" />
         <source>Diagnostics</source>
         <translation>Diagnostics</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="204" />
+        <location filename="../../ui/main_window.py" line="230" />
         <source>Settings</source>
         <translation>Settings</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="254" />
+        <location filename="../../ui/main_window.py" line="280" />
         <source>Open</source>
         <translation>Open</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="255" />
+        <location filename="../../ui/main_window.py" line="281" />
         <source>Open a project file</source>
         <translation>Open a project file</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="325" />
+        <location filename="../../ui/main_window.py" line="351" />
         <source>Problems that block a write</source>
         <translation>Problems that block a write</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="335" />
+        <location filename="../../ui/main_window.py" line="361" />
         <source>Transfer progress</source>
         <translation>Transfer progress</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="224" />
+        <location filename="../../ui/main_window.py" line="250" />
         <source>Ready</source>
         <translation>Ready</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="241" />
+        <location filename="../../ui/main_window.py" line="267" />
         <source>Profile:</source>
         <translation>Profile:</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="244" />
+        <location filename="../../ui/main_window.py" line="270" />
         <source>Active profile</source>
         <translation>Active profile</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="250" />
+        <location filename="../../ui/main_window.py" line="276" />
         <source>Device connection</source>
         <translation>Device connection</translation>
     </message>
@@ -865,67 +865,67 @@
         <translation>Connect or disconnect the device</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="258" />
+        <location filename="../../ui/main_window.py" line="284" />
         <source>Save</source>
         <translation>Save</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="259" />
+        <location filename="../../ui/main_window.py" line="285" />
         <source>Save the project file</source>
         <translation>Save the project file</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="265" />
+        <location filename="../../ui/main_window.py" line="291" />
         <source>Write to device</source>
         <translation>Write to device</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="266" />
+        <location filename="../../ui/main_window.py" line="292" />
         <source>Write the configuration to the device</source>
         <translation>Write the configuration to the device</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="295" />
+        <location filename="../../ui/main_window.py" line="321" />
         <source>Local changes</source>
         <translation>Local changes</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="296" />
+        <location filename="../../ui/main_window.py" line="322" />
         <source>Project file</source>
         <translation>Project file</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="297" />
+        <location filename="../../ui/main_window.py" line="323" />
         <source>Configuration on the device</source>
         <translation>Configuration on the device</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="316" />
+        <location filename="../../ui/main_window.py" line="342" />
         <source>Fix these before writing to the device.</source>
         <translation>Fix these before writing to the device.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="441" />
+        <location filename="../../ui/main_window.py" line="467" />
         <source>a new project</source>
         <translation>a new project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="444" />
+        <location filename="../../ui/main_window.py" line="470" />
         <source>Unsaved work was found</source>
         <translation>Unsaved work was found</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="446" />
+        <location filename="../../ui/main_window.py" line="472" />
         <source>Duo Input closed with unsaved changes to {0} on {1}. Recover them?</source>
         <translation>Duo Input closed with unsaved changes to {0} on {1}. Recover them?</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="520" />
+        <location filename="../../ui/main_window.py" line="546" />
         <source>Untitled project</source>
         <translation>Untitled project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="529" />
+        <location filename="../../ui/main_window.py" line="555" />
         <source>Device: {0}</source>
         <translation>Device: {0}</translation>
     </message>
@@ -934,97 +934,100 @@
         <translation>Disconnect</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="542" />
+        <location filename="../../ui/main_window.py" line="568" />
         <source>Local changes: unsaved</source>
         <translation>Local changes: unsaved</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="544" />
+        <location filename="../../ui/main_window.py" line="570" />
         <source>Local changes: none</source>
         <translation>Local changes: none</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="550" />
+        <location filename="../../ui/main_window.py" line="576" />
         <source>Project file: not created yet</source>
         <translation>Project file: not created yet</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="553" />
+        <location filename="../../ui/main_window.py" line="579" />
         <source>Project file: {0}</source>
         <translation>Project file: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="558" />
+        <location filename="../../ui/main_window.py" line="584" />
         <source>Written to device: no link</source>
         <translation>Written to device: no link</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="561" />
+        <location filename="../../ui/main_window.py" line="587" />
         <source>Written to device: matches the project</source>
         <translation>Written to device: matches the project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="564" />
+        <location filename="../../ui/main_window.py" line="590" />
         <source>Written to device: differs from the project</source>
         <translation>Written to device: differs from the project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="610" />
+        <location filename="../../ui/main_window.py" line="636" />
         <source>Save project</source>
         <translation>Save project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="630" />
+        <location filename="../../ui/main_window.py" line="656" />
         <source>Save failed</source>
         <translation>Save failed</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="636" />
+        <location filename="../../ui/main_window.py" line="662" />
         <source>Project saved</source>
         <translation>Project saved</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="644" />
+        <location filename="../../ui/main_window.py" line="670" />
         <source>Open project</source>
         <translation>Open project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="660" />
+        <location filename="../../ui/main_window.py" line="686" />
         <source>That project could not be opened: {0}</source>
         <translation>That project could not be opened: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="668" />
+        <location filename="../../ui/main_window.py" line="694" />
         <source>Project opened</source>
         <translation>Project opened</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="706" />
+        <location filename="../../ui/main_window.py" line="732" />
         <source>No Duo Input device was found</source>
         <translation>No Duo Input device was found</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="803" />
+        <location filename="../../ui/main_window.py" line="758" />
+        <source>No device found. Load a copy from a file, or plug the device in.</source>
+        <translation>No device found. Load a copy from a file, or plug the device in.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/main_window.py" line="885" />
         <source>The device has a different configuration; your edits were kept.</source>
         <translation>The device has a different configuration; your edits were kept.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="811" />
+        <location filename="../../ui/main_window.py" line="893" />
         <source>The device's configuration could not be read: {0}</source>
         <translation>The device's configuration could not be read: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="815" />
+        <location filename="../../ui/main_window.py" line="897" />
         <source>Configuration read from the device</source>
         <translation>Configuration read from the device</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="833" />
         <source>Unsaved changes</source>
         <translation>Unsaved changes</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="834" />
         <source>The project has unsaved changes. Save them before closing?</source>
         <translation>The project has unsaved changes. Save them before closing?</translation>
     </message>

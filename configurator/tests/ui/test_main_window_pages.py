@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from PySide6.QtWidgets import QMessageBox
 
 from duo_input.device.emulator import U1Emulator
 from duo_input.device.service import DeviceService
@@ -25,10 +24,6 @@ def _binding(code: int = 0x04) -> Binding:
     )
 
 
-def _discard_on_teardown(window: MainWindow) -> None:
-    window._confirm_close = lambda: QMessageBox.StandardButton.Discard
-
-
 @pytest.fixture
 def emulator() -> U1Emulator:
     emulator = U1Emulator()
@@ -39,7 +34,7 @@ def emulator() -> U1Emulator:
 @pytest.fixture
 def window(qtbot) -> MainWindow:
     window = MainWindow(DeviceService(timeout_ms=5000), transport_factory=lambda: None)
-    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.addWidget(window)
     return window
 
 
