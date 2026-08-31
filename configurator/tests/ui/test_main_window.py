@@ -70,6 +70,26 @@ def _connect(qtbot, window: MainWindow, emulator: U1Emulator) -> None:
     with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
         window.connect_device(emulator)
     assert window.service.state is DeviceState.READY
+    # Connecting also queues the window's own read of what the device is
+    # running (see read_device_project); the request is deferred to the next
+    # tick and its answer a few more after that. A caller that goes straight
+    # on to its own device operation must not race it, so every test that
+    # uses this helper waits for it to land - successfully or not - first.
+    # The listener is attached before anything pumps the event loop, so it
+    # cannot miss a read that lands on the very first tick.
+    settled = [False]
+
+    def _mark_settled(result: object) -> None:
+        if getattr(result, "operation", None) == "read_config":
+            settled[0] = True
+
+    window.service.operation_succeeded.connect(_mark_settled)
+    window.service.operation_failed.connect(_mark_settled)
+    try:
+        qtbot.waitUntil(lambda: settled[0], timeout=5000)
+    finally:
+        window.service.operation_succeeded.disconnect(_mark_settled)
+        window.service.operation_failed.disconnect(_mark_settled)
 
 
 def _close(window: MainWindow) -> bool:
@@ -426,6 +446,51 @@ def test_connect_without_a_device_reports_it_and_stays_disconnected(window):
 
     assert window.service.state is DeviceState.DISCONNECTED
     assert window.overview.events()
+
+
+# ---------------------------------------------------------- reading a device
+
+
+def test_a_device_that_answers_supplies_the_project(qtbot, service, emulator, settings):
+    """Opening the program answers "what is my device doing?" without being asked."""
+    from duo_input.domain.text_compiler import compile_project_to_binary
+    from duo_input.ui.models.project_session import RenameProfile, default_project
+
+    wanted = ProjectSession.new().apply(RenameProfile(1, "On the board")).project
+    emulator.install_active(compile_project_to_binary(wanted))
+
+    window = MainWindow(service, transport_factory=lambda: emulator, settings=settings)
+    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.waitUntil(lambda: service.state is DeviceState.READY, timeout=5000)
+    window.read_device_project()
+
+    qtbot.waitUntil(
+        lambda: window.session.active_profile.name == "On the board", timeout=5000
+    )
+    assert window.session.path is None
+
+
+def test_a_read_that_lands_late_does_not_discard_unsaved_edits(
+    qtbot, service, emulator, settings
+):
+    """The read is several chunks over a serial link. Work started meanwhile stays."""
+    from duo_input.domain.text_compiler import compile_project_to_binary
+    from duo_input.ui.models.project_session import RenameProfile
+
+    on_board = ProjectSession.new().apply(RenameProfile(1, "From device")).project
+    emulator.install_active(compile_project_to_binary(on_board))
+
+    window = MainWindow(service, transport_factory=lambda: emulator, settings=settings)
+    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.waitUntil(lambda: service.state is DeviceState.READY, timeout=5000)
+
+    window.set_session(window.session.apply(RenameProfile(1, "Being typed")))
+    assert window.session.dirty
+
+    window.read_device_project()
+    qtbot.wait(300)
+
+    assert window.session.active_profile.name == "Being typed"
 
 
 # --------------------------------------------------------------- close flow

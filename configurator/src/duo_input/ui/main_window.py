@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from duo_input.device.service import DeviceService, DeviceState
+from duo_input.domain.config_reader import binary_to_project
 from duo_input.domain.project_store import ProjectError
 from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.domain.validation import ValidationIssue
@@ -139,6 +140,10 @@ class MainWindow(QMainWindow):
         #: Mouse buttons the attached device has actually reported.
         self._observed_buttons: frozenset[int] = frozenset()
         self.transport_factory = transport_factory or default_transport_factory
+        #: Set while a device-initiated read is in flight, so its answer -
+        #: which arrives on ``operation_succeeded`` several chunks later - is
+        #: only adopted when it is actually the read this window asked for.
+        self._reading_device = False
         self.autosave = AutosaveService(parent=self)
         self.autosave.timer.timeout.connect(self.autosave_now)
         self.autosave.timer.start()
@@ -717,6 +722,17 @@ class MainWindow(QMainWindow):
             return
         self._service.connect_device(link)
 
+    def read_device_project(self) -> None:
+        """Ask the device for the configuration it is running.
+
+        The answer arrives later, on ``operation_succeeded``; see
+        ``_on_operation_succeeded``.
+        """
+        if not self._service.is_connected:
+            return
+        self._reading_device = True
+        self._service.read_config()
+
     def disconnect_device(self) -> None:
         self._service.disconnect_device()
         self._sync_device_state()
@@ -748,12 +764,52 @@ class MainWindow(QMainWindow):
         self.progress.setValue(percent)
 
     def _on_operation_succeeded(self, result: object) -> None:
+        if result.operation == "read_config" and self._reading_device:
+            self._reading_device = False
+            self._adopt_device_project(result.value)
+        elif result.operation == "connect_device":
+            # The device attaches itself, so it also answers "what is it
+            # running?" itself: the operator never has to ask. This fires
+            # once per connect, never on the read that follows it, so there
+            # is no loop. The read is deferred to the next tick: this handler
+            # runs inside DeviceService's own unwind of "connect_device", and
+            # starting a second operation synchronously here would re-enter
+            # the service mid-transaction.
+            QTimer.singleShot(0, self.read_device_project)
         self.overview.append_event(result.operation, "ok")
         self.diagnostics.refresh()
         self.progress.setVisible(False)
         self._sync_device_state()
 
+    def _adopt_device_project(self, package: bytes | None) -> None:
+        """Show what the device is running, unless the operator is mid-edit.
+
+        The read takes several chunks over a serial link. Somebody who started
+        typing while it was in flight must not have that thrown away by an
+        answer that arrives afterwards - the device is authoritative at
+        startup, not at every moment.
+        """
+        if package is None:
+            return
+        if self._session.dirty:
+            self.statusBar().showMessage(
+                self.tr("The device has a different configuration; your edits were kept.")
+            )
+            return
+        try:
+            project = binary_to_project(package)
+        except ProjectError as error:
+            self.overview.append_event("read_config", type(error).__name__)
+            self.statusBar().showMessage(
+                self.tr("The device's configuration could not be read: {0}").format(error)
+            )
+            return
+        self.set_session(ProjectSession(project=project))
+        self.statusBar().showMessage(self.tr("Configuration read from the device"))
+
     def _on_operation_failed(self, failure: object) -> None:
+        if failure.operation == "read_config" and self._reading_device:
+            self._reading_device = False
         detail = failure.reason.value
         if failure.error_code is not None:
             detail = f"{detail} ({failure.error_code.name})"
