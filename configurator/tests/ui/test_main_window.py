@@ -844,3 +844,10 @@ def test_changing_the_page_still_shows_the_page(qtbot, window):
 
     assert window.pages.currentWidget() is window.overview
     assert window.overview.graphicsEffect() is None
+
+
+def test_the_shell_keeps_no_autosave(window):
+    """Autosave guarded edits between runs of a document that no longer exists."""
+    assert not hasattr(window, "autosave")
+    assert not hasattr(window, "offer_recovery")
+    assert not hasattr(window, "autosave_now")

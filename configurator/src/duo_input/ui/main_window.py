@@ -34,7 +34,6 @@ from duo_input.domain.project_store import ProjectError
 from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.domain.validation import ValidationIssue
 from duo_input.i18n import TranslationManager
-from duo_input.persistence.autosave import AutosaveService, Recovery
 from duo_input.ui.bindings import BindingsPage
 from duo_input.ui.diagnostics import DiagnosticsPage
 from duo_input.ui.macros import MacrosPage
@@ -148,8 +147,9 @@ class MainWindow(QMainWindow):
         #: startup and only at startup: the autoconnect timer runs for the
         #: life of the window, so a read on every connect would replace the
         #: operator's open project with the board's the moment they plug a
-        #: board in to write that project to it - saved, so the dirty guard
-        #: below lets it through - and drop the file path with it.
+        #: board in to write that project to it - saving no longer clears
+        #: ``dirty``, so the dirty guard below is not bypassed in that
+        #: scenario any more - and drop the file path with it.
         self._startup_read_done = False
         #: DECISION (not an oversight): the spec says the device always wins.
         #: Narrowed to "the device wins when there is nothing of the
@@ -170,9 +170,6 @@ class MainWindow(QMainWindow):
         #: Set once ``try_autoconnect`` has told the operator no device
         #: answered, so that message is said once rather than on every retry.
         self._said_no_device = False
-        self.autosave = AutosaveService(parent=self)
-        self.autosave.timer.timeout.connect(self.autosave_now)
-        self.autosave.timer.start()
         # The device attaches itself. The operator plugs a board in and the
         # program notices; there is nothing for them to decide, so there is no
         # button to press.
@@ -426,55 +423,6 @@ class MainWindow(QMainWindow):
         """Pages that both render a session and ask for changes to it."""
         return (self.profiles, self.bindings, self.macros, self.mouse)
 
-    # ------------------------------------------------------------- recovery
-
-    def autosave_now(self) -> bool:
-        """Keep a recovery copy of the current session. Never raises.
-
-        A full disk must not take the editor down mid-sentence, so a failed
-        autosave is reported alongside the device events and the operator
-        keeps typing.
-        """
-        try:
-            return bool(self.autosave.save(self._session))
-        except (ProjectError, OSError) as error:
-            self.overview.append_event("autosave", type(error).__name__)
-            return False
-
-    def offer_recovery(self) -> bool:
-        """Ask about unsaved work from a previous run. Returns whether it was taken.
-
-        A recovery is only ever offered when the autosave is newer than the
-        project file, so accepting it can never move the operator backwards.
-        """
-        try:
-            recovery = self.autosave.recovery()
-        except (ProjectError, OSError) as error:
-            # Startup continues either way: a broken autosave is a thing to
-            # report, not a reason to refuse to open the program.
-            self.overview.append_event("autosave", type(error).__name__)
-            return False
-        if recovery is None:
-            return False
-        if self._ask_recovery(recovery) != QMessageBox.StandardButton.Yes:
-            self.autosave.discard()
-            return False
-        self.set_session(recovery.session)
-        self.overview.append_event("autosave", "recovered")
-        return True
-
-    def _ask_recovery(self, recovery: Recovery) -> QMessageBox.StandardButton:
-        name = recovery.project_path.name if recovery.project_path else self.tr("a new project")
-        return QMessageBox.question(
-            self,
-            self.tr("Unsaved work was found"),
-            self.tr(
-                "Duo Input closed with unsaved changes to {0} on {1}. Recover them?"
-            ).format(name, recovery.saved_at.isoformat(timespec="seconds")),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-
     # ------------------------------------------------------------ validation
 
     def issues(self) -> tuple[ValidationIssue, ...]:
@@ -657,8 +605,6 @@ class MainWindow(QMainWindow):
             return False
         self.set_session(saved)
         self._remember_project(saved.path)
-        # The file on disk now holds everything the autosave was protecting.
-        self.autosave.discard()
         self.statusBar().showMessage(self.tr("Project saved"))
         return True
 
@@ -688,9 +634,6 @@ class MainWindow(QMainWindow):
             return False
         self.set_session(session)
         self._remember_project(session.path)
-        # What is on screen is now what is on disk; the autosave was guarding
-        # the session this one replaced.
-        self.autosave.discard()
         self.statusBar().showMessage(self.tr("Project opened"))
         return True
 

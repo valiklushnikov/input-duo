@@ -42,9 +42,8 @@ def test_build_main_window_produces_a_wired_shell(qtbot):
 def test_starting_a_window_reopens_what_was_open_last(qtbot, tmp_path):
     """The startup sequence is a function so it can be tested at all.
 
-    Both steps it performs - reopening the last project and offering an
-    autosave recovery - used to be reachable only from main(), where nothing
-    could check that they were still wired.
+    Reopening the last project used to be reachable only from main(), where
+    nothing could check that it was still wired.
     """
     from PySide6.QtCore import QSettings
 

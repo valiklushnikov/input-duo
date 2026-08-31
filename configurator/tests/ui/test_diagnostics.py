@@ -1,16 +1,14 @@
-"""The Diagnostics page and the recovery the shell offers at startup."""
+"""The Diagnostics page and the shell it hangs off of."""
 
 from __future__ import annotations
 
 import zipfile
 
 import pytest
-from PySide6.QtWidgets import QMessageBox
 
 from duo_input.device.emulator import U1Emulator
 from duo_input.device.service import DeviceService
 from duo_input.domain.text_compiler import compile_project_to_binary
-from duo_input.persistence.autosave import AutosaveService
 from duo_input.persistence.diagnostic_export import (
     DIAGNOSTICS_MEMBER,
     PROJECT_MEMBER,
@@ -23,7 +21,6 @@ from duo_input.ui.models.macro_steps import text_step
 from duo_input.ui.models.project_session import (
     AddMacro,
     ProjectSession,
-    RenameProfile,
     SetMacroSteps,
     default_project,
 )
@@ -144,7 +141,7 @@ def test_every_control_carries_an_accessible_name(page):
         assert widget.accessibleName()
 
 
-# ----------------------------------------------------------------- recovery
+# --------------------------------------------------------------- the shell
 
 
 @pytest.fixture
@@ -159,74 +156,6 @@ def test_the_shell_offers_the_diagnostics_page(window):
     window.show_page(window.PAGE_DIAGNOSTICS)
 
     assert window.pages.currentWidget() is window.diagnostics
-
-
-def test_nothing_is_offered_when_there_is_no_autosave(window):
-    assert window.offer_recovery() is False
-
-
-def test_a_recovery_the_operator_accepts_becomes_the_session(window, tmp_path):
-    window.autosave.save(ProjectSession.new().apply(RenameProfile(1, "Работа")))
-    window._ask_recovery = lambda recovery: QMessageBox.StandardButton.Yes
-
-    assert window.offer_recovery() is True
-
-    assert window.session.project.profiles[0].name == "Работа"
-    assert window.session.dirty is True
-
-
-def test_a_recovery_the_operator_declines_is_thrown_away(window):
-    window.autosave.save(ProjectSession.new().apply(RenameProfile(1, "Работа")))
-    window._ask_recovery = lambda recovery: QMessageBox.StandardButton.No
-
-    assert window.offer_recovery() is False
-
-    assert window.session.project.profiles[0].name == "Profile 1"
-    assert window.autosave.recovery() is None
-
-
-def test_a_corrupted_autosave_is_reported_and_does_not_stop_startup(window):
-    window.autosave.save(ProjectSession.new().apply(RenameProfile(1, "Работа")))
-    window.autosave.autosave_path.write_text("{ not json", encoding="utf-8")
-    window._ask_recovery = lambda recovery: QMessageBox.StandardButton.Yes
-
-    assert window.offer_recovery() is False
-    assert any("autosave" in event for event in window.overview.events())
-
-
-def test_saving_the_project_clears_the_recovery(window, tmp_path):
-    window.set_session(window.session.apply(RenameProfile(1, "Работа")))
-    window.autosave.save(window.session)
-    assert window.autosave.recovery() is not None
-
-    assert window.save_project(tmp_path / "work.duoinput.json") is True
-
-    assert window.autosave.recovery() is None
-
-
-def test_the_shell_autosaves_on_its_own_schedule(window):
-    window.set_session(window.session.apply(RenameProfile(1, "Работа")))
-    assert window.autosave.recovery() is None
-
-    window.autosave_now()
-
-    assert window.autosave.recovery() is not None
-
-
-def test_the_autosave_timer_runs_while_the_shell_is_open(window):
-    assert window.autosave.timer.isActive() is True
-    assert window.autosave.timer.interval() > 0
-
-
-def test_an_autosave_that_cannot_be_written_is_reported_not_raised(window, monkeypatch):
-    window.set_session(window.session.apply(RenameProfile(1, "Работа")))
-    monkeypatch.setattr(
-        window.autosave, "save", lambda session: (_ for _ in ()).throw(OSError("disk full"))
-    )
-
-    window.autosave_now()
-
-    assert any("autosave" in event for event in window.overview.events())
 
 
 # --------------------------------------------------------- how a fact reads

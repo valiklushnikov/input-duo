@@ -30,10 +30,6 @@ def application_directory() -> Path:
     return base / APPLICATION_DIRECTORY_NAME
 
 
-def autosave_directory() -> Path:
-    return application_directory() / "autosave"
-
-
 def log_directory() -> Path:
     return application_directory() / "logs"
 
@@ -78,7 +74,6 @@ __all__ = [
     "LOG_FILE_NAME",
     "LOG_MAX_BYTES",
     "application_directory",
-    "autosave_directory",
     "configure_logging",
     "log_directory",
     "log_path",

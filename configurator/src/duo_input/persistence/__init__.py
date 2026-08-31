@@ -1,1 +1,1 @@
-"""Where the configurator keeps things on disk: projects, autosave, logs."""
+"""Where the configurator keeps things on disk: projects, logs."""

@@ -69,7 +69,7 @@ anyone else will run.
 - **Start Menu shortcut and an uninstall entry**, and an optional desktop icon
   that is unchecked by default.
 - **Uninstall removes only what it installed.** `%LOCALAPPDATA%\DuoInput`
-  holds the operator's autosave, logs and settings, and their `.duoinput.json`
+  holds the operator's logs and settings, and their `.duoinput.json`
   projects live wherever they chose to save them. Neither is touched.
 
 ## Before handing the build to anyone

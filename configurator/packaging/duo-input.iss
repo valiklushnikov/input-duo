@@ -80,6 +80,6 @@ Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; \
 
 [UninstallDelete]
 ; Only what this installer put there. %LOCALAPPDATA%\DuoInput holds the
-; operator's autosave, logs and settings, and their .duoinput.json projects
-; live wherever they chose to save them; uninstalling must not touch either.
+; operator's logs and settings, and their .duoinput.json projects live
+; wherever they chose to save them; uninstalling must not touch either.
 Type: filesandordirs; Name: "{app}"

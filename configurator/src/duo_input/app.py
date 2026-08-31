@@ -87,11 +87,7 @@ def start_window(window: MainWindow) -> None:
     # port open before the first paint is the price of that proof; it is a
     # local enumeration, not a handshake, which still happens on the loop.
     window.try_autoconnect()
-    # The file first: a recovery is only offered when the autosave is newer
-    # than the project, and that comparison needs the project to be loaded.
     window.reopen_last_project()
-    # Asked after the window exists, so the prompt has something to sit on.
-    window.offer_recovery()
 
 
 def main(argv: list[str] | None = None) -> int:
