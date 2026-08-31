@@ -77,7 +77,14 @@ def test_starting_a_window_reopens_what_was_open_last(qtbot, tmp_path):
 def test_startup_prefers_the_device_over_the_last_file(qtbot, tmp_path):
     """The device wins: the question on opening is what the hardware is doing.
 
-    A file is only reached for when nothing answered.
+    This asserts the end state, not ``start_window``'s ordering: it passes
+    whether or not ``start_window`` branches on the device at all, because a
+    successful connect already replaces the session on its own (the
+    construction-time autoconnect timer plus Task 3's connect-triggered
+    read). It is kept because the end state is still worth pinning, not as
+    proof that ``start_window`` is what delivers it - see
+    ``test_startup_falls_back_to_the_file_when_the_device_never_answers``
+    for the case that actually distinguishes ``start_window``'s behaviour.
     """
     from PySide6.QtCore import QSettings
 
@@ -112,6 +119,54 @@ def test_startup_prefers_the_device_over_the_last_file(qtbot, tmp_path):
     qtbot.waitUntil(
         lambda: window.session.active_profile.name == "On the board", timeout=5000
     )
+
+
+def test_startup_falls_back_to_the_file_when_the_device_never_answers(qtbot, tmp_path):
+    """A device that opens but never completes its handshake must not strand
+    the operator with a blank project.
+
+    ``DeviceService.is_connected`` is true the instant the port opens - well
+    before HELLO is answered, since replies always arrive on the next event
+    loop tick (``SynchronousTransportLink.send`` defers through
+    ``QTimer.singleShot``). A ``start_window`` that branches on
+    ``is_connected`` right after ``try_autoconnect()`` therefore branches
+    before the device has answered anything, and if the handshake then
+    fails, nothing ever reopens the last file. The last file must still be
+    what the operator sees.
+    """
+    from PySide6.QtCore import QSettings
+
+    from duo_input.app import build_main_window, start_window
+    from duo_input.device.service import DeviceService
+    from duo_input.device.transport import AbstractByteTransport
+    from duo_input.ui.models.project_session import RenameProfile
+
+    class _SilentTransport(AbstractByteTransport):
+        """Opens immediately; answers every write with an undecodable frame."""
+
+        def write(self, data: bytes) -> bytes:
+            return b"not-a-real-reply\x00"
+
+    store = QSettings(str(tmp_path / "duo-input.ini"), QSettings.Format.IniFormat)
+    store.clear()
+    saved = tmp_path / "on-disk.duoinput.json"
+
+    on_disk = build_main_window(DeviceService(), transport_factory=lambda: None, settings=store)
+    qtbot.addWidget(on_disk)
+    on_disk.set_session(on_disk.session.apply(RenameProfile(1, "On disk")))
+    assert on_disk.save_project(saved) is True
+
+    window = build_main_window(
+        DeviceService(timeout_ms=5000),
+        transport_factory=lambda: _SilentTransport(),
+        settings=store,
+    )
+    qtbot.addWidget(window)
+    window._confirm_close = lambda: None
+    start_window(window)
+
+    assert window.session.path == saved
+    assert window.session.active_profile.name == "On disk"
 
 
 def test_starting_the_application_configures_the_log(tmp_path, monkeypatch):

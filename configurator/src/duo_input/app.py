@@ -64,10 +64,13 @@ def build_main_window(
 def start_window(window: MainWindow) -> None:
     """Show the shell and restore what the operator was working on.
 
-    The device comes first: the question someone opens this program with is
-    what their hardware is currently doing. A file is reached for only when
-    nothing answered - and the autosave, which holds edits that were never
-    written anywhere, is offered last so it can override either.
+    The file opens first, and the device replaces it. That order looks
+    backwards and is not: the read is asynchronous, so branching on whether
+    a device is present means branching before it has answered - the port is
+    open long before the handshake finishes, and a device that never answers
+    would leave the operator with neither its configuration nor their file.
+    Opening the file costs nothing when a device does answer, because
+    adopting its configuration replaces an unmodified session anyway.
 
     This is a function rather than three lines inside ``main`` so that the
     order can be tested: a step that only ``main`` performs is a step nothing
@@ -75,10 +78,9 @@ def start_window(window: MainWindow) -> None:
     """
     window.show()
     window.try_autoconnect()
-    if window.service.is_connected:
-        window.read_device_project()
-    else:
-        window.reopen_last_project()
+    # The file first: a recovery is only offered when the autosave is newer
+    # than the project, and that comparison needs the project to be loaded.
+    window.reopen_last_project()
     # Asked after the window exists, so the prompt has something to sit on.
     window.offer_recovery()
 
