@@ -72,3 +72,28 @@ def test_a_length_that_disagrees_with_the_bytes_is_refused():
 
     with pytest.raises(ProjectError):
         parse_header(_recrc(package))
+
+
+def test_a_data_blob_that_overlaps_the_string_blob_is_refused():
+    package = bytearray(_vector("valid_full.bin"))
+    total_length = len(package)
+    string_blob_offset = struct.unpack_from("<I", package, 24)[0]
+
+    struct.pack_into("<I", package, 32, string_blob_offset)  # data_blob_offset
+    struct.pack_into("<I", package, 36, total_length - string_blob_offset)  # data_blob_length
+
+    with pytest.raises(ProjectError):
+        parse_header(_recrc(package))
+
+
+def test_a_string_blob_that_does_not_start_at_the_profile_table_end_is_refused():
+    package = bytearray(_vector("valid_full.bin"))
+    string_blob_offset, string_blob_length = struct.unpack_from("<II", package, 24)
+    string_blob_end = string_blob_offset + string_blob_length
+
+    new_offset = string_blob_offset + 4
+    struct.pack_into("<I", package, 24, new_offset)  # string_blob_offset
+    struct.pack_into("<I", package, 28, string_blob_end - new_offset)  # string_blob_length
+
+    with pytest.raises(ProjectError):
+        parse_header(_recrc(package))

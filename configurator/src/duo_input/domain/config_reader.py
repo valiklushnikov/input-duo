@@ -114,6 +114,20 @@ def parse_header(package: bytes) -> PackageHeader:
     if data_blob_offset + data_blob_length != total_length:
         raise ProjectError("the data blob does not end where the package does")
 
+    expected_string_blob_offset = profile_table_offset + profile_count * PROFILE_SIZE
+    if string_blob_offset != expected_string_blob_offset:
+        raise ProjectError(
+            f"string blob starts at {string_blob_offset}, expected "
+            f"{expected_string_blob_offset} (immediately after the profile table)"
+        )
+
+    expected_data_blob_offset = (string_blob_offset + string_blob_length + 3) & ~3
+    if data_blob_offset != expected_data_blob_offset:
+        raise ProjectError(
+            f"data blob starts at {data_blob_offset}, expected "
+            f"{expected_data_blob_offset} (the string blob end, aligned up to four bytes)"
+        )
+
     return PackageHeader(
         total_length=total_length,
         active_profile_id=active_profile_id,
