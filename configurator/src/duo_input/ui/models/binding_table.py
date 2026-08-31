@@ -83,6 +83,32 @@ def _key_names() -> dict[int, str]:
         }
     )
     names.update({0x3A + index: f"F{index + 1}" for index in range(12)})
+    # The keys a switch box actually gets bound to. F13 upwards exist on real
+    # keyboards and collide with nothing, which is exactly why an operator
+    # picks them - and the device reports them back as usages this table has
+    # to be able to name, or a binding read from the device reads as
+    # "usage 0x68" and tells them nothing.
+    names.update({0x68 + index: f"F{index + 13}" for index in range(12)})
+    names.update(
+        {
+            0x32: "\\ (Non-US)",
+            0x46: "PrintScreen",
+            0x47: "ScrollLock",
+            0x48: "Pause",
+            0x53: "NumLock",
+            0x54: "Num/",
+            0x55: "Num*",
+            0x56: "Num-",
+            0x57: "Num+",
+            0x58: "NumEnter",
+            0x63: "Num.",
+            0x64: "\\ (Non-US)",
+            0x65: "Menu",
+            0x67: "Num=",
+        }
+    )
+    names.update({0x59 + index: f"Num{index + 1}" for index in range(9)})
+    names[0x62] = "Num0"
     return names
 
 

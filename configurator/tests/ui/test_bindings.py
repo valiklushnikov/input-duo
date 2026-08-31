@@ -478,6 +478,30 @@ def test_the_table_says_what_each_binding_does(page):
     assert "клав" in text.lower() or "keyboard" in text.lower()
 
 
+def test_every_key_the_device_can_report_has_a_legend(page):
+    """A binding read back from the device must not read as "usage 0x68".
+
+    The device reports HID usages, and it will report ones nobody typed on
+    this page - F13 upwards exist on real keyboards and are exactly what a
+    switch box gets bound to, because nothing else uses them.
+    """
+    from duo_input.ui.models.binding_table import key_name
+
+    assert key_name(0x68) == "F13"
+    assert key_name(0x73) == "F24"
+    assert key_name(0x46) == "PrintScreen"
+    assert key_name(0x48) == "Pause"
+    assert key_name(0x59) == "Num1"
+    assert key_name(0x58) == "NumEnter"
+
+
+def test_an_unknown_usage_still_reads_as_a_number(page):
+    """Whatever is left must degrade to something, not crash or read as empty."""
+    from duo_input.ui.models.binding_table import key_name
+
+    assert "0x01" in key_name(0x01)
+
+
 def test_the_action_chooser_says_what_an_action_does(page):
     """TOGGLE_KEYBOARD_ROUTE is what the protocol calls it, not what it means."""
     offered = [page.action_combo.itemText(row) for row in range(page.action_combo.count())]
