@@ -147,14 +147,6 @@ class MainWindow(QMainWindow):
         #: holding is this project, not whatever is on screen when the last
         #: turn lands, so this is what the baseline becomes.
         self._writing_project: DeviceProject | None = None
-        #: Set once the connect hook has queued its read. The device wins at
-        #: startup and only at startup: the autoconnect timer runs for the
-        #: life of the window, so a read on every connect would replace the
-        #: operator's open project with the board's the moment they plug a
-        #: board in to write that project to it - saving no longer clears
-        #: ``dirty``, so the dirty guard below is not bypassed in that
-        #: scenario any more - and drop the file path with it.
-        self._startup_read_done = False
         #: Set once ``try_autoconnect`` has told the operator no device
         #: answered, so that message is said once rather than on every retry.
         self._said_no_device = False
@@ -777,15 +769,14 @@ class MainWindow(QMainWindow):
             written = self._writing_project
             self._writing_project = None
             self.set_session(self._session.agreeing_with_device(written))
-        elif result.operation == "connect_device" and not self._startup_read_done:
+        elif result.operation == "connect_device":
             # The device attaches itself, so it also answers "what is it
-            # running?" itself: the operator never has to ask. Only the
-            # first connect this window makes does so; later connects queue
-            # nothing regardless of the session, which is why the flag is
-            # set here unconditionally rather than only when a read is
-            # actually queued below - a read that fails is not retried on
-            # the next reconnect either.
-            self._startup_read_done = True
+            # running?" itself: the operator never has to ask. Every attach
+            # asks, not just the window's first one - a board plugged in
+            # after startup, or swapped for another, is as much a board
+            # whose configuration nobody has seen yet, and there is no
+            # control anywhere that asks on the operator's behalf.
+            #
             # Nothing gates the read itself. Whether the answer may replace
             # what is on screen is decided when it lands, by the dirty guard
             # in ``_adopt_device_project``: a read that is issued and then
@@ -794,7 +785,10 @@ class MainWindow(QMainWindow):
             # since ``path`` is set by nothing but "save a copy" and has no
             # UI surface at all, exporting a template meant the board was
             # never read, was reported as differing, and was overwritten by
-            # the first Write.
+            # the first Write. A one-shot flag was the other such gate: it
+            # left a board arriving later unread, warned that the device
+            # differed, and offered nothing but Write - which overwrites
+            # that board - to clear the warning.
             #
             # The read is deferred to the next tick: this handler runs
             # inside DeviceService's own unwind of "connect_device", and

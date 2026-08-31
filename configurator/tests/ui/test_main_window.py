@@ -53,18 +53,11 @@ def window(qtbot, service, settings) -> MainWindow:
 
 
 def _connect(qtbot, window: MainWindow, emulator: U1Emulator) -> None:
-    # Only the first connect a window makes queues the read (see
-    # MainWindow._startup_read_done), so only the first one has anything to
-    # wait for. Asked before the connect, because the flag is set while it
-    # runs; waiting on a later connect would simply burn the full timeout.
-    expects_read = not window._startup_read_done
     with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
         window.connect_device(emulator)
     assert window.service.state is DeviceState.READY
-    if not expects_read:
-        return
-    # That first connect also queues the window's own read of what the device
-    # is running (see read_device_project); the request is deferred to the next
+    # Every connect queues the window's own read of what the device is
+    # running (see read_device_project); the request is deferred to the next
     # tick and its answer a few more after that. A caller that goes straight
     # on to its own device operation must not race it, so every test that
     # uses this helper waits for it to land - successfully or not - first.
@@ -733,9 +726,13 @@ def test_a_device_plugged_in_after_startup_leaves_the_open_project_alone(
         window.connect_device(later)
     qtbot.wait(500)
 
+    # The board is asked what it is running - that is not the protection.
+    # The protection is what happens to the answer: the operator's project is
+    # still on screen, under its own file name, exactly as they left it.
+    assert "connect_device" in operations
     assert window.session.active_profile.name == "Mine"
     assert window.session.path == saved
-    assert "read_config" not in operations
+    assert window.session.project.profiles[0].name == "Mine"
 
 
 def test_a_device_plugged_in_after_a_deviceless_startup_leaves_the_open_project_alone(
@@ -743,22 +740,16 @@ def test_a_device_plugged_in_after_a_deviceless_startup_leaves_the_open_project_
 ):
     """The surviving half of the defect: startup with nothing attached.
 
-    ``_startup_read_done`` is only spent once a connect actually *succeeds*.
-    The test above starts with a device present, which spends it before the
-    operator ever opens anything. The operator's normal habit is the other
-    order: start with no device, work for a while, save a copy, and only
-    then plug a board in - to write that project to it. Nothing here has
-    spent the flag yet, so the connect below is still this window's startup
-    connect and its read *is* issued - which is harmless, because the guard
-    that matters refuses the answer: ``_adopt_device_project`` will not
-    discard edits the operator has not written anywhere. This is the
-    reproduction from the defect report, and the read is deliberately
-    asserted to happen so that reinstating a gate in front of it - the one
-    that lost the board's own configuration for anybody who exported a
-    template - would fail here.
+    The operator's normal habit: start with no device, work for a while,
+    save a copy, and only then plug a board in - to write that project to
+    it. The connect issues its read like every other connect, which is
+    harmless, because the guard that matters refuses the answer:
+    ``_adopt_device_project`` will not discard edits the operator has not
+    written anywhere. This is the reproduction from the defect report, and
+    the read is deliberately asserted to happen so that reinstating a gate
+    in front of it - the one that lost the board's own configuration for
+    anybody who exported a template - would fail here.
     """
-    assert window._startup_read_done is False
-
     saved = tmp_path / "mine.duoinput.json"
     window.set_session(window.session.apply(RenameProfile(1, "Моя работа")))
     assert window.save_copy(saved) is True
@@ -897,6 +888,51 @@ def test_a_device_plugged_in_after_startup_into_an_untouched_session_is_adopted(
         lambda: window.session.active_profile.name == "Конфигурация платы", timeout=5000
     )
     assert window.session.path is None
+
+
+def test_a_board_attaching_to_an_untouched_window_is_asked_what_it_is_running(
+    qtbot, window
+):
+    """Every attach gets the question, not only the window's first one.
+
+    The window opened with nothing plugged in and the operator has touched
+    nothing, so there is nothing of theirs to protect - and yet a board that
+    attached after another one had already been seen was never read. The
+    window went on showing the first board's configuration, put the pending
+    marker in the title and told the operator the device differed, and the
+    only lever that cleared either was Write - which would have overwritten
+    the board that had just arrived. Reading on every attach is what makes
+    the honest state reachable without destroying anything.
+    """
+    first = U1Emulator()
+    first.install_active(
+        compile_project_to_binary(
+            ProjectSession.new().apply(RenameProfile(1, "First board")).project
+        )
+    )
+    _connect(qtbot, window, first)
+    qtbot.waitUntil(
+        lambda: window.session.active_profile.name == "First board", timeout=5000
+    )
+    window.disconnect_device()
+
+    second = U1Emulator()
+    second.install_active(
+        compile_project_to_binary(
+            ProjectSession.new().apply(RenameProfile(1, "Second board")).project
+        )
+    )
+    assert window.session.dirty is False
+
+    _connect(qtbot, window, second)
+
+    qtbot.waitUntil(
+        lambda: window.session.active_profile.name == "Second board", timeout=5000
+    )
+    assert window.session.device_matches is True
+    assert window.session.pending is False
+    assert DIRTY_MARKER not in window.windowTitle()
+    assert "matches the project" in window.state_chips["device"].text()
 
 
 def test_a_disconnect_during_a_read_does_not_disable_reading_for_good(
@@ -1046,16 +1082,17 @@ def _assert_the_marker_and_the_chip_agree(window) -> None:
     assert (signal == theme.SIGNAL_WARN) is (bool(session.device_hash) and session.pending)
 
 
-def test_the_marker_and_the_chip_agree_when_no_read_reconciles_a_new_board(
+def test_the_marker_and_the_chip_agree_about_a_board_holding_something_else(
     qtbot, window, emulator
 ):
     """A board that turns up holding something else, with nothing edited.
 
-    The startup read is spent on the first connect, so a second board is
-    never read: the project has not moved since the last agreement -
-    ``dirty`` is False - while the board in front of the operator is holding
-    a different package. The chip warned about that and the title stayed
-    clean, which is the divergence, in the direction that under-reports.
+    Between the connect landing and the board's answer arriving, the project
+    has not moved since the last agreement - ``dirty`` is False - while the
+    board in front of the operator is holding a different package. The chip
+    warned about that and the title stayed clean, which is the divergence,
+    in the direction that under-reports. The read closes the gap a few ticks
+    later, so the invariant is checked on both sides of it.
     """
     _connect(qtbot, window, emulator)
     assert window.session.dirty is False
@@ -1069,11 +1106,23 @@ def test_the_marker_and_the_chip_agree_when_no_read_reconciles_a_new_board(
             ProjectSession.new().apply(RenameProfile(1, "Другая плата")).project
         )
     )
-    _connect(qtbot, window, later)
+    # The bare connect rather than the helper: the helper waits for the read,
+    # and the state this guards is the one that stands before it lands.
+    with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
+        window.connect_device(later)
 
     assert window.session.dirty is False
     assert window.session.device_matches is False
     assert DIRTY_MARKER in window.windowTitle()
+    _assert_the_marker_and_the_chip_agree(window)
+
+    # And once the board has answered, the same two places agree again - now
+    # that there is nothing outstanding.
+    qtbot.waitUntil(
+        lambda: window.session.active_profile.name == "Другая плата", timeout=5000
+    )
+    assert window.session.device_matches is True
+    assert DIRTY_MARKER not in window.windowTitle()
     _assert_the_marker_and_the_chip_agree(window)
 
 
