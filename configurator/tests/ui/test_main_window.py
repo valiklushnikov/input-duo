@@ -445,6 +445,68 @@ def test_an_edit_made_during_a_write_is_not_declared_written(qtbot, window, emul
     assert DIRTY_MARKER in window.windowTitle()
 
 
+def test_a_second_write_press_cannot_declare_the_unsent_edit_written(
+    qtbot, window, emulator
+):
+    """Pressing Write again mid-write must not rewrite the first write's baseline.
+
+    The button is live for as long as the link is open, and a write leaves it
+    open. A second press used to overwrite the held project with whatever was
+    on screen, get itself rejected as BUSY, and have that rejection clear the
+    held project - so the first write then landed with nothing to make a
+    baseline out of and fell back to the screen, declaring an edit written
+    that never left the host.
+    """
+    _connect(qtbot, window, emulator)
+    window.set_session(window.session.apply(RenameProfile(1, "Sent to the board")))
+
+    pressed: list[bool] = []
+
+    def _edit_and_press_write_again(_percent: int) -> None:
+        if pressed:
+            return
+        pressed.append(True)
+        window.set_session(window.session.apply(RenameProfile(2, "Never sent")))
+        window.write_to_device()
+
+    window.service.progress_changed.connect(_edit_and_press_write_again)
+    try:
+        with qtbot.waitSignal(window.service.operation_succeeded, timeout=20000):
+            window.write_to_device()
+    finally:
+        window.service.progress_changed.disconnect(_edit_and_press_write_again)
+
+    assert pressed == [True]
+    # The edit is still on screen, and it was never sent.
+    assert window.session.project.profiles[0].name == "Sent to the board"
+    assert window.session.project.profiles[1].name == "Never sent"
+    assert window.session.dirty is True
+    assert DIRTY_MARKER in window.windowTitle()
+
+
+def test_the_write_button_is_off_while_a_write_is_in_flight(qtbot, window, emulator):
+    """The best refusal is one the operator never has to run into."""
+    _connect(qtbot, window, emulator)
+    window.set_session(window.session.apply(RenameProfile(1, "Sent to the board")))
+    assert window.write_button.isEnabled() is True
+
+    seen: list[bool] = []
+
+    def _look_at_the_button(_percent: int) -> None:
+        seen.append(window.write_button.isEnabled())
+
+    window.service.progress_changed.connect(_look_at_the_button)
+    try:
+        with qtbot.waitSignal(window.service.operation_succeeded, timeout=20000):
+            window.write_to_device()
+    finally:
+        window.service.progress_changed.disconnect(_look_at_the_button)
+
+    assert seen and not any(seen)
+    # And it comes back when the board is idle again.
+    assert window.write_button.isEnabled() is True
+
+
 def test_failed_write_leaves_the_mismatch_visible(qtbot, window, emulator):
     _connect(qtbot, window, emulator)
     before = window.session.device_hash

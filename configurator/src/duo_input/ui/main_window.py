@@ -494,8 +494,15 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{APPLICATION_NAME}{marker}")
 
     def _refresh_actions(self) -> None:
-        self.write_button.setEnabled(self._session.can_write)
         state = self._service.state
+        # A write leaves the link open, so ``can_write`` alone is still true
+        # while one is running. Offering the button again mid-write invites a
+        # second press the service can only reject - and a rejection arriving
+        # during someone else's transaction is not something to recover from,
+        # it is something not to cause.
+        self.write_button.setEnabled(
+            self._session.can_write and state is not DeviceState.BUSY
+        )
         # The state itself is a protocol identifier and stays in one language,
         # so a screenshot means the same thing to whoever reads it next.
         self.connection_label.setText(self.tr("Device: {0}").format(state.value))
@@ -709,7 +716,18 @@ class MainWindow(QMainWindow):
         self._sync_device_state()
 
     def write_to_device(self) -> None:
-        """Send the compiled project in one transaction; never edits it."""
+        """Send the compiled project in one transaction; never edits it.
+
+        Refused while the service is mid-operation. The link stays open for
+        the whole of a write, so nothing about "is a device attached?" says
+        no to a second press - and a second press would replace the project
+        the first write is holding, be rejected as BUSY, and have that
+        rejection clear the held project out from under the write that is
+        still running. The button greys out for the same reason; this is the
+        half that cannot be got around.
+        """
+        if self._service.state is DeviceState.BUSY:
+            return
         if not self._session.can_write:
             return
         try:

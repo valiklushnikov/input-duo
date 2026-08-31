@@ -236,6 +236,24 @@ def test_agreeing_with_the_device_clears_the_change_marker():
     assert agreed.project == session.project
 
 
+def test_agreeing_with_nothing_is_an_error_rather_than_a_silent_fallback():
+    """"No argument" means a read. ``None`` means a caller lost what it sent.
+
+    Those used to be the same thing, and the second one quietly became the
+    first: a write whose held project had been cleared underneath it passed
+    ``None``, got the project on screen as its baseline, and reported an
+    unsent edit as written. A fallback that cannot tell the two apart turns
+    a bug into a clean title; raising turns it into a failing test.
+    """
+    session = ProjectSession.new().apply(RenameProfile(1, "Edited"))
+
+    with pytest.raises(ValueError):
+        session.agreeing_with_device(None)
+
+    # And the read's own call, which names no project, still means "mine".
+    assert session.agreeing_with_device().baseline == session.project
+
+
 def test_an_edit_after_agreeing_reads_as_changed_again():
     session = ProjectSession.new().agreeing_with_device()
 

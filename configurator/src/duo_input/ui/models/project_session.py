@@ -437,6 +437,13 @@ def _as_hex(value: bytes | str) -> str:
     return bytes(value).hex()
 
 
+#: "No argument was given", as distinct from "explicitly nothing". Only a
+#: sentinel can tell those apart, and ``agreeing_with_device`` has to: one
+#: means a read, where the project is what came back, and the other means a
+#: caller that lost the project it sent.
+_ITS_OWN_PROJECT = object()
+
+
 @dataclass(frozen=True)
 class ProjectSession:
     """An immutable snapshot of everything the shell needs to know."""
@@ -565,7 +572,9 @@ class ProjectSession:
     def with_connection(self, connected: bool) -> ProjectSession:
         return replace(self, connected=bool(connected))
 
-    def agreeing_with_device(self, project: DeviceProject | None = None) -> ProjectSession:
+    def agreeing_with_device(
+        self, project: DeviceProject | object = _ITS_OWN_PROJECT
+    ) -> ProjectSession:
         """Mark ``project`` as being what the device holds.
 
         Called after a configuration is read from the device and after one is
@@ -574,14 +583,28 @@ class ProjectSession:
         gets its meaning: changed since the board last agreed, not changed
         since a file was written.
 
-        ``project`` defaults to the session's own project, which is right for
-        a read: the project *is* what came back. A write must pass what it
+        Omitting ``project`` means "the session's own project", which is right
+        for a read: the project *is* what came back. A write must pass what it
         actually sent instead. A write is a long sequence of event-loop turns
         with the editors still live, so the project on screen when it finishes
         may already have moved past the package that went down the wire; using
         it here would declare an unsent edit written.
+
+        Passing ``None`` - a caller that meant to name a project and had none
+        - raises rather than quietly falling back to the screen. That silent
+        fallback is exactly how an edit that never left the host came to be
+        reported as written: a caller lost track of what it sent, passed
+        nothing, and got a clean title instead of an error.
         """
-        return replace(self, baseline=self.project if project is None else project)
+        if project is _ITS_OWN_PROJECT:
+            project = self.project
+        if not isinstance(project, DeviceProject):
+            raise ValueError(
+                "agreeing_with_device needs the project the device agreed to: "
+                "pass nothing for a read, or the project that was sent for a "
+                f"write, not {project!r}"
+            )
+        return replace(self, baseline=project)
 
     def save(self, path: str | Path | None = None) -> ProjectSession:
         """Write a copy of the project to disk and return a session that knows
