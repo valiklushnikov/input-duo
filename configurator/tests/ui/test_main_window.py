@@ -420,6 +420,7 @@ def test_an_edit_made_during_a_write_is_not_declared_written(qtbot, window, emul
     """
     _connect(qtbot, window, emulator)
     window.set_session(window.session.apply(RenameProfile(1, "Sent to the board")))
+    before_the_edit = window.session.project.profiles[1].name
 
     edited: list[bool] = []
 
@@ -443,6 +444,13 @@ def test_an_edit_made_during_a_write_is_not_declared_written(qtbot, window, emul
     # And it was never sent, so it is still pending.
     assert window.session.dirty is True
     assert DIRTY_MARKER in window.windowTitle()
+    # The other half of the same claim, and the half a mid-write edit staying
+    # pending does not prove on its own: the baseline is now the project that
+    # went down the wire. Take the mid-write edit back and nothing is
+    # outstanding - which is only true if the write's own rename was adopted.
+    assert (
+        window.session.apply(RenameProfile(2, before_the_edit)).dirty is False
+    )
 
 
 def test_a_second_write_press_cannot_declare_the_unsent_edit_written(
