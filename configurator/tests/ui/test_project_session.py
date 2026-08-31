@@ -159,39 +159,56 @@ def test_pending_is_one_answer_for_the_title_and_the_chip():
 
 
 def test_pending_stays_true_when_only_untranslated_detail_changed():
-    """The known corner, decided in the operator's favour.
+    """The known corner, decided in the operator's favour - and reachable.
 
-    The binary format stores keystrokes, never the text they were typed from,
-    so an edited macro source with identical keystrokes compiles to the same
-    package: the device *does* match. The project has still moved past what
-    the board was given, so this reads as pending - and the title and the
-    chip say the same thing about it, which is the whole point.
+    The binary carries a TEXT macro's keystrokes and never the Unicode they
+    were typed from, so a configuration read off the board comes back with no
+    source text at all. Typing that text back in is what the editor is for,
+    and it compiles to the very package the board is already running: the
+    device *does* match. The project has still moved past what the board was
+    given, so this reads as pending - and the title and the chip say the same
+    thing about it, which is the whole point.
     """
-    written, retyped = _a_macro_source_edited_to_the_same_keystrokes()
-    assert compile_project_to_binary(written) == compile_project_to_binary(retyped)
+    from_the_device, retyped = _a_macro_source_restored_after_a_device_read()
+    # Reachable, not hypothetical: both are valid projects a write would accept.
+    assert validate_project(from_the_device) == ()
+    assert validate_project(retyped) == ()
+    assert from_the_device != retyped
+    assert compile_project_to_binary(from_the_device) == compile_project_to_binary(retyped)
 
-    session = ProjectSession(project=written)
+    session = ProjectSession(project=from_the_device).with_connection(True)
     agreed = session.with_device_hash(bytes.fromhex(session.compiled_hash))
     moved = replace(agreed, project=retyped)
 
+    assert moved.can_write is True
     assert moved.device_matches is True
     assert moved.dirty is True
     assert moved.pending is True
 
 
-def _a_macro_source_edited_to_the_same_keystrokes() -> tuple[DeviceProject, DeviceProject]:
-    """Two projects: same keystrokes, different source text."""
-    from duo_input.domain.models import Macro, MacroStep
-    from duo_input.generated.protocol import MacroStepType, TargetMode
+def _a_macro_source_restored_after_a_device_read() -> tuple[DeviceProject, DeviceProject]:
+    """What the board hands back for a TEXT macro, and that macro retyped.
 
-    def build(source_text: str) -> DeviceProject:
-        project = default_project()
-        step = MacroStep(type=MacroStepType.KEY_TAP, payload=bytes([0, 4]), source_text=source_text)
-        macro = Macro(id=1, name="M", target=TargetMode.INHERIT, steps=(step,))
+    The step the reader produces has the keystrokes and ``source_text=None``;
+    the editor labels it "From the device: N keystrokes". The step the editor
+    produces has the Unicode and an empty payload the compiler fills in. Same
+    package, different project - and every state here is one an operator
+    reaches by reading a board and typing into the macro they find there.
+    """
+    from duo_input.domain.config_reader import binary_to_project
+    from duo_input.domain.models import Macro
+    from duo_input.generated.protocol import TargetMode
+    from duo_input.ui.models.macro_steps import text_step
+
+    def with_macro(project: DeviceProject, steps) -> DeviceProject:
+        macro = Macro(id=1, name="Greeting", target=TargetMode.INHERIT, steps=tuple(steps))
         first = replace(project.profiles[0], macros=(macro,))
         return replace(project, profiles=(first,) + project.profiles[1:])
 
-    return build("a"), build("A")
+    typed = with_macro(default_project(), (text_step("hello"),))
+    from_the_device = binary_to_project(compile_project_to_binary(typed))
+    retyped = with_macro(from_the_device, (text_step("hello"),))
+    return from_the_device, retyped
 
 
 def test_disconnecting_clears_the_device_hash():

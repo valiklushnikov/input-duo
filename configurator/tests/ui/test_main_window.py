@@ -1106,34 +1106,42 @@ def test_the_marker_and_the_chip_agree_after_an_edit_during_a_write(
 def test_the_marker_and_the_chip_agree_on_an_edit_the_binary_cannot_see(
     qtbot, window, emulator
 ):
-    """The known corner: same keystrokes, different source text.
+    """The known corner, walked the way an operator reaches it.
 
-    The binary format stores keystrokes and never the text they were typed
-    from, so this compiles to the package the board is already holding. The
-    project has still moved past what was written, and both readers say so.
+    The package carries a TEXT macro's keystrokes and never the Unicode they
+    were typed from, so what the board hands back at startup has no source
+    text at all - the editor calls the step "From the device: N keystrokes".
+    Typing that text back in is what the editor is for, and it compiles to
+    the very package the board is already running. The project has moved past
+    what was written, and both readers say so.
     """
-    from duo_input.domain.models import Macro, MacroStep
-    from duo_input.generated.protocol import MacroStepType, TargetMode
+    from duo_input.domain.models import Macro
+    from duo_input.generated.protocol import TargetMode
+    from duo_input.ui.models.macro_steps import text_step
+    from duo_input.ui.models.project_session import SetMacroSteps
 
-    def _with_source(project, source_text: str):
-        step = MacroStep(
-            type=MacroStepType.KEY_TAP, payload=bytes([0, 4]), source_text=source_text
-        )
-        macro = Macro(id=1, name="M", target=TargetMode.INHERIT, steps=(step,))
-        first = replace(project.profiles[0], macros=(macro,))
-        return replace(project, profiles=(first,) + project.profiles[1:])
+    macro = Macro(id=1, name="Greeting", target=TargetMode.INHERIT, steps=(text_step("hello"),))
+    typed = default_project()
+    typed = replace(
+        typed, profiles=(replace(typed.profiles[0], macros=(macro,)),) + typed.profiles[1:]
+    )
+    emulator.install_active(compile_project_to_binary(typed))
 
-    written = _with_source(default_project(), "a")
-    emulator.install_active(compile_project_to_binary(written))
-    window.set_session(replace(window.session, project=written))
+    # The startup read is the baseline: the window adopts what the board is
+    # running, so nothing is outstanding before the edit under test.
     _connect(qtbot, window, emulator)
+    on_screen = window.session.project.profiles[0].macros[0]
+    assert on_screen.steps[0].source_text is None
+    assert window.session.dirty is False
     assert window.session.device_matches is True
     _assert_the_marker_and_the_chip_agree(window)
 
-    window.set_session(
-        replace(window.session, project=_with_source(default_project(), "A"))
-    )
+    # The operator types the macro's text back in. Same keystrokes, so the
+    # board's package does not change - but the project has.
+    assert window.apply_command(SetMacroSteps(1, on_screen.uuid, (text_step("hello"),))) is True
 
+    assert window.session.is_valid is True
+    assert window.session.can_write is True
     assert window.session.device_matches is True
     assert window.session.dirty is True
     assert DIRTY_MARKER in window.windowTitle()
