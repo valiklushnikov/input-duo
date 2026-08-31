@@ -1044,6 +1044,33 @@ def test_a_macro_name_still_being_typed_survives_a_link_coming_back(
     assert "your edits were kept" in window.statusBar().currentMessage()
 
 
+def test_a_field_cleared_to_retype_does_not_become_a_rename_to_nothing(
+    qtbot, window, emulator
+):
+    """An emptied field must not turn into a rename the operator never made.
+
+    ``_name_is_valid`` accepts "", so the command would be applied: the
+    session goes dirty, and the board attaching a moment later has its
+    configuration refused with "your edits were kept" - for a rename nobody
+    asked for. The commit does not wait for focus-out either. Every device
+    event asks the pages for pending text, the reported mouse buttons
+    included, so this fires mid-word on the operator's ordinary workflow.
+    """
+    window.show_page(MainWindow.PAGE_PROFILES)
+    window.profiles.select_profile(1)
+    window.profiles.name_edit.clear()
+    assert window.session.dirty is False
+
+    on_board = ProjectSession.new().apply(RenameProfile(1, "Конфигурация платы")).project
+    emulator.install_active(compile_project_to_binary(on_board))
+
+    _connect(qtbot, window, emulator)
+    qtbot.wait(200)
+
+    assert window.session.project.profiles[0].name == "Конфигурация платы"
+    assert "your edits were kept" not in window.statusBar().currentMessage()
+
+
 def test_two_fields_being_typed_at_once_both_survive_a_board_attaching(
     qtbot, window, emulator
 ):

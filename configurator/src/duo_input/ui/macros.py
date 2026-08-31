@@ -639,9 +639,12 @@ class MacrosPage(QWidget):
 
     def _pending_name_command(self) -> RenameMacro | None:
         macro = self.macro()
-        if self._updating or macro is None or self.name_edit.text() == macro.name:
+        name = self.name_edit.text()
+        # An empty field commits nothing; see the same guard on the Profiles
+        # page for why the stored name stands instead.
+        if self._updating or macro is None or not name or name == macro.name:
             return None
-        return RenameMacro(self.profile.id, macro.uuid, self.name_edit.text())
+        return RenameMacro(self.profile.id, macro.uuid, name)
 
     def _on_target_changed(self, _index: int) -> None:
         macro = self.macro()

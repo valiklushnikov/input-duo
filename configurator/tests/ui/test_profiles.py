@@ -81,6 +81,29 @@ def test_an_unchanged_name_asks_for_nothing(page):
     assert seen == []
 
 
+def test_an_emptied_name_asks_for_nothing_and_the_stored_name_stands(page):
+    """Clearing the field is somebody about to retype, not a rename to "".
+
+    Validation accepts an empty name, so the command would be applied: the
+    session goes dirty over a rename the operator never made, and the next
+    board to attach has its configuration refused with "your edits were kept".
+    The commit does not only run on focus-out either - every device event
+    asks the pages for pending text, so a mouse button the board reports is
+    enough to fire it mid-word.
+    """
+    page.select_profile(2)
+    stored = page.session.project.profiles[1].name
+    seen: list[object] = []
+    page.command_requested.connect(seen.append)
+
+    page.name_edit.clear()
+    page.name_edit.editingFinished.emit()
+
+    assert seen == []
+    assert page.pending_edit_command() is None
+    assert page.session.project.profiles[1].name == stored
+
+
 def test_choosing_a_colour_asks_for_it(page, qtbot):
     page.select_profile(3)
 

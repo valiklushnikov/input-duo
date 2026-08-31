@@ -86,6 +86,24 @@ def test_the_page_lists_the_macros_of_the_active_profile(page):
     assert "Куркума" in page.macro_list.item(0).text()
 
 
+def test_an_emptied_macro_name_asks_for_nothing(page):
+    """The same as on the Profiles page: an empty field commits nothing.
+
+    A device event asks every editor page for the text it is still holding,
+    so a field cleared to retype would otherwise be committed as a rename to
+    "" by the next button the board reports.
+    """
+    seen: list[object] = []
+    page.command_requested.connect(seen.append)
+
+    page.name_edit.clear()
+    page.name_edit.editingFinished.emit()
+
+    assert seen == []
+    assert page.pending_edit_command() is None
+    assert _macro(page).name == "Куркума"
+
+
 def test_adding_a_macro_asks_for_one(page, qtbot):
     with qtbot.waitSignal(page.command_requested) as blocker:
         page.add_macro_button.click()

@@ -285,6 +285,14 @@ class ProfilesPage(QWidget):
         if self._updating:
             return None
         name = self.name_edit.text()
+        if not name:
+            # An emptied field is somebody about to retype, not a request to
+            # call the profile "". Validation accepts the empty string, so
+            # committing it would be a rename the operator never made - and
+            # this runs on every device event, not only on focus-out, so a
+            # mouse button the board reports is enough to fire it mid-word.
+            # The stored name stands.
+            return None
         if name == self._profile(self._selected_id).name:
             return None
         return RenameProfile(self._selected_id, name)
