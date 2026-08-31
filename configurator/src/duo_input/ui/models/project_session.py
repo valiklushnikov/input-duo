@@ -3,8 +3,9 @@
 Three hashes describe three different things and are never conflated:
 
 ``file_hash``
-    SHA-256 of the ``.duoinput.json`` bytes that are currently on disk. Empty
-    while the session has never been saved or loaded.
+    SHA-256 of the ``.duoinput.json`` bytes the last :meth:`ProjectSession.save`
+    wrote. Empty until a copy has been saved - loading one in the shell goes
+    through :meth:`with_project`, which touches no hash at all.
 ``compiled_hash``
     SHA-256 of ``compile_project_to_binary`` applied to the project **as it is
     in memory right now**. This is the package a write would send.
@@ -17,6 +18,11 @@ last known to agree with the device (see ``agreeing_with_device``), or the
 pristine project of a brand-new session. Saving to a file sets ``file_hash``
 but never touches the baseline: a file is a copy, not the truth, so writing
 one leaves ``dirty`` exactly as it was.
+
+``pending`` is the question the window actually asks, and the one both the
+title's marker and the state chip read: is there anything the board has not
+been given? That is ``dirty``, or a board that is attached and holding
+something else - ``dirty`` on its own answers only half of it.
 
 Every mutation returns a *new* session: :meth:`ProjectSession.apply` takes a
 command object and hands back a fresh session, so editors never mutate shared

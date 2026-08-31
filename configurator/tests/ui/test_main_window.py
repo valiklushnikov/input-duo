@@ -682,15 +682,16 @@ def test_a_device_present_at_startup_still_supplies_the_project(
 def test_a_device_plugged_in_after_startup_leaves_the_open_project_alone(
     qtbot, service, emulator, settings, tmp_path
 ):
-    """The read belongs to startup, not to every connect.
+    """The answer belongs to the guard, not the request to the clock.
 
     The autoconnect timer runs for the life of the window, so without this
     the harm is the program's primary workflow: the operator opens their
     project, edits it, saves a copy, and only then plugs the board in - in
-    order to write that project to it. A read fired by that connect would
-    replace their project with the board's and drop ``session.path``. The
-    next Write then sends the board's own configuration back instead of
-    theirs.
+    order to write that project to it. Every attach asks the board what it
+    is running, this one included; what protects them is that the answer is
+    refused while their edits are unwritten. Adopting it would replace their
+    project with the board's and drop ``session.path``, and the next Write
+    would send the board's own configuration back instead of theirs.
     """
     from duo_input.ui.models.project_session import RenameProfile
 
@@ -779,11 +780,11 @@ def test_a_device_that_turns_up_clears_the_no_device_message(qtbot, window, emul
     """The status bar must not contradict the connection chip.
 
     "No device found..." is posted with no timeout, so it stays on screen
-    until something replaces it - and on any connect after the first, nothing
-    does: the startup read has already been spent, and no other step on the
-    connect path writes to the status bar. The window then says the device is
-    ready in one place and absent in another, on what the code's own comments
-    call the primary workflow.
+    until something replaces it - and on a connect whose read is refused, or
+    skipped because the board already holds what is on screen, nothing does:
+    no other step on the connect path writes to the status bar. The window
+    then says the device is ready in one place and absent in another, on what
+    the code's own comments call the primary workflow.
     """
     # Nothing attached: the message is posted, and posted without a timeout.
     window.try_autoconnect()
