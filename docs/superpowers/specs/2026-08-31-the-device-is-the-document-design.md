@@ -125,10 +125,13 @@ to clear the warning.
 
 What that costs is paid where the answer lands, not where the request goes
 out. Issuing the read is unconditional and costs a few chunks over the wire;
-adopting it is refused while the session is dirty, and refused while an editor
-page still holds text that has not been committed — the pages are asked to
-commit first, so a name being typed when a board attaches becomes an edit the
-dirty guard can see rather than a field that gets overwritten. And when the
+adopting it is refused while the session is dirty, and that one guard is the
+whole of it. An editor page still holding text that has not been committed is
+asked to commit it first, so a name being typed when a board attaches becomes
+an edit the dirty guard can see rather than a field that gets overwritten —
+which is not a second refusal, because two guards asking the same question are
+two answers waiting to disagree. Every page is asked before any one page's
+answer is applied, since applying one repaints them all. And when the
 package the board sends is byte-for-byte what the project already compiles to,
 adoption is skipped entirely: the board has nothing to teach the project, while
 decoding its answer would cost detail the binary cannot carry — a TEXT macro
@@ -159,6 +162,14 @@ and that autosave did not actually work today.
 - Closing the window with unwritten changes does not prompt.
 - Starting with no device leaves an empty project and says so.
 - Starting with a device shows the device's configuration, unchanged.
+- Every attach reads, not only the window's first: a board plugged in after
+  startup, or swapped for another, is read like any other.
+- A board holding exactly the package the project compiles to is not adopted.
+  What is on screen survives it, baseline and all — including a macro's source
+  text, which the binary does not carry.
+- A name still being typed when a board attaches is committed before the guard
+  weighs the answer, and two fields being typed at once both survive: every
+  page is asked before any one page's answer is applied.
 - No test references `autosave`, `offer_recovery`, or `projects/last` when the
   work is done.
 

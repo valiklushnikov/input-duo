@@ -661,9 +661,9 @@ def test_a_device_present_at_startup_still_supplies_the_project(
     """The connect-triggered read is what makes startup work; nothing else asks.
 
     Unlike the test above, nothing here calls ``read_device_project``: the
-    window has to ask on its own, which is the whole point of spec section 3
-    ("At startup, a device that answers has its configuration read and
-    shown").
+    window has to ask on its own, which is the whole point of section 3 of the
+    read-configuration design ("If a device answered, its configuration is
+    read and becomes the session").
     """
     from duo_input.ui.models.project_session import RenameProfile
 

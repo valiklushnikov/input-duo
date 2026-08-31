@@ -18,10 +18,9 @@ carries the offsets and record sizes to find them. Only the reader is missing.
 
 ## What this changes
 
-At startup, a device that answers has its configuration read and shown. The
-operator sees what is actually running on the hardware without pressing
-anything. When no device answers, the last project file opens instead, exactly
-as it does today.
+A device that answers has its configuration read and shown. The operator sees
+what is actually running on the hardware without pressing anything. When no
+device answers, the program opens empty and the status bar says so.
 
 **Explicitly out of scope.** No "Read from device" button: the whole point is
 that it happens on its own. No firmware change, no protocol change — this reads
@@ -82,7 +81,7 @@ save without anyone noticing.
 Everything else is exact: profile names, colours, routes, layout, bindings,
 macro names and every other step type.
 
-## 3. Startup order
+## 3. Attach order
 
 The device wins. This is a deliberate choice with a cost, taken because the
 question the operator asks on opening the program is "what is my device doing?"
@@ -91,17 +90,46 @@ question the operator asks on opening the program is "what is my device doing?"
 2. If a device answered, its configuration is read and becomes the session.
    The session has no file path — it came from hardware, not from disk — so
    the first save asks where to put it.
-3. If no device answered, the last project file opens, as it does today.
-4. The autosave recovery is offered afterwards, unchanged. This is the
-   safeguard for edits that were never written to the device: they live in the
-   autosave and are offered back.
+3. If no device answered, the program opens empty, and the status bar says a
+   device was not found and names the way back in: load a copy from a file, or
+   attach a board.
 
-**One protection beyond that.** If the session already has unsaved local edits
-by the time the read finishes, the read does not replace it. The read is
-asynchronous — several chunks over a serial link — and an operator who started
-typing during it must not have their work discarded by an answer that arrived
-late. In that case the device's configuration is dropped and a line in the
-status bar says so.
+**Step 2 belongs to every attach, not only the one at startup.** A board
+plugged in an hour after the window opened, or swapped for a different one, is
+just as much a board whose configuration nobody has seen, and there is no
+control anywhere that asks on the operator's behalf. Issuing the read is
+unconditional and costs a few chunks over the wire. What it costs beyond that
+is paid where the answer lands, not where the request goes out.
+
+**Two things can refuse the answer**, and both are decided when it arrives.
+
+*The board already holds what is on screen.* If the package the device sends is
+byte-for-byte what the project compiles to, adoption is skipped: the board has
+nothing to teach the project, and decoding its answer would cost detail the
+binary cannot carry (section 2). Only the baseline is re-agreed.
+
+*The session has unsaved local edits.* The read is asynchronous — several
+chunks over a serial link — and an operator who started typing during it must
+not have their work discarded by an answer that arrived late. In that case the
+device's configuration is dropped and a line in the status bar says so.
+
+**There is one guard, not two.** Text an editor page is still holding — a name
+typed but not yet committed, because the name fields turn text into a command
+on `editingFinished` — is committed before the answer is weighed, so it becomes
+an edit the dirty guard can see rather than a field the repaint overwrites.
+Committing is not a second refusal of its own: it gives the single dirty guard
+something to look at, and that guard then decides. Every page is asked before
+any one page's answer is applied, because applying one repaints them all.
+
+**What later changes replaced.** As approved, this section had two more steps:
+if no device answered the last project file opened, and the autosave recovery
+was offered afterwards. Both are gone, and so is the startup-only read.
+*The device is the document*
+(`2026-08-31-the-device-is-the-document-design.md`) removed the last-project
+memory and autosave outright — a file is a copy of the device, not the thing
+being edited — and its section 5 is where the every-attach read, the identity
+skip and the commit-first step were settled. They are written out here so the
+read feature's own spec stops describing behaviour the program no longer has.
 
 ## 4. What already exists
 
@@ -126,9 +154,12 @@ maximum macro ID.
 CRC, a bad magic, an offset pointing past the end, a count that overflows its
 table: each raises `ProjectError` and nothing else.
 
-**The startup order.** A device present means its configuration is shown; a
-device absent means the last file opens; a session with unsaved edits is not
-replaced by a late read.
+**The attach order.** A device present means its configuration is shown; a
+device absent means the program opens empty and says so; a session with unsaved
+edits is not replaced by a late read; a board that arrives after startup is
+read like any other; a board holding exactly what is on screen is not adopted
+at all; and a name still being typed when a board attaches is committed first,
+so the dirty guard sees it.
 
 **On real hardware.** Write a known project to the board, restart the
 configurator, and confirm the same project comes back.
@@ -139,8 +170,9 @@ configurator, and confirm the same project comes back.
 why it is the primary test rather than an afterthought.
 
 **A device configuration replaces work the operator wanted.** Mitigated by the
-autosave recovery and by the unsaved-edits protection in section 3. This is the
-cost of "the device wins", accepted deliberately.
+unsaved-edits protection in section 3 — which, with autosave gone (see *What
+later changes replaced*), is the whole of the mitigation now. This is the cost
+of "the device wins", accepted deliberately.
 
 **Text macros silently lose their source.** Mitigated by marking the step in
 the editor rather than letting it look like an ordinary text step.
