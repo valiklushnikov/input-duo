@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 
 from duo_input.device.service import DeviceService, DeviceState
 from duo_input.domain.config_reader import binary_to_project
-from duo_input.domain.project_store import ProjectError
+from duo_input.domain.project_store import ProjectError, load_project
 from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.domain.validation import ValidationIssue
 from duo_input.i18n import TranslationManager
@@ -72,10 +72,6 @@ MINIMUM_HEIGHT = 700
 
 TransportFactory = Callable[[], object | None]
 
-
-#: Where the path of the last project is kept between runs, so the program
-#: opens what the operator was working on rather than an empty one.
-LAST_PROJECT_KEY = "projects/last"
 
 #: How often the shell looks for a device that is not attached yet. Short
 #: enough that plugging a board in feels immediate, long enough that the
@@ -156,13 +152,13 @@ class MainWindow(QMainWindow):
         #: operator's to lose" - no file opened or saved, no unsaved edits -
         #: because the alternative was replacing a saved project the moment a
         #: board is plugged in to receive it. Snapshotted at the moment a
-        #: connection attempt begins, not when its read is queued or lands:
-        #: ``start_window`` opens the port before it reopens the last
-        #: project, so checking the session at either later point would see
-        #: that reopen's path already set and wrongly refuse the very read
-        #: the startup case depends on (a bare ``session.path`` guard was
-        #: tried before and rejected for exactly this reason). What has to
-        #: be untouched is the session at the moment this attempt began, not
+        #: connection attempt begins, not when its read is queued or lands: a
+        #: synchronous step - saving or loading a copy, say - could run in
+        #: between and change ``session.path`` or ``dirty``, and checking at
+        #: either later point would wrongly refuse the very read the startup
+        #: case depends on (a bare ``session.path`` guard was tried before
+        #: and rejected for exactly this reason). What has to be untouched
+        #: is the session at the moment this attempt began, not
         #: at whatever point another synchronous step gets to run next. When
         #: the device and the project disagree, the mismatch stays visible
         #: in the state strip instead.
@@ -274,12 +270,14 @@ class MainWindow(QMainWindow):
         set_role(self.connection_label, ROLE_CHIP)
         set_signal(self.connection_label, SIGNAL_MUTED)
 
-        self.open_button = QPushButton(self.tr("Open"), bar)
-        self.open_button.setAccessibleName(self.tr("Open a project file"))
+        self.open_button = QPushButton(self.tr("Load a copy..."), bar)
+        self.open_button.setAccessibleName(self.tr("Load a configuration from a file"))
         self.open_button.clicked.connect(self._on_open_clicked)
 
-        self.save_button = QPushButton(self.tr("Save"), bar)
-        self.save_button.setAccessibleName(self.tr("Save the project file"))
+        self.save_button = QPushButton(self.tr("Save a copy..."), bar)
+        self.save_button.setAccessibleName(
+            self.tr("Save a copy of the configuration to a file")
+        )
         set_role(self.save_button, ROLE_PRIMARY)
         self.save_button.clicked.connect(self._on_save_clicked)
 
@@ -581,7 +579,7 @@ class MainWindow(QMainWindow):
 
     def _ask_save_path(self) -> Path | None:
         name, _ = QFileDialog.getSaveFileName(
-            self, self.tr("Save project"), "", PROJECT_FILTER
+            self, self.tr("Save a copy"), "", PROJECT_FILTER
         )
         if not name:
             return None
@@ -590,78 +588,60 @@ class MainWindow(QMainWindow):
             path = path.with_name(path.stem + ".duoinput.json")
         return path
 
-    def save_project(self, path: str | Path | None = None) -> bool:
-        """Save the project. Returns False when the operator cancels or it fails."""
-        target = Path(path) if path is not None else self._session.path
+    def save_copy(self, path: str | Path | None = None) -> bool:
+        """Save a copy of the project to a file.
+
+        Always asks where to put it unless ``path`` is given directly: a copy
+        is not "the open file", so there is no remembered location to fall
+        back to. Returns False when the operator cancels or it fails.
+        """
+        target = Path(path) if path is not None else self._ask_save_path()
         if target is None:
-            target = self._ask_save_path()
-            if target is None:
-                return False
+            return False
         try:
             saved = self._session.save(target)
         except (ProjectError, OSError) as error:
-            self.overview.append_event("save_project", type(error).__name__)
+            self.overview.append_event("save_copy", type(error).__name__)
             QMessageBox.critical(self, self.tr("Save failed"), str(error))
             return False
         self.set_session(saved)
-        self._remember_project(saved.path)
         self.statusBar().showMessage(self.tr("Project saved"))
         return True
 
     def _on_save_clicked(self) -> None:
-        self.save_project()
+        self.save_copy()
 
     def _ask_open_path(self) -> Path | None:
         name, _ = QFileDialog.getOpenFileName(
-            self, self.tr("Open project"), "", PROJECT_FILTER
+            self, self.tr("Load a copy"), "", PROJECT_FILTER
         )
         return Path(name) if name else None
 
     def _on_open_clicked(self) -> None:
         path = self._ask_open_path()
         if path is not None:
-            self.open_project(path)
+            self.load_copy(path)
 
-    def open_project(self, path: str | Path) -> bool:
-        """Read a project file into the session. False when it could not be read."""
+    def load_copy(self, path: str | Path) -> bool:
+        """Read a copy of a configuration from a file into the current session.
+
+        Replaces only the project: the baseline and the device hash carry
+        over unchanged, so whether the result reads as changed still follows
+        from whether it actually differs from what the board holds - not
+        from having just been read off disk. False when the file could not
+        be read.
+        """
         try:
-            session = ProjectSession.load(path)
+            project = load_project(path)
         except (ProjectError, OSError) as error:
-            self.overview.append_event("open_project", type(error).__name__)
+            self.overview.append_event("load_copy", type(error).__name__)
             self.statusBar().showMessage(
                 self.tr("That project could not be opened: {0}").format(error)
             )
             return False
-        self.set_session(session)
-        self._remember_project(session.path)
+        self.set_session(self._session.with_project(project))
         self.statusBar().showMessage(self.tr("Project opened"))
         return True
-
-    def last_project_path(self) -> Path | None:
-        """The file this program had open when it was last used, if it is still there."""
-        stored = self._settings.value(LAST_PROJECT_KEY)
-        if not stored:
-            return None
-        path = Path(str(stored))
-        return path if path.is_file() else None
-
-    def _remember_project(self, path: Path | None) -> None:
-        if path is None:
-            return
-        self._settings.setValue(LAST_PROJECT_KEY, str(path))
-        self._settings.sync()
-
-    def reopen_last_project(self) -> bool:
-        """Open what was open last time, silently. False when there is nothing to open.
-
-        A file that has been moved or deleted since is not an error worth a
-        dialog: the operator gets an empty project and a line in the status
-        bar, which is what they would get from a first run anyway.
-        """
-        path = self.last_project_path()
-        if path is None:
-            return False
-        return self.open_project(path)
 
     # ----------------------------------------------------------------- device
 

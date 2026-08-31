@@ -777,83 +777,111 @@
 <context>
     <name>MainWindow</name>
     <message>
-        <location filename="../../ui/main_window.py" line="207"/>
+        <location filename="../../ui/main_window.py" line="203"/>
         <source>Sections</source>
-        <extracomment>Where the path of the last project is kept between runs, so the program opens what the operator was working on rather than an empty one. How often the shell looks for a device that is not attached yet. Short enough that plugging a board in feels immediate, long enough that the retry costs nothing while the socket stays empty. Navigation rows, in the order the sections appear. Mouse buttons the attached device has actually reported. Set while a device-initiated read is in flight, so its answer - which arrives on ``operation_succeeded`` several chunks later - is only adopted when it is actually the read this window asked for. Set once the connect hook has queued its read. The device wins at startup and only at startup: the autoconnect timer runs for the life of the window, so a read on every connect would replace the operator&apos;s open project with the board&apos;s the moment they plug a board in to write that project to it - saving no longer clears ``dirty``, so the dirty guard below is not bypassed in that scenario any more - and drop the file path with it. DECISION (not an oversight): the spec says the device always wins. Narrowed to &quot;the device wins when there is nothing of the operator&apos;s to lose&quot; - no file opened or saved, no unsaved edits - because the alternative was replacing a saved project the moment a board is plugged in to receive it. Snapshotted at the moment a connection attempt begins, not when its read is queued or lands: ``start_window`` opens the port before it reopens the last project, so checking the session at either later point would see that reopen&apos;s path already set and wrongly refuse the very read the startup case depends on (a bare ``session.path`` guard was tried before and rejected for exactly this reason). What has to be untouched is the session at the moment this attempt began, not at whatever point another synchronous step gets to run next. When the device and the project disagree, the mismatch stays visible in the state strip instead. Set once ``try_autoconnect`` has told the operator no device answered, so that message is said once rather than on every retry.</extracomment>
+        <extracomment>How often the shell looks for a device that is not attached yet. Short enough that plugging a board in feels immediate, long enough that the retry costs nothing while the socket stays empty. Navigation rows, in the order the sections appear. Mouse buttons the attached device has actually reported. Set while a device-initiated read is in flight, so its answer - which arrives on ``operation_succeeded`` several chunks later - is only adopted when it is actually the read this window asked for. Set once the connect hook has queued its read. The device wins at startup and only at startup: the autoconnect timer runs for the life of the window, so a read on every connect would replace the operator&apos;s open project with the board&apos;s the moment they plug a board in to write that project to it - saving no longer clears ``dirty``, so the dirty guard below is not bypassed in that scenario any more - and drop the file path with it. DECISION (not an oversight): the spec says the device always wins. Narrowed to &quot;the device wins when there is nothing of the operator&apos;s to lose&quot; - no file opened or saved, no unsaved edits - because the alternative was replacing a saved project the moment a board is plugged in to receive it. Snapshotted at the moment a connection attempt begins, not when its read is queued or lands: a synchronous step - saving or loading a copy, say - could run in between and change ``session.path`` or ``dirty``, and checking at either later point would wrongly refuse the very read the startup case depends on (a bare ``session.path`` guard was tried before and rejected for exactly this reason). What has to be untouched is the session at the moment this attempt began, not at whatever point another synchronous step gets to run next. When the device and the project disagree, the mismatch stays visible in the state strip instead. Set once ``try_autoconnect`` has told the operator no device answered, so that message is said once rather than on every retry.</extracomment>
         <translation>Разделы</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="221"/>
+        <location filename="../../ui/main_window.py" line="217"/>
         <source>Overview</source>
         <translation>Обзор</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="222"/>
+        <location filename="../../ui/main_window.py" line="218"/>
         <source>Profiles</source>
         <translation>Профили</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="223"/>
+        <location filename="../../ui/main_window.py" line="219"/>
         <source>Bindings</source>
         <translation>Назначения</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="224"/>
+        <location filename="../../ui/main_window.py" line="220"/>
         <source>Macros</source>
         <translation>Макросы</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="225"/>
+        <location filename="../../ui/main_window.py" line="221"/>
         <source>Mouse</source>
         <translation>Мышь</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="226"/>
+        <location filename="../../ui/main_window.py" line="222"/>
         <source>Diagnostics</source>
         <translation>Диагностика</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="227"/>
+        <location filename="../../ui/main_window.py" line="223"/>
         <source>Settings</source>
         <translation>Настройки</translation>
     </message>
     <message>
+        <location filename="../../ui/main_window.py" line="273"/>
+        <source>Load a copy...</source>
+        <translation>Загрузить копию…</translation>
+    </message>
+    <message>
+        <location filename="../../ui/main_window.py" line="274"/>
+        <source>Load a configuration from a file</source>
+        <translation>Загрузить конфигурацию из файла</translation>
+    </message>
+    <message>
         <location filename="../../ui/main_window.py" line="277"/>
+        <source>Save a copy...</source>
+        <translation>Сохранить копию…</translation>
+    </message>
+    <message>
+        <location filename="../../ui/main_window.py" line="279"/>
+        <source>Save a copy of the configuration to a file</source>
+        <translation>Сохранить копию конфигурации в файл</translation>
+    </message>
+    <message>
+        <location filename="../../ui/main_window.py" line="582"/>
+        <source>Save a copy</source>
+        <translation>Сохранение копии</translation>
+    </message>
+    <message>
+        <location filename="../../ui/main_window.py" line="616"/>
+        <source>Load a copy</source>
+        <translation>Загрузка копии</translation>
+    </message>
+    <message>
         <source>Open</source>
-        <translation>Открыть</translation>
+        <translation type="vanished">Открыть</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="278"/>
         <source>Open a project file</source>
-        <translation>Открыть файл проекта</translation>
+        <translation type="vanished">Открыть файл проекта</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="348"/>
+        <location filename="../../ui/main_window.py" line="346"/>
         <source>Problems that block a write</source>
         <translation>Проблемы, мешающие записи</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="358"/>
+        <location filename="../../ui/main_window.py" line="356"/>
         <source>Transfer progress</source>
         <translation>Ход передачи</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="247"/>
+        <location filename="../../ui/main_window.py" line="243"/>
         <source>Ready</source>
         <translation>Готово</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="264"/>
+        <location filename="../../ui/main_window.py" line="260"/>
         <source>Profile:</source>
         <translation>Профиль:</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="267"/>
+        <location filename="../../ui/main_window.py" line="263"/>
         <source>Active profile</source>
         <translation>Активный профиль</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="273"/>
+        <location filename="../../ui/main_window.py" line="269"/>
         <source>Device connection</source>
         <translation>Подключение устройства</translation>
     </message>
@@ -866,42 +894,40 @@
         <translation type="vanished">Подключить или отключить устройство</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="281"/>
         <source>Save</source>
-        <translation>Сохранить</translation>
+        <translation type="vanished">Сохранить</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="282"/>
         <source>Save the project file</source>
-        <translation>Сохранить файл проекта</translation>
+        <translation type="vanished">Сохранить файл проекта</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="288"/>
+        <location filename="../../ui/main_window.py" line="286"/>
         <source>Write to device</source>
         <translation>Записать в устройство</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="289"/>
+        <location filename="../../ui/main_window.py" line="287"/>
         <source>Write the configuration to the device</source>
         <translation>Записать конфигурацию в устройство</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="318"/>
+        <location filename="../../ui/main_window.py" line="316"/>
         <source>Local changes</source>
         <translation>Локальные изменения</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="319"/>
+        <location filename="../../ui/main_window.py" line="317"/>
         <source>Project file</source>
         <translation>Файл проекта</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="320"/>
+        <location filename="../../ui/main_window.py" line="318"/>
         <source>Configuration on the device</source>
         <translation>Конфигурация в устройстве</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="339"/>
+        <location filename="../../ui/main_window.py" line="337"/>
         <source>Fix these before writing to the device.</source>
         <translation>Исправьте это перед записью в устройство.</translation>
     </message>
@@ -918,12 +944,12 @@
         <translation type="vanished">Duo Input закрылся с несохранёнными изменениями в {0} от {1}. Восстановить их?</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="494"/>
+        <location filename="../../ui/main_window.py" line="492"/>
         <source>Untitled project</source>
         <translation>Безымянный проект</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="503"/>
+        <location filename="../../ui/main_window.py" line="501"/>
         <source>Device: {0}</source>
         <translation>Устройство: {0}</translation>
     </message>
@@ -932,47 +958,46 @@
         <translation type="vanished">Отключить</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="516"/>
+        <location filename="../../ui/main_window.py" line="514"/>
         <source>Local changes: unsaved</source>
         <translation>Локальные изменения: не сохранены</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="518"/>
+        <location filename="../../ui/main_window.py" line="516"/>
         <source>Local changes: none</source>
         <translation>Локальные изменения: нет</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="524"/>
+        <location filename="../../ui/main_window.py" line="522"/>
         <source>Project file: not created yet</source>
         <translation>Файл проекта: ещё не создан</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="527"/>
+        <location filename="../../ui/main_window.py" line="525"/>
         <source>Project file: {0}</source>
         <translation>Файл проекта: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="532"/>
+        <location filename="../../ui/main_window.py" line="530"/>
         <source>Written to device: no link</source>
         <translation>Записано в устройство: нет связи</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="535"/>
+        <location filename="../../ui/main_window.py" line="533"/>
         <source>Written to device: matches the project</source>
         <translation>Записано в устройство: совпадает с проектом</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="538"/>
+        <location filename="../../ui/main_window.py" line="536"/>
         <source>Written to device: differs from the project</source>
         <translation>Записано в устройство: отличается от проекта</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="584"/>
         <source>Save project</source>
-        <translation>Сохранить проект</translation>
+        <translation type="vanished">Сохранить проект</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="604"/>
+        <location filename="../../ui/main_window.py" line="605"/>
         <source>Save failed</source>
         <translation>Сохранить не удалось</translation>
     </message>
@@ -982,42 +1007,41 @@
         <translation>Проект сохранён</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="616"/>
         <source>Open project</source>
-        <translation>Открыть проект</translation>
+        <translation type="vanished">Открыть проект</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="632"/>
+        <location filename="../../ui/main_window.py" line="639"/>
         <source>That project could not be opened: {0}</source>
         <translation>Не удалось открыть проект: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="637"/>
+        <location filename="../../ui/main_window.py" line="643"/>
         <source>Project opened</source>
         <translation>Проект открыт</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="675"/>
+        <location filename="../../ui/main_window.py" line="655"/>
         <source>No Duo Input device was found</source>
         <translation>Устройство Duo Input не найдено</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="701"/>
+        <location filename="../../ui/main_window.py" line="681"/>
         <source>No device found. Load a copy from a file, or plug the device in.</source>
         <translation>Устройство не найдено. Загрузите копию из файла или подключите устройство.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="828"/>
+        <location filename="../../ui/main_window.py" line="808"/>
         <source>The device has a different configuration; your edits were kept.</source>
         <translation>На устройстве другая конфигурация; ваши правки сохранены.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="836"/>
+        <location filename="../../ui/main_window.py" line="816"/>
         <source>The device&apos;s configuration could not be read: {0}</source>
         <translation>Не удалось прочитать конфигурацию устройства: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="840"/>
+        <location filename="../../ui/main_window.py" line="820"/>
         <source>Configuration read from the device</source>
         <translation>Конфигурация прочитана с устройства</translation>
     </message>

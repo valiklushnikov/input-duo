@@ -62,32 +62,23 @@ def build_main_window(
 
 
 def start_window(window: MainWindow) -> None:
-    """Show the shell and restore what the operator was working on.
+    """Show the shell and give it its first chance to find a device.
 
-    The file opens first, and the device replaces it. That order looks
-    backwards and is not: the read is asynchronous, so branching on whether
-    a device is present means branching before it has answered - the port is
-    open long before the handshake finishes, and a device that never answers
-    would leave the operator with neither its configuration nor their file.
-    Opening the file costs nothing when a device does answer, because
-    adopting its configuration replaces an unmodified session anyway.
+    There is no file to reopen any more - the device is the document, and a
+    file is only ever a copy the operator asks for by name. So this is
+    startup's whole job: show the window and look for a board.
 
-    This is a function rather than three lines inside ``main`` so that the
+    This is a function rather than two lines inside ``main`` so that the
     order can be tested: a step that only ``main`` performs is a step nothing
     can prove is still wired.
     """
     window.show()
-    # Called here, synchronously, rather than left to the window's own
-    # deferred attach: the port has to be open before the next line asks
-    # about the file, or the fallback below is never actually exercised.
-    # test_startup_falls_back_to_the_file_when_the_device_never_answers
-    # asserts straight after start_window() without pumping the event loop,
-    # so with only the deferred attach no device would be in play at all by
-    # then and the test would pass without proving anything. Blocking on a
-    # port open before the first paint is the price of that proof; it is a
-    # local enumeration, not a handshake, which still happens on the loop.
+    # Called here, synchronously, rather than left entirely to the window's
+    # own deferred attach: a board already plugged in should be found before
+    # the first paint, not two ticks after the operator is already looking
+    # at a "disconnected" chip. Blocking on a port open here is a local
+    # enumeration, not a handshake, which still happens on the loop.
     window.try_autoconnect()
-    window.reopen_last_project()
 
 
 def main(argv: list[str] | None = None) -> int:

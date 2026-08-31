@@ -158,57 +158,53 @@ def test_the_shell_offers_a_way_to_open_a_project(window):
     assert window.open_button.accessibleName()
 
 
-def test_opening_a_project_reads_it_and_remembers_the_path(qtbot, window, tmp_path):
-    saved = tmp_path / "kept.duoinput.json"
-    window.set_session(window.session.apply(RenameProfile(1, "Nine")))
-    assert window.save_project(saved) is True
+def test_saving_a_copy_remembers_nothing(qtbot, window, tmp_path, settings):
+    """A copy is a copy: it does not become "the open file"."""
+    target = tmp_path / "copy.duoinput.json"
+    window.set_session(window.session.apply(RenameProfile(1, "Copied")))
+
+    assert window.save_copy(target) is True
+
+    assert target.is_file()
+    assert settings.value("projects/last") is None
+
+
+def test_loading_a_copy_replaces_the_configuration(qtbot, window, tmp_path):
+    target = tmp_path / "copy.duoinput.json"
+    window.set_session(window.session.apply(RenameProfile(1, "From a copy")))
+    assert window.save_copy(target) is True
     window.set_session(ProjectSession.new())
-    assert window.session.active_profile.name != "Nine"
 
-    assert window.open_project(saved) is True
+    assert window.load_copy(target) is True
 
-    assert window.session.active_profile.name == "Nine"
-    assert window.session.path == saved
-    assert window.last_project_path() == saved
+    assert window.session.active_profile.name == "From a copy"
 
 
-def test_a_project_that_cannot_be_read_is_reported_not_fatal(qtbot, window, tmp_path):
+def test_a_copy_that_cannot_be_read_is_reported_not_fatal(qtbot, window, tmp_path):
     broken = tmp_path / "broken.duoinput.json"
     broken.write_text("{ not json", encoding="utf-8")
 
-    assert window.open_project(broken) is False
-
-    assert window.session.path is None
+    assert window.load_copy(broken) is False
 
 
-def test_the_last_project_is_reopened_on_the_next_run(qtbot, service, tmp_path, settings):
-    first = MainWindow(service, transport_factory=lambda: None, settings=settings)
-    qtbot.addWidget(first)
-    saved = tmp_path / "again.duoinput.json"
-    first.set_session(first.session.apply(RenameProfile(1, "Kept")))
-    assert first.save_project(saved) is True
-
-    later = MainWindow(DeviceService(timeout_ms=5000), transport_factory=lambda: None, settings=settings)
-    qtbot.addWidget(later)
-    later.reopen_last_project()
-
-    assert later.session.path == saved
-    assert later.session.active_profile.name == "Kept"
+def test_the_shell_no_longer_reopens_anything(window):
+    assert not hasattr(window, "reopen_last_project")
+    assert not hasattr(window, "last_project_path")
 
 
-def test_a_remembered_project_that_vanished_leaves_a_clean_start(qtbot, service, tmp_path, settings):
-    """A file moved or deleted between runs must not stop the program opening."""
-    gone = tmp_path / "gone.duoinput.json"
-    first = MainWindow(service, transport_factory=lambda: None, settings=settings)
-    qtbot.addWidget(first)
-    assert first.save_project(gone) is True
-    gone.unlink()
+def test_a_loaded_copy_is_still_measured_against_the_board(qtbot, window, tmp_path):
+    """Loading a backup must not make the program forget the board."""
+    from duo_input.ui.models.project_session import RenameProfile
 
-    later = MainWindow(DeviceService(timeout_ms=5000), transport_factory=lambda: None, settings=settings)
-    qtbot.addWidget(later)
-    later.reopen_last_project()
+    window.set_session(window.session.with_device_hash(b"\x22" * 32))
+    differs = tmp_path / "differs.duoinput.json"
+    assert window.save_copy(differs) is True
+    window.set_session(window.session.apply(RenameProfile(1, "Elsewhere")))
 
-    assert later.session.path is None
+    assert window.load_copy(differs) is True
+
+    assert window.session.device_hash == "22" * 32
+    assert window.session.device_matches is False
 
 
 def test_minimum_window_size_shows_every_control(qtbot, window):
@@ -358,7 +354,7 @@ def test_save_clears_the_dirty_marker_but_not_a_device_mismatch(qtbot, window, e
     assert window.session.dirty is True
     assert window.session.device_matches is False
 
-    assert window.save_project(tmp_path / "profile.duoinput.json") is True
+    assert window.save_copy(tmp_path / "profile.duoinput.json") is True
 
     assert window.session.dirty is False
     assert DIRTY_MARKER not in window.windowTitle()
@@ -589,12 +585,11 @@ def test_a_device_plugged_in_after_startup_leaves_the_open_project_alone(
 
     The autoconnect timer runs for the life of the window, so without this
     the harm is the program's primary workflow: the operator opens their
-    project, edits it, saves it, and only then plugs the board in - in order
-    to write that project to it. A read fired by that connect sails past the
-    dirty guard (they just saved), replaces their project with the board's
-    and drops ``session.path``. The next Write then sends the board's own
-    configuration back, and the next Save is a Save As they can point at
-    their own file.
+    project, edits it, saves a copy, and only then plugs the board in - in
+    order to write that project to it. A read fired by that connect would
+    replace their project with the board's and drop ``session.path``. The
+    next Write then sends the board's own configuration back, and the next
+    Save is a Save As they can point at their own file.
     """
     from duo_input.ui.models.project_session import RenameProfile
 
@@ -608,11 +603,10 @@ def test_a_device_plugged_in_after_startup_leaves_the_open_project_alone(
         lambda: window.session.active_profile.name == "On the board", timeout=5000
     )
 
-    # The operator's own project: edited and saved, so it is not dirty.
+    # The operator's own project: edited and saved as a copy.
     saved = tmp_path / "mine.duoinput.json"
     window.set_session(window.session.apply(RenameProfile(1, "Mine")))
-    assert window.save_project(saved) is True
-    assert window.session.dirty is False
+    assert window.save_copy(saved) is True
     assert window.session.path == saved
 
     # They unplug the board and plug it back in, to write their project to it.
@@ -644,19 +638,18 @@ def test_a_device_plugged_in_after_a_deviceless_startup_leaves_the_open_project_
     ``_startup_read_done`` is only spent once a connect actually *succeeds*.
     The test above starts with a device present, which spends it before the
     operator ever opens anything. The operator's normal habit is the other
-    order: start with no device, work for a while, save, and only then plug
-    a board in - to write that project to it. Nothing here has spent the
-    flag yet, so without the fix the connect below is still treated as
-    "startup" and the board's configuration silently replaces the operator's
-    saved file, dropping ``session.path`` with it. This is the reproduction
-    from the defect report.
+    order: start with no device, work for a while, save a copy, and only
+    then plug a board in - to write that project to it. Nothing here has
+    spent the flag yet, so without the fix the connect below is still
+    treated as "startup" and the board's configuration silently replaces
+    the operator's saved copy, dropping ``session.path`` with it. This is
+    the reproduction from the defect report.
     """
     assert window._startup_read_done is False
 
     saved = tmp_path / "mine.duoinput.json"
     window.set_session(window.session.apply(RenameProfile(1, "Моя работа")))
-    assert window.save_project(saved) is True
-    assert window.session.dirty is False
+    assert window.save_copy(saved) is True
     assert window.session.path == saved
 
     on_board = ProjectSession.new().apply(RenameProfile(1, "Конфигурация платы")).project
@@ -773,7 +766,7 @@ def test_an_edit_turns_the_changes_chip_and_nothing_else(window):
 def test_saving_names_the_file_and_settles_the_changes_chip(window, tmp_path):
     window.apply_command(SetActiveProfile(4))
 
-    assert window.save_project(tmp_path / "work.duoinput.json") is True
+    assert window.save_copy(tmp_path / "work.duoinput.json") is True
 
     assert window.state_chips["changes"].property("signal") == theme.SIGNAL_OK
     assert window.state_chips["file"].property("signal") == theme.SIGNAL_OK

@@ -539,6 +539,17 @@ class ProjectSession:
         """Record what the device reports it is holding; nothing else changes."""
         return replace(self, device_hash=_as_hex(value))
 
+    def with_project(self, project: DeviceProject) -> ProjectSession:
+        """Replace the configuration, keeping what is known about the device.
+
+        Used when a copy is loaded from a file. The baseline and the device
+        hash both survive, so "does this differ from the board?" is still
+        answerable and still answered by the board: a copy matching what the
+        board holds reads as unchanged, one that differs reads as needing a
+        write. Nothing here asserts anything about the file.
+        """
+        return replace(self, project=project)
+
     def with_connection(self, connected: bool) -> ProjectSession:
         return replace(self, connected=bool(connected))
 

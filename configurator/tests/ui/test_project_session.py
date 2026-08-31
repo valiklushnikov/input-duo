@@ -80,13 +80,13 @@ def test_reverting_an_edit_clears_dirty_again():
     assert reverted.dirty is False
 
 
-def test_save_clears_dirty_and_records_the_file_hash(tmp_path):
+def test_save_records_the_file_hash(tmp_path):
     path = tmp_path / "profile.duoinput.json"
     session = ProjectSession.new().apply(SetActiveProfile(4))
 
     saved = session.save(path)
 
-    assert saved.dirty is False
+    assert saved.dirty is True
     assert saved.path == path
     assert saved.file_hash == hashlib.sha256(path.read_bytes()).hexdigest()
     assert saved.project == session.project
@@ -101,7 +101,7 @@ def test_save_does_not_change_the_device_hash_or_hide_a_mismatch(tmp_path):
 
     saved = session.save(tmp_path / "profile.duoinput.json")
 
-    assert saved.dirty is False
+    assert saved.dirty is True
     assert saved.device_hash == "11" * 32
     assert saved.device_matches is False
     assert saved.file_hash != saved.device_hash
@@ -189,3 +189,23 @@ def test_saving_a_copy_does_not_clear_the_change_marker(tmp_path):
     saved = session.save(tmp_path / "copy.duoinput.json")
 
     assert saved.dirty is True
+
+
+def test_with_project_replaces_the_configuration_but_keeps_what_is_known_about_the_device():
+    """Loading a copy swaps the project in place; the board's story is untouched."""
+    session = (
+        ProjectSession.new()
+        .with_device_hash(b"\x33" * 32)
+        .with_connection(True)
+        .agreeing_with_device()
+    )
+    replacement = ProjectSession.new().apply(RenameProfile(1, "Loaded")).project
+
+    swapped = session.with_project(replacement)
+
+    assert swapped.project == replacement
+    assert swapped.baseline == session.baseline
+    assert swapped.device_hash == "33" * 32
+    assert swapped.connected is True
+    assert swapped.path == session.path
+    assert swapped.file_hash == session.file_hash
