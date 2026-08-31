@@ -618,6 +618,65 @@ def test_a_device_plugged_in_after_startup_leaves_the_open_project_alone(
     assert "read_config" not in operations
 
 
+def test_a_device_plugged_in_after_a_deviceless_startup_leaves_the_open_project_alone(
+    qtbot, window, emulator, tmp_path
+):
+    """The surviving half of the defect: startup with nothing attached.
+
+    ``_startup_read_done`` is only spent once a connect actually *succeeds*.
+    The test above starts with a device present, which spends it before the
+    operator ever opens anything. The operator's normal habit is the other
+    order: start with no device, work for a while, save, and only then plug
+    a board in - to write that project to it. Nothing here has spent the
+    flag yet, so without the fix the connect below is still treated as
+    "startup" and the board's configuration silently replaces the operator's
+    saved file, dropping ``session.path`` with it. This is the reproduction
+    from the defect report.
+    """
+    assert window._startup_read_done is False
+
+    saved = tmp_path / "mine.duoinput.json"
+    window.set_session(window.session.apply(RenameProfile(1, "Моя работа")))
+    assert window.save_project(saved) is True
+    assert window.session.dirty is False
+    assert window.session.path == saved
+
+    on_board = ProjectSession.new().apply(RenameProfile(1, "Конфигурация платы")).project
+    emulator.install_active(compile_project_to_binary(on_board))
+    window.transport_factory = lambda: emulator
+
+    with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
+        window.try_autoconnect()
+    qtbot.wait(500)
+
+    assert window.session.active_profile.name == "Моя работа"
+    assert window.session.path == saved
+
+
+def test_a_device_plugged_in_after_startup_into_an_untouched_session_is_adopted(
+    qtbot, window, emulator
+):
+    """The case the operator's decision keeps: nothing of theirs to lose yet.
+
+    No file has been opened or saved, and there are no edits, so a device
+    that answers only after startup is still trusted - same as one that
+    answers during it. What matters is the session, not the clock.
+    """
+    assert window.session.path is None
+    assert window.session.dirty is False
+
+    on_board = ProjectSession.new().apply(RenameProfile(1, "Конфигурация платы")).project
+    emulator.install_active(compile_project_to_binary(on_board))
+    window.transport_factory = lambda: emulator
+
+    window.try_autoconnect()
+
+    qtbot.waitUntil(
+        lambda: window.session.active_profile.name == "Конфигурация платы", timeout=5000
+    )
+    assert window.session.path is None
+
+
 def test_a_disconnect_during_a_read_does_not_disable_reading_for_good(
     qtbot, window, emulator
 ):
