@@ -74,6 +74,46 @@ def test_starting_a_window_reopens_what_was_open_last(qtbot, tmp_path):
     assert later.session.active_profile.name == "Remembered"
 
 
+def test_startup_prefers_the_device_over_the_last_file(qtbot, tmp_path):
+    """The device wins: the question on opening is what the hardware is doing.
+
+    A file is only reached for when nothing answered.
+    """
+    from PySide6.QtCore import QSettings
+
+    from duo_input.app import build_main_window, start_window
+    from duo_input.device.emulator import U1Emulator
+    from duo_input.device.service import DeviceService, DeviceState
+    from duo_input.domain.text_compiler import compile_project_to_binary
+    from duo_input.ui.models.project_session import ProjectSession, RenameProfile
+
+    store = QSettings(str(tmp_path / "duo-input.ini"), QSettings.Format.IniFormat)
+    store.clear()
+    saved = tmp_path / "on-disk.duoinput.json"
+
+    on_disk = build_main_window(DeviceService(), transport_factory=lambda: None, settings=store)
+    qtbot.addWidget(on_disk)
+    on_disk.set_session(on_disk.session.apply(RenameProfile(1, "On disk")))
+    assert on_disk.save_project(saved) is True
+
+    emulator = U1Emulator()
+    on_board = ProjectSession.new().apply(RenameProfile(1, "On the board")).project
+    emulator.install_active(compile_project_to_binary(on_board))
+
+    window = build_main_window(
+        DeviceService(timeout_ms=5000),
+        transport_factory=lambda: emulator,
+        settings=store,
+    )
+    qtbot.addWidget(window)
+    window._confirm_close = lambda: None
+    start_window(window)
+
+    qtbot.waitUntil(
+        lambda: window.session.active_profile.name == "On the board", timeout=5000
+    )
+
+
 def test_starting_the_application_configures_the_log(tmp_path, monkeypatch):
     from duo_input.app import configure_application
     from duo_input.persistence.locations import log_directory
