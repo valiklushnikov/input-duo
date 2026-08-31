@@ -170,6 +170,17 @@ class ProfilesPage(QWidget):
     def selected_profile_id(self) -> int:
         return self._selected_id
 
+    def commit_pending_edit(self) -> None:
+        """Send the command a focus-out would send, for text still being typed.
+
+        The name field turns text into a command on ``editingFinished``, so a
+        name half typed is nowhere near the session and ``dirty`` cannot see
+        it. Anything about to repaint this page from a session has to ask for
+        this first: otherwise the field is simply overwritten and the work is
+        gone with it, with nothing on screen to say so.
+        """
+        self._on_name_edited()
+
     def set_session(self, session: ProjectSession) -> None:
         """Render ``session``; the slot that was selected stays selected."""
         self._session = session

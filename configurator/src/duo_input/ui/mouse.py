@@ -229,6 +229,13 @@ class MouseSwitchPage(QWidget):
     def profile(self) -> Profile:
         return self._session.active_profile
 
+    def commit_pending_edit(self) -> None:
+        """Nothing to commit: this page holds no free-text field.
+
+        See ``BindingsPage.commit_pending_edit`` - every editor page answers
+        this so the shell can ask all of them before a device read repaints.
+        """
+
     def set_session(self, session: ProjectSession) -> None:
         self._session = session
         self._refresh()

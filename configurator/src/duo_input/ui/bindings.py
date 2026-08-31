@@ -372,6 +372,15 @@ class BindingsPage(QWidget):
     def profile(self) -> Profile:
         return self._session.active_profile
 
+    def commit_pending_edit(self) -> None:
+        """Nothing to commit: this page holds no free-text field.
+
+        Every editor page answers this, because the shell asks all of them
+        before it lets a device read repaint anything. A page that grows a
+        field committing on ``editingFinished`` has to answer it for real -
+        an unanswered one loses whatever was being typed into it.
+        """
+
     def set_session(self, session: ProjectSession) -> None:
         """Render ``session``; the selected binding stays selected if it lives."""
         selected = self.selected_binding()

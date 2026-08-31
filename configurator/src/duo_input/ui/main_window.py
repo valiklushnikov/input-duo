@@ -530,6 +530,15 @@ class MainWindow(QMainWindow):
         self._sync_device_state()
 
     def _sync_device_state(self) -> None:
+        # Every device event repaints the pages from the session, and the
+        # first one a connect fires arrives long before the read it triggers
+        # lands. A page repainted from a session that has never heard of the
+        # half-typed name in one of its fields simply overwrites that field,
+        # so the commit has to happen here as well as in
+        # ``_adopt_device_project`` - same commit, the two doors a device can
+        # come through, and the dirty guard still the only thing deciding
+        # anything.
+        self._commit_pending_edits()
         connected = self._service.is_connected
         # A stale hash from a device that is no longer attached would be a lie.
         device_hash = self._service.device_hash if connected else b""
@@ -801,6 +810,21 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         self._sync_device_state()
 
+    def _commit_pending_edits(self) -> None:
+        """Ask every editor page to commit text that is still being typed.
+
+        The editors turn text into a command on ``editingFinished``, not on
+        every keystroke, so a field the operator is still typing into is not
+        in the session at all and ``dirty`` reads False over it. That is the
+        one state in which the guard below admits an answer - and adopting it
+        repaints the very field they were typing in. Committing first is what
+        gives the dirty guard something to see; it is deliberately not a
+        second guard of its own, because two guards asking the same question
+        are two answers waiting to disagree.
+        """
+        for page in self._editor_pages():
+            page.commit_pending_edit()
+
     def _adopt_device_project(self, package: bytes | None) -> None:
         """Show what the device is running, unless the operator is mid-edit.
 
@@ -811,6 +835,7 @@ class MainWindow(QMainWindow):
         """
         if package is None:
             return
+        self._commit_pending_edits()
         if hashlib.sha256(package).hexdigest() == self._session.compiled_hash:
             # The board is holding exactly the package this project compiles
             # to, so it has nothing to teach the project - and decoding it

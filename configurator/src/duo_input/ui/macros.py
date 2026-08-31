@@ -393,6 +393,17 @@ class MacrosPage(QWidget):
         macros = self.profile.macros
         return macros[self._macro_row] if 0 <= self._macro_row < len(macros) else None
 
+    def commit_pending_edit(self) -> None:
+        """Send the command a focus-out would send, for text still being typed.
+
+        The macro name commits on ``editingFinished``, so until focus leaves
+        the field the session knows nothing about it; see the same method on
+        the Profiles page. The step editor below is not this: what it holds is
+        staged until "Apply to step" is pressed, and committing it here would
+        store a step the operator never applied.
+        """
+        self._on_name_edited()
+
     def set_session(self, session: ProjectSession) -> None:
         """Render ``session``, keeping the selected macro and step if they live."""
         self._session = session

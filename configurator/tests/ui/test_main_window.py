@@ -974,6 +974,133 @@ def test_a_replug_keeps_the_macro_text_the_operator_typed(qtbot, window, emulato
     assert "matches the project" in window.state_chips["device"].text()
 
 
+def test_a_profile_name_still_being_typed_survives_a_board_attaching(
+    qtbot, window, emulator
+):
+    """``dirty`` cannot see a field that has not been committed yet.
+
+    The Profiles page turns text into a command on ``editingFinished``, so
+    until focus leaves the field the session knows nothing about it and the
+    dirty guard reads False. The operator is typing a new profile name with
+    one hand and plugs a board in with the other; the read lands, the guard
+    sees a clean session, and ``_refresh_editor`` puts the board's name into
+    the field they were typing in. Title clean, chip "matches", no message.
+    """
+    window.show_page(MainWindow.PAGE_PROFILES)
+    window.profiles.select_profile(1)
+    window.profiles.name_edit.clear()
+    qtbot.keyClicks(window.profiles.name_edit, "Half-typed name")
+    assert window.session.dirty is False
+    assert window.session.project.profiles[0].name != "Half-typed name"
+
+    on_board = ProjectSession.new().apply(RenameProfile(1, "Конфигурация платы")).project
+    emulator.install_active(compile_project_to_binary(on_board))
+
+    _connect(qtbot, window, emulator)
+    qtbot.wait(200)
+
+    assert window.profiles.name_edit.text() == "Half-typed name"
+    assert window.session.project.profiles[0].name == "Half-typed name"
+    assert window.session.dirty is True
+    assert "your edits were kept" in window.statusBar().currentMessage()
+
+
+def test_a_macro_name_still_being_typed_survives_a_link_coming_back(
+    qtbot, window, emulator
+):
+    """The same hole on the Macros page, on the link-recovery path.
+
+    The macro name field commits on ``editingFinished`` too, and every
+    attach now reads - so a board that drops and comes back mid-word is
+    enough. The session is clean because the board was read a moment ago,
+    which is exactly the state the guard admits.
+    """
+    from duo_input.ui.models.project_session import AddMacro
+
+    on_board = ProjectSession.new().apply(AddMacro(1, "Имя с платы")).project
+    emulator.install_active(compile_project_to_binary(on_board))
+    _connect(qtbot, window, emulator)
+    qtbot.waitUntil(
+        lambda: bool(window.session.project.profiles[0].macros), timeout=5000
+    )
+    assert window.session.dirty is False
+
+    window.show_page(MainWindow.PAGE_MACROS)
+    window.macros.select_macro_row(0)
+    window.macros.name_edit.clear()
+    qtbot.keyClicks(window.macros.name_edit, "Half-typed name")
+    assert window.session.dirty is False
+
+    # The link drops and the same board comes back.
+    window.disconnect_device()
+    emulator.simulate_power_cycle()
+    _connect(qtbot, window, emulator)
+    qtbot.wait(200)
+
+    assert window.macros.name_edit.text() == "Half-typed name"
+    assert window.session.project.profiles[0].macros[0].name == "Half-typed name"
+    assert window.session.dirty is True
+    assert "your edits were kept" in window.statusBar().currentMessage()
+
+
+def test_typing_that_starts_while_a_read_is_in_flight_is_not_discarded(
+    qtbot, window, emulator
+):
+    """The promise section 3 of the read-configuration design made in words.
+
+    A read is several chunks over a serial link and the editor pages stay
+    live for every one of them, so somebody can start typing after the
+    request has gone out. The connect's own repaint is long past by then:
+    this is the door ``_adopt_device_project`` holds on its own, and the
+    answer that arrives afterwards must not be what throws the typing away.
+    """
+    _connect(qtbot, window, emulator)
+    on_board = ProjectSession.new().apply(RenameProfile(1, "On the board")).project
+    emulator.install_active(compile_project_to_binary(on_board))
+
+    window.read_device_project()
+    assert window._reading_device is True
+
+    window.profiles.select_profile(1)
+    window.profiles.name_edit.clear()
+    qtbot.keyClicks(window.profiles.name_edit, "Typed while reading")
+    assert window.session.dirty is False
+
+    qtbot.waitUntil(lambda: window._reading_device is False, timeout=5000)
+    qtbot.wait(200)
+
+    assert window.profiles.name_edit.text() == "Typed while reading"
+    assert window.session.project.profiles[0].name == "Typed while reading"
+    assert "your edits were kept" in window.statusBar().currentMessage()
+
+
+def test_the_answer_is_weighed_after_the_pending_edit_is_committed(
+    qtbot, window, emulator
+):
+    """The guard weighs the answer, so it does not borrow somebody else's order.
+
+    On the connect path the service flips its state around a read, so the
+    same commit has already run from ``_sync_device_state`` a moment
+    earlier - which makes this call site look redundant from the outside.
+    Leaning on that would put the operator's typing at the mercy of when
+    another object happens to emit a signal, so the guard commits what it is
+    about to weigh, itself.
+    """
+    _connect(qtbot, window, emulator)
+    on_board = ProjectSession.new().apply(RenameProfile(1, "On the board")).project
+
+    window.profiles.select_profile(1)
+    window.profiles.name_edit.clear()
+    qtbot.keyClicks(window.profiles.name_edit, "Not committed yet")
+    assert window.session.dirty is False
+
+    window._adopt_device_project(compile_project_to_binary(on_board))
+
+    assert window.session.project.profiles[0].name == "Not committed yet"
+    assert window.profiles.name_edit.text() == "Not committed yet"
+    assert "your edits were kept" in window.statusBar().currentMessage()
+
+
 def test_a_disconnect_during_a_read_does_not_disable_reading_for_good(
     qtbot, window, emulator
 ):
