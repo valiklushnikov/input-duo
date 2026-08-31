@@ -403,6 +403,17 @@ def test_successful_write_aligns_the_device_hash(qtbot, window, emulator):
     assert emulator.active_hash.hex() == window.session.compiled_hash
 
 
+def test_a_successful_write_reads_as_unchanged(qtbot, window, emulator):
+    _connect(qtbot, window, emulator)
+    window.set_session(window.session.apply(RenameProfile(1, "To write")))
+    assert window.session.dirty is True
+
+    with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
+        window.write_to_device()
+
+    qtbot.waitUntil(lambda: window.session.dirty is False, timeout=5000)
+
+
 def test_failed_write_leaves_the_mismatch_visible(qtbot, window, emulator):
     _connect(qtbot, window, emulator)
     before = window.session.device_hash
@@ -475,6 +486,16 @@ def test_a_device_that_answers_supplies_the_project(qtbot, service, emulator, se
         lambda: window.session.active_profile.name == "On the board", timeout=5000
     )
     assert window.session.path is None
+
+
+def test_a_project_read_from_the_device_reads_as_unchanged(qtbot, service, emulator, settings):
+    window = MainWindow(service, transport_factory=lambda: emulator, settings=settings)
+    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.waitUntil(lambda: service.state is DeviceState.READY, timeout=5000)
+    window.read_device_project()
+    qtbot.waitUntil(lambda: window.session.dirty is False, timeout=5000)
+
+    assert window.session.dirty is False
 
 
 def test_a_read_that_lands_late_does_not_discard_unsaved_edits(

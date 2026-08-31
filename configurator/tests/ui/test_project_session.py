@@ -160,3 +160,32 @@ def test_can_write_requires_a_connection_and_a_valid_project():
 def test_save_refuses_a_session_without_a_path():
     with pytest.raises(ValueError):
         ProjectSession.new().save()
+
+
+def test_agreeing_with_the_device_clears_the_change_marker():
+    """After a read or a write, the project and the board are the same thing."""
+    session = ProjectSession.new().apply(RenameProfile(1, "Edited"))
+    assert session.dirty is True
+
+    agreed = session.agreeing_with_device()
+
+    assert agreed.dirty is False
+    assert agreed.project == session.project
+
+
+def test_an_edit_after_agreeing_reads_as_changed_again():
+    session = ProjectSession.new().agreeing_with_device()
+
+    edited = session.apply(RenameProfile(1, "Since"))
+
+    assert edited.dirty is True
+
+
+def test_saving_a_copy_does_not_clear_the_change_marker(tmp_path):
+    """A file is a copy, not the truth. Writing one changes nothing about
+    whether the board is up to date."""
+    session = ProjectSession.new().apply(RenameProfile(1, "Edited"))
+
+    saved = session.save(tmp_path / "copy.duoinput.json")
+
+    assert saved.dirty is True

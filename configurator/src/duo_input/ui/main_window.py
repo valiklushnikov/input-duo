@@ -814,6 +814,10 @@ class MainWindow(QMainWindow):
         if result.operation == "read_config" and self._reading_device:
             self._reading_device = False
             self._adopt_device_project(result.value)
+        elif result.operation == "write_config":
+            # The device just confirmed it holds what we sent; the project
+            # and the board agree from this moment on.
+            self.set_session(self._session.agreeing_with_device())
         elif result.operation == "connect_device" and not self._startup_read_done:
             # The device attaches itself, so it also answers "what is it
             # running?" itself: the operator never has to ask. Only the
@@ -870,7 +874,7 @@ class MainWindow(QMainWindow):
                 self.tr("The device's configuration could not be read: {0}").format(error)
             )
             return
-        self.set_session(ProjectSession(project=project))
+        self.set_session(ProjectSession(project=project).agreeing_with_device())
         self.statusBar().showMessage(self.tr("Configuration read from the device"))
 
     def _on_operation_failed(self, failure: object) -> None:

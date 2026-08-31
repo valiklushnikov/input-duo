@@ -12,10 +12,11 @@ Three hashes describe three different things and are never conflated:
     What :class:`~duo_input.device.service.DeviceService` reports the device is
     holding. The session never derives it, it only carries it.
 
-``dirty`` compares the in-memory project against the baseline - the state that
-was last persisted, or the pristine project of a brand-new session. Saving
-therefore clears ``dirty`` and sets ``file_hash``; it can never change
-``device_hash`` and so can never make a device mismatch disappear.
+``dirty`` compares the in-memory project against the baseline - the project
+last known to agree with the device (see ``agreeing_with_device``), or the
+pristine project of a brand-new session. Saving to a file sets ``file_hash``
+but never touches the baseline: a file is a copy, not the truth, so writing
+one leaves ``dirty`` exactly as it was.
 
 Every mutation returns a *new* session: :meth:`ProjectSession.apply` takes a
 command object and hands back a fresh session, so editors never mutate shared
@@ -541,8 +542,21 @@ class ProjectSession:
     def with_connection(self, connected: bool) -> ProjectSession:
         return replace(self, connected=bool(connected))
 
+    def agreeing_with_device(self) -> ProjectSession:
+        """Mark the project as being what the device holds.
+
+        Called after a configuration is read from the device and after one is
+        written to it - the two moments the two are known to be the same. The
+        baseline is what ``dirty`` compares against, so this is where "changed"
+        gets its meaning: changed since the board last agreed, not changed
+        since a file was written.
+        """
+        return replace(self, baseline=self.project)
+
     def save(self, path: str | Path | None = None) -> ProjectSession:
-        """Write the project and return a clean session; device state is kept."""
+        """Write a copy of the project to disk and return a session that knows
+        where it went; it does not change whether the device is up to date.
+        """
         location = Path(path) if path is not None else self.path
         if location is None:
             raise ValueError("the session has no file to save to")
@@ -551,7 +565,6 @@ class ProjectSession:
             self,
             path=location,
             file_hash=_file_hash(location),
-            baseline=self.project,
         )
 
 
