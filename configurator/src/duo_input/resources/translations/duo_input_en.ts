@@ -1023,17 +1023,17 @@
         <translation>No device found. Load a copy from a file, or plug the device in.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="815" />
+        <location filename="../../ui/main_window.py" line="821" />
         <source>The device has a different configuration; your edits were kept.</source>
         <translation>The device has a different configuration; your edits were kept.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="823" />
+        <location filename="../../ui/main_window.py" line="829" />
         <source>The device's configuration could not be read: {0}</source>
         <translation>The device's configuration could not be read: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="827" />
+        <location filename="../../ui/main_window.py" line="833" />
         <source>Configuration read from the device</source>
         <translation>Configuration read from the device</translation>
     </message>

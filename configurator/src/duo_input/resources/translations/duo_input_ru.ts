@@ -1024,17 +1024,17 @@
         <translation>Устройство не найдено. Загрузите копию из файла или подключите устройство.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="815"/>
+        <location filename="../../ui/main_window.py" line="821"/>
         <source>The device has a different configuration; your edits were kept.</source>
         <translation>На устройстве другая конфигурация; ваши правки сохранены.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="823"/>
+        <location filename="../../ui/main_window.py" line="829"/>
         <source>The device&apos;s configuration could not be read: {0}</source>
         <translation>Не удалось прочитать конфигурацию устройства: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="827"/>
+        <location filename="../../ui/main_window.py" line="833"/>
         <source>Configuration read from the device</source>
         <translation>Конфигурация прочитана с устройства</translation>
     </message>
