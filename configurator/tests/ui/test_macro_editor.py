@@ -251,6 +251,25 @@ def test_a_text_step_keeps_the_unicode_it_was_given(page):
     assert _macro(page).steps[0].source_text == "Привет мир"
 
 
+def test_a_text_step_read_from_the_device_says_where_it_came_from(qtbot):
+    """The source text was never stored on the device, only the keystrokes.
+
+    An empty text box would read as data loss; the truth is that this step can
+    still be run and can no longer be edited as a sentence.
+    """
+    from duo_input.domain.models import MacroStep
+    from duo_input.generated.protocol import MacroStepType
+    from duo_input.ui.models.macro_steps import step_label
+
+    recovered = MacroStep(MacroStepType.TEXT, bytes((0x00, 0x04, 0x00, 0x05)), None)
+
+    summary = step_label(recovered)
+
+    assert summary
+    assert summary != ""
+    assert "устройств" in summary.lower() or "device" in summary.lower()
+
+
 def test_the_text_limit_blocks_the_apply(page):
     _apply(page)
     page.select_step_type(MacroStepType.TEXT)

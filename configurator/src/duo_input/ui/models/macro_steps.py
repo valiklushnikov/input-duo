@@ -17,7 +17,14 @@ from __future__ import annotations
 import struct
 from uuid import UUID, uuid4
 
-from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, Signal
+from PySide6.QtCore import (
+    QAbstractListModel,
+    QCoreApplication,
+    QModelIndex,
+    QT_TRANSLATE_NOOP,
+    Qt,
+    Signal,
+)
 
 from duo_input.domain.models import Macro, MacroStep
 from duo_input.generated.protocol import (
@@ -142,7 +149,13 @@ def step_label(step: MacroStep) -> str:
     if kind is MacroStepType.CONSUMER_TAP and len(step.payload) == 2:
         return f"{name} 0x{int.from_bytes(step.payload, 'little'):04X}"
     if kind is MacroStepType.TEXT:
-        text = step.source_text or ""
+        if step.source_text is None:
+            keystrokes = len(step.payload) // 2
+            origin = QCoreApplication.translate(
+                "MacroSteps", QT_TRANSLATE_NOOP("MacroSteps", "From the device: {0} keystrokes")
+            ).format(keystrokes)
+            return f"{name} {origin}"
+        text = step.source_text
         if len(text) > TEXT_PREVIEW_CHARACTERS:
             text = text[:TEXT_PREVIEW_CHARACTERS] + "..."
         return f"{name} {text}" if text else name

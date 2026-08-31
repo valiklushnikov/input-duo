@@ -509,6 +509,15 @@
     </message>
 </context>
 <context>
+    <name>MacroSteps</name>
+    <message>
+        <location filename="../../ui/models/macro_steps.py" line="155" />
+        <source>From the device: {0} keystrokes</source>
+        <extracomment>How much of a text step is shown in the list before it is elided. A default step of every type, so the editor can offer all of them.</extracomment>
+        <translation>From the device: {0} keystrokes</translation>
+    </message>
+</context>
+<context>
     <name>MacrosPage</name>
     <message>
         <location filename="../../ui/macros.py" line="145" />
@@ -995,27 +1004,27 @@
         <translation>No Duo Input device was found</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="796" />
+        <location filename="../../ui/main_window.py" line="803" />
         <source>The device has a different configuration; your edits were kept.</source>
         <translation>The device has a different configuration; your edits were kept.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="804" />
+        <location filename="../../ui/main_window.py" line="811" />
         <source>The device's configuration could not be read: {0}</source>
         <translation>The device's configuration could not be read: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="808" />
+        <location filename="../../ui/main_window.py" line="815" />
         <source>Configuration read from the device</source>
         <translation>Configuration read from the device</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="826" />
+        <location filename="../../ui/main_window.py" line="833" />
         <source>Unsaved changes</source>
         <translation>Unsaved changes</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="827" />
+        <location filename="../../ui/main_window.py" line="834" />
         <source>The project has unsaved changes. Save them before closing?</source>
         <translation>The project has unsaved changes. Save them before closing?</translation>
     </message>
