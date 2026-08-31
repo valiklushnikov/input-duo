@@ -807,6 +807,36 @@ def test_a_device_that_turns_up_clears_the_no_device_message(qtbot, window, emul
     assert "No device found" not in window.statusBar().currentMessage()
 
 
+def test_a_board_arriving_does_not_wipe_a_message_it_did_not_post(
+    qtbot, window, emulator, tmp_path
+):
+    """Only the no-device message is the connect path's to clear.
+
+    The flag says a no-device message was posted at some point, not that it
+    is still the one on screen. Anything said in between - a load that
+    failed, "Project saved" - belongs to whoever said it, and clearing the
+    status bar on the strength of the flag alone deletes it. The operator
+    reads why their file would not open, plugs the board in, and the
+    explanation vanishes with it.
+    """
+    window.try_autoconnect()
+    assert "No device found" in window.statusBar().currentMessage()
+
+    # They try to load a copy while they wait, and it fails.
+    broken = tmp_path / "broken.duoinput.json"
+    broken.write_text("{ not json", encoding="utf-8")
+    assert window.load_copy(broken) is False
+    posted = window.statusBar().currentMessage()
+    assert "could not be opened" in posted
+
+    # The board turns up on the next tick.
+    window.transport_factory = lambda: emulator
+    window.try_autoconnect()
+
+    assert window._said_no_device is False
+    assert window.statusBar().currentMessage() == posted
+
+
 def test_a_template_saved_before_the_board_arrives_still_lets_the_board_be_read(
     qtbot, window, emulator, tmp_path
 ):

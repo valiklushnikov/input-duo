@@ -670,11 +670,7 @@ class MainWindow(QMainWindow):
             # window needs to know why it is empty and what to do about it.
             if not self._said_no_device:
                 self._said_no_device = True
-                self.statusBar().showMessage(
-                    self.tr(
-                        "No device found. Load a copy from a file, or plug the device in."
-                    )
-                )
+                self.statusBar().showMessage(self._no_device_message())
             return
         if self._said_no_device:
             # That message was posted with no timeout, so it stays until
@@ -682,9 +678,19 @@ class MainWindow(QMainWindow):
             # it here, where the flag it belongs to is reset, is what stops
             # the status bar saying the board is absent while the connection
             # chip says it is ready.
+            #
+            # Only that message, though: the flag records that it was posted,
+            # not that it is still the one on screen. A failed load or a saved
+            # copy may have replaced it in between, and those belong to
+            # whoever said them.
             self._said_no_device = False
-            self.statusBar().clearMessage()
+            if self.statusBar().currentMessage() == self._no_device_message():
+                self.statusBar().clearMessage()
         self._service.connect_device(link)
+
+    def _no_device_message(self) -> str:
+        """Said once when the socket is empty, and recognised when clearing it."""
+        return self.tr("No device found. Load a copy from a file, or plug the device in.")
 
     def read_device_project(self) -> None:
         """Ask the device for the configuration it is running.

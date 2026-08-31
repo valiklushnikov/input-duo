@@ -837,12 +837,12 @@
         <translation>Save a copy of the configuration to a file</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="570" />
+        <location filename="../../ui/main_window.py" line="577" />
         <source>Save a copy</source>
         <translation>Save a copy</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="604" />
+        <location filename="../../ui/main_window.py" line="611" />
         <source>Load a copy</source>
         <translation>Load a copy</translation>
     </message>
@@ -945,7 +945,7 @@
         <translation>Untitled project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="501" />
+        <location filename="../../ui/main_window.py" line="508" />
         <source>Device: {0}</source>
         <translation>Device: {0}</translation>
     </message>
@@ -970,17 +970,17 @@
         <translation>Project file: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="518" />
+        <location filename="../../ui/main_window.py" line="525" />
         <source>Written to device: no link</source>
         <translation>Written to device: no link</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="524" />
+        <location filename="../../ui/main_window.py" line="531" />
         <source>Written to device: matches the project</source>
         <translation>Written to device: matches the project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="521" />
+        <location filename="../../ui/main_window.py" line="528" />
         <source>Written to device: differs from the project</source>
         <translation>Written to device: differs from the project</translation>
     </message>
@@ -989,12 +989,12 @@
         <translation>Save project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="593" />
+        <location filename="../../ui/main_window.py" line="600" />
         <source>Save failed</source>
         <translation>Save failed</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="596" />
+        <location filename="../../ui/main_window.py" line="603" />
         <source>Project saved</source>
         <translation>Project saved</translation>
     </message>
@@ -1003,37 +1003,37 @@
         <translation>Open project</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="627" />
+        <location filename="../../ui/main_window.py" line="634" />
         <source>That project could not be opened: {0}</source>
         <translation>That project could not be opened: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="631" />
+        <location filename="../../ui/main_window.py" line="638" />
         <source>Project opened</source>
         <translation>Project opened</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="643" />
+        <location filename="../../ui/main_window.py" line="650" />
         <source>No Duo Input device was found</source>
         <translation>No Duo Input device was found</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="668" />
+        <location filename="../../ui/main_window.py" line="693" />
         <source>No device found. Load a copy from a file, or plug the device in.</source>
         <translation>No device found. Load a copy from a file, or plug the device in.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="791" />
+        <location filename="../../ui/main_window.py" line="815" />
         <source>The device has a different configuration; your edits were kept.</source>
         <translation>The device has a different configuration; your edits were kept.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="799" />
+        <location filename="../../ui/main_window.py" line="823" />
         <source>The device's configuration could not be read: {0}</source>
         <translation>The device's configuration could not be read: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="803" />
+        <location filename="../../ui/main_window.py" line="827" />
         <source>Configuration read from the device</source>
         <translation>Configuration read from the device</translation>
     </message>
