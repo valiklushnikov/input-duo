@@ -299,11 +299,15 @@ class MainWindow(QMainWindow):
         return bar
 
     def _build_state_strip(self, parent: QWidget) -> QWidget:
-        """The three states of specification section 18.5, always all three.
+        """One chip, because there is only one question worth asking.
 
-        They sit side by side on purpose. Any one of them alone invites the
-        wrong conclusion - a saved file says nothing about what the device is
-        holding - so the strip never hides the two that happen to be settled.
+        "Local changes", "project file" and "device" used to be shown side by
+        side because a saved file could disagree with the device and neither
+        could be trusted to speak for the other. Now that the device is the
+        reference point, all three were answering the same question - does
+        this configuration match what the board is running - and answering
+        it three times invited the three answers to drift apart. Stating it
+        once is the point.
         """
         strip = QFrame(parent)
         strip.setObjectName(NAME_STATE_STRIP)
@@ -313,8 +317,6 @@ class MainWindow(QMainWindow):
 
         self.state_chips: dict[str, QLabel] = {}
         for key, name in (
-            ("changes", self.tr("Local changes")),
-            ("file", self.tr("Project file")),
             ("device", self.tr("Configuration on the device")),
         ):
             chip = QLabel(strip)
@@ -489,9 +491,14 @@ class MainWindow(QMainWindow):
             self._updating_selector = False
 
     def _refresh_title(self) -> None:
-        name = self._session.path.name if self._session.path else self.tr("Untitled project")
+        """The program's name, and whether the board is behind.
+
+        No file name: there is no open document to name. The marker means
+        "not yet written to the device", which is the only kind of pending
+        change there is now.
+        """
         marker = f" {DIRTY_MARKER}" if self._session.dirty else ""
-        self.setWindowTitle(f"{APPLICATION_NAME} - {name}{marker}")
+        self.setWindowTitle(f"{APPLICATION_NAME}{marker}")
 
     def _refresh_actions(self) -> None:
         self.write_button.setEnabled(self._session.can_write)
@@ -506,24 +513,8 @@ class MainWindow(QMainWindow):
         self._refresh_state_strip()
 
     def _refresh_state_strip(self) -> None:
-        """Say where the project stands, in each of the three places it exists."""
+        """Say where the project stands against the device."""
         session = self._session
-
-        changes = self.state_chips["changes"]
-        changes.setText(
-            self.tr("Local changes: unsaved")
-            if session.dirty
-            else self.tr("Local changes: none")
-        )
-        set_signal(changes, SIGNAL_WARN if session.dirty else SIGNAL_OK)
-
-        stored = self.state_chips["file"]
-        if session.path is None:
-            stored.setText(self.tr("Project file: not created yet"))
-            set_signal(stored, SIGNAL_MUTED)
-        else:
-            stored.setText(self.tr("Project file: {0}").format(session.path.name))
-            set_signal(stored, SIGNAL_OK)
 
         device = self.state_chips["device"]
         if not session.device_hash:

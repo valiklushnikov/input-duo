@@ -838,12 +838,12 @@
         <translation>Сохранить копию конфигурации в файл</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="582"/>
+        <location filename="../../ui/main_window.py" line="573"/>
         <source>Save a copy</source>
         <translation>Сохранение копии</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="616"/>
+        <location filename="../../ui/main_window.py" line="607"/>
         <source>Load a copy</source>
         <translation>Загрузка копии</translation>
     </message>
@@ -856,12 +856,12 @@
         <translation type="vanished">Открыть файл проекта</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="346"/>
+        <location filename="../../ui/main_window.py" line="348"/>
         <source>Problems that block a write</source>
         <translation>Проблемы, мешающие записи</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="356"/>
+        <location filename="../../ui/main_window.py" line="358"/>
         <source>Transfer progress</source>
         <translation>Ход передачи</translation>
     </message>
@@ -912,22 +912,20 @@
         <translation>Записать конфигурацию в устройство</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="316"/>
         <source>Local changes</source>
-        <translation>Локальные изменения</translation>
+        <translation type="vanished">Локальные изменения</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="317"/>
         <source>Project file</source>
-        <translation>Файл проекта</translation>
+        <translation type="vanished">Файл проекта</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="318"/>
+        <location filename="../../ui/main_window.py" line="320"/>
         <source>Configuration on the device</source>
         <translation>Конфигурация в устройстве</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="337"/>
+        <location filename="../../ui/main_window.py" line="339"/>
         <source>Fix these before writing to the device.</source>
         <translation>Исправьте это перед записью в устройство.</translation>
     </message>
@@ -944,12 +942,11 @@
         <translation type="vanished">Duo Input закрылся с несохранёнными изменениями в {0} от {1}. Восстановить их?</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="492"/>
         <source>Untitled project</source>
-        <translation>Безымянный проект</translation>
+        <translation type="vanished">Безымянный проект</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="501"/>
+        <location filename="../../ui/main_window.py" line="508"/>
         <source>Device: {0}</source>
         <translation>Устройство: {0}</translation>
     </message>
@@ -958,37 +955,33 @@
         <translation type="vanished">Отключить</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="514"/>
         <source>Local changes: unsaved</source>
-        <translation>Локальные изменения: не сохранены</translation>
+        <translation type="vanished">Локальные изменения: не сохранены</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="516"/>
         <source>Local changes: none</source>
-        <translation>Локальные изменения: нет</translation>
+        <translation type="vanished">Локальные изменения: нет</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="522"/>
         <source>Project file: not created yet</source>
-        <translation>Файл проекта: ещё не создан</translation>
+        <translation type="vanished">Файл проекта: ещё не создан</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="525"/>
         <source>Project file: {0}</source>
-        <translation>Файл проекта: {0}</translation>
+        <translation type="vanished">Файл проекта: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="530"/>
+        <location filename="../../ui/main_window.py" line="521"/>
         <source>Written to device: no link</source>
         <translation>Записано в устройство: нет связи</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="533"/>
+        <location filename="../../ui/main_window.py" line="524"/>
         <source>Written to device: matches the project</source>
         <translation>Записано в устройство: совпадает с проектом</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="536"/>
+        <location filename="../../ui/main_window.py" line="527"/>
         <source>Written to device: differs from the project</source>
         <translation>Записано в устройство: отличается от проекта</translation>
     </message>
@@ -997,12 +990,12 @@
         <translation type="vanished">Сохранить проект</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="605"/>
+        <location filename="../../ui/main_window.py" line="596"/>
         <source>Save failed</source>
         <translation>Сохранить не удалось</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="608"/>
+        <location filename="../../ui/main_window.py" line="599"/>
         <source>Project saved</source>
         <translation>Проект сохранён</translation>
     </message>
@@ -1011,37 +1004,37 @@
         <translation type="vanished">Открыть проект</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="639"/>
+        <location filename="../../ui/main_window.py" line="630"/>
         <source>That project could not be opened: {0}</source>
         <translation>Не удалось открыть проект: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="643"/>
+        <location filename="../../ui/main_window.py" line="634"/>
         <source>Project opened</source>
         <translation>Проект открыт</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="655"/>
+        <location filename="../../ui/main_window.py" line="646"/>
         <source>No Duo Input device was found</source>
         <translation>Устройство Duo Input не найдено</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="681"/>
+        <location filename="../../ui/main_window.py" line="672"/>
         <source>No device found. Load a copy from a file, or plug the device in.</source>
         <translation>Устройство не найдено. Загрузите копию из файла или подключите устройство.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="808"/>
+        <location filename="../../ui/main_window.py" line="799"/>
         <source>The device has a different configuration; your edits were kept.</source>
         <translation>На устройстве другая конфигурация; ваши правки сохранены.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="816"/>
+        <location filename="../../ui/main_window.py" line="807"/>
         <source>The device&apos;s configuration could not be read: {0}</source>
         <translation>Не удалось прочитать конфигурацию устройства: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="820"/>
+        <location filename="../../ui/main_window.py" line="811"/>
         <source>Configuration read from the device</source>
         <translation>Конфигурация прочитана с устройства</translation>
     </message>

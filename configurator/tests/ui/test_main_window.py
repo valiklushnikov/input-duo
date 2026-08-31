@@ -346,7 +346,9 @@ def test_editing_the_active_profile_marks_the_title_dirty(window):
     assert window.windowTitle().endswith(DIRTY_MARKER)
 
 
-def test_save_clears_the_dirty_marker_but_not_a_device_mismatch(qtbot, window, emulator, tmp_path):
+def test_saving_a_copy_does_not_clear_the_dirty_marker_or_the_device_mismatch(
+    qtbot, window, emulator, tmp_path
+):
     _connect(qtbot, window, emulator)
     assert window.session.device_matches is True
 
@@ -356,8 +358,8 @@ def test_save_clears_the_dirty_marker_but_not_a_device_mismatch(qtbot, window, e
 
     assert window.save_copy(tmp_path / "profile.duoinput.json") is True
 
-    assert window.session.dirty is False
-    assert DIRTY_MARKER not in window.windowTitle()
+    assert window.session.dirty is True
+    assert DIRTY_MARKER in window.windowTitle()
     assert window.session.device_matches is False
     assert window.session.device_hash == window.service.device_hash.hex()
 
@@ -588,8 +590,8 @@ def test_a_device_plugged_in_after_startup_leaves_the_open_project_alone(
     project, edits it, saves a copy, and only then plugs the board in - in
     order to write that project to it. A read fired by that connect would
     replace their project with the board's and drop ``session.path``. The
-    next Write then sends the board's own configuration back, and the next
-    Save is a Save As they can point at their own file.
+    next Write then sends the board's own configuration back instead of
+    theirs.
     """
     from duo_input.ui.models.project_session import RenameProfile
 
@@ -738,39 +740,26 @@ def test_closing_never_asks_about_saving(window):
 # ------------------------------------------------- the three project states
 
 
-def test_the_strip_shows_all_three_states_of_the_specification(window):
-    """Section 18.5 names three; the shell shows three, always, side by side."""
-    assert set(window.state_chips) == {"changes", "file", "device"}
-    for chip in window.state_chips.values():
-        assert chip.text()
-        assert chip.property("signal")
+def test_the_strip_states_the_device_once(window):
+    """Two chips saying the same thing differently is how the confusion began."""
+    assert set(window.state_chips) == {"device"}
 
 
-def test_a_clean_untouched_project_says_so_in_all_three(window):
-    changes, file_chip, device = (window.state_chips[key] for key in ("changes", "file", "device"))
+def test_the_title_names_the_program_not_a_file(qtbot, window, tmp_path):
+    window.save_copy(tmp_path / "copy.duoinput.json")
 
-    assert changes.property("signal") == theme.SIGNAL_OK
-    assert file_chip.property("signal") == theme.SIGNAL_MUTED
-    assert device.property("signal") == theme.SIGNAL_MUTED
+    assert "copy" not in window.windowTitle()
+    assert "duoinput" not in window.windowTitle()
 
 
-def test_an_edit_turns_the_changes_chip_and_nothing_else(window):
-    before = window.state_chips["file"].text()
+def test_an_edit_turns_the_device_chip_to_its_warning_state(qtbot, window, emulator):
+    """An unwritten edit is exactly what "differs from the device" means now."""
+    _connect(qtbot, window, emulator)
+    assert window.state_chips["device"].property("signal") == theme.SIGNAL_OK
 
     window.apply_command(SetActiveProfile(4))
 
-    assert window.state_chips["changes"].property("signal") == theme.SIGNAL_WARN
-    assert window.state_chips["file"].text() == before
-
-
-def test_saving_names_the_file_and_settles_the_changes_chip(window, tmp_path):
-    window.apply_command(SetActiveProfile(4))
-
-    assert window.save_copy(tmp_path / "work.duoinput.json") is True
-
-    assert window.state_chips["changes"].property("signal") == theme.SIGNAL_OK
-    assert window.state_chips["file"].property("signal") == theme.SIGNAL_OK
-    assert "work.duoinput.json" in window.state_chips["file"].text()
+    assert window.state_chips["device"].property("signal") == theme.SIGNAL_WARN
 
 
 def test_a_device_holding_the_same_package_reads_as_agreement(qtbot, window, emulator):
