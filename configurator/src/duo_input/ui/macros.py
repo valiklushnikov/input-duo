@@ -393,16 +393,17 @@ class MacrosPage(QWidget):
         macros = self.profile.macros
         return macros[self._macro_row] if 0 <= self._macro_row < len(macros) else None
 
-    def commit_pending_edit(self) -> None:
-        """Send the command a focus-out would send, for text still being typed.
+    def pending_edit_command(self) -> object | None:
+        """The command a focus-out would send, for text still being typed.
 
         The macro name commits on ``editingFinished``, so until focus leaves
         the field the session knows nothing about it; see the same method on
-        the Profiles page. The step editor below is not this: what it holds is
+        the Profiles page, including why the command is handed back rather
+        than emitted. The step editor below is not this: what it holds is
         staged until "Apply to step" is pressed, and committing it here would
         store a step the operator never applied.
         """
-        self._on_name_edited()
+        return self._pending_name_command()
 
     def set_session(self, session: ProjectSession) -> None:
         """Render ``session``, keeping the selected macro and step if they live."""
@@ -632,12 +633,15 @@ class MacrosPage(QWidget):
             self._refresh()
 
     def _on_name_edited(self) -> None:
+        command = self._pending_name_command()
+        if command is not None:
+            self.command_requested.emit(command)
+
+    def _pending_name_command(self) -> RenameMacro | None:
         macro = self.macro()
         if self._updating or macro is None or self.name_edit.text() == macro.name:
-            return
-        self.command_requested.emit(
-            RenameMacro(self.profile.id, macro.uuid, self.name_edit.text())
-        )
+            return None
+        return RenameMacro(self.profile.id, macro.uuid, self.name_edit.text())
 
     def _on_target_changed(self, _index: int) -> None:
         macro = self.macro()

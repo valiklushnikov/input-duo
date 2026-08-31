@@ -170,16 +170,20 @@ class ProfilesPage(QWidget):
     def selected_profile_id(self) -> int:
         return self._selected_id
 
-    def commit_pending_edit(self) -> None:
-        """Send the command a focus-out would send, for text still being typed.
+    def pending_edit_command(self) -> object | None:
+        """The command a focus-out would send, for text still being typed.
 
         The name field turns text into a command on ``editingFinished``, so a
         name half typed is nowhere near the session and ``dirty`` cannot see
         it. Anything about to repaint this page from a session has to ask for
         this first: otherwise the field is simply overwritten and the work is
         gone with it, with nothing on screen to say so.
+
+        It hands the command back rather than emitting it, because applying it
+        would repaint every page - including one whose own field has not been
+        asked yet.
         """
-        self._on_name_edited()
+        return self._pending_name_command()
 
     def set_session(self, session: ProjectSession) -> None:
         """Render ``session``; the slot that was selected stays selected."""
@@ -273,12 +277,17 @@ class ProfilesPage(QWidget):
             self._refresh_editor()
 
     def _on_name_edited(self) -> None:
+        command = self._pending_name_command()
+        if command is not None:
+            self.command_requested.emit(command)
+
+    def _pending_name_command(self) -> RenameProfile | None:
         if self._updating:
-            return
+            return None
         name = self.name_edit.text()
         if name == self._profile(self._selected_id).name:
-            return
-        self.command_requested.emit(RenameProfile(self._selected_id, name))
+            return None
+        return RenameProfile(self._selected_id, name)
 
     def _on_color_clicked(self) -> None:
         current = QColor(*self._profile(self._selected_id).color_rgb)

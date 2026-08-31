@@ -1044,6 +1044,53 @@ def test_a_macro_name_still_being_typed_survives_a_link_coming_back(
     assert "your edits were kept" in window.statusBar().currentMessage()
 
 
+def test_two_fields_being_typed_at_once_both_survive_a_board_attaching(
+    qtbot, window, emulator
+):
+    """Committing one page must not repaint the next page's pending text.
+
+    Each real commit travels ``command_requested`` -> ``apply_command`` ->
+    ``set_session``, and ``set_session`` repaints *every* page. So a loop that
+    committed one page at a time overwrote the second page's half-typed field
+    with the session before that page was ever asked, and its handler then saw
+    a field that already matched and sent nothing: the mechanism that exists to
+    save typing destroyed it for every page after the first. The commands are
+    collected from all the pages first and applied afterwards, so what each
+    page is asked is what the operator left there.
+    """
+    from duo_input.ui.models.project_session import AddMacro
+
+    on_board = ProjectSession.new().apply(AddMacro(1, "Имя с платы")).project
+    emulator.install_active(compile_project_to_binary(on_board))
+    _connect(qtbot, window, emulator)
+    qtbot.waitUntil(lambda: bool(window.session.project.profiles[0].macros), timeout=5000)
+    assert window.session.dirty is False
+
+    window.show_page(MainWindow.PAGE_PROFILES)
+    window.profiles.select_profile(1)
+    window.profiles.name_edit.clear()
+    qtbot.keyClicks(window.profiles.name_edit, "Typed profile")
+
+    window.show_page(MainWindow.PAGE_MACROS)
+    window.macros.select_macro_row(0)
+    window.macros.name_edit.clear()
+    qtbot.keyClicks(window.macros.name_edit, "Typed macro")
+    assert window.session.dirty is False
+
+    # The same board, unplugged and plugged back in: every attach reads.
+    window.disconnect_device()
+    emulator.simulate_power_cycle()
+    _connect(qtbot, window, emulator)
+    qtbot.wait(200)
+
+    assert window.session.project.profiles[0].name == "Typed profile"
+    assert window.session.project.profiles[0].macros[0].name == "Typed macro"
+    assert window.profiles.name_edit.text() == "Typed profile"
+    assert window.macros.name_edit.text() == "Typed macro"
+    assert window.session.dirty is True
+    assert "your edits were kept" in window.statusBar().currentMessage()
+
+
 def test_typing_that_starts_while_a_read_is_in_flight_is_not_discarded(
     qtbot, window, emulator
 ):

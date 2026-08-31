@@ -821,9 +821,22 @@ class MainWindow(QMainWindow):
         gives the dirty guard something to see; it is deliberately not a
         second guard of its own, because two guards asking the same question
         are two answers waiting to disagree.
+
+        Every page is asked before any answer is applied. Applying one runs
+        ``apply_command`` -> ``set_session``, and ``set_session`` repaints
+        *all* the pages: a page asked after that has already had its
+        half-typed field overwritten from the session, so its own handler
+        sees a field that matches and offers nothing. Collecting first and
+        applying afterwards is what keeps this from destroying the very
+        typing it exists to save.
         """
-        for page in self._editor_pages():
-            page.commit_pending_edit()
+        pending = [
+            command
+            for command in (page.pending_edit_command() for page in self._editor_pages())
+            if command is not None
+        ]
+        for command in pending:
+            self.apply_command(command)
 
     def _adopt_device_project(self, package: bytes | None) -> None:
         """Show what the device is running, unless the operator is mid-edit.
