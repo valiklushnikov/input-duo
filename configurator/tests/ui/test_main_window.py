@@ -762,6 +762,14 @@ def test_an_edit_turns_the_device_chip_to_its_warning_state(qtbot, window, emula
     assert window.state_chips["device"].property("signal") == theme.SIGNAL_WARN
 
 
+def test_a_window_that_has_seen_no_board_says_so_and_says_something(window):
+    """The first thing an operator sees: no link yet, stated in words."""
+    chip = window.state_chips["device"]
+
+    assert chip.text()
+    assert chip.property("signal") == theme.SIGNAL_MUTED
+
+
 def test_a_device_holding_the_same_package_reads_as_agreement(qtbot, window, emulator):
     _connect(qtbot, window, emulator)
 
