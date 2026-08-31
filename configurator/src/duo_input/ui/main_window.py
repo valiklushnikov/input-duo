@@ -144,6 +144,13 @@ class MainWindow(QMainWindow):
         #: which arrives on ``operation_succeeded`` several chunks later - is
         #: only adopted when it is actually the read this window asked for.
         self._reading_device = False
+        #: Set once the connect hook has queued its read. The device wins at
+        #: startup and only at startup: the autoconnect timer runs for the
+        #: life of the window, so a read on every connect would replace the
+        #: operator's open project with the board's the moment they plug a
+        #: board in to write that project to it - saved, so the dirty guard
+        #: below lets it through - and drop the file path with it.
+        self._startup_read_done = False
         self.autosave = AutosaveService(parent=self)
         self.autosave.timer.timeout.connect(self.autosave_now)
         self.autosave.timer.start()
@@ -774,14 +781,22 @@ class MainWindow(QMainWindow):
         if result.operation == "read_config" and self._reading_device:
             self._reading_device = False
             self._adopt_device_project(result.value)
-        elif result.operation == "connect_device":
+        elif result.operation == "connect_device" and not self._startup_read_done:
             # The device attaches itself, so it also answers "what is it
-            # running?" itself: the operator never has to ask. This fires
-            # once per connect, never on the read that follows it, so there
-            # is no loop. The read is deferred to the next tick: this handler
-            # runs inside DeviceService's own unwind of "connect_device", and
-            # starting a second operation synchronously here would re-enter
-            # the service mid-transaction.
+            # running?" itself: the operator never has to ask. Only the first
+            # connect this window makes does so - that is the startup the
+            # specification grants the device ("At startup, a device that
+            # answers has its configuration read and shown"). Later connects
+            # queue nothing: by then the session is the operator's, and a
+            # board plugged in to receive it must not overwrite it instead.
+            # The flag is set on queueing rather than on the answer, so a
+            # read that fails is not retried on the next reconnect either.
+            #
+            # The read is deferred to the next tick: this handler runs inside
+            # DeviceService's own unwind of "connect_device", and starting a
+            # second operation synchronously here would re-enter the service
+            # mid-transaction.
+            self._startup_read_done = True
             QTimer.singleShot(0, self.read_device_project)
         self.overview.append_event(result.operation, "ok")
         self.diagnostics.refresh()

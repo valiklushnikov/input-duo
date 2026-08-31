@@ -67,11 +67,18 @@ def window(qtbot, service, settings) -> MainWindow:
 
 
 def _connect(qtbot, window: MainWindow, emulator: U1Emulator) -> None:
+    # Only the first connect a window makes queues the read (see
+    # MainWindow._startup_read_done), so only the first one has anything to
+    # wait for. Asked before the connect, because the flag is set while it
+    # runs; waiting on a later connect would simply burn the full timeout.
+    expects_read = not window._startup_read_done
     with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
         window.connect_device(emulator)
     assert window.service.state is DeviceState.READY
-    # Connecting also queues the window's own read of what the device is
-    # running (see read_device_project); the request is deferred to the next
+    if not expects_read:
+        return
+    # That first connect also queues the window's own read of what the device
+    # is running (see read_device_project); the request is deferred to the next
     # tick and its answer a few more after that. A caller that goes straight
     # on to its own device operation must not race it, so every test that
     # uses this helper waits for it to land - successfully or not - first.
@@ -531,6 +538,84 @@ def test_calling_read_device_project_twice_in_a_row_issues_one_read(
     qtbot.waitUntil(
         lambda: window.session.active_profile.name == "On the board", timeout=5000
     )
+
+
+def test_a_device_present_at_startup_still_supplies_the_project(
+    qtbot, service, emulator, settings
+):
+    """The connect-triggered read is what makes startup work; nothing else asks.
+
+    Unlike the test above, nothing here calls ``read_device_project``: the
+    window has to ask on its own, which is the whole point of spec section 3
+    ("At startup, a device that answers has its configuration read and
+    shown").
+    """
+    from duo_input.ui.models.project_session import RenameProfile
+
+    wanted = ProjectSession.new().apply(RenameProfile(1, "On the board")).project
+    emulator.install_active(compile_project_to_binary(wanted))
+
+    window = MainWindow(service, transport_factory=lambda: emulator, settings=settings)
+    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+
+    qtbot.waitUntil(
+        lambda: window.session.active_profile.name == "On the board", timeout=5000
+    )
+    assert window.session.path is None
+
+
+def test_a_device_plugged_in_after_startup_leaves_the_open_project_alone(
+    qtbot, service, emulator, settings, tmp_path
+):
+    """The read belongs to startup, not to every connect.
+
+    The autoconnect timer runs for the life of the window, so without this
+    the harm is the program's primary workflow: the operator opens their
+    project, edits it, saves it, and only then plugs the board in - in order
+    to write that project to it. A read fired by that connect sails past the
+    dirty guard (they just saved), replaces their project with the board's
+    and drops ``session.path``. The next Write then sends the board's own
+    configuration back, and the next Save is a Save As they can point at
+    their own file.
+    """
+    from duo_input.ui.models.project_session import RenameProfile
+
+    on_board = ProjectSession.new().apply(RenameProfile(1, "On the board")).project
+    emulator.install_active(compile_project_to_binary(on_board))
+
+    # Startup, with a device attached: the board's configuration is adopted.
+    window = MainWindow(service, transport_factory=lambda: emulator, settings=settings)
+    qtbot.addWidget(window, before_close_func=_discard_on_teardown)
+    qtbot.waitUntil(
+        lambda: window.session.active_profile.name == "On the board", timeout=5000
+    )
+
+    # The operator's own project: edited and saved, so it is not dirty.
+    saved = tmp_path / "mine.duoinput.json"
+    window.set_session(window.session.apply(RenameProfile(1, "Mine")))
+    assert window.save_project(saved) is True
+    assert window.session.dirty is False
+    assert window.session.path == saved
+
+    # They unplug the board and plug it back in, to write their project to it.
+    window.disconnect_device()
+    later = U1Emulator()
+    later.install_active(
+        compile_project_to_binary(
+            ProjectSession.new().apply(RenameProfile(1, "Still the board")).project
+        )
+    )
+    operations: list[str] = []
+    window.service.operation_succeeded.connect(
+        lambda result: operations.append(result.operation)
+    )
+    with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
+        window.connect_device(later)
+    qtbot.wait(500)
+
+    assert window.session.active_profile.name == "Mine"
+    assert window.session.path == saved
+    assert "read_config" not in operations
 
 
 # --------------------------------------------------------------- close flow
