@@ -553,16 +553,23 @@ class ProjectSession:
     def with_connection(self, connected: bool) -> ProjectSession:
         return replace(self, connected=bool(connected))
 
-    def agreeing_with_device(self) -> ProjectSession:
-        """Mark the project as being what the device holds.
+    def agreeing_with_device(self, project: DeviceProject | None = None) -> ProjectSession:
+        """Mark ``project`` as being what the device holds.
 
         Called after a configuration is read from the device and after one is
         written to it - the two moments the two are known to be the same. The
         baseline is what ``dirty`` compares against, so this is where "changed"
         gets its meaning: changed since the board last agreed, not changed
         since a file was written.
+
+        ``project`` defaults to the session's own project, which is right for
+        a read: the project *is* what came back. A write must pass what it
+        actually sent instead. A write is a long sequence of event-loop turns
+        with the editors still live, so the project on screen when it finishes
+        may already have moved past the package that went down the wire; using
+        it here would declare an unsent edit written.
         """
-        return replace(self, baseline=self.project)
+        return replace(self, baseline=self.project if project is None else project)
 
     def save(self, path: str | Path | None = None) -> ProjectSession:
         """Write a copy of the project to disk and return a session that knows

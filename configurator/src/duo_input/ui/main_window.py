@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from duo_input.device.service import DeviceService, DeviceState
 from duo_input.domain.config_reader import binary_to_project
+from duo_input.domain.models import DeviceProject
 from duo_input.domain.project_store import ProjectError, load_project
 from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.domain.validation import ValidationIssue
@@ -139,6 +140,13 @@ class MainWindow(QMainWindow):
         #: which arrives on ``operation_succeeded`` several chunks later - is
         #: only adopted when it is actually the read this window asked for.
         self._reading_device = False
+        #: The project a write is currently sending, held from the moment it
+        #: was compiled until the device confirms it. A write is chunks, then
+        #: WRITE_COMMIT, then a read-back - every step a full event-loop turn,
+        #: with the editor pages live throughout. What the board ends up
+        #: holding is this project, not whatever is on screen when the last
+        #: turn lands, so this is what the baseline becomes.
+        self._writing_project: DeviceProject | None = None
         #: Set once the connect hook has queued its read. The device wins at
         #: startup and only at startup: the autoconnect timer runs for the
         #: life of the window, so a read on every connect would replace the
@@ -723,6 +731,7 @@ class MainWindow(QMainWindow):
         except ValueError as error:
             self.overview.append_event("write_config", type(error).__name__)
             return
+        self._writing_project = self._session.project
         self.progress.setValue(0)
         self.progress.setVisible(True)
         self._service.write_config(package)
@@ -745,9 +754,13 @@ class MainWindow(QMainWindow):
             self._reading_device = False
             self._adopt_device_project(result.value)
         elif result.operation == "write_config":
-            # The device just confirmed it holds what we sent; the project
-            # and the board agree from this moment on.
-            self.set_session(self._session.agreeing_with_device())
+            # The device just confirmed it holds what we sent - so the
+            # baseline becomes what was sent, which is not necessarily what
+            # is on screen: an edit made during the write went nowhere and
+            # has to keep reading as pending.
+            written = self._writing_project
+            self._writing_project = None
+            self.set_session(self._session.agreeing_with_device(written))
         elif result.operation == "connect_device" and not self._startup_read_done:
             # The device attaches itself, so it also answers "what is it
             # running?" itself: the operator never has to ask. Only the
@@ -813,6 +826,10 @@ class MainWindow(QMainWindow):
     def _on_operation_failed(self, failure: object) -> None:
         if failure.operation == "read_config" and self._reading_device:
             self._reading_device = False
+        if failure.operation == "write_config":
+            # Nothing landed on the board, so there is no package to make a
+            # baseline out of; leave the last agreement standing.
+            self._writing_project = None
         detail = failure.reason.value
         if failure.error_code is not None:
             detail = f"{detail} ({failure.error_code.name})"

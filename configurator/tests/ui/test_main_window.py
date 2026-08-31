@@ -409,6 +409,42 @@ def test_a_successful_write_reads_as_unchanged(qtbot, window, emulator):
     qtbot.waitUntil(lambda: window.session.dirty is False, timeout=5000)
 
 
+def test_an_edit_made_during_a_write_is_not_declared_written(qtbot, window, emulator):
+    """The baseline after a write is what was sent, not what is on screen.
+
+    A write is a long sequence - chunks, WRITE_COMMIT, then a read-back - and
+    every step is a full event-loop turn during which the editor pages stay
+    live. An edit that lands in one of those turns was compiled into nothing
+    and sent nowhere, so afterwards the board has still never seen it and the
+    session has to say so.
+    """
+    _connect(qtbot, window, emulator)
+    window.set_session(window.session.apply(RenameProfile(1, "Sent to the board")))
+
+    edited: list[bool] = []
+
+    def _edit_mid_write(_percent: int) -> None:
+        if edited:
+            return
+        edited.append(True)
+        window.set_session(window.session.apply(RenameProfile(2, "Typed mid-write")))
+
+    window.service.progress_changed.connect(_edit_mid_write)
+    try:
+        with qtbot.waitSignal(window.service.operation_succeeded, timeout=20000):
+            window.write_to_device()
+    finally:
+        window.service.progress_changed.disconnect(_edit_mid_write)
+
+    assert edited == [True]
+    # The edit is still on screen - a write never touches the project.
+    assert window.session.project.profiles[0].name == "Sent to the board"
+    assert window.session.project.profiles[1].name == "Typed mid-write"
+    # And it was never sent, so it is still pending.
+    assert window.session.dirty is True
+    assert DIRTY_MARKER in window.windowTitle()
+
+
 def test_failed_write_leaves_the_mismatch_visible(qtbot, window, emulator):
     _connect(qtbot, window, emulator)
     before = window.session.device_hash
