@@ -98,7 +98,7 @@ carried: *matches the device*, *differs from the device* (which is now also
 what "you have unwritten edits" means), and *no link* — the case where nothing
 can be compared because no board answered.
 
-## 5. Startup, after this change
+## 5. Attaching, after this change
 
 1. The window opens.
 2. It attaches to a device by itself, as it already does.
@@ -111,6 +111,30 @@ Point 4 is a real loss and is accepted deliberately: today the last file would
 have opened. Without a device and without an explicit load, there is nothing to
 show, and inventing something would be the confusion this change exists to
 remove.
+
+**Step 3 belongs to every attach, not only to the one at startup.** The
+operator asked for this in these words — *«до этого же мы читали плату при
+старте! делаем без кнопки как и сначала было оговорено!»* — and the reason it
+has to be every attach is that a board plugged in an hour after startup, or
+swapped for a different one, is just as much a board whose configuration
+nobody has seen. There is no control anywhere that asks on the operator's
+behalf, so a board that arrived late was simply never read: the window went on
+showing the previous board's configuration, marked the project as pending, and
+offered nothing but Write — which overwrites the board that had just arrived —
+to clear the warning.
+
+What that costs is paid where the answer lands, not where the request goes
+out. Issuing the read is unconditional and costs a few chunks over the wire;
+adopting it is refused while the session is dirty, and refused while an editor
+page still holds text that has not been committed — the pages are asked to
+commit first, so a name being typed when a board attaches becomes an edit the
+dirty guard can see rather than a field that gets overwritten. And when the
+package the board sends is byte-for-byte what the project already compiles to,
+adoption is skipped entirely: the board has nothing to teach the project, while
+decoding its answer would cost detail the binary cannot carry — a TEXT macro
+travels as keystrokes and never as the Unicode it was compiled from, so
+adopting a board's echo of what was just written to it would throw away the
+text the operator typed.
 
 ## 6. What this costs
 
