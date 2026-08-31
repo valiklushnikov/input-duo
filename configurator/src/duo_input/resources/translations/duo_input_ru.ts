@@ -2,20 +2,79 @@
 <!DOCTYPE TS>
 <TS version="2.1" language="ru_RU">
 <context>
+    <name>BindingTable</name>
+    <message>
+        <location filename="../../ui/models/binding_table.py" line="120"/>
+        <source>Switch the keyboard between PC1 and PC2</source>
+        <extracomment>Modifier key of the editor, in the order the labels are joined. Buttons every HID mouse reports; 4 and 5 have to be seen before they exist. Highest button number the binary format can store, mirrored from validation. HID usage to the legend the operator sees. Missing usages read as a number. Usages the key chooser offers, in HID order. What each action does, said the way the operator would say it. The protocol name stays available in a tooltip: a screenshot has to be readable against the diagnostics and the documentation, which both speak in identifiers.</extracomment>
+        <translation>Переключить клавиатуру между ПК1 и ПК2</translation>
+    </message>
+    <message>
+        <location filename="../../ui/models/binding_table.py" line="121"/>
+        <source>Each press sends the keyboard to the other computer.</source>
+        <translation>Каждое нажатие отправляет клавиатуру на другой компьютер.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/models/binding_table.py" line="127"/>
+        <source>Switch the mouse between PC1 and PC2</source>
+        <translation>Переключить мышь между ПК1 и ПК2</translation>
+    </message>
+    <message>
+        <location filename="../../ui/models/binding_table.py" line="128"/>
+        <source>Each press sends the mouse to the other computer.</source>
+        <translation>Каждое нажатие отправляет мышь на другой компьютер.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/models/binding_table.py" line="133"/>
+        <source>Send the keyboard to one computer</source>
+        <translation>Направить клавиатуру на один компьютер</translation>
+    </message>
+    <message>
+        <location filename="../../ui/models/binding_table.py" line="134"/>
+        <location filename="../../ui/models/binding_table.py" line="141"/>
+        <source>Always the same computer, whichever one was being used before.</source>
+        <translation>Всегда один и тот же компьютер, каким бы ни был предыдущий.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/models/binding_table.py" line="140"/>
+        <source>Send the mouse to one computer</source>
+        <translation>Направить мышь на один компьютер</translation>
+    </message>
+    <message>
+        <location filename="../../ui/models/binding_table.py" line="147"/>
+        <source>Switch to another profile</source>
+        <translation>Перейти на другой профиль</translation>
+    </message>
+    <message>
+        <location filename="../../ui/models/binding_table.py" line="148"/>
+        <source>Loads a different set of bindings on the device.</source>
+        <translation>Загружает на устройство другой набор назначений.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/models/binding_table.py" line="153"/>
+        <source>Run a macro</source>
+        <translation>Запустить макрос</translation>
+    </message>
+    <message>
+        <location filename="../../ui/models/binding_table.py" line="154"/>
+        <source>Plays a recorded sequence of keys and pauses.</source>
+        <translation>Проигрывает записанную последовательность клавиш и пауз.</translation>
+    </message>
+</context>
+<context>
     <name>BindingTableModel</name>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="242"/>
+        <location filename="../../ui/models/binding_table.py" line="316"/>
         <source>Trigger</source>
-        <extracomment>Modifier key of the editor, in the order the labels are joined. Buttons every HID mouse reports; 4 and 5 have to be seen before they exist. Highest button number the binary format can store, mirrored from validation. HID usage to the legend the operator sees. Missing usages read as a number. Usages the key chooser offers, in HID order.</extracomment>
         <translation>Триггер</translation>
     </message>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="242"/>
+        <location filename="../../ui/models/binding_table.py" line="316"/>
         <source>Mode</source>
         <translation>Режим</translation>
     </message>
     <message>
-        <location filename="../../ui/models/binding_table.py" line="242"/>
+        <location filename="../../ui/models/binding_table.py" line="316"/>
         <source>Action</source>
         <translation>Действие</translation>
     </message>
@@ -23,176 +82,176 @@
 <context>
     <name>BindingsPage</name>
     <message>
-        <location filename="../../ui/bindings.py" line="228"/>
+        <location filename="../../ui/bindings.py" line="230"/>
         <source>Bindings</source>
         <extracomment>A mouse button the device just reported, so the shell can remember it.</extracomment>
         <translation>Назначения</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="229"/>
+        <location filename="../../ui/bindings.py" line="231"/>
         <source>Choose what a key or mouse button does in this profile.</source>
         <translation>Настройте действия клавиш и кнопок мыши в этом профиле.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="236"/>
+        <location filename="../../ui/bindings.py" line="238"/>
         <source>Bindings of the active profile</source>
         <translation>Назначения активного профиля</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="251"/>
+        <location filename="../../ui/bindings.py" line="253"/>
         <source>Binding</source>
         <translation>Назначение</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="259"/>
+        <location filename="../../ui/bindings.py" line="261"/>
         <source>Trigger kind</source>
         <translation>Вид триггера</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="260"/>
-        <location filename="../../ui/bindings.py" line="266"/>
+        <location filename="../../ui/bindings.py" line="262"/>
+        <location filename="../../ui/bindings.py" line="268"/>
         <source>Keyboard key</source>
         <translation>Клавиша клавиатуры</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="261"/>
-        <location filename="../../ui/bindings.py" line="274"/>
+        <location filename="../../ui/bindings.py" line="263"/>
+        <location filename="../../ui/bindings.py" line="276"/>
         <source>Mouse button</source>
         <translation>Кнопка мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="263"/>
+        <location filename="../../ui/bindings.py" line="265"/>
         <source>Trigger:</source>
         <translation>Триггер:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="270"/>
+        <location filename="../../ui/bindings.py" line="272"/>
         <source>Key:</source>
         <translation>Клавиша:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="276"/>
+        <location filename="../../ui/bindings.py" line="278"/>
         <source>Button:</source>
         <translation>Кнопка:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="283"/>
+        <location filename="../../ui/bindings.py" line="285"/>
         <source>{0} modifier</source>
         <translation>Модификатор {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="288"/>
+        <location filename="../../ui/bindings.py" line="290"/>
         <source>Modifiers:</source>
         <translation>Модификаторы:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="291"/>
+        <location filename="../../ui/bindings.py" line="293"/>
         <source>Binding mode</source>
         <translation>Режим назначения</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="292"/>
+        <location filename="../../ui/bindings.py" line="294"/>
         <source>Replace</source>
         <translation>Заменить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="293"/>
-        <location filename="../../ui/bindings.py" line="321"/>
+        <location filename="../../ui/bindings.py" line="295"/>
+        <location filename="../../ui/bindings.py" line="330"/>
         <source>Add</source>
         <translation>Добавить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="294"/>
+        <location filename="../../ui/bindings.py" line="296"/>
         <source>Mode:</source>
         <translation>Режим:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="297"/>
+        <location filename="../../ui/bindings.py" line="299"/>
         <source>Action</source>
         <translation>Действие</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="302"/>
+        <location filename="../../ui/bindings.py" line="311"/>
         <source>Action:</source>
         <translation>Действие:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="305"/>
+        <location filename="../../ui/bindings.py" line="314"/>
         <source>Action target</source>
         <translation>Цель действия</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="307"/>
+        <location filename="../../ui/bindings.py" line="316"/>
         <source>Target:</source>
         <translation>Цель:</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="311"/>
+        <location filename="../../ui/bindings.py" line="320"/>
         <source>Why this binding cannot be used</source>
         <translation>Почему это назначение нельзя применить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="318"/>
+        <location filename="../../ui/bindings.py" line="327"/>
         <source>Detect</source>
         <translation>Определить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="319"/>
+        <location filename="../../ui/bindings.py" line="328"/>
         <source>Detect the trigger on the device</source>
         <translation>Определить триггер на устройстве</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="322"/>
+        <location filename="../../ui/bindings.py" line="331"/>
         <source>Add this binding</source>
         <translation>Добавить это назначение</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="325"/>
+        <location filename="../../ui/bindings.py" line="334"/>
         <source>Apply</source>
         <translation>Применить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="326"/>
+        <location filename="../../ui/bindings.py" line="335"/>
         <source>Apply the changes to the selected binding</source>
         <translation>Применить изменения к выбранному назначению</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="328"/>
+        <location filename="../../ui/bindings.py" line="337"/>
         <source>Remove</source>
         <translation>Удалить</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="329"/>
+        <location filename="../../ui/bindings.py" line="338"/>
         <source>Remove the selected binding</source>
         <translation>Удалить выбранное назначение</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="499"/>
+        <location filename="../../ui/bindings.py" line="508"/>
         <source>Button {0}</source>
         <translation>Кнопка {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="558"/>
+        <location filename="../../ui/bindings.py" line="567"/>
         <source>No mouse is attached, so no mouse button can be bound.</source>
         <translation>Мышь не подключена, поэтому назначить кнопку мыши нельзя.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="561"/>
+        <location filename="../../ui/bindings.py" line="570"/>
         <source>Choose a trigger first.</source>
         <translation>Сначала выберите триггер.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="564"/>
+        <location filename="../../ui/bindings.py" line="573"/>
         <source>This profile has no macros to run.</source>
         <translation>В этом профиле нет макросов для запуска.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="566"/>
+        <location filename="../../ui/bindings.py" line="575"/>
         <source>Choose what the trigger should do.</source>
         <translation>Выберите, что должен делать триггер.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="571"/>
+        <location filename="../../ui/bindings.py" line="580"/>
         <source>{0} is already bound in this profile.</source>
         <translation>{0} уже назначен в этом профиле.</translation>
     </message>
@@ -200,18 +259,18 @@
 <context>
     <name>CaptureDialog</name>
     <message>
-        <location filename="../../ui/bindings.py" line="103"/>
+        <location filename="../../ui/bindings.py" line="105"/>
         <source>Detect a key or button</source>
         <extracomment>Seconds the device keeps capture mode open, mirrored from the design spec. Actions whose argument is fixed at zero.</extracomment>
         <translation>Определение клавиши или кнопки</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="108"/>
+        <location filename="../../ui/bindings.py" line="110"/>
         <source>Press the mouse button you want to use.</source>
         <translation>Нажмите кнопку мыши, которую хотите использовать.</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="110"/>
+        <location filename="../../ui/bindings.py" line="112"/>
         <source>Press the key or mouse button you want to bind.</source>
         <translation>Нажмите клавишу или кнопку мыши, которую хотите назначить.</translation>
     </message>

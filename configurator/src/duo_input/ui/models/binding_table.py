@@ -10,7 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from uuid import UUID
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QCoreApplication,
+    QModelIndex,
+    Qt,
+)
+from PySide6.QtCore import QT_TRANSLATE_NOOP
 
 from duo_input.domain.models import Action, Binding, Profile, Trigger
 from duo_input.generated.protocol import (
@@ -106,8 +112,76 @@ def trigger_label(trigger: Trigger) -> str:
     return f"{prefix}+{name}" if prefix else name
 
 
+#: What each action does, said the way the operator would say it. The protocol
+#: name stays available in a tooltip: a screenshot has to be readable against
+#: the diagnostics and the documentation, which both speak in identifiers.
+ACTION_MEANINGS: dict[ActionKind, tuple[str, str]] = {
+    ActionKind.TOGGLE_KEYBOARD_ROUTE: (
+        QT_TRANSLATE_NOOP("BindingTable", "Switch the keyboard between PC1 and PC2"),
+        QT_TRANSLATE_NOOP(
+            "BindingTable",
+            "Each press sends the keyboard to the other computer.",
+        ),
+    ),
+    ActionKind.TOGGLE_MOUSE_ROUTE: (
+        QT_TRANSLATE_NOOP("BindingTable", "Switch the mouse between PC1 and PC2"),
+        QT_TRANSLATE_NOOP(
+            "BindingTable", "Each press sends the mouse to the other computer."
+        ),
+    ),
+    ActionKind.SET_KEYBOARD_ROUTE: (
+        QT_TRANSLATE_NOOP("BindingTable", "Send the keyboard to one computer"),
+        QT_TRANSLATE_NOOP(
+            "BindingTable",
+            "Always the same computer, whichever one was being used before.",
+        ),
+    ),
+    ActionKind.SET_MOUSE_ROUTE: (
+        QT_TRANSLATE_NOOP("BindingTable", "Send the mouse to one computer"),
+        QT_TRANSLATE_NOOP(
+            "BindingTable",
+            "Always the same computer, whichever one was being used before.",
+        ),
+    ),
+    ActionKind.SET_PROFILE: (
+        QT_TRANSLATE_NOOP("BindingTable", "Switch to another profile"),
+        QT_TRANSLATE_NOOP(
+            "BindingTable", "Loads a different set of bindings on the device."
+        ),
+    ),
+    ActionKind.RUN_MACRO: (
+        QT_TRANSLATE_NOOP("BindingTable", "Run a macro"),
+        QT_TRANSLATE_NOOP(
+            "BindingTable", "Plays a recorded sequence of keys and pauses."
+        ),
+    ),
+}
+
+
+def action_kind_label(kind: ActionKind) -> str:
+    """What this action does, in words. Falls back to the protocol name."""
+    meaning = ACTION_MEANINGS.get(kind)
+    if meaning is None:
+        return kind.name
+    return QCoreApplication.translate("BindingTable", meaning[0])
+
+
+def action_kind_hint(kind: ActionKind) -> str:
+    """The sentence behind the label, with the protocol identifier after it."""
+    meaning = ACTION_MEANINGS.get(kind)
+    if meaning is None:
+        return kind.name
+    sentence = QCoreApplication.translate("BindingTable", meaning[1])
+    return f"{sentence}\n{kind.name}"
+
+
 def action_label(action: Action, profile: Profile | None = None) -> str:
-    """One action as the protocol names it, plus the target it points at."""
+    """One action in words, with the computer or macro it points at.
+
+    The protocol name is not here: it is in the tooltip beside it. An operator
+    reading this column wants to know what pressing the key will do, and
+    ``SET_MOUSE_ROUTE PC2`` answers a different question.
+    """
     kind = ActionKind(action.kind)
     if kind is ActionKind.RUN_MACRO:
         name = None
@@ -116,14 +190,14 @@ def action_label(action: Action, profile: Profile | None = None) -> str:
                 (macro.name for macro in profile.macros if macro.id == action.argument), None
             )
         target = f"#{action.argument}" if name is None else f"#{action.argument} {name}"
-        return f"{kind.name} {target}"
+        return f"{action_kind_label(kind)}: {target}"
     if kind in (ActionKind.TOGGLE_KEYBOARD_ROUTE, ActionKind.TOGGLE_MOUSE_ROUTE):
-        return kind.name
+        return action_kind_label(kind)
     if kind is ActionKind.SET_KEYBOARD_ROUTE:
-        return f"{kind.name} {_enum_name(KeyboardRoute, action.argument)}"
+        return f"{action_kind_label(kind)}: {_enum_name(KeyboardRoute, action.argument)}"
     if kind is ActionKind.SET_MOUSE_ROUTE:
-        return f"{kind.name} {_enum_name(MouseRoute, action.argument)}"
-    return f"{kind.name} #{action.argument}"
+        return f"{action_kind_label(kind)}: {_enum_name(MouseRoute, action.argument)}"
+    return f"{action_kind_label(kind)}: #{action.argument}"
 
 
 def _enum_name(enum_type: type, value: int) -> str:

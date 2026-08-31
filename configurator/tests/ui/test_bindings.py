@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel
 
 from duo_input.device.emulator import U1Emulator
@@ -21,6 +22,8 @@ from duo_input.generated.protocol import (
 )
 from duo_input.ui.bindings import BindingsPage, CaptureDialog
 from duo_input.ui.models.binding_table import (
+    action_kind_hint,
+    action_kind_label,
     LEFT_ALT,
     LEFT_CTRL,
     LEFT_SHIFT,
@@ -113,19 +116,24 @@ def test_a_run_macro_action_reads_as_the_macro_it_runs():
 
     label = action_label(Action(ActionKind.RUN_MACRO, 3), profile)
 
-    assert "RUN_MACRO" in label
+    # The protocol name moved to the tooltip; the column says what it does.
+    assert "RUN_MACRO" not in label
     assert "Куркума" in label
+    assert action_kind_hint(ActionKind.RUN_MACRO).endswith("RUN_MACRO")
 
 
-def test_a_route_action_reads_as_the_protocol_route_name():
+def test_a_route_action_names_the_computer_it_points_at():
+    """The action is said in words; the route it targets keeps its own name.
+
+    PC1 and PC2 are what the labels on the hardware say, so translating them
+    would help nobody.
+    """
     profile = default_project().profiles[0]
 
-    assert action_label(Action(ActionKind.SET_MOUSE_ROUTE, MouseRoute.PC2), profile) == (
-        "SET_MOUSE_ROUTE PC2"
-    )
-    assert action_label(Action(ActionKind.TOGGLE_KEYBOARD_ROUTE, 0), profile) == (
-        "TOGGLE_KEYBOARD_ROUTE"
-    )
+    label = action_label(Action(ActionKind.SET_MOUSE_ROUTE, MouseRoute.PC2), profile)
+
+    assert "SET_MOUSE_ROUTE" not in label
+    assert "PC2" in label
 
 
 # -------------------------------------------------------------- table model
@@ -146,7 +154,7 @@ def test_the_table_lists_the_bindings_of_one_profile(qtbot):
     assert model.columnCount() == 3
     assert model.index(0, 0).data() == "A"
     assert model.index(0, 1).data() == "REPLACE"
-    assert model.index(0, 2).data() == "TOGGLE_KEYBOARD_ROUTE"
+    assert model.index(0, 2).data() == action_kind_label(ActionKind.TOGGLE_KEYBOARD_ROUTE)
 
 
 def test_the_table_finds_a_binding_by_its_uuid(qtbot):
@@ -453,6 +461,41 @@ def test_a_captured_event_becomes_the_trigger(qtbot, service, emulator):
         link.poll()
 
     assert dialog.trigger == Trigger(TriggerKind.MOUSE_BUTTON, 4, 0)
+
+
+def test_the_table_says_what_each_binding_does(page):
+    """The list of bindings is the page's answer to "what is set up here?"."""
+    binding = Binding(
+        trigger=Trigger(TriggerKind.KEYBOARD_USAGE, 0x3F, 0),
+        mode=BindingMode.REPLACE,
+        action=Action(ActionKind.TOGGLE_KEYBOARD_ROUTE, 0),
+    )
+    page.set_session(page.session.apply(AddBinding(1, binding)))
+
+    text = page.model.data(page.model.index(0, page.model.ACTION), Qt.ItemDataRole.DisplayRole)
+
+    assert "TOGGLE_KEYBOARD_ROUTE" not in text
+    assert "клав" in text.lower() or "keyboard" in text.lower()
+
+
+def test_the_action_chooser_says_what_an_action_does(page):
+    """TOGGLE_KEYBOARD_ROUTE is what the protocol calls it, not what it means."""
+    offered = [page.action_combo.itemText(row) for row in range(page.action_combo.count())]
+
+    assert offered
+    for text in offered:
+        assert text.upper() != text, f"still a protocol identifier: {text}"
+        assert "_" not in text, f"still a protocol identifier: {text}"
+
+
+def test_each_action_keeps_its_protocol_name_within_reach(page):
+    """The identifier still has to be findable: a screenshot has to be readable
+    against the diagnostics and the documentation, which both use it."""
+    for row in range(page.action_combo.count()):
+        hint = page.action_combo.itemData(row, Qt.ItemDataRole.ToolTipRole)
+        assert hint, f"row {row} carries no tooltip"
+        kind = page.action_combo.itemData(row)
+        assert kind.name in hint
 
 
 def test_a_mouse_only_capture_ignores_keyboard_events(qtbot, service):

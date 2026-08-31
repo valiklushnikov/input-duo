@@ -41,6 +41,8 @@ from duo_input.ui.models.binding_table import (
     SELECTABLE_USAGES,
     BindingTableModel,
     MouseCapabilities,
+    action_kind_hint,
+    action_kind_label,
     key_name,
     trigger_label,
 )
@@ -296,7 +298,14 @@ class BindingsPage(QWidget):
         self.action_combo = QComboBox(box)
         self.action_combo.setAccessibleName(self.tr("Action"))
         for kind in ActionKind:
-            self.action_combo.addItem(kind.name, kind)
+            # The list says what the action does; the protocol name it carries
+            # stays one hover away, because the diagnostics and the docs speak
+            # in identifiers and a screenshot has to be readable against them.
+            self.action_combo.addItem(action_kind_label(kind), kind)
+            row = self.action_combo.count() - 1
+            self.action_combo.setItemData(
+                row, action_kind_hint(kind), Qt.ItemDataRole.ToolTipRole
+            )
         self.action_combo.setCurrentIndex(self.action_combo.findData(_DEFAULT_ACTION))
         self.action_combo.currentIndexChanged.connect(self._on_action_kind_changed)
         form.addRow(field_label(self.tr("Action:"), box), self.action_combo)
