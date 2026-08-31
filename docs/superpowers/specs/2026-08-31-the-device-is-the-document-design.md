@@ -129,7 +129,9 @@ and that autosave did not actually work today.
 - `dirty` is false right after a device read and right after a successful
   write, and true after any edit in between.
 - Saving a copy does not make a changed project read as unchanged.
-- Loading a copy marks the project as not yet written to the device.
+- Loading a copy that differs from the device reads as needing a write; one
+  that matches what the board holds reads as matching. The file itself is
+  never what the comparison is against.
 - Closing the window with unwritten changes does not prompt.
 - Starting with no device leaves an empty project and says so.
 - Starting with a device shows the device's configuration, unchanged.
