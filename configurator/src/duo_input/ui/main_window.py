@@ -713,11 +713,17 @@ class MainWindow(QMainWindow):
     def disconnect_device(self) -> None:
         # DeviceService.disconnect_device clears its operation before tearing
         # the link down, so it deliberately reports no failure - which means
-        # _on_operation_failed never runs and never clears the flag below. A
-        # read that was in flight would otherwise stay "in flight" forever,
-        # and read_device_project would refuse every later read for the life
-        # of the window, silently and permanently.
+        # _on_operation_failed never runs and never clears either of the two
+        # things below. A read that was in flight would otherwise stay "in
+        # flight" forever, and read_device_project would refuse every later
+        # read for the life of the window, silently and permanently. A write
+        # that was in flight would leave its project held as if it were still
+        # on its way to a board that is no longer attached; nothing reads it
+        # again before the next write overwrites it, but that is a margin,
+        # not a guarantee, and this round has already seen what happens when
+        # something else clears it at the wrong moment.
         self._reading_device = False
+        self._writing_project = None
         self._service.disconnect_device()
         self._sync_device_state()
 

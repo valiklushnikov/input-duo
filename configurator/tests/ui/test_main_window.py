@@ -926,6 +926,32 @@ def test_a_disconnect_during_a_read_does_not_disable_reading_for_good(
     )
 
 
+def test_a_disconnect_during_a_write_lets_go_of_what_it_was_sending(
+    qtbot, window, emulator
+):
+    """The write's held project has the same hazard as the read's flag.
+
+    ``DeviceService.disconnect_device`` clears its operation before tearing
+    the link down and reports no failure, so ``_on_operation_failed`` - the
+    only other place that lets go of the project a write is holding - never
+    runs. Left set, it is a project the window believes is on its way to a
+    board that is not even attached.
+    """
+    _connect(qtbot, window, emulator)
+    window.set_session(window.session.apply(RenameProfile(1, "Halfway there")))
+
+    window.write_to_device()
+    assert window.service.state is DeviceState.BUSY
+    assert window._writing_project is not None
+
+    window.disconnect_device()
+
+    assert window.service.is_connected is False
+    assert window._writing_project is None
+    # Nothing reached the board, so the edit is still waiting to be sent.
+    assert window.session.dirty is True
+
+
 # --------------------------------------------------------------- close flow
 
 
