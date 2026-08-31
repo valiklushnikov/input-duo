@@ -678,10 +678,14 @@ def test_a_device_plugged_in_after_a_deviceless_startup_leaves_the_open_project_
     operator ever opens anything. The operator's normal habit is the other
     order: start with no device, work for a while, save a copy, and only
     then plug a board in - to write that project to it. Nothing here has
-    spent the flag yet, so without the fix the connect below is still
-    treated as "startup" and the board's configuration silently replaces
-    the operator's saved copy, dropping ``session.path`` with it. This is
-    the reproduction from the defect report.
+    spent the flag yet, so the connect below is still this window's startup
+    connect and its read *is* issued - which is harmless, because the guard
+    that matters refuses the answer: ``_adopt_device_project`` will not
+    discard edits the operator has not written anywhere. This is the
+    reproduction from the defect report, and the read is deliberately
+    asserted to happen so that reinstating a gate in front of it - the one
+    that lost the board's own configuration for anybody who exported a
+    template - would fail here.
     """
     assert window._startup_read_done is False
 
@@ -694,12 +698,50 @@ def test_a_device_plugged_in_after_a_deviceless_startup_leaves_the_open_project_
     emulator.install_active(compile_project_to_binary(on_board))
     window.transport_factory = lambda: emulator
 
+    operations: list[str] = []
+    window.service.operation_succeeded.connect(
+        lambda result: operations.append(result.operation)
+    )
     with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
         window.try_autoconnect()
+    qtbot.waitUntil(lambda: "read_config" in operations, timeout=5000)
     qtbot.wait(500)
 
+    # The board answered, and the answer was refused rather than never asked.
     assert window.session.active_profile.name == "Моя работа"
     assert window.session.path == saved
+    assert "your edits were kept" in window.statusBar().currentMessage()
+    assert window.session.device_matches is False
+
+
+def test_a_template_saved_before_the_board_arrives_still_lets_the_board_be_read(
+    qtbot, window, emulator, tmp_path
+):
+    """Saving a copy must not silence the board that turns up afterwards.
+
+    An operator with no board attached exports the untouched default
+    configuration as a template, then plugs the board in. A gate on
+    ``session.path`` - which nothing but ``save_copy`` sets, and which has no
+    UI surface at all now the file name has left the title - meant the board
+    was never read. The chip then said "differs from the project", Write was
+    enabled, and pressing it overwrote the board's real configuration, which
+    the spec (section 6) calls unrecoverable.
+    """
+    assert window.session.dirty is False
+    assert window.save_copy(tmp_path / "template.duoinput.json") is True
+    assert window.session.path is not None
+
+    on_board = ProjectSession.new().apply(RenameProfile(1, "Конфигурация платы")).project
+    emulator.install_active(compile_project_to_binary(on_board))
+    window.transport_factory = lambda: emulator
+
+    window.try_autoconnect()
+
+    qtbot.waitUntil(
+        lambda: window.session.active_profile.name == "Конфигурация платы", timeout=5000
+    )
+    # And so the board is not about to be overwritten with the template.
+    assert window.session.device_matches is True
 
 
 def test_a_device_plugged_in_after_startup_into_an_untouched_session_is_adopted(

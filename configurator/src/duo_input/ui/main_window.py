@@ -155,22 +155,6 @@ class MainWindow(QMainWindow):
         #: ``dirty``, so the dirty guard below is not bypassed in that
         #: scenario any more - and drop the file path with it.
         self._startup_read_done = False
-        #: DECISION (not an oversight): the spec says the device always wins.
-        #: Narrowed to "the device wins when there is nothing of the
-        #: operator's to lose" - no file opened or saved, no unsaved edits -
-        #: because the alternative was replacing a saved project the moment a
-        #: board is plugged in to receive it. Snapshotted at the moment a
-        #: connection attempt begins, not when its read is queued or lands: a
-        #: synchronous step - saving or loading a copy, say - could run in
-        #: between and change ``session.path`` or ``dirty``, and checking at
-        #: either later point would wrongly refuse the very read the startup
-        #: case depends on (a bare ``session.path`` guard was tried before
-        #: and rejected for exactly this reason). What has to be untouched
-        #: is the session at the moment this attempt began, not
-        #: at whatever point another synchronous step gets to run next. When
-        #: the device and the project disagree, the mismatch stays visible
-        #: in the state strip instead.
-        self._connect_may_adopt = False
         #: Set once ``try_autoconnect`` has told the operator no device
         #: answered, so that message is said once rather than on every retry.
         self._said_no_device = False
@@ -653,7 +637,6 @@ class MainWindow(QMainWindow):
             self.overview.append_event("connect_device", "no_device_found")
             self.statusBar().showMessage(self.tr("No Duo Input device was found"))
             return
-        self._note_whether_this_connect_may_adopt()
         self._service.connect_device(link)
 
     def try_autoconnect(self) -> None:
@@ -682,16 +665,7 @@ class MainWindow(QMainWindow):
                 )
             return
         self._said_no_device = False
-        self._note_whether_this_connect_may_adopt()
         self._service.connect_device(link)
-
-    def _note_whether_this_connect_may_adopt(self) -> None:
-        """Record, before the handshake starts, whether its read may adopt.
-
-        See the comment on ``_connect_may_adopt`` in ``__init__`` for why this
-        has to be decided now rather than when the read is queued or lands.
-        """
-        self._connect_may_adopt = self._session.path is None and not self._session.dirty
 
     def read_device_project(self) -> None:
         """Ask the device for the configuration it is running.
@@ -770,28 +744,21 @@ class MainWindow(QMainWindow):
             # actually queued below - a read that fails is not retried on
             # the next reconnect either.
             self._startup_read_done = True
-            # DECISION: the specification says the device always wins
-            # ("At startup, a device that answers has its configuration
-            # read and shown"); the operator chose to narrow that to "wins
-            # when there is nothing of theirs to lose" (see
-            # ``_connect_may_adopt`` in ``__init__``). ``_startup_read_done``
-            # alone is not that guard: it only ever catches the *first*
-            # connect, and the operator's ordinary workflow - start with no
-            # device, work, save, plug a board in to write to it - makes
-            # that first connect happen long after startup, with a saved
-            # project already open. Saving does not clear ``dirty`` - a file
-            # is a copy, not the truth - so the dirty half of the guard below
-            # still holds in that scenario; the path half is what also has to
-            # cover a project that was opened or saved without ever being
-            # edited, which ``dirty`` alone would miss. ``_connect_may_adopt``
-            # was snapshotted before this handshake began, so it reflects the
-            # session at that moment even though it may have changed by now.
-            if self._connect_may_adopt:
-                # The read is deferred to the next tick: this handler runs
-                # inside DeviceService's own unwind of "connect_device", and
-                # starting a second operation synchronously here would
-                # re-enter the service mid-transaction.
-                QTimer.singleShot(0, self.read_device_project)
+            # Nothing gates the read itself. Whether the answer may replace
+            # what is on screen is decided when it lands, by the dirty guard
+            # in ``_adopt_device_project``: a read that is issued and then
+            # refused costs a few chunks over the wire and nothing else.
+            # There used to be a second gate here, on ``session.path`` - and
+            # since ``path`` is set by nothing but "save a copy" and has no
+            # UI surface at all, exporting a template meant the board was
+            # never read, was reported as differing, and was overwritten by
+            # the first Write.
+            #
+            # The read is deferred to the next tick: this handler runs
+            # inside DeviceService's own unwind of "connect_device", and
+            # starting a second operation synchronously here would
+            # re-enter the service mid-transaction.
+            QTimer.singleShot(0, self.read_device_project)
         self.overview.append_event(result.operation, "ok")
         self.diagnostics.refresh()
         self.progress.setVisible(False)
