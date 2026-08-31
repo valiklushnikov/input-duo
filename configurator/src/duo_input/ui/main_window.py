@@ -664,7 +664,14 @@ class MainWindow(QMainWindow):
                     )
                 )
             return
-        self._said_no_device = False
+        if self._said_no_device:
+            # That message was posted with no timeout, so it stays until
+            # something replaces it - and on a connect nothing does. Clearing
+            # it here, where the flag it belongs to is reset, is what stops
+            # the status bar saying the board is absent while the connection
+            # chip says it is ready.
+            self._said_no_device = False
+            self.statusBar().clearMessage()
         self._service.connect_device(link)
 
     def read_device_project(self) -> None:

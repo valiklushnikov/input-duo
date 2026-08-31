@@ -714,6 +714,37 @@ def test_a_device_plugged_in_after_a_deviceless_startup_leaves_the_open_project_
     assert window.session.device_matches is False
 
 
+def test_a_device_that_turns_up_clears_the_no_device_message(qtbot, window, emulator):
+    """The status bar must not contradict the connection chip.
+
+    "No device found..." is posted with no timeout, so it stays on screen
+    until something replaces it - and on any connect after the first, nothing
+    does: the startup read has already been spent, and no other step on the
+    connect path writes to the status bar. The window then says the device is
+    ready in one place and absent in another, on what the code's own comments
+    call the primary workflow.
+    """
+    # Nothing attached: the message is posted, and posted without a timeout.
+    window.try_autoconnect()
+    assert window._said_no_device is True
+    assert "No device found" in window.statusBar().currentMessage()
+
+    # A board turns up. The handshake takes several event-loop turns, so the
+    # message has to go as the attempt begins - not be left standing behind
+    # whatever some later step happens to say, on the connects where no later
+    # step says anything at all.
+    window.transport_factory = lambda: emulator
+    window.try_autoconnect()
+
+    assert window._said_no_device is False
+    assert "No device found" not in window.statusBar().currentMessage()
+
+    with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
+        pass
+    assert window.service.is_connected is True
+    assert "No device found" not in window.statusBar().currentMessage()
+
+
 def test_a_template_saved_before_the_board_arrives_still_lets_the_board_be_read(
     qtbot, window, emulator, tmp_path
 ):
