@@ -935,6 +935,45 @@ def test_a_board_attaching_to_an_untouched_window_is_asked_what_it_is_running(
     assert "matches the project" in window.state_chips["device"].text()
 
 
+def test_a_replug_keeps_the_macro_text_the_operator_typed(qtbot, window, emulator):
+    """A board holding exactly what is on screen has nothing to teach it.
+
+    The binary carries a TEXT step's keystrokes and never the Unicode they
+    were compiled from, so a configuration read back always comes home with
+    ``source_text`` gone and the step labelled "From the device: N
+    keystrokes". After a successful write the session is clean by
+    construction - which is exactly the state in which the dirty guard lets
+    an answer through - so the next attach of the very same board replaced
+    the operator's own text with the board's lossy echo of it: no marker, no
+    message, nothing on screen that had changed, and no way back.
+    """
+    from duo_input.ui.models.macro_steps import text_step
+    from duo_input.ui.models.project_session import AddMacro, SetMacroSteps
+
+    _connect(qtbot, window, emulator)
+    assert window.apply_command(AddMacro(1, "Greeting")) is True
+    macro = window.session.project.profiles[0].macros[0]
+    assert window.apply_command(SetMacroSteps(1, macro.uuid, (text_step("hello"),))) is True
+    assert window.session.project.profiles[0].macros[0].steps[0].source_text == "hello"
+
+    with qtbot.waitSignal(window.service.operation_succeeded, timeout=20000):
+        window.write_to_device()
+    qtbot.waitUntil(lambda: window.session.dirty is False, timeout=5000)
+
+    # The same board, unplugged and plugged back in: the very same slots,
+    # holding the very same package, on a link that starts over.
+    window.disconnect_device()
+    emulator.simulate_power_cycle()
+    _connect(qtbot, window, emulator)
+    qtbot.wait(200)
+
+    step = window.session.project.profiles[0].macros[0].steps[0]
+    assert step.source_text == "hello"
+    assert window.session.pending is False
+    assert DIRTY_MARKER not in window.windowTitle()
+    assert "matches the project" in window.state_chips["device"].text()
+
+
 def test_a_disconnect_during_a_read_does_not_disable_reading_for_good(
     qtbot, window, emulator
 ):

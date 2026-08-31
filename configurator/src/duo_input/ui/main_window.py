@@ -7,6 +7,7 @@ merely mirrors whatever that service reports back.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from pathlib import Path
 
@@ -805,10 +806,25 @@ class MainWindow(QMainWindow):
 
         The read takes several chunks over a serial link. Somebody who started
         typing while it was in flight must not have that thrown away by an
-        answer that arrives afterwards - the device is authoritative at
-        startup, not at every moment.
+        answer that arrives afterwards - the device is authoritative when it
+        has something to say, not at every moment.
         """
         if package is None:
+            return
+        if hashlib.sha256(package).hexdigest() == self._session.compiled_hash:
+            # The board is holding exactly the package this project compiles
+            # to, so it has nothing to teach the project - and decoding it
+            # would cost detail the binary cannot carry. A TEXT step travels
+            # as keystrokes and never as the Unicode it was compiled from, so
+            # a project that came back from a board always has
+            # ``source_text=None`` and reads "From the device: N keystrokes".
+            # Adopting that after a write - the one moment the session is
+            # clean by construction, and so the one moment the guard below
+            # lets an answer through - threw away the text the operator typed
+            # with nothing on screen to show it had happened. Re-agree the
+            # baseline, which is all this read had to offer, and keep the
+            # representation that still knows what the operator wrote.
+            self.set_session(self._session.agreeing_with_device())
             return
         if self._session.dirty:
             self.statusBar().showMessage(
