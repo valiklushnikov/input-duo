@@ -260,12 +260,23 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 return;
             }
             endpoint_ = setup_.interrupt_endpoint();
+            auxiliary_endpoint_ = setup_.auxiliary_endpoint();
+            secondary_auxiliary_endpoint_ = setup_.secondary_auxiliary_endpoint();
             // A new device starts its data toggle at DATA0, and the chip has
             // to be told - it does not track this itself (DS2 1.6). Without
             // it the first IN transaction never completes: no data, no error,
             // and no interrupt, which on the bench was 120 polls in a row
             // producing nothing at all.
             expect_data1_ = false;
+            auxiliary_expect_data1_ = false;
+            secondary_auxiliary_expect_data1_ = false;
+            token_slot_ = 0;
+            poll_slot_count_ = static_cast<std::uint8_t>(
+                1 + (auxiliary_endpoint_ != 0 ? 1 : 0) +
+                (secondary_auxiliary_endpoint_ != 0 ? 1 : 0));
+            poll_primary_next_ = true;
+            next_auxiliary_slot_ = 1;
+            largest_report_ = 0;
             transport_.set_receive_toggle(kToggleData0);
             // The control transfers are over and the polling begins, so the
             // NAK changes meaning: from a device that is busy to one that has
@@ -394,14 +405,62 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 std::uint8_t buffer[kMaxBlockSize];
                 std::size_t size = 0;
                 if (transport_.read_block(buffer, sizeof(buffer), size) && size > 0) {
-                    publish_report(buffer, size, now_us);
+                    if (token_slot_ == 0) {
+                        publish_report(buffer, size, now_us);
+                    } else {
+                        const std::uint8_t source_endpoint =
+                            token_slot_ == 1 ? auxiliary_endpoint_
+                                             : secondary_auxiliary_endpoint_;
+                        publish_auxiliary_report(source_endpoint, buffer, size, now_us);
+                    }
+#if DUO_CH375_PROBE
+                    if (token_slot_ != 0) {
+                        const unsigned auxiliary = static_cast<unsigned>(token_slot_ - 1);
+                        if (auxiliary < 2) {
+                            ++auxiliary_probe_count_[auxiliary];
+                            auxiliary_probe_previous_size_[auxiliary] =
+                                auxiliary_probe_last_size_[auxiliary];
+                            std::memcpy(auxiliary_probe_previous_[auxiliary],
+                                        auxiliary_probe_last_[auxiliary],
+                                        auxiliary_probe_last_size_[auxiliary]);
+                            const std::size_t keep =
+                                size < sizeof(auxiliary_probe_last_[auxiliary])
+                                    ? size
+                                    : sizeof(auxiliary_probe_last_[auxiliary]);
+                            auxiliary_probe_last_size_[auxiliary] =
+                                static_cast<std::uint8_t>(keep);
+                            std::memcpy(auxiliary_probe_last_[auxiliary], buffer, keep);
+
+                            const unsigned trace_slot = auxiliary_probe_trace_next_[auxiliary];
+                            const std::size_t trace_keep =
+                                size < sizeof(auxiliary_probe_trace_[auxiliary][trace_slot])
+                                    ? size
+                                    : sizeof(auxiliary_probe_trace_[auxiliary][trace_slot]);
+                            auxiliary_probe_trace_size_[auxiliary][trace_slot] =
+                                static_cast<std::uint8_t>(trace_keep);
+                            std::memcpy(auxiliary_probe_trace_[auxiliary][trace_slot], buffer,
+                                        trace_keep);
+                            auxiliary_probe_trace_next_[auxiliary] = static_cast<std::uint8_t>(
+                                (trace_slot + 1) % kAuxiliaryTraceDepth);
+                            if (auxiliary_probe_trace_count_[auxiliary] < kAuxiliaryTraceDepth) {
+                                ++auxiliary_probe_trace_count_[auxiliary];
+                            }
+                        }
+                    }
+#endif
                 }
                 // One transaction succeeded, so the device will send the other
                 // packet type next. Told only after a success: a transaction
                 // that failed did not consume anything, and moving the toggle
                 // anyway would leave the two ends permanently one apart.
-                expect_data1_ = !expect_data1_;
-                transport_.set_receive_toggle(expect_data1_ ? kToggleData1 : kToggleData0);
+                if (token_slot_ == 1) {
+                    auxiliary_expect_data1_ = !auxiliary_expect_data1_;
+                } else if (token_slot_ == 2) {
+                    secondary_auxiliary_expect_data1_ =
+                        !secondary_auxiliary_expect_data1_;
+                } else {
+                    expect_data1_ = !expect_data1_;
+                }
             }
             if (now_us - last_poll_us_ < poll_interval_us()) {
                 return;
@@ -429,10 +488,34 @@ void Ch375Device::tick(std::uint32_t now_us) {
             last_poll_us_ = now_us;
             token_outstanding_ = true;
             token_at_us_ = now_us;
+            // The routed endpoint gets every other token. Between those, all
+            // auxiliary endpoints rotate: Keychron is 2,4,2,1. This preserves
+            // the smooth pointer without ever abandoning either queue which
+            // carries its side-button notification.
+            if (poll_slot_count_ == 1) {
+                token_slot_ = 0;
+            } else if (poll_primary_next_) {
+                token_slot_ = 0;
+                poll_primary_next_ = false;
+            } else {
+                token_slot_ = next_auxiliary_slot_;
+                next_auxiliary_slot_ =
+                    poll_slot_count_ == 3 && next_auxiliary_slot_ == 1 ? 2 : 1;
+                poll_primary_next_ = true;
+            }
+            const bool data1 = token_slot_ == 0
+                                   ? expect_data1_
+                                   : (token_slot_ == 1 ? auxiliary_expect_data1_
+                                                       : secondary_auxiliary_expect_data1_);
+            transport_.set_receive_toggle(data1 ? kToggleData1 : kToggleData0);
             // Ask the device whether it has anything. The answer arrives as an
             // interrupt, which the next tick picks up - nothing waits here.
             ++polls_issued_;
-            transport_.issue_token(endpoint_, TokenPid::In);
+            const std::uint8_t poll_endpoint =
+                token_slot_ == 0 ? endpoint_
+                                 : (token_slot_ == 1 ? auxiliary_endpoint_
+                                                     : secondary_auxiliary_endpoint_);
+            transport_.issue_token(poll_endpoint, TokenPid::In);
             return;
         }
 
@@ -891,6 +974,13 @@ std::uint32_t Ch375Device::poll_interval_us() const {
 }
 
 std::size_t Ch375Device::packet_bytes() const {
+    // wMaxPacketSize is a ceiling. Once a primary report has arrived, use the
+    // largest size actually observed; otherwise a Keychron 64-byte endpoint
+    // carrying eight bytes remains needlessly limited after its other two IN
+    // endpoints are added to the schedule.
+    if (largest_report_ != 0) {
+        return largest_report_;
+    }
     return setup_.max_packet() != 0 ? static_cast<std::size_t>(setup_.max_packet())
                                     : kAssumedPacketBytes;
 }
@@ -976,6 +1066,26 @@ void Ch375Device::publish_report(const std::uint8_t* data, std::size_t size,
                                 std::uint32_t now_us) {
     Ch375Event event;
     event.kind = Ch375EventKind::Report;
+    event.received_us = now_us;
+    event.report_size = size > kMaxBlockSize ? kMaxBlockSize : size;
+    std::memcpy(event.report, data, event.report_size);
+    if (event.report_size > largest_report_) {
+        largest_report_ = static_cast<std::uint16_t>(event.report_size);
+    }
+
+    if (count_ == kEventQueueDepth) {
+        head_ = (head_ + 1) % kEventQueueDepth;
+        --count_;
+    }
+    events_[(head_ + count_) % kEventQueueDepth] = event;
+    ++count_;
+}
+
+void Ch375Device::publish_auxiliary_report(std::uint8_t endpoint, const std::uint8_t* data,
+                                           std::size_t size, std::uint32_t now_us) {
+    Ch375Event event;
+    event.kind = Ch375EventKind::AuxiliaryReport;
+    event.endpoint = endpoint;
     event.received_us = now_us;
     event.report_size = size > kMaxBlockSize ? kMaxBlockSize : size;
     std::memcpy(event.report, data, event.report_size);

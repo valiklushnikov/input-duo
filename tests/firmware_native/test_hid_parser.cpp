@@ -97,6 +97,8 @@ TEST_CASE(a_boot_mouse_is_recognised) {
     CHECK_EQ(static_cast<int>(found.kind), static_cast<int>(DeviceKind::Mouse));
     CHECK_EQ(found.endpoint, 2u);
     CHECK_EQ(found.max_packet, 4u);
+    CHECK_EQ(found.auxiliary_endpoint, 0u);
+    CHECK_EQ(found.auxiliary_max_packet, 0u);
 }
 
 TEST_CASE(a_mouse_without_the_boot_subclass_is_still_a_mouse) {
@@ -133,6 +135,44 @@ TEST_CASE(a_composite_device_is_searched_past_its_first_interface) {
     CHECK_EQ(static_cast<int>(found.kind), static_cast<int>(DeviceKind::Keyboard));
     CHECK_EQ(found.interface_number, 1u);
     CHECK_EQ(found.endpoint, 1u);
+}
+
+TEST_CASE(the_first_routable_interface_identifies_the_keychron_m3_receiver) {
+    // Captured from VID 0x3434 PID 0xD030 through the CH375 probe. The receiver
+    // exposes its mouse first, an auxiliary vendor-neutral HID interface
+    // second, and a boot keyboard last. Picking the keyboard merely because it
+    // appears later polls endpoint 1 forever while movement waits on endpoint
+    // 2, which is the observed dead cursor.
+    const std::vector<std::uint8_t> bytes = {
+        0x09, 0x02, 0x5B, 0x00, 0x03, 0x01, 0x00, 0xA0, 0x32,
+        0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x02, 0x00,
+        0x09, 0x21, 0x11, 0x01, 0x21, 0x01, 0x22, 0x51, 0x00,
+        0x07, 0x05, 0x82, 0x03, 0x40, 0x00, 0x01,
+        0x09, 0x04, 0x01, 0x00, 0x02, 0x03, 0x00, 0x00, 0x00,
+        0x09, 0x21, 0x11, 0x01, 0x21, 0x01, 0x22, 0x73, 0x00,
+        0x07, 0x05, 0x84, 0x03, 0x40, 0x00, 0x01,
+        0x07, 0x05, 0x05, 0x03, 0x40, 0x00, 0x01,
+        0x09, 0x04, 0x02, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00,
+        0x09, 0x21, 0x11, 0x01, 0x21, 0x01, 0x22, 0xA4, 0x00,
+        0x07, 0x05, 0x81, 0x03, 0x20, 0x00, 0x01,
+    };
+    HidCapabilities found;
+
+    CHECK_EQ(static_cast<int>(parse_configuration(view(bytes), found)),
+             static_cast<int>(ParseError::None));
+    CHECK_EQ(static_cast<int>(found.kind), static_cast<int>(DeviceKind::Mouse));
+    CHECK_EQ(found.interface_number, 0u);
+    CHECK_EQ(found.endpoint, 2u);
+    CHECK_EQ(found.max_packet, 64u);
+    CHECK(found.boot_protocol);
+    CHECK_EQ(found.report_descriptor_length, std::uint16_t{81});
+    CHECK_EQ(found.auxiliary_endpoint, 4u);
+    CHECK_EQ(found.auxiliary_max_packet, 64u);
+    // Interface 2 is a boot-keyboard endpoint. It is not the routed device,
+    // but Windows polls it and the receiver may queue a side-button action on
+    // it, so it must be serviced alongside the vendor endpoint.
+    CHECK_EQ(found.secondary_auxiliary_endpoint, 1u);
+    CHECK_EQ(found.secondary_auxiliary_max_packet, 32u);
 }
 
 // --------------------------------------------------------- what is refused
@@ -350,14 +390,13 @@ TEST_CASE(a_hid_record_that_promises_more_than_it_holds_is_refused) {
 }
 
 TEST_CASE(a_length_is_not_carried_from_one_interface_to_the_next) {
-    // A mouse interface that declares a fifty-two byte report descriptor, and
-    // a keyboard behind it that declares none at all. The keyboard is what
-    // gets chosen - it wins outright - and it must declare nothing rather than
-    // inherit the interface in front of it, which would ask a keyboard for
-    // fifty-two bytes of a descriptor it does not have.
+    // An auxiliary HID interface declares a fifty-two byte report descriptor,
+    // and a keyboard behind it declares none at all. The parser walks past the
+    // interface it cannot route, and the keyboard must declare nothing rather
+    // than inherit the length in front of it.
     const std::vector<std::uint8_t> bytes = {
         9,    0x02, 50,   0,    2,    1,    0,    0x80, 50,    // configuration
-        9,    0x04, 0,    0,    1,    0x03, 0x01, 0x02, 0,     // a boot mouse
+        9,    0x04, 0,    0,    1,    0x03, 0x00, 0x00, 0,     // auxiliary HID
         9,    0x21, 0x11, 0x01, 0,    1,    0x22, 0x34, 0,     // its HID record
         7,    0x05, 0x82, 0x03, 4,    0,    10,                // its endpoint
         9,    0x04, 1,    0,    1,    0x03, 0x01, 0x01, 0,     // a boot keyboard

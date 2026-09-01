@@ -440,7 +440,44 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
                 break;
             }
             ++tokens_issued_;
-            if (!report_waiting_) {
+            ++tokens_per_endpoint_[endpoint];
+            // A service packet left sitting is not merely in the way. On the
+            // bench the receiver stops answering on *every* endpoint after a
+            // few polls of being ignored, and stays that way through a bus
+            // reset and a full re-enumeration - only losing power clears it.
+            // Modelled here because a fake that lets the device recover once
+            // the packet is finally collected passes code the hardware does
+            // not survive, which is exactly what happened.
+            const bool auxiliary_pending = auxiliary_waiting_ || secondary_auxiliary_waiting_;
+            const bool serves_pending =
+                (auxiliary_waiting_ && endpoint == auxiliary_endpoint_) ||
+                (secondary_auxiliary_waiting_ && endpoint == secondary_auxiliary_endpoint_);
+            if (auxiliary_pending && wedge_after_ != 0 && !serves_pending &&
+                ++auxiliary_ignored_ >= wedge_after_) {
+                wedged_ = true;
+            }
+            if (wedged_) {
+                pending_status_ = idle_token_status_;
+            } else if (endpoint == auxiliary_endpoint_ && auxiliary_waiting_) {
+                pending_read_ = auxiliary_report_;
+                auxiliary_report_.clear();
+                auxiliary_waiting_ = false;
+                auxiliary_ignored_ = 0;
+                pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Success);
+            } else if (endpoint == secondary_auxiliary_endpoint_ &&
+                       secondary_auxiliary_waiting_) {
+                pending_read_ = secondary_auxiliary_report_;
+                secondary_auxiliary_report_.clear();
+                secondary_auxiliary_waiting_ = false;
+                auxiliary_ignored_ = 0;
+                pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Success);
+            } else if (block_primary_for_auxiliary_ && auxiliary_pending) {
+                pending_status_ = idle_token_status_;
+            } else if (!report_waiting_ && !continuous_report_.empty()) {
+                // Still moving, so there is always something to fetch.
+                pending_read_ = continuous_report_;
+                pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Success);
+            } else if (!report_waiting_) {
                 // A HID device sends a report when something changes and NAKs
                 // every poll in between. What the chip does with that is the
                 // retry policy's business (DS2 1.3): reported to the MCU as a
@@ -504,6 +541,13 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
                 read_configuration_ = true;
             }
             finish_transfer(false);
+            // DS1 5.13: the dedicated command has only the controller's
+            // 64-byte buffer behind it. A larger configuration is reported as
+            // 0x17 instead of being made available to RD_USB_DATA0.
+            if (value == 2 && configuration_.size() > kMaxBlockSize) {
+                pending_read_.clear();
+                pending_status_ = static_cast<std::uint8_t>(InterruptStatus::BufferOver);
+            }
             break;
         }
 
@@ -615,6 +659,19 @@ void FakeCh375Chip::queue_report(const std::uint8_t* data, std::size_t size) {
     report_waiting_ = true;
 }
 
+void FakeCh375Chip::queue_auxiliary_report(std::uint8_t endpoint, const std::uint8_t* data,
+                                           std::size_t size) {
+    if (!auxiliary_waiting_ || endpoint == auxiliary_endpoint_) {
+        auxiliary_endpoint_ = endpoint;
+        auxiliary_report_.assign(data, data + size);
+        auxiliary_waiting_ = true;
+        return;
+    }
+    secondary_auxiliary_endpoint_ = endpoint;
+    secondary_auxiliary_report_.assign(data, data + size);
+    secondary_auxiliary_waiting_ = true;
+}
+
 // ---------------------------------------------------------------------------
 
 void FakeDeviceSetup::begin(std::uint32_t now_us) {
@@ -713,10 +770,13 @@ constexpr std::uint8_t kRequestTypeInterfaceOut = 0x21;
 constexpr std::uint8_t kRequestSetProtocol = 0x0B;
 /// USB 2.0 9.3.1: device to host, standard request, to an interface.
 constexpr std::uint8_t kRequestTypeInterfaceIn = 0x81;
+/// USB 2.0 9.3.1: device to host, standard request, to the device.
+constexpr std::uint8_t kRequestTypeDeviceIn = 0x80;
 /// USB 2.0 9.4.3 and HID 1.11 7.1.1: GET_DESCRIPTOR of a report descriptor,
 /// whose type is the high byte of wValue.
 constexpr std::uint8_t kRequestGetDescriptor = 0x06;
 constexpr std::uint8_t kDescriptorReport = 0x22;
+constexpr std::uint8_t kDescriptorConfiguration = 0x02;
 
 }  // namespace
 
@@ -769,6 +829,25 @@ void FakeCh375Chip::begin_control_transfer() {
     control_read_open_ = false;
     control_read_at_ = 0;
     control_read_total_ = 0;
+    control_read_source_ = ControlReadSource::None;
+
+    const bool is_configuration_descriptor_read =
+        outbound_block_.size() == kSetupPacketSize &&
+        outbound_block_[0] == kRequestTypeDeviceIn &&
+        outbound_block_[1] == kRequestGetDescriptor &&
+        outbound_block_[3] == kDescriptorConfiguration;
+    if (is_configuration_descriptor_read) {
+        const std::uint16_t asked = static_cast<std::uint16_t>(
+            outbound_block_[6] | (static_cast<std::uint16_t>(outbound_block_[7]) << 8));
+        configuration_descriptor_requests_.push_back(asked);
+        control_read_total_ = configuration_.size() < asked ? configuration_.size() : asked;
+        control_read_source_ = ControlReadSource::Configuration;
+        control_read_open_ = true;
+        control_read_data1_ = true;
+        pending_read_.clear();
+        finish_transfer(false);
+        return;
+    }
 
     const bool is_report_descriptor_read =
         outbound_block_.size() == kSetupPacketSize &&
@@ -802,6 +881,7 @@ void FakeCh375Chip::begin_control_transfer() {
         control_read_total_ = report_descriptor_.size() < report_descriptor_asked_
                                   ? report_descriptor_.size()
                                   : report_descriptor_asked_;
+        control_read_source_ = ControlReadSource::Report;
         control_read_open_ = true;
         control_read_data1_ = true;
         // The setup packet's own interrupt carries no data with it; the bytes
@@ -844,9 +924,11 @@ void FakeCh375Chip::serve_control_read_packet() {
     control_read_data1_ = !control_read_data1_;
     const std::size_t left = control_read_total_ - control_read_at_;
     const std::size_t take = left < control_packet_ ? left : control_packet_;
-    pending_read_.assign(report_descriptor_.begin() + static_cast<std::ptrdiff_t>(control_read_at_),
-                         report_descriptor_.begin() +
-                             static_cast<std::ptrdiff_t>(control_read_at_ + take));
+    const std::vector<std::uint8_t>& source =
+        control_read_source_ == ControlReadSource::Configuration ? configuration_
+                                                                 : report_descriptor_;
+    pending_read_.assign(source.begin() + static_cast<std::ptrdiff_t>(control_read_at_),
+                         source.begin() + static_cast<std::ptrdiff_t>(control_read_at_ + take));
     control_read_at_ += take;
     ++report_descriptor_packets_;
     pending_status_ = static_cast<std::uint8_t>(InterruptStatus::Success);
@@ -890,6 +972,20 @@ void FakeCh375Chip::serve_boot_mouse() {
     append(body, interface_record(0, 0x03, 0x01, 0x02, 1));
     append(body, endpoint_record(0x82, 4));
     configuration_ = configuration_header(9 + body.size(), 1);
+    append(configuration_, body);
+}
+
+void FakeCh375Chip::serve_long_composite_mouse() {
+    std::vector<std::uint8_t> body;
+    // Four vendor-specific interfaces put the useful HID record past byte 64,
+    // as a wireless receiver with several auxiliary collections does.
+    for (std::uint8_t number = 0; number < 4; ++number) {
+        append(body, interface_record(number, 0xFF, 0x00, 0x00, 1));
+        append(body, endpoint_record(static_cast<std::uint8_t>(0x81 + number), 8));
+    }
+    append(body, interface_record(4, 0x03, 0x01, 0x02, 1));
+    append(body, endpoint_record(0x82, 8));
+    configuration_ = configuration_header(9 + body.size(), 5);
     append(configuration_, body);
 }
 

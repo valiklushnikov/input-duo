@@ -572,6 +572,147 @@ TEST_CASE(a_report_from_the_device_is_handed_over) {
     CHECK(found);
 }
 
+TEST_CASE(a_composite_receivers_auxiliary_packet_cannot_block_mouse_reports) {
+    // Keychron M3's side button produces a service report on endpoint 4. The
+    // hardware trace then shows endpoint 2 returning only NAK until endpoint
+    // 4 is drained. The service bytes are not mouse input and must be discarded;
+    // the movement queued behind them must still be published.
+    Rig rig;
+    rig.setup.set_auxiliary_endpoint(4, 64);
+    bring_up(rig);
+    rig.count(Ch375EventKind::Ready);
+    rig.chip.block_primary_while_auxiliary_waits(true);
+
+    const std::uint8_t service[8] = {0x54, 0xE2, 0x01, 0x02, 0, 0, 0, 0};
+    rig.chip.queue_auxiliary_report(4, service, sizeof(service));
+    const std::uint8_t movement[8] = {0x03, 0x00, 1, 0, 1, 0, 0, 0};
+    rig.chip.queue_report(movement, sizeof(movement));
+    rig.run(50000);
+
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+    CHECK_EQ(rig.count(Ch375EventKind::Report), 1);
+}
+
+TEST_CASE(all_of_a_composite_receivers_input_endpoints_are_serviced) {
+    // Keychron M3 receiver: mouse EP2, vendor EP4 and a later boot-keyboard
+    // EP1. The side button does not appear in the mouse reports. Polling EP4
+    // alone still wedges the real receiver, so both non-routed IN endpoints
+    // must be drained before the movement queued behind them can flow.
+    Rig rig;
+    rig.setup.set_interrupt_endpoint(2);
+    rig.setup.set_auxiliary_endpoint(4, 64);
+    rig.setup.set_secondary_auxiliary_endpoint(1, 32);
+    bring_up(rig);
+    rig.count(Ch375EventKind::Ready);
+    rig.chip.block_primary_while_auxiliary_waits(true);
+
+    const std::uint8_t vendor[8] = {0x54, 0xE2, 0x01, 0x02, 0, 0, 0, 0};
+    const std::uint8_t keyboard[8] = {0x00, 0x00, 0x50, 0, 0, 0, 0, 0};
+    rig.chip.queue_auxiliary_report(4, vendor, sizeof(vendor));
+    rig.chip.queue_auxiliary_report(1, keyboard, sizeof(keyboard));
+    const std::uint8_t movement[8] = {0x03, 0x00, 1, 0, 1, 0, 0, 0};
+    rig.chip.queue_report(movement, sizeof(movement));
+    rig.run(100000);
+
+    CHECK(rig.chip.tokens_to(4) > 0);
+    CHECK(rig.chip.tokens_to(1) > 0);
+    CHECK_EQ(rig.count(Ch375EventKind::Report), 1);
+}
+
+TEST_CASE(the_mouse_endpoint_is_prioritised_while_both_auxiliaries_are_serviced) {
+    Rig rig;
+    rig.setup.set_interrupt_endpoint(2);
+    rig.setup.set_auxiliary_endpoint(4, 64);
+    rig.setup.set_secondary_auxiliary_endpoint(1, 32);
+    bring_up(rig);
+    rig.run(200000);
+
+    const unsigned mouse = rig.chip.tokens_to(2);
+    const unsigned vendor = rig.chip.tokens_to(4);
+    const unsigned keyboard = rig.chip.tokens_to(1);
+    CHECK(vendor > 0);
+    CHECK(keyboard > 0);
+    CHECK(mouse >= vendor * 2);
+    CHECK(mouse >= keyboard * 2);
+}
+
+TEST_CASE(the_interval_follows_the_short_report_a_device_actually_sends) {
+    // The Keychron receiver advertises sixty-four bytes and sends eight-byte
+    // mouse reports. Once that is measured, retaining the ceiling leaves the
+    // pointer at 49 Hz after sharing the schedule among all three endpoints.
+    Rig rig;
+    rig.setup.set_max_packet(64);
+    bring_up(rig);
+    rig.count(Ch375EventKind::Ready);
+
+    const std::uint32_t declared = rig.device.poll_interval_us();
+
+    const std::uint8_t report[8] = {0x03, 0x00, 1, 0, 1, 0, 0, 0};
+    rig.chip.queue_report(report, sizeof(report));
+    rig.run(50000, 100);
+
+    const std::uint32_t measured = rig.device.poll_interval_us();
+    CHECK(measured < declared);
+    CHECK_EQ(measured, duo_input::u1::ch375::report_poll_interval_us(
+                           sizeof(report), rig.transport.port_baud()));
+}
+
+TEST_CASE(a_service_packet_is_collected_while_the_mouse_is_still_moving) {
+    // The test above passes on firmware the bench then killed in six seconds,
+    // and the difference is when the button is pressed. It is pressed while
+    // the hand is moving - which is the one moment the primary endpoint is
+    // *not* NAKing, and the only moment the old rule ever looked at.
+    //
+    // Measured: with the mouse moving, the primary answered 129 polls of 148
+    // with data, leaving nineteen NAKs a second for the service endpoint to
+    // be offered. The receiver does not wait that long. It stops answering on
+    // every endpoint, keeps the channel in Ready, and does not come back for a
+    // bus reset or a fresh enumeration - ninety seconds of it were recorded.
+    Rig rig;
+    rig.setup.set_auxiliary_endpoint(4, 64);
+    bring_up(rig);
+    rig.count(Ch375EventKind::Ready);
+    // Ten polls of neglect, which at the input endpoint's own interval is
+    // about twenty milliseconds - inside the band the bench measured, where
+    // fifty-three was fatal and thirteen was survivable.
+    rig.chip.wedges_if_auxiliary_ignored(10);
+
+    const std::uint8_t movement[8] = {0x03, 0x00, 1, 0, 1, 0, 0, 0};
+    const std::uint8_t service[8] = {0x54, 0xE2, 0x01, 0x02, 0, 0, 0, 0};
+
+    // A hand that never stops, which is what the input endpoint having data
+    // on almost every poll means. The packet is queued straight away, while
+    // the service endpoint's deadline is still fresh: queued later, the
+    // deadline has long since expired on the model's clock and the very next
+    // token collects it whatever the interval says, which is a test that
+    // passes for a reason that has nothing to do with the code.
+    rig.chip.always_reports(movement, sizeof(movement));
+    rig.chip.queue_auxiliary_report(4, service, sizeof(service));
+    rig.run(120000, 200);
+
+    // Asked directly, because the model's clock cannot be trusted to make a
+    // deadline expire when a test means it to: how often was the service
+    // endpoint actually visited while the input endpoint had data every time?
+    const unsigned input_polls = rig.chip.tokens_to(1);
+    const unsigned service_polls = rig.chip.tokens_to(4);
+    CHECK(input_polls > 20);
+    // Under the rule this replaces the answer was none at all: it offered the
+    // service endpoint only the polls the input endpoint declined, and a
+    // moving mouse declines none.
+    CHECK(service_polls > 0);
+    // And not merely some of them. What the receiver tolerates is one input
+    // poll between visits, measured: at seventy-four polls a second it died
+    // with the service endpoint undrained and lived with it drained every
+    // other poll, and at four hundred and twenty it died again with four
+    // input polls in between. So the two counts must be within one of each
+    // other, and a rule expressed in milliseconds would not hold that - a
+    // faster link turns the same period back into four.
+    CHECK(service_polls * 2 >= input_polls);
+    CHECK(!rig.chip.wedged());
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+    CHECK(rig.count(Ch375EventKind::Report) > 0);
+}
+
 TEST_CASE(no_report_is_invented_when_the_device_has_nothing_to_say) {
     Rig rig;
     bring_up(rig);

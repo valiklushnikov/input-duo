@@ -89,6 +89,21 @@ TEST_CASE(a_mouse_is_brought_up) {
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
 }
 
+TEST_CASE(a_mouse_beyond_the_ch375_single_descriptor_buffer_is_brought_up) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_long_composite_mouse();
+
+    rig.begin(rig.chip.now_us());
+
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK_EQ(static_cast<int>(rig.setup.kind()), static_cast<int>(DeviceKind::Mouse));
+    CHECK_EQ(rig.setup.interrupt_endpoint(), 2u);
+    CHECK_EQ(rig.chip.configuration_descriptor_requests().size(), std::size_t{2});
+    CHECK_EQ(rig.chip.configuration_descriptor_requests()[0], std::uint16_t{9});
+    CHECK_EQ(rig.chip.configuration_descriptor_requests()[1], std::uint16_t{89});
+}
+
 TEST_CASE(the_endpoint_comes_from_the_descriptor_not_from_a_guess) {
     Rig rig;
     rig.chip.attach_device();
@@ -1081,6 +1096,9 @@ TEST_CASE(the_descriptor_request_names_the_interface_the_mouse_is_on) {
 
     rig.begin(rig.chip.now_us());
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK_EQ(rig.setup.interrupt_endpoint(), 2u);
+    CHECK_EQ(rig.setup.auxiliary_endpoint(), 3u);
+    CHECK_EQ(rig.setup.auxiliary_max_packet(), 4u);
 
     CHECK_EQ(rig.chip.setup_packets().size(), std::size_t{1});
     SetupPacket packet;

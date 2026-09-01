@@ -22,6 +22,7 @@
 
 #include "ch375/commands.hpp"
 #include "ch375/transport.hpp"
+#include "protocol/bytes.hpp"
 
 namespace duo_input::u1::ch375 {
 
@@ -111,12 +112,18 @@ enum class Ch375EventKind : std::uint8_t {
     Fault,
     /// A report arrived from the device.
     Report,
+    /// A report from another interrupt-IN endpoint of the same composite
+    /// device. It is not interpreted as the primary device's report layout.
+    AuxiliaryReport,
 };
 
 struct Ch375Event {
     Ch375EventKind kind = Ch375EventKind::None;
     std::uint8_t report[kMaxBlockSize] = {};
     std::size_t report_size = 0;
+    /// Source endpoint for AuxiliaryReport; zero for lifecycle and primary
+    /// Report events.
+    std::uint8_t endpoint = 0;
 
     /// When this report was read out of the controller, in microseconds on the
     /// device's own clock. Zero for everything that is not a report.
@@ -168,6 +175,14 @@ public:
     /// still being fetched - so a caller falls back to the largest boot report
     /// this firmware routes rather than treating zero as a small packet.
     virtual std::uint16_t max_packet() const { return 0; }
+
+    /// Optional interrupt-IN endpoint from another HID interface on the same
+    /// composite receiver. It is serviced only to keep the primary endpoint
+    /// flowing; its packets are not routed as input.
+    virtual std::uint8_t auxiliary_endpoint() const { return 0; }
+    virtual std::uint16_t auxiliary_max_packet() const { return 0; }
+    virtual std::uint8_t secondary_auxiliary_endpoint() const { return 0; }
+    virtual std::uint16_t secondary_auxiliary_max_packet() const { return 0; }
 };
 
 /// How long the USB bus is held in reset before the device is configured.
@@ -234,6 +249,32 @@ inline constexpr std::uint32_t kSlowestReportPollUs = 8000;
 /// polls a second against the 500 asked for, which is the core and not the
 /// wire. Going faster only widens that gap.
 inline constexpr std::uint32_t kFastestReportPollUs = 2000;
+
+/// Whether a composite receiver's service endpoint is visited every other
+/// poll, rather than on a clock of its own.
+///
+/// Some receivers put more than input on their interfaces and will not
+/// tolerate the rest of it being ignored. A Keychron M3's receiver stops
+/// answering on *every* endpoint if a service packet is left waiting - not for
+/// a while but for good: the channel stays in Ready, the input endpoint NAKs
+/// every poll, and neither a bus reset nor a fresh enumeration brings it back.
+/// Only unplugging it does.
+///
+/// What it will not tolerate is measured, and it is not a period. Five runs on
+/// the bench, and the only survivor was the one that let a single input poll
+/// pass between visits:
+///
+///     input 148/s, service  19/s (7 input polls between visits)  died
+///     input 148/s, service   0/s                                 died
+///     input  74/s, service   0/s                                 died
+///     input 420/s, service 100/s (4 input polls between visits)  died
+///     input  74/s, service  74/s (1 input poll  between visits)  lived
+///
+/// The middle two are what rule the rate out: the same 74 polls a second at
+/// the input endpoint killed it without the service endpoint being drained and
+/// spared it with. So this alternates, and the count of polls the service
+/// endpoint waits through is what is held at one - not the milliseconds, which
+/// a faster link would quietly turn back into four.
 
 
 /// A CH375 serial frame is eleven bits.
@@ -516,6 +557,46 @@ public:
     /// reports came back from it.
     std::uint16_t polls_issued() const { return polls_issued_; }
 
+#if DUO_CH375_PROBE
+    static constexpr unsigned kAuxiliaryTraceDepth = 8;
+
+    std::uint16_t auxiliary_reports(unsigned index) const {
+        return index < 2 ? auxiliary_probe_count_[index] : 0;
+    }
+    protocol::ByteView auxiliary_previous_report(unsigned index) const {
+        return index < 2
+                   ? protocol::ByteView{auxiliary_probe_previous_[index],
+                                        auxiliary_probe_previous_size_[index]}
+                   : protocol::ByteView{nullptr, 0};
+    }
+    protocol::ByteView auxiliary_last_report(unsigned index) const {
+        return index < 2
+                   ? protocol::ByteView{auxiliary_probe_last_[index],
+                                        auxiliary_probe_last_size_[index]}
+                   : protocol::ByteView{nullptr, 0};
+    }
+    unsigned auxiliary_trace_count(unsigned index) const {
+        return index < 2 ? auxiliary_probe_trace_count_[index] : 0;
+    }
+    protocol::ByteView auxiliary_trace_report(unsigned auxiliary, unsigned index) const {
+        if (auxiliary >= 2 || index >= auxiliary_probe_trace_count_[auxiliary]) {
+            return protocol::ByteView{nullptr, 0};
+        }
+        const unsigned oldest = auxiliary_probe_trace_count_[auxiliary] < kAuxiliaryTraceDepth
+                                    ? 0
+                                    : auxiliary_probe_trace_next_[auxiliary];
+        const unsigned slot = (oldest + index) % kAuxiliaryTraceDepth;
+        return protocol::ByteView{auxiliary_probe_trace_[auxiliary][slot],
+                                  auxiliary_probe_trace_size_[auxiliary][slot]};
+    }
+#endif
+
+    /// How often this device is being asked, in microseconds.
+    ///
+    /// Derived from the rate this channel settled on and the endpoint's
+    /// declared maximum packet size.
+    std::uint32_t poll_interval_us() const;
+
     /// Whether the device that is attached answered as a low-speed one.
     ///
     /// Only meaningful when device_rate_known() is true. The chip is asked
@@ -560,12 +641,13 @@ private:
     /// Read fresh each time rather than cached: the port moves - up the ladder
     /// on bring-up, down it on a collapse - and an interval remembered from
     /// the rate before would be one this link can no longer answer inside.
-    std::uint32_t poll_interval_us() const;
 
     void enter(Ch375State state, std::uint32_t now_us);
     void publish(Ch375EventKind kind);
     void publish_report(const std::uint8_t* data, std::size_t size,
                         std::uint32_t now_us);
+    void publish_auxiliary_report(std::uint8_t endpoint, const std::uint8_t* data,
+                                  std::size_t size, std::uint32_t now_us);
     void fail(std::uint32_t now_us);
     void handle_detach(std::uint32_t now_us);
 
@@ -657,6 +739,29 @@ private:
     /// Which data packet the next IN transaction should expect. Alternates on
     /// every one that succeeds; the chip does not track it.
     bool expect_data1_ = false;
+    std::uint8_t auxiliary_endpoint_ = 0;
+    std::uint8_t secondary_auxiliary_endpoint_ = 0;
+    bool auxiliary_expect_data1_ = false;
+    bool secondary_auxiliary_expect_data1_ = false;
+    /// Slot used by the outstanding token: 0 primary, 1 first auxiliary,
+    /// 2 second auxiliary.
+    std::uint8_t token_slot_ = 0;
+    std::uint8_t poll_slot_count_ = 1;
+    bool poll_primary_next_ = true;
+    std::uint8_t next_auxiliary_slot_ = 1;
+    /// Largest primary report observed since this device became Ready.
+    std::uint16_t largest_report_ = 0;
+#if DUO_CH375_PROBE
+    std::uint16_t auxiliary_probe_count_[2] = {};
+    std::uint8_t auxiliary_probe_previous_[2][16] = {};
+    std::uint8_t auxiliary_probe_last_[2][16] = {};
+    std::uint8_t auxiliary_probe_previous_size_[2] = {};
+    std::uint8_t auxiliary_probe_last_size_[2] = {};
+    std::uint8_t auxiliary_probe_trace_[2][kAuxiliaryTraceDepth][9] = {};
+    std::uint8_t auxiliary_probe_trace_size_[2][kAuxiliaryTraceDepth] = {};
+    std::uint8_t auxiliary_probe_trace_next_[2] = {};
+    std::uint8_t auxiliary_probe_trace_count_[2] = {};
+#endif
 
     Ch375Event events_[kEventQueueDepth];
     std::size_t head_ = 0;

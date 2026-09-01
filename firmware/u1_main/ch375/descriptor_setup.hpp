@@ -80,6 +80,10 @@ inline constexpr std::uint8_t kAssignedAddress = 2;
 /// stack: Core 1 has two kilobytes under it.
 inline constexpr std::size_t kMaxReportDescriptorBytes = 256;
 
+/// The longest configuration descriptor collected after the CH375's
+/// dedicated 64-byte command reports that its own buffer is too small.
+inline constexpr std::size_t kMaxConfigurationDescriptorBytes = 256;
+
 /// How many times in a row a device may go silent on the report-descriptor
 /// request before it is simply not asked again.
 ///
@@ -97,6 +101,18 @@ public:
     void begin(std::uint32_t now_us) override;
     SetupProgress poll(std::uint32_t now_us, bool interrupted, InterruptStatus status) override;
     std::uint8_t interrupt_endpoint() const override { return capabilities_.endpoint; }
+    std::uint8_t auxiliary_endpoint() const override {
+        return capabilities_.auxiliary_endpoint;
+    }
+    std::uint16_t auxiliary_max_packet() const override {
+        return capabilities_.auxiliary_max_packet;
+    }
+    std::uint8_t secondary_auxiliary_endpoint() const override {
+        return capabilities_.secondary_auxiliary_endpoint;
+    }
+    std::uint16_t secondary_auxiliary_max_packet() const override {
+        return capabilities_.secondary_auxiliary_max_packet;
+    }
 
     DeviceKind kind() const { return capabilities_.kind; }
     std::uint16_t max_packet() const override { return capabilities_.max_packet; }
@@ -165,6 +181,13 @@ private:
         ReadingDeviceDescriptor,
         SettingAddress,
         ReadingConfiguration,
+        /// Fallback for a configuration longer than the CH375 command buffer.
+        RequestingConfigurationHeader,
+        ReadingConfigurationHeader,
+        FinishingConfigurationHeader,
+        RequestingConfiguration,
+        ReadingLongConfiguration,
+        FinishingLongConfiguration,
         ChoosingConfiguration,
         /// The GET_DESCRIPTOR setup packet has gone; its interrupt is awaited.
         RequestingReportDescriptor,
@@ -180,6 +203,10 @@ private:
 
     SetupProgress fail(std::uint8_t status);
     SetupProgress finish(std::uint8_t status);
+    SetupProgress request_configuration_header(std::uint32_t now_us);
+    SetupProgress request_long_configuration(std::uint32_t now_us);
+    SetupProgress collect_configuration(std::uint32_t now_us, Step finished_step);
+    SetupProgress parse_long_configuration();
     /// Ask a mouse for its report descriptor, or go straight to boot.
     SetupProgress request_report_descriptor(std::uint32_t now_us);
     /// Collect one packet of it, and ask for the next or end the transfer.
@@ -210,6 +237,12 @@ private:
     ParseError last_parse_error_ = ParseError::None;
     bool boot_protocol_selected_ = false;
     std::uint16_t attempts_ = 0;
+
+    // --- configuration descriptor fallback --------------------------------
+    std::uint16_t configuration_wanted_ = 0;
+    std::uint16_t configuration_received_ = 0;
+    bool configuration_toggle_data1_ = true;
+    std::uint8_t configuration_buffer_[kMaxConfigurationDescriptorBytes] = {};
 
     // --- the report descriptor ---------------------------------------------
     MouseReportLayout mouse_layout_ = boot_mouse_layout();

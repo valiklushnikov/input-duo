@@ -73,12 +73,17 @@ ParseError parse_configuration(protocol::ByteView descriptor, HidCapabilities& o
 
     // Filled in only when an interface is both usable and complete. A caller
     // that gets a failure must not find half of a device in here.
-    HidCapabilities candidate;
     bool interface_open = false;
     DeviceKind open_kind = DeviceKind::Unknown;
     std::uint8_t open_number = 0;
     bool open_boot = false;
     std::uint16_t open_report_length = 0;
+    HidCapabilities selected;
+    bool have_selected = false;
+    std::uint8_t auxiliary_endpoint = 0;
+    std::uint16_t auxiliary_max_packet = 0;
+    std::uint8_t secondary_auxiliary_endpoint = 0;
+    std::uint16_t secondary_auxiliary_max_packet = 0;
 
     std::size_t at = descriptor.data[0];
     if (at < kMinimumRecord || at > total) {
@@ -123,7 +128,7 @@ ParseError parse_configuration(protocol::ByteView descriptor, HidCapabilities& o
             // often consumer controls - stopping there picks an interface
             // this firmware cannot route and calls the keyboard behind it
             // unsupported.
-            interface_open = open_kind != DeviceKind::Unknown;
+            interface_open = device_class == kClassHid;
         } else if (type == kDescriptorHid && interface_open) {
             // No test can tell this check from the one below it: both refuse
             // the same records with the same error, because a record shorter
@@ -172,33 +177,60 @@ ParseError parse_configuration(protocol::ByteView descriptor, HidCapabilities& o
                     // Reports would arrive cut in half, which is worse than
                     // refusing the device: a truncated report is a keystroke
                     // that is not the one somebody made.
-                    return ParseError::PacketTooLarge;
+                    if (open_kind != DeviceKind::Unknown) {
+                        return ParseError::PacketTooLarge;
+                    }
+                    at += length;
+                    continue;
                 }
-                candidate.kind = open_kind;
-                candidate.interface_number = open_number;
-                candidate.endpoint = static_cast<std::uint8_t>(address & 0x0F);
-                candidate.max_packet = max_packet;
-                candidate.boot_protocol = open_boot;
-                candidate.report_descriptor_length = open_report_length;
-
-                // A keyboard is what this device is mainly for, so it wins
-                // outright. A mouse is kept and the walk continues, in case a
-                // keyboard interface follows it on the same device.
-                if (candidate.kind == DeviceKind::Keyboard) {
-                    out = candidate;
-                    return ParseError::None;
+                const std::uint8_t endpoint = static_cast<std::uint8_t>(address & 0x0F);
+                if (open_kind != DeviceKind::Unknown && !have_selected) {
+                    selected.kind = open_kind;
+                    selected.interface_number = open_number;
+                    selected.endpoint = endpoint;
+                    selected.max_packet = max_packet;
+                    selected.boot_protocol = open_boot;
+                    selected.report_descriptor_length = open_report_length;
+                    have_selected = true;
+                } else {
+                    // Every interrupt-IN endpoint other than the routed one
+                    // still belongs to the same composite receiver. Leaving
+                    // either the vendor channel or Keychron's later keyboard
+                    // channel unpolled can leave a notification queued in the
+                    // receiver while its mouse endpoint only NAKs.
+                    if (auxiliary_endpoint == 0) {
+                        auxiliary_endpoint = endpoint;
+                        auxiliary_max_packet = max_packet;
+                    } else if (secondary_auxiliary_endpoint == 0) {
+                        secondary_auxiliary_endpoint = endpoint;
+                        secondary_auxiliary_max_packet = max_packet;
+                    }
                 }
-                interface_open = false;
             }
         }
 
         at += length;
     }
 
-    if (candidate.kind == DeviceKind::Unknown) {
+    if (!have_selected) {
         return ParseError::NoUsableInterface;
     }
-    out = candidate;
+    selected.auxiliary_endpoint = auxiliary_endpoint;
+    selected.auxiliary_max_packet = auxiliary_max_packet;
+    selected.secondary_auxiliary_endpoint = secondary_auxiliary_endpoint;
+    selected.secondary_auxiliary_max_packet = secondary_auxiliary_max_packet;
+    // The diagnostic build used to select the *unknown* interface here, so
+    // that DescriptorSetup would fetch and print its report descriptor. It did
+    // its job - the Keychron receiver's vendor descriptor is captured in
+    // docs/hardware/ch375-compatibility.md - and it has to go, because it made
+    // the two builds route different endpoints.
+    //
+    // A diagnostic that changes what is being diagnosed is worse than none.
+    // It left the probe image reading vendor packets as boot mouse reports:
+    // 54 E2 01 02 arrives as buttons 0x54 held down and the pointer dragged
+    // thirty counts left, on a build somebody is using to decide whether the
+    // mouse works.
+    out = selected;
     return ParseError::None;
 }
 

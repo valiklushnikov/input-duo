@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <initializer_list>
 #include <string>
 #include <vector>
@@ -189,6 +190,49 @@ public:
     /// Give the device something to say the next time it is polled.
     void queue_report(const std::uint8_t* data, std::size_t size);
 
+    /// Queue a service packet on a composite receiver's other IN endpoint.
+    void queue_auxiliary_report(std::uint8_t endpoint, const std::uint8_t* data,
+                                std::size_t size);
+
+    /// Model the Keychron receiver holding mouse traffic until that service
+    /// packet has been collected.
+    void block_primary_while_auxiliary_waits(bool blocking) {
+        block_primary_for_auxiliary_ = blocking;
+    }
+
+    /// A hand that never stops: a report is ready on every poll.
+    ///
+    /// Queueing one per test slice is not the same scene. A moving mouse
+    /// answered 129 polls out of 148 with data on the bench, so the endpoint
+    /// is almost never NAKing - and a rule that only services the other
+    /// endpoint on a NAK almost never runs. That gap is the defect.
+    void always_reports(const std::uint8_t* data, std::size_t size) {
+        continuous_report_.assign(data, data + size);
+    }
+
+    /// Model the same receiver giving up for good.
+    ///
+    /// After this many tokens issued elsewhere while a service packet waits,
+    /// the device answers nothing on any endpoint, for ever. That is what the
+    /// bench showed: ninety seconds of NAK on a channel still reporting Ready,
+    /// unchanged by a bus reset or a fresh enumeration, and cured only by
+    /// pulling the receiver out. Zero disables it.
+    void wedges_if_auxiliary_ignored(unsigned tokens) { wedge_after_ = tokens; }
+
+    /// How many IN tokens this endpoint has been issued.
+    ///
+    /// The direct question, and the only one the model's clock cannot blur:
+    /// whether the service endpoint is being visited at all while the input
+    /// endpoint has something to give on every poll.
+    unsigned tokens_to(std::uint8_t endpoint) const {
+        const auto found = tokens_per_endpoint_.find(endpoint);
+        return found == tokens_per_endpoint_.end() ? 0u : found->second;
+    }
+
+    /// Whether it has given up. For a test that wants to say so out loud.
+    bool wedged() const { return wedged_; }
+
+
     /// Was the chip asked to configure the device by itself?
     bool saw_auto_setup() const { return saw_auto_setup_; }
 
@@ -201,6 +245,9 @@ public:
 
     /// Serve the descriptors of an ordinary boot mouse on endpoint 2.
     void serve_boot_mouse();
+    /// A composite whose mouse interface lies beyond the CH375's 64-byte
+    /// single-command descriptor buffer.
+    void serve_long_composite_mouse();
     /// A composite whose first HID interface is consumer controls.
     void serve_composite_keyboard();
     /// A hub, which this firmware does not support.
@@ -266,6 +313,9 @@ public:
     std::uint16_t report_descriptor_asked_for() const { return report_descriptor_asked_; }
     /// How many IN transactions its data stage took.
     int report_descriptor_packets() const { return report_descriptor_packets_; }
+    const std::vector<std::uint16_t>& configuration_descriptor_requests() const {
+        return configuration_descriptor_requests_;
+    }
     /// Was the transfer closed with an empty packet the host sent?
     int control_read_status_stages() const { return control_read_status_stages_; }
     /// The transmitter's data toggle, as it was last set (DS2 1.7).
@@ -544,6 +594,18 @@ private:
 
     std::vector<std::uint8_t> report_;
     bool report_waiting_ = false;
+    std::vector<std::uint8_t> auxiliary_report_;
+    std::uint8_t auxiliary_endpoint_ = 0;
+    bool auxiliary_waiting_ = false;
+    std::vector<std::uint8_t> secondary_auxiliary_report_;
+    std::uint8_t secondary_auxiliary_endpoint_ = 0;
+    bool secondary_auxiliary_waiting_ = false;
+    bool block_primary_for_auxiliary_ = false;
+    std::map<std::uint8_t, unsigned> tokens_per_endpoint_;
+    std::vector<std::uint8_t> continuous_report_;
+    unsigned wedge_after_ = 0;
+    unsigned auxiliary_ignored_ = 0;
+    bool wedged_ = false;
 
     UsbMode mode_ = UsbMode::DeviceDisabled;
     bool attached_ = false;
@@ -615,8 +677,10 @@ private:
     bool refuse_setup_ = false;
     bool ignore_setup_ = false;
     std::vector<std::uint8_t> report_descriptor_;
-    /// What is left of the report descriptor's data stage, and where it is up
-    /// to. A control read is one SETUP and then as many INs as it takes.
+    enum class ControlReadSource : std::uint8_t { None, Configuration, Report };
+    ControlReadSource control_read_source_ = ControlReadSource::None;
+    /// What is left of a descriptor's data stage, and where it is up to. A
+    /// control read is one SETUP and then as many INs as it takes.
     std::size_t control_read_at_ = 0;
     std::size_t control_read_total_ = 0;
     bool control_read_open_ = false;
@@ -630,6 +694,7 @@ private:
     int report_descriptor_requests_ = 0;
     std::uint16_t report_descriptor_asked_ = 0;
     int report_descriptor_packets_ = 0;
+    std::vector<std::uint16_t> configuration_descriptor_requests_;
     int control_read_status_stages_ = 0;
     std::uint8_t transmit_toggle_ = 0;
     std::vector<std::uint8_t> setup_toggles_;
@@ -672,7 +737,30 @@ class FakeDeviceSetup final : public IDeviceSetup {
 public:
     void begin(std::uint32_t now_us) override;
     SetupProgress poll(std::uint32_t now_us, bool interrupted, InterruptStatus status) override;
-    std::uint8_t interrupt_endpoint() const override { return 1; }
+    void set_interrupt_endpoint(std::uint8_t endpoint) { interrupt_endpoint_ = endpoint; }
+    std::uint8_t interrupt_endpoint() const override { return interrupt_endpoint_; }
+
+    /// What the endpoint descriptor claimed. A ceiling, not a measurement.
+    void set_max_packet(std::uint16_t bytes) { max_packet_ = bytes; }
+    std::uint16_t max_packet() const override { return max_packet_; }
+
+    void set_auxiliary_endpoint(std::uint8_t endpoint, std::uint16_t max_packet) {
+        auxiliary_endpoint_ = endpoint;
+        auxiliary_max_packet_ = max_packet;
+    }
+    std::uint8_t auxiliary_endpoint() const override { return auxiliary_endpoint_; }
+    std::uint16_t auxiliary_max_packet() const override { return auxiliary_max_packet_; }
+    void set_secondary_auxiliary_endpoint(std::uint8_t endpoint,
+                                          std::uint16_t max_packet) {
+        secondary_auxiliary_endpoint_ = endpoint;
+        secondary_auxiliary_max_packet_ = max_packet;
+    }
+    std::uint8_t secondary_auxiliary_endpoint() const override {
+        return secondary_auxiliary_endpoint_;
+    }
+    std::uint16_t secondary_auxiliary_max_packet() const override {
+        return secondary_auxiliary_max_packet_;
+    }
 
     void always_fail(bool failing) { failing_ = failing; }
 
@@ -695,6 +783,12 @@ private:
     bool running_ = false;
     bool failing_ = false;
     bool begun_ = false;
+    std::uint8_t interrupt_endpoint_ = 1;
+    std::uint8_t auxiliary_endpoint_ = 0;
+    std::uint16_t auxiliary_max_packet_ = 0;
+    std::uint8_t secondary_auxiliary_endpoint_ = 0;
+    std::uint16_t secondary_auxiliary_max_packet_ = 0;
+    std::uint16_t max_packet_ = 0;
 };
 
 }  // namespace duo_input::u1::ch375::testing

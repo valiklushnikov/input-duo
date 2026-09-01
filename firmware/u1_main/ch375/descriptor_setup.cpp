@@ -51,6 +51,12 @@ constexpr std::uint8_t kRequestTypeInterfaceIn = 0x81;
 /// HID 1.11 7.1.1. wValue is the type in the high byte and the index in the
 /// low one, and there is only ever one report descriptor per interface.
 constexpr std::uint16_t kDescriptorReport = 0x2200;
+/// USB 2.0 9.3.1: device to host, standard request, addressed to the device.
+constexpr std::uint8_t kRequestTypeDeviceIn = 0x80;
+/// The configuration descriptor, index zero (USB 2.0 9.4.3).
+constexpr std::uint16_t kDescriptorConfiguration = 0x0200;
+/// The fixed part that carries wTotalLength (USB 2.0 9.6.3).
+constexpr std::uint16_t kConfigurationHeaderBytes = 9;
 
 /// Where bMaxPacketSize0 sits in a device descriptor (USB 2.0 9.6.1).
 constexpr std::size_t kMaxPacketSizeOffset = 7;
@@ -83,6 +89,9 @@ void DescriptorSetup::begin(std::uint32_t now_us) {
     report_error_ = ReportDescriptorError::None;
     report_status_ = 0;
     control_packet_ = 8;
+    configuration_wanted_ = 0;
+    configuration_received_ = 0;
+    configuration_toggle_data1_ = true;
     report_wanted_ = 0;
     report_received_ = 0;
     report_toggle_data1_ = true;
@@ -126,6 +135,99 @@ SetupProgress DescriptorSetup::finish(std::uint8_t status) {
     // device to arrive on this channel gets the full three tries again.
     report_silences_ = 0;
     return SetupProgress::Done;
+}
+
+SetupProgress DescriptorSetup::request_configuration_header(std::uint32_t now_us) {
+    ControlRequest request;
+    request.request_type = kRequestTypeDeviceIn;
+    request.request = kRequestGetDescriptor;
+    request.value = kDescriptorConfiguration;
+    request.index = 0;
+    request.length = kConfigurationHeaderBytes;
+    if (!transport_.begin_control_request(request)) {
+        return fail(kEndedUnreadable);
+    }
+    configuration_wanted_ = kConfigurationHeaderBytes;
+    configuration_received_ = 0;
+    configuration_toggle_data1_ = true;
+    started_us_ = now_us;
+    step_ = Step::RequestingConfigurationHeader;
+    return SetupProgress::Busy;
+}
+
+SetupProgress DescriptorSetup::request_long_configuration(std::uint32_t now_us) {
+    if (configuration_received_ < kConfigurationHeaderBytes) {
+        last_parse_error_ = ParseError::Truncated;
+        return fail(kEndedUnsupported);
+    }
+    const std::uint16_t total = static_cast<std::uint16_t>(
+        configuration_buffer_[2] |
+        (static_cast<std::uint16_t>(configuration_buffer_[3]) << 8));
+    if (total < kConfigurationHeaderBytes || total > kMaxConfigurationDescriptorBytes) {
+        last_parse_error_ = ParseError::Truncated;
+        return fail(kEndedUnsupported);
+    }
+
+    ControlRequest request;
+    request.request_type = kRequestTypeDeviceIn;
+    request.request = kRequestGetDescriptor;
+    request.value = kDescriptorConfiguration;
+    request.index = 0;
+    request.length = total;
+    if (!transport_.begin_control_request(request)) {
+        return fail(kEndedUnreadable);
+    }
+    configuration_wanted_ = total;
+    configuration_received_ = 0;
+    configuration_toggle_data1_ = true;
+    started_us_ = now_us;
+    step_ = Step::RequestingConfiguration;
+    return SetupProgress::Busy;
+}
+
+SetupProgress DescriptorSetup::collect_configuration(std::uint32_t now_us,
+                                                     Step finished_step) {
+    std::uint8_t packet[kDescriptorBuffer];
+    std::size_t size = 0;
+    if (!transport_.read_block(packet, sizeof(packet), size)) {
+        return fail(kEndedUnreadable);
+    }
+    const std::size_t room = kMaxConfigurationDescriptorBytes - configuration_received_;
+    const std::size_t keep = size < room ? size : room;
+    for (std::size_t index = 0; index < keep; ++index) {
+        configuration_buffer_[configuration_received_ + index] = packet[index];
+    }
+    configuration_received_ = static_cast<std::uint16_t>(configuration_received_ + keep);
+    configuration_toggle_data1_ = !configuration_toggle_data1_;
+
+    const bool short_packet = size < control_packet_;
+    if (!short_packet && configuration_received_ < configuration_wanted_ && keep == size) {
+        transport_.request_control_data(configuration_toggle_data1_);
+        started_us_ = now_us;
+        return SetupProgress::Busy;
+    }
+    if (!transport_.finish_control_read()) {
+        step_ = finished_step;
+        return finished_step == Step::FinishingConfigurationHeader
+                   ? request_long_configuration(now_us)
+                   : parse_long_configuration();
+    }
+    started_us_ = now_us;
+    step_ = finished_step;
+    return SetupProgress::Busy;
+}
+
+SetupProgress DescriptorSetup::parse_long_configuration() {
+    last_parse_error_ = parse_configuration(
+        protocol::ByteView{configuration_buffer_, configuration_received_}, capabilities_);
+    if (last_parse_error_ != ParseError::None) {
+        capabilities_ = HidCapabilities{};
+        return fail(kEndedUnsupported);
+    }
+    transport_.set_configuration(1);
+    started_us_ = transport_.now_us();
+    step_ = Step::ChoosingConfiguration;
+    return SetupProgress::Busy;
 }
 
 /// Ask the mouse where it keeps its fields, or take the path already working.
@@ -334,6 +436,12 @@ SetupProgress DescriptorSetup::poll(std::uint32_t now_us, bool interrupted,
     }
 
     if (status != InterruptStatus::Success) {
+        if (step_ == Step::ReadingConfiguration && status == InterruptStatus::BufferOver) {
+            // The dedicated GET_DESCRIPTOR command owns one 64-byte buffer.
+            // Ask endpoint zero ourselves so each USB packet can be drained
+            // before the next one arrives.
+            return request_configuration_header(now_us);
+        }
         if (fetching_report_descriptor()) {
             // A STALL is a device saying it will not answer that, which it is
             // entitled to. Unlike a timeout it is an answer: the interrupt has
@@ -420,6 +528,30 @@ SetupProgress DescriptorSetup::poll(std::uint32_t now_us, bool interrupted,
             step_ = Step::ChoosingConfiguration;
             return SetupProgress::Busy;
         }
+
+        case Step::RequestingConfigurationHeader:
+            transport_.request_control_data(configuration_toggle_data1_);
+            started_us_ = now_us;
+            step_ = Step::ReadingConfigurationHeader;
+            return SetupProgress::Busy;
+
+        case Step::ReadingConfigurationHeader:
+            return collect_configuration(now_us, Step::FinishingConfigurationHeader);
+
+        case Step::FinishingConfigurationHeader:
+            return request_long_configuration(now_us);
+
+        case Step::RequestingConfiguration:
+            transport_.request_control_data(configuration_toggle_data1_);
+            started_us_ = now_us;
+            step_ = Step::ReadingLongConfiguration;
+            return SetupProgress::Busy;
+
+        case Step::ReadingLongConfiguration:
+            return collect_configuration(now_us, Step::FinishingLongConfiguration);
+
+        case Step::FinishingLongConfiguration:
+            return parse_long_configuration();
 
         case Step::ChoosingConfiguration:
             return request_report_descriptor(now_us);

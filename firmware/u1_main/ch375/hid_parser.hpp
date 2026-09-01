@@ -65,6 +65,15 @@ struct HidCapabilities {
     /// Zero means the interface did not declare one, which is a device to leave
     /// on the path it already worked on rather than one to guess at.
     std::uint16_t report_descriptor_length = 0;
+    /// Optional interrupt-IN endpoint belonging to another HID interface of
+    /// the same composite receiver. Its packets are serviced and discarded so
+    /// they cannot block the primary mouse/keyboard endpoint.
+    std::uint8_t auxiliary_endpoint = 0;
+    std::uint16_t auxiliary_max_packet = 0;
+    /// A second non-routed interrupt-IN endpoint. Keychron's receiver has
+    /// both a vendor channel and a boot-keyboard channel beside its mouse.
+    std::uint8_t secondary_auxiliary_endpoint = 0;
+    std::uint16_t secondary_auxiliary_max_packet = 0;
 };
 
 /// The largest packet the controller can read in one go (DS1 5.13).
