@@ -52,6 +52,13 @@ rather than by make or model, deliberately. Every user's peripherals are
 different, and a document that named one bench's hardware would invite a reader
 to read the absence of their own device as incompatibility, which it is not.
 
+A third has since been driven the same way: **a 2.4 GHz receiver presenting a
+boot-protocol keyboard**, `VID 0x3554 PID 0xFA09`. It is the one thing on this
+page carried by its identifiers rather than by its class, and only because the
+last observation below is true of *it* and was not true of the wired keyboard
+in the same socket. A reader with a different receiver learns from that
+observation what to look for, not what they have.
+
 ### A channel's name is not the device on it
 
 **U1's two CH375 channels are called the keyboard channel and the mouse
@@ -94,7 +101,7 @@ throughout.
 
 ### What was observed, as distinct from what was assumed
 
-The three facts below are recorded separately because each was, at some point
+The four facts below are recorded separately because each was, at some point
 in this project, believed on weaker evidence than it deserved.
 
 - **Interrupt IN endpoint 1, on both devices.** Not inferred from the interface
@@ -111,6 +118,30 @@ in this project, believed on weaker evidence than it deserved.
   result was a left button held down for ever and sideways movement arriving as
   vertical. "It says it can" and "it is" are claims about different devices,
   and only the second byte says which one is attached.
+
+- **A key slot holding `0x01` is not necessarily a rollover.** The receiver at
+  `0x3554:0xFA09` sends boot reports with `0x01` in the *first* key slot and
+  zeros in the other five, where the wired keyboard in the same socket sends an
+  empty report: 32 of 156 reports in one twenty-second line of typing, and 14
+  of 149 in another. HID 1.11 8.3 has a keyboard that has lost count put
+  ErrorRollOver in *every* array field, so one of them is not that - it is the
+  keyboard saying nothing is held.
+
+  Read as a rollover, each of those reports was discarded whole, and a
+  discarded report leaves the normalizer holding keys the keyboard has already
+  let go. That is one defect wearing two faces, and both were reported as
+  hardware: a lost *release* leaves the key down with nothing left that would
+  ever lift it, so the far computer repeats it until the next keystroke - on
+  the bench a space stuck for 1188 ms and put twenty-two of them in a line
+  nobody typed - while a lost *press* is a letter that never arrives at all,
+  because the release behind it compares equal to a state that never moved.
+
+  What made this expensive to find is that the device's own numbers all looked
+  well. Firmware-internal latency stayed at 1-2 ms throughout, because its
+  clock starts when the report reaches Core 1 and a report that is discarded
+  never starts one; `dropped_commands` and `runtime_fault` stayed at zero,
+  because nothing was refused by any queue. The evidence that named it was the
+  report bytes themselves, out of the probe build's `last=` field.
 
 ### How the serial link to the controller settles
 
@@ -182,7 +213,12 @@ behaviour, not speculation.
   the controller reads at most 64 in one transaction and a report arriving
   silently cut in half is a keystroke nobody made.
 
-**Two devices verified is a sample of two.** What this firmware supports is
+**Three devices verified is a sample of three.** What this firmware supports is
 defined by the descriptor corpus in the first part of this document and by the
 parser that is tested against it — not by this bench. A device absent from this
 section is not a device known to fail.
+
+The third one is the argument for keeping this section honest. Two devices had
+been driven for weeks, and the report format they both sent was taken as the
+report format keyboards send; the receiver was the first thing to disagree, and
+it disagreed on a byte no test had ever been given.
