@@ -13,6 +13,7 @@
 // it is rebooted. So a disconnect synthesises the releases the device did not
 // send, which is the only moment anything here invents input.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -46,18 +47,32 @@ public:
 
     /// A report arrived from the device.
     void on_report(protocol::ByteView report, std::uint32_t now_ms);
+    void on_auxiliary_report(std::uint8_t endpoint, protocol::ByteView report,
+                             std::uint32_t now_ms);
 
     /// The device went away.
     void on_detached(std::uint32_t now_ms);
 
     /// Turn one controller event into whatever it means.
     void on_event(const ch375::Ch375Event& event, ch375::DeviceKind kind,
-                  const ch375::MouseReportLayout& mouse_layout, std::uint32_t now_ms);
+                  const ch375::MouseReportLayout& mouse_layout, std::uint32_t now_ms,
+                  std::uint16_t vendor_id = 0, std::uint16_t product_id = 0);
 
     ch375::DeviceKind kind() const { return kind_; }
     /// How many reports were dropped because the pipeline did not know what
     /// kind of device they came from.
     std::uint32_t unclaimed_reports() const { return unclaimed_; }
+#if DUO_CH375_PROBE
+    std::uint32_t keychron_side_presses() const {
+        return keychron_side_presses_.load(std::memory_order_relaxed);
+    }
+    std::uint32_t keychron_side_releases() const {
+        return keychron_side_releases_.load(std::memory_order_relaxed);
+    }
+    bool keychron_side_held() const {
+        return keychron_side_button_held_.load(std::memory_order_relaxed);
+    }
+#endif
 
 private:
     void emit(const InputEvent* events, std::size_t count, std::uint32_t now_ms);
@@ -66,6 +81,12 @@ private:
     ch375::DeviceKind kind_ = ch375::DeviceKind::Unknown;
     KeyboardNormalizer keyboard_;
     MouseNormalizer mouse_;
+    bool keychron_receiver_ = false;
+    std::atomic<bool> keychron_side_button_held_{false};
+#if DUO_CH375_PROBE
+    std::atomic<std::uint32_t> keychron_side_presses_{0};
+    std::atomic<std::uint32_t> keychron_side_releases_{0};
+#endif
     std::uint32_t unclaimed_ = 0;
 };
 

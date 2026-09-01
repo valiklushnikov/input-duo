@@ -400,7 +400,9 @@ void core1_entry() {
                 // the backlog worth knowing about.
                 g_runtime.set_event_origin_us(event.received_us);
                 pipelines[index]->on_event(event, setups[index]->kind(),
-                                           setups[index]->mouse_layout(), now_ms);
+                                           setups[index]->mouse_layout(), now_ms,
+                                           setups[index]->vendor_id(),
+                                           setups[index]->product_id());
                 // Cleared immediately. A stamp left standing would be attached
                 // to whatever the device did next - a macro step, a timeout's
                 // release - and the further from the report that happened, the
@@ -654,6 +656,15 @@ namespace {
     // over narration and ends with a marker that makes truncation visible.
     static char text[1023] = {};
     int used = 0;
+    used += snprintf(
+        text + used, sizeof(text) - static_cast<std::size_t>(used),
+        "side kaux=%lu/%lu/%u maux=%lu/%lu/%u\n",
+        static_cast<unsigned long>(g_keyboard_pipeline.keychron_side_presses()),
+        static_cast<unsigned long>(g_keyboard_pipeline.keychron_side_releases()),
+        g_keyboard_pipeline.keychron_side_held() ? 1u : 0u,
+        static_cast<unsigned long>(g_mouse_pipeline.keychron_side_presses()),
+        static_cast<unsigned long>(g_mouse_pipeline.keychron_side_releases()),
+        g_mouse_pipeline.keychron_side_held() ? 1u : 0u);
     const char* names[2] = {"keyboard", "mouse"};
     for (int index = 0; index < 2 && used < static_cast<int>(sizeof(text)) - 1; ++index) {
         const duo_input::u1::ch375::Ch375Device& device = *devices[index];
@@ -662,7 +673,7 @@ namespace {
         used += snprintf(
             text + used, sizeof(text) - static_cast<std::size_t>(used),
             "%s st=%s rate=%s life=%u/%u/%u reports=%u int=%u/%u\n"
-            " bus ce=%s status=%u/%u/%u/%u/%u enumfail=%u modefail=%u polls=%u\n"
+            " bus ce=%s usb=%02X status=%u/%u/%u/%u/%u enumfail=%u modefail=%u polls=%u\n"
             " hid=%s ep=%u pkt=%u boot=%s/%s setup=%u last=%02X cfgerr=%u\n"
             " rd=%02X err=%u got/want=%u/%u layout=%s id=%s/%u "
             "b=%u x=%u/%u+%u:%u y=%u/%u+%u:%u w=%u p=%u min=%u\n"
@@ -677,6 +688,7 @@ namespace {
             (index == 0 ? g_probe.keyboard_probe : g_probe.mouse_probe).check_exist_ok
                 ? "0xA8"
                 : "WRONG",
+            device.last_status(),
             device.status_connect(), device.status_disconnect(), device.status_success(),
             device.status_failure(), device.status_impossible(),
             device.enumerate_failures(), device.mode_failures(),
@@ -719,6 +731,63 @@ namespace {
         if (used < 0 || used > static_cast<int>(sizeof(text)) - 1) {
             used = static_cast<int>(sizeof(text)) - 1;
             break;
+        }
+
+        // Sparse composite-interface reports are the evidence needed to map
+        // buttons which never appear on the mouse endpoint. Keep the previous
+        // and current packet: a press followed quickly by a release would
+        // otherwise overwrite the only interesting half before CDC reads it.
+        for (unsigned auxiliary = 0; auxiliary < 2 &&
+                                     used < static_cast<int>(sizeof(text)) - 24;
+             ++auxiliary) {
+            const std::uint8_t endpoint = auxiliary == 0
+                                              ? setups[index]->auxiliary_endpoint()
+                                              : setups[index]->secondary_auxiliary_endpoint();
+            if (endpoint == 0 || devices[index]->auxiliary_reports(auxiliary) == 0) {
+                continue;
+            }
+            used += snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used),
+                             " aux%u n=%u p=", endpoint,
+                             devices[index]->auxiliary_reports(auxiliary));
+            const duo_input::protocol::ByteView previous =
+                devices[index]->auxiliary_previous_report(auxiliary);
+            for (std::size_t byte = 0; byte < previous.size && byte < 9 &&
+                                       used < static_cast<int>(sizeof(text)) - 3;
+                 ++byte) {
+                used += snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used),
+                                 "%02X", previous.data[byte]);
+            }
+            used += snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used), " l=");
+            const duo_input::protocol::ByteView last =
+                devices[index]->auxiliary_last_report(auxiliary);
+            for (std::size_t byte = 0; byte < last.size && byte < 9 &&
+                                       used < static_cast<int>(sizeof(text)) - 3;
+                 ++byte) {
+                used += snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used),
+                                 "%02X", last.data[byte]);
+            }
+            if (used < static_cast<int>(sizeof(text)) - 1) {
+                text[used++] = '\n';
+                text[used] = '\0';
+            }
+            if (endpoint == 1 && used < static_cast<int>(sizeof(text)) - 16) {
+                used += snprintf(text + used,
+                                 sizeof(text) - static_cast<std::size_t>(used), " trace=");
+                const unsigned trace_count = devices[index]->auxiliary_trace_count(auxiliary);
+                for (unsigned trace = 0;
+                     trace < trace_count && used < static_cast<int>(sizeof(text)) - 19;
+                     ++trace) {
+                    const duo_input::protocol::ByteView packet =
+                        devices[index]->auxiliary_trace_report(auxiliary, trace);
+                    for (std::size_t byte = 0; byte < packet.size && byte < 9; ++byte) {
+                        used += snprintf(text + used,
+                                         sizeof(text) - static_cast<std::size_t>(used), "%02X",
+                                         packet.data[byte]);
+                    }
+                    text[used++] = trace + 1 == trace_count ? '\n' : ',';
+                    text[used] = '\0';
+                }
+            }
         }
 
         // A parser failure without its bytes is still a guess.  Keep this in
