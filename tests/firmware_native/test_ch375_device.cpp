@@ -29,7 +29,7 @@ using duo_input::u1::ch375::kRecoverDelayUs;
 using duo_input::u1::ch375::kRetryReportNak;
 using duo_input::u1::ch375::kRetryWaitOutNak;
 using duo_input::u1::ch375::kPresenceRecheckUs;
-using duo_input::u1::ch375::kReportPollUs;
+using duo_input::u1::ch375::kSlowestReportPollUs;
 using duo_input::u1::ch375::PendingReply;
 using duo_input::u1::ch375::testing::FakeCh375Chip;
 using duo_input::u1::ch375::testing::FakeDeviceSetup;
@@ -1335,16 +1335,94 @@ TEST_CASE(the_floor_is_derived_from_what_one_report_costs_on_the_wire) {
     // So a seven-byte mouse report is fifteen frames, 165 bits - the fifteen
     // bytes the transport's own note names, and 17.2 ms at 9600 against the
     // 8 ms a moving hand produces one in.
-    CHECK_EQ(duo_input::u1::ch375::report_rate_floor(7, kReportPollUs), 20625u);
+    CHECK_EQ(duo_input::u1::ch375::report_rate_floor(7, kSlowestReportPollUs), 20625u);
     // 9600 is below it and 37500 is the slowest rung above it, which is the
     // rung the bench measured block reads completing on.
-    CHECK(9600u < duo_input::u1::ch375::report_rate_floor(7, kReportPollUs));
-    CHECK(37500u > duo_input::u1::ch375::report_rate_floor(8, kReportPollUs));
+    CHECK(9600u < duo_input::u1::ch375::report_rate_floor(7, kSlowestReportPollUs));
+    CHECK(37500u > duo_input::u1::ch375::report_rate_floor(8, kSlowestReportPollUs));
     // CH375's maximum packet is 64 bytes. Even that valid maximum needs
     // 99 kbaud, so the 115200 rung still clears the floor; there is no valid
     // packet size for which the ladder has no usable rung.
-    CHECK_EQ(duo_input::u1::ch375::report_rate_floor(64, kReportPollUs), 99000u);
-    CHECK(115200u > duo_input::u1::ch375::report_rate_floor(64, kReportPollUs));
+    CHECK_EQ(duo_input::u1::ch375::report_rate_floor(64, kSlowestReportPollUs), 99000u);
+    CHECK(115200u > duo_input::u1::ch375::report_rate_floor(64, kSlowestReportPollUs));
+}
+
+TEST_CASE(a_faster_link_is_polled_faster_because_the_endpoint_holds_a_state) {
+    using duo_input::u1::ch375::kFastestReportPollUs;
+    using duo_input::u1::ch375::kSlowestReportPollUs;
+    using duo_input::u1::ch375::report_poll_interval_us;
+
+    // A receiver's interrupt endpoint answers with what is held *now*, not
+    // with a queue of what happened, so a state that begins and ends between
+    // two polls was never here at all. Measured on the bench: at 8 ms an Aula
+    // F75's receiver lost two keys in thirty-nine, and at 2 ms none in two
+    // hundred and thirty-one, while Windows - polling at 1 ms - lost none.
+    //
+    // So the interval is taken from what the link can carry rather than fixed,
+    // and the top rung is polled at the floor below.
+    CHECK_EQ(report_poll_interval_us(8, 115200), kFastestReportPollUs);
+
+    // And a slower rung is polled slower, because a poll issued faster than
+    // the wire can answer only overruns the channel next to it.
+    CHECK(report_poll_interval_us(8, 37500) > report_poll_interval_us(8, 115200));
+    CHECK(report_poll_interval_us(8, 62500) > report_poll_interval_us(8, 115200));
+    CHECK(report_poll_interval_us(8, 37500) > report_poll_interval_us(8, 62500));
+
+    // Never faster than the two channels on one core can sustain, and never
+    // slower than the fixed 8 ms every device was polled at before this.
+    for (unsigned baud : {37500u, 62500u, 115200u}) {
+        CHECK(report_poll_interval_us(8, baud) >= kFastestReportPollUs);
+        CHECK(report_poll_interval_us(8, baud) <= kSlowestReportPollUs);
+        // The whole point: an interval a rung cannot carry would ask for a
+        // second report before the first had finished arriving.
+        CHECK(report_poll_interval_us(8, baud) >=
+              duo_input::u1::ch375::report_cost_us(8, baud));
+    }
+}
+
+TEST_CASE(a_ready_device_is_actually_polled_at_the_interval_it_earned) {
+    // The arithmetic above is worth nothing if the machine goes on using the
+    // old constant, and that is this project's most common defect by some way:
+    // correct code with a passing test that production never reaches. So this
+    // asks the device, not the formula.
+    Rig rig;
+    bring_up(rig);
+    CHECK_EQ(static_cast<int>(rig.device.state()), static_cast<int>(Ch375State::Ready));
+
+    const std::uint32_t window_us = 100000;
+    const std::uint16_t before = rig.device.polls_issued();
+    rig.run(window_us, 50);
+    const unsigned issued = static_cast<unsigned>(
+        static_cast<std::uint16_t>(rig.device.polls_issued() - before));
+
+    const std::uint32_t interval =
+        duo_input::u1::ch375::report_poll_interval_us(8, rig.transport.port_baud());
+    const unsigned wanted = window_us / interval;
+
+    // Near what the interval asks for - a poll or two either way, since the
+    // window does not begin on one.
+    CHECK(issued + 2 >= wanted);
+    CHECK(issued <= wanted + 2);
+    // And clearly past what the old fixed 8 ms would have produced. Without
+    // this line the check above passes on a device that ignored the interval
+    // entirely and polled at whatever the constant said.
+    CHECK(issued > window_us / kSlowestReportPollUs + 2);
+}
+
+TEST_CASE(deriving_the_interval_leaves_every_rung_of_the_ladder_usable) {
+    using duo_input::u1::ch375::kBaudLadder;
+    using duo_input::u1::ch375::kBaudLadderSize;
+    using duo_input::u1::ch375::kSlowestReportPollUs;
+
+    // The ladder exists because the two channels on this board do not manage
+    // the same rate, and a collapse has to have somewhere to go. Deriving the
+    // poll interval from a rate must not take that away: were the floor still
+    // read off the *fastest* interval, only 115200 would clear it and a
+    // channel that cannot hold 115200 would have no rung to fall to.
+    const unsigned floor = duo_input::u1::ch375::report_rate_floor(8, kSlowestReportPollUs);
+    for (std::size_t index = 0; index < kBaudLadderSize; ++index) {
+        CHECK(kBaudLadder[index].baud >= floor);
+    }
 }
 
 TEST_CASE(a_channel_with_a_device_up_never_rests_below_that_floor) {

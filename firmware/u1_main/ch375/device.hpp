@@ -219,11 +219,22 @@ inline constexpr std::uint32_t kSetupTimeoutUs = 200000;
 /// leave someone staring at a keyboard that does nothing.
 inline constexpr std::uint32_t kRecoverDelayUs = 1000000;
 
-/// How often a configured device is asked whether it has anything to say.
+/// The slowest a configured device is asked whether it has anything to say.
 ///
-/// A USB interrupt endpoint on a keyboard is polled about every 8 ms by a real
-/// host, and faster gains nothing a person can feel.
-inline constexpr std::uint32_t kReportPollUs = 8000;
+/// What every device was polled at before the interval was derived, and still
+/// what the bottom of the baud ladder gets. It is also the figure the ladder's
+/// own floor is read from, so that every rung stays somewhere a collapse can
+/// fall to - see slowest_usable_rung.
+inline constexpr std::uint32_t kSlowestReportPollUs = 8000;
+
+/// The fastest, whatever the link would allow.
+///
+/// Core 1 drives both CH375s from one loop, so an interval below this buys
+/// nothing and spends the other channel's turn: at 2 ms the bench measured 416
+/// polls a second against the 500 asked for, which is the core and not the
+/// wire. Going faster only widens that gap.
+inline constexpr std::uint32_t kFastestReportPollUs = 2000;
+
 
 /// A CH375 serial frame is eleven bits.
 ///
@@ -259,6 +270,38 @@ constexpr unsigned report_rate_floor(std::size_t packet_bytes, std::uint32_t pol
     const std::uint64_t bits =
         static_cast<std::uint64_t>(packet_bytes + kReportOverheadFrames) * kSerialFrameBits;
     return static_cast<unsigned>(bits * 1000000u / poll_us);
+}
+
+/// How long one report costs on the wire at ``baud``.
+constexpr std::uint32_t report_cost_us(std::size_t packet_bytes, unsigned baud) {
+    const std::uint64_t bits =
+        static_cast<std::uint64_t>(packet_bytes + kReportOverheadFrames) * kSerialFrameBits;
+    return static_cast<std::uint32_t>(bits * 1000000u / baud);
+}
+
+/// How often to ask, on a link running at ``baud``.
+///
+/// Derived rather than fixed, and the direction of the dependency is the whole
+/// point. A fixed interval decides the slowest rate that can carry it, which
+/// is how the ladder came to be clamped by a constant; taking the interval
+/// from the rate instead lets a fast link be polled fast without costing a
+/// slow one the rungs it needs.
+///
+/// Why fast matters at all: an interrupt endpoint answers with the state held
+/// *now*, not with a queue of what happened, so a key whose whole press falls
+/// between two polls was never here. That is not theoretical - an Aula F75's
+/// 2.4 GHz receiver lost two keys in thirty-nine at 8 ms and none in two
+/// hundred and thirty-one at 2 ms, while Windows, polling at 1 ms, lost none
+/// of the same thirty-nine.
+constexpr std::uint32_t report_poll_interval_us(std::size_t packet_bytes, unsigned baud) {
+    const std::uint32_t cost = report_cost_us(packet_bytes, baud);
+    if (cost < kFastestReportPollUs) {
+        return kFastestReportPollUs;
+    }
+    if (cost > kSlowestReportPollUs) {
+        return kSlowestReportPollUs;
+    }
+    return cost;
 }
 
 /// How many block reads may fail in a row on one rate before the ladder steps
@@ -507,6 +550,17 @@ private:
 
     /// The slowest rung this channel's device can actually be run at.
     std::size_t slowest_usable_rung() const;
+
+    /// How big this device's reports are, or the largest boot report this
+    /// firmware routes while its descriptors are still being fetched.
+    std::size_t packet_bytes() const;
+
+    /// How often to ask this device, on the rate this channel actually got.
+    ///
+    /// Read fresh each time rather than cached: the port moves - up the ladder
+    /// on bring-up, down it on a collapse - and an interval remembered from
+    /// the rate before would be one this link can no longer answer inside.
+    std::uint32_t poll_interval_us() const;
 
     void enter(Ch375State state, std::uint32_t now_us);
     void publish(Ch375EventKind kind);

@@ -403,7 +403,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
                 expect_data1_ = !expect_data1_;
                 transport_.set_receive_toggle(expect_data1_ ? kToggleData1 : kToggleData0);
             }
-            if (now_us - last_poll_us_ < kReportPollUs) {
+            if (now_us - last_poll_us_ < poll_interval_us()) {
                 return;
             }
             // One token at a time. Giving the controller another before it has
@@ -886,11 +886,23 @@ void Ch375Device::handle_detach(std::uint32_t now_us) {
     }
 }
 
+std::uint32_t Ch375Device::poll_interval_us() const {
+    return report_poll_interval_us(packet_bytes(), transport_.port_baud());
+}
+
+std::size_t Ch375Device::packet_bytes() const {
+    return setup_.max_packet() != 0 ? static_cast<std::size_t>(setup_.max_packet())
+                                    : kAssumedPacketBytes;
+}
+
 std::size_t Ch375Device::slowest_usable_rung() const {
-    const std::size_t packet = setup_.max_packet() != 0
-                                   ? static_cast<std::size_t>(setup_.max_packet())
-                                   : kAssumedPacketBytes;
-    const unsigned floor = report_rate_floor(packet, kReportPollUs);
+    const std::size_t packet = packet_bytes();
+    // The *slowest* interval, deliberately. The floor says which rungs a
+    // collapse may fall to, and every rung that can carry a report inside the
+    // interval it will actually be polled at is one of them. Reading it off
+    // the fastest interval instead would leave 115200 the only rung clearing
+    // it, which is the whole ladder gone for the sake of a constant.
+    const unsigned floor = report_rate_floor(packet, kSlowestReportPollUs);
     // Fastest first, so the last rung still at or above the floor is the
     // slowest usable one. Rung zero if none of them clears it, which keeps a
     // channel on the fastest rate there is rather than the slowest.
