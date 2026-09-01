@@ -219,6 +219,49 @@ TEST_CASE(the_keys_held_before_a_rollover_are_still_held_after_it) {
 
     CHECK(out.has(InputEventKind::KeyUp, 0x04));
 }
+TEST_CASE(one_error_slot_is_a_keyboard_holding_nothing_not_a_rollover) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.apply(view(keys(0, {0x0F})), out.events, kMaxEventsPerReport);
+
+    // Captured from an Aula F75's 2.4 GHz receiver, which sends this in place
+    // of an empty report about nine times in every hundred: 0x01 in the first
+    // slot and nothing in the other five. HID 1.11 8.3 puts ErrorRollOver in
+    // *every* array field, so one of them is not a keyboard saying it has lost
+    // count of what is held - it is a keyboard saying nothing is.
+    out.count = normalizer.apply(view(keys(0, {0x01})), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 1u);
+    CHECK(out.has(InputEventKind::KeyUp, 0x0F));
+}
+TEST_CASE(an_error_slot_is_never_delivered_as_a_key) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+
+    // 0x01 is not a usage anybody can press. Reading it as one would put a key
+    // nobody has on the far computer, and - worse - leave it held there, since
+    // the report that clears it would look like a release of something real.
+    out.count = normalizer.apply(view(keys(0, {0x01})), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 0u);
+}
+TEST_CASE(an_error_slot_does_not_leave_the_key_before_it_repeating) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+
+    // The sequence the bench recorded while a letter stuck for 453 ms: the
+    // key, two of the receiver's one-slot error reports, then the next key.
+    // With the error reports believed, 0x0F is released only here - and on a
+    // computer that is a letter repeating until the next keystroke stops it.
+    normalizer.apply(view(keys(0, {0x0F})), out.events, kMaxEventsPerReport);
+    normalizer.apply(view(keys(0, {0x01})), out.events, kMaxEventsPerReport);
+    normalizer.apply(view(keys(0, {0x01})), out.events, kMaxEventsPerReport);
+
+    out.count = normalizer.apply(view(keys(0, {0x04})), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 1u);
+    CHECK(out.has(InputEventKind::KeyDown, 0x04));
+}
 
 TEST_CASE(a_report_that_is_too_short_is_ignored) {
     KeyboardNormalizer normalizer;

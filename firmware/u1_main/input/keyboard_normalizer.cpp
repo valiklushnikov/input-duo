@@ -42,21 +42,34 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
     // anything is compared against it.
     std::uint8_t now[kKeySlots] = {};
     std::uint8_t now_count = 0;
-    bool rollover = false;
+    std::uint8_t error_slots = 0;
     for (std::size_t slot = 0; slot < kKeySlots; ++slot) {
         const std::uint8_t usage = report.data[2 + slot];
         if (usage == kRollover) {
-            // Every slot filled with this means the keyboard cannot say what
-            // is held - too many keys at once for its matrix. It is not six
-            // new keys. Believing it releases what is really down and presses
-            // one that does not exist.
-            rollover = true;
-            break;
+            // Not a usage anybody can press, so it never joins the set. How
+            // many there are is what decides the report: HID 1.11 8.3 has a
+            // keyboard that has lost count put this in *every* array field,
+            // and only that is the keyboard saying so.
+            ++error_slots;
+            continue;
         }
         if (usage != 0 && !contains(now, now_count, usage)) {
             now[now_count++] = usage;
         }
     }
+
+    // Every slot: too many keys at once for the matrix, and the report says
+    // nothing about what is held. It is not six new keys, and believing it
+    // releases what is really down and presses one that does not exist.
+    //
+    // One slot is a different thing entirely, and treating it as this one is
+    // what sent us looking. An Aula F75's 2.4 GHz receiver puts a lone 0x01
+    // in an otherwise empty report about nine times in every hundred it
+    // sends - where a wired keyboard sends an empty one - so freezing on it
+    // threw away nine per cent of this keyboard's reports. A thrown-away
+    // release leaves the key held, and the computer repeats it until the next
+    // keystroke; a thrown-away press is a letter that never arrives at all.
+    const bool rollover = error_slots == kKeySlots;
 
     if (!rollover) {
         for (std::size_t index = 0; index < held_count_; ++index) {
