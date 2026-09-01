@@ -245,6 +245,53 @@ TEST_CASE(an_error_slot_is_never_delivered_as_a_key) {
 
     CHECK_EQ(out.count, 0u);
 }
+TEST_CASE(a_report_that_would_not_fit_is_not_half_applied) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.apply(view(keys(0, {0x04, 0x05, 0x06, 0x07, 0x08, 0x09})), out.events,
+                     kMaxEventsPerReport);
+
+    // Six keys let go and six pressed in one report is twelve events, into
+    // room for three. Writing the three that fit and then recording the other
+    // nine as delivered strands them: the far computer holds keys this no
+    // longer believes are down, so nothing left will ever lift them.
+    normalizer.apply(view(keys(0, {0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F})), out.events, 3);
+
+    out.count = normalizer.apply(view(keys(0, {})), out.events, kMaxEventsPerReport);
+
+    CHECK(out.has(InputEventKind::KeyUp, 0x07));
+    CHECK(out.has(InputEventKind::KeyUp, 0x09));
+}
+TEST_CASE(a_report_that_would_not_fit_writes_nothing_at_all) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.apply(view(keys(0, {0x04, 0x05, 0x06, 0x07, 0x08, 0x09})), out.events,
+                     kMaxEventsPerReport);
+
+    // Nothing, rather than as much as fits. A caller handed three events out
+    // of twelve has no way to learn that the other nine existed, and the three
+    // it does get are a state no keyboard was ever in.
+    out.count = normalizer.apply(view(keys(0, {0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F})),
+                                 out.events, 3);
+
+    CHECK_EQ(out.count, 0u);
+}
+TEST_CASE(a_release_all_that_would_not_fit_keeps_what_it_could_not_say) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.apply(view(keys(0x0F, {0x04, 0x05, 0x06, 0x07, 0x08, 0x09})), out.events,
+                     kMaxEventsPerReport);
+
+    // Six keys and four modifiers is ten releases, into room for two. This is
+    // the path that exists so an unplugged keyboard cannot leave keys held on
+    // a computer nobody is watching; it must not become the path that does it.
+    normalizer.release_all(out.events, 2);
+
+    out.count = normalizer.release_all(out.events, kMaxEventsPerReport);
+
+    CHECK(out.has(InputEventKind::KeyUp, 0x09));
+    CHECK(out.has(InputEventKind::KeyUp, 0xE3));
+}
 TEST_CASE(an_error_slot_does_not_leave_the_key_before_it_repeating) {
     KeyboardNormalizer normalizer;
     Collected out;

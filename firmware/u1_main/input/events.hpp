@@ -47,10 +47,19 @@ struct InputEvent {
 
 /// The most a single report can produce.
 ///
-/// A boot keyboard can change all eight modifiers and all six key slots at
-/// once, which is fourteen presses and fourteen releases; a mouse cannot come
-/// close. Fixed, because this runs on a chip with no allocator and a report
-/// that produced more than expected must be truncated rather than trusted.
+/// A boot keyboard is what sets it: six keys let go and six pressed - the
+/// report holds no more - with all eight modifiers changing alongside them,
+/// which is twenty. A mouse cannot come close. The old note here said
+/// fourteen presses and fourteen releases, which double-counts: no report can
+/// both press and release the same thing.
+///
+/// What is above twenty is headroom and nothing else. It can be raised
+/// freely; it cannot be lowered past what a keyboard produces, because
+/// keyboard_normalizer.hpp names that figure and asserts against this one.
+/// Nothing here is ever truncated to fit - a normalizer offered less room
+/// than it needs refuses the report whole rather than applying part of it.
+///
+/// Fixed, because this runs on a chip with no allocator.
 inline constexpr std::size_t kMaxEventsPerReport = 28;
 
 }  // namespace duo_input::u1::input

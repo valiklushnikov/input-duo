@@ -28,6 +28,27 @@ inline constexpr std::uint16_t kFirstModifierUsage = 0xE0;
 /// What a keyboard puts in every slot when it cannot say what is held.
 inline constexpr std::uint8_t kRollover = 0x01;
 
+/// The most events one report can produce, and so the least room a caller may
+/// offer either of the calls below.
+///
+/// Six keys let go and six pressed - the report has no more slots - with all
+/// eight modifiers changing alongside them. Derived rather than chosen,
+/// because what lies below it is not a smaller buffer: it is a report applied
+/// in part, which is a state no keyboard was ever in.
+///
+/// One number for both calls rather than one each. release_all needs fourteen
+/// and apply needs twenty, and a caller that sized its buffer for the smaller
+/// and then made the other call would be exactly the defect this exists to
+/// refuse.
+inline constexpr std::size_t kMaxKeyboardEventsPerReport = kKeySlots * 2 + 8;
+
+// The buffer every caller actually passes. A shared constant that drifted
+// below what a keyboard can produce would not announce itself: it would
+// truncate on the one report that needed the room and strand a key on
+// somebody else's computer. So it stops at the compiler instead.
+static_assert(kMaxEventsPerReport >= kMaxKeyboardEventsPerReport,
+              "the shared event buffer must hold the worst keyboard report");
+
 class KeyboardNormalizer {
 public:
     /// Read one report and write out what changed.

@@ -33,6 +33,19 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
         // every key currently held.
         return 0;
     }
+    if (capacity < kMaxKeyboardEventsPerReport) {
+        // No room for everything this report could mean. The same rule as the
+        // line above, for the same reason: what cannot be delivered whole is
+        // not delivered in part.
+        //
+        // Writing what fits and moving the state on regardless is the worse
+        // half of it. The events that did not fit are ones the far computer
+        // never received, and a release recorded as delivered is a key nothing
+        // left will ever lift - while the caller, handed only a count, has no
+        // way to tell that from a quiet report. Nothing is touched here, so
+        // the next call with room says the whole of it.
+        return 0;
+    }
 
     std::size_t used = 0;
 
@@ -109,7 +122,14 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
 }
 
 std::size_t KeyboardNormalizer::release_all(InputEvent* out, std::size_t capacity) {
-    if (out == nullptr) {
+    if (out == nullptr || capacity < kMaxKeyboardEventsPerReport) {
+        // Refused whole rather than done in part, and nothing is cleared, so a
+        // caller with room can still do it.
+        //
+        // This is the one path that exists so an unplugged keyboard cannot
+        // leave keys held on a computer the operator has no way to reach. A
+        // partial release that then forgot what it had not said would be that
+        // exact fault with the evidence taken away.
         return 0;
     }
     std::size_t used = 0;
