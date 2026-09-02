@@ -556,6 +556,14 @@ public:
     /// How many times the device's endpoint has been polled, and how many
     /// reports came back from it.
     std::uint16_t polls_issued() const { return polls_issued_; }
+    /// Of those, the ones that went to the endpoint the reports come in on.
+    ///
+    /// The interval is derived so a keystroke cannot fall between two polls,
+    /// but that reasoning is about *this* endpoint - and a device with a
+    /// service endpoint shares the schedule. What the derivation promises and
+    /// what the keys are actually sampled at are two numbers, and only this
+    /// one is the second.
+    std::uint16_t primary_polls() const { return primary_polls_; }
 
 #if DUO_CH375_PROBE
     static constexpr unsigned kAuxiliaryTraceDepth = 8;
@@ -590,6 +598,17 @@ public:
                                   auxiliary_probe_trace_size_[auxiliary][slot]};
     }
 #endif
+
+    /// How often a token goes out, in microseconds.
+    ///
+    /// The interval below is what the endpoint carrying the reports has to be
+    /// sampled at; this is how often *any* token is issued. They are the same
+    /// number only for a device with nothing but that endpoint. A composite
+    /// receiver spends every other token on its service endpoint, so the token
+    /// clock has to run that much faster or the reports are sampled at half
+    /// the rate they were derived for - which for a keyboard is letters that
+    /// were struck between two polls and so never happened.
+    std::uint32_t token_interval_us() const;
 
     /// How often this device is being asked, in microseconds.
     ///
@@ -734,6 +753,7 @@ private:
     bool baud_exhausted_ = false;
     std::uint16_t mode_failures_ = 0;
     std::uint16_t polls_issued_ = 0;
+    std::uint16_t primary_polls_ = 0;
     /// Block reads that have failed in a row on the rate now in use.
     std::uint16_t block_read_failures_ = 0;
     /// Which data packet the next IN transaction should expect. Alternates on

@@ -462,7 +462,7 @@ void Ch375Device::tick(std::uint32_t now_us) {
                     expect_data1_ = !expect_data1_;
                 }
             }
-            if (now_us - last_poll_us_ < poll_interval_us()) {
+            if (now_us - last_poll_us_ < token_interval_us()) {
                 return;
             }
             // One token at a time. Giving the controller another before it has
@@ -511,6 +511,9 @@ void Ch375Device::tick(std::uint32_t now_us) {
             // Ask the device whether it has anything. The answer arrives as an
             // interrupt, which the next tick picks up - nothing waits here.
             ++polls_issued_;
+            if (token_slot_ == 0) {
+                ++primary_polls_;
+            }
             const std::uint8_t poll_endpoint =
                 token_slot_ == 0 ? endpoint_
                                  : (token_slot_ == 1 ? auxiliary_endpoint_
@@ -971,6 +974,11 @@ void Ch375Device::handle_detach(std::uint32_t now_us) {
 
 std::uint32_t Ch375Device::poll_interval_us() const {
     return report_poll_interval_us(packet_bytes(), transport_.port_baud());
+}
+
+std::uint32_t Ch375Device::token_interval_us() const {
+    const std::uint8_t slots = poll_slot_count_ == 0 ? 1 : poll_slot_count_;
+    return poll_interval_us() / slots;
 }
 
 std::size_t Ch375Device::packet_bytes() const {

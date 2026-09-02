@@ -119,6 +119,33 @@ in this project, believed on weaker evidence than it deserved.
   vertical. "It says it can" and "it is" are claims about different devices,
   and only the second byte says which one is attached.
 
+- **The poll interval is per endpoint, but the token clock is per device.**
+  `report_poll_interval_us` derives how often the endpoint carrying the reports
+  has to be sampled - 2 ms, because a key whose whole press falls between two
+  polls was never here. But a composite receiver spends every other token on
+  its service endpoint, so that derived interval was being halved for the
+  endpoint it was derived for, and nothing said so.
+
+  Measured on the bench 2026-09-02 with the probe build, both receivers
+  attached: the Aula issued 521 tokens a second and its keyboard endpoint saw
+  260 of them - one every **3.86 ms** against the 2 ms it had earned. The
+  Keychron, with two service endpoints, was worse: 152 tokens a second and 76
+  to the mouse, one every **13.2 ms**. Fast typing on the Aula dropped letters
+  inside words; slow typing dropped none. The receiver's own service endpoint
+  had sent *one* report in the whole session while taking half of every poll.
+
+  The token clock now runs at the endpoint's interval divided by the number of
+  endpoints sharing it, so the reports keep the interval they were given and
+  the service endpoint is paid for with extra tokens rather than out of theirs.
+  After the change, on the same bench: Aula **1.95 ms**, Keychron **1.31 ms**,
+  2549 tokens a second across both channels against 673 before, both devices
+  still `Ready`. The every-other-token share of the service endpoint is
+  unchanged, so the wedging described below is unaffected.
+
+  The one-`0x01`-in-four-reports behaviour of the Aula receiver did not change
+  with it - 28% of reports before and after. It stopped costing anything
+  because a real state now arrives between two of them.
+
 - **A keyboard is read in the protocol it declares, and put into boot protocol
   only when it cannot be.** The report descriptor is fetched for keyboards as
   well as mice now. When it parses, the layout it gives is what the normalizer
