@@ -227,27 +227,63 @@ The `0x01`-in-one-report-of-four behaviour of the receiver is unchanged at 28%
 before and after. It stopped costing anything because a real state now arrives
 between two of them.
 
+## Release build flashed, and the failing test explained
+
+The release U1 was rebuilt with the polling fix in it and flashed; the operator
+is running the day on it rather than on the probe build.
+
+| Artifact | Bytes | SHA-256 |
+| --- | --- | --- |
+| `build\pico-release\firmware\u1_main\duo_u1_main.uf2` | 315392 | `4E8E7EF55A52FF38356E345D59B1FBD438A75614BFF3DA1E86F8CA1BE7C2EB09` |
+| `build\pico-release\firmware\u2_endpoint\duo_u2_endpoint.uf2` | 62976 | `AAA7B062083AF0AC5E75D780138DCE75A2F47DAAD5B3715949F886297D74CD43` |
+
+U2 is byte-identical to the earlier build and was not reflashed. The probe
+build's counters are compiled out of the release, so the `kerr`, `kusb`,
+`unpaced` and split `polls` lines are not available on it - reading them again
+means flashing `build\pico-ch375`.
+
+**The one failing test from step 1 now passes.** With the release firmware on
+the board:
+
+```
+.\.venv\Scripts\python.exe -m pytest configurator/tests/integration/test_real_config_contract.py -q
+5 passed, 4 skipped
+```
+
+and the full suite is **900 passed, 4 skipped, 6 subtests passed, 0 failed**,
+with 36 of 36 native tests. So the `GET_DIAGNOSTICS latency block has the wrong
+size` failure was what it was suspected to be - a board running firmware older
+than the configurator - and it is no longer unexplained. Step 1's recorded
+result stands as it was measured at the time.
+
+## Acceptance not performed by this session
+
+Task 6 steps 4 and 5 - keyboard routing, receiver reconnect, U2 switching and
+BOTH routing, the wired keyboard, and the Trust and Keychron M3 mouse
+regression - were **not run as scripted acceptance**. The operator states they
+have already tested these and elected not to repeat them.
+
+This is recorded as the operator's decision, not as an observation of this
+session: nothing in those areas was watched, measured or evidenced here. The
+mouse channel was exercised only incidentally, by the Keychron being attached
+throughout, and the only mouse figures gathered are its polling rates.
+
 ## What is still to do
 
-1. Flash the probe U1 (after checking the drive label reads `RPI-RP2`) and read
-   `tools\keychron_probe.py COM18`. The Aula row must show VID/PID `3554:FA09`,
-   `hid=keyboard`, `boot=yes/no` (advertised, not selected), `klayout=report`,
-   `kbits=8/5@16`, `kid=no/0`, `kmin=7`, a complete descriptor length of 77, a
-   nonzero hash, zero failed polls and zero dropped commands. Stop if any field
-   disagrees.
-2. Keyboard acceptance on PC1 through the CH375: repeated fixed groups,
-   sustained rapid and ordinary typing, Shift/Ctrl/Alt, repeat, release,
-   receiver reconnect, U2 switching and return, and BOTH routing. Then the same
-   basic pass and a disconnect recovery with the wired keyboard.
-3. Mouse regression: Trust movement, buttons and wheel; Keychron M3 movement,
-   wheel, side-button switch to U2 and back, receiver reconnect.
-4. Flash the release U1, repeat a shorter pass, and read release diagnostics.
-5. Re-run the configurator HIL test against the re-flashed board and record
-   whether the GET_DIAGNOSTICS failure above clears.
-6. If report protocol does not remove the loss, restore the pre-feature release
-   U1 (SHA-256
-   `D2072DFF3CF958F6FDC9B43C5278E81F316F7EB529B1B78809E9D37F2518B81B`) and
-   record the hypothesis as disproved.
+1. **Confirm the polling fix over a day of ordinary use.** This is the only
+   open question. The evidence so far is two clean runs of repeated words,
+   which is not the test the losses appeared in - live Russian prose is. If
+   letters go missing again, the number worth capturing is `down` before and
+   immediately after the phrase that lost one: it is what separates "the
+   keystroke never reached the board" from "it reached it and was lost later".
+   That needs the probe build (`build\pico-ch375`) flashed.
+2. Decide what to do about the two spaces that went missing in the second run
+   while the counters said both were read and every state was sent. Either
+   there is a further stage of loss not yet measured, or it was a hand missing
+   the space bar. Unresolved.
+3. If the loss returns and the polling fix is judged not to have helped,
+   the pre-feature release U1 is SHA-256
+   `D2072DFF3CF958F6FDC9B43C5278E81F316F7EB529B1B78809E9D37F2518B81B`.
 
 ## Limits of this record
 
