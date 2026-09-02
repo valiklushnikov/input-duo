@@ -207,11 +207,11 @@ private:
     SetupProgress request_long_configuration(std::uint32_t now_us);
     SetupProgress collect_configuration(std::uint32_t now_us, Step finished_step);
     SetupProgress parse_long_configuration();
-    /// Ask a mouse for its report descriptor, or go straight to boot.
+    /// Ask a mouse or keyboard for its report descriptor, or go straight to boot.
     SetupProgress request_report_descriptor(std::uint32_t now_us);
     /// Collect one packet of it, and ask for the next or end the transfer.
     SetupProgress collect_report_descriptor(std::uint32_t now_us);
-    /// Parse what arrived, and keep the layout or fall back to boot.
+    /// Apply what arrived, retaining keyboard evidence or parsing a mouse layout.
     SetupProgress apply_report_descriptor(std::uint32_t now_us);
     /// Give up on the descriptor and take the path that was already working.
     SetupProgress abandon_report_descriptor(std::uint32_t now_us, std::uint8_t status);

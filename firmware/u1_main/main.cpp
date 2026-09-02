@@ -790,11 +790,28 @@ namespace {
             }
         }
 
+        const duo_input::protocol::ByteView raw = setups[index]->report_descriptor();
+        if (setups[index]->kind() == duo_input::u1::ch375::DeviceKind::Keyboard &&
+            used < static_cast<int>(sizeof(text)) - 24) {
+            used += snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used),
+                             "kbd-desc=%u/%u:", setups[index]->report_descriptor_bytes(),
+                             setups[index]->report_descriptor_wanted());
+            for (std::size_t byte = 0;
+                 byte < raw.size && used < static_cast<int>(sizeof(text)) - 3; ++byte) {
+                used += snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used),
+                                 "%02X", raw.data[byte]);
+            }
+            if (used < static_cast<int>(sizeof(text)) - 1) {
+                text[used++] = '\n';
+                text[used] = '\0';
+            }
+        }
+
         // A parser failure without its bytes is still a guess.  Keep this in
         // the same reply so the exact real descriptor can become a native
         // regression vector before the parser is changed.
-        const duo_input::protocol::ByteView raw = setups[index]->report_descriptor();
-        if (raw.size != 0 && !setups[index]->has_mouse_layout()) {
+        if (setups[index]->kind() == duo_input::u1::ch375::DeviceKind::Mouse &&
+            raw.size != 0 && !setups[index]->has_mouse_layout()) {
             used += snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used),
                              " rdhex=");
             for (std::size_t byte = 0;

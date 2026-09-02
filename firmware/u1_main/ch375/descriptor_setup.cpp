@@ -32,6 +32,8 @@ constexpr std::uint8_t kReportDescriptorUnreadable = 0xF4;
 constexpr std::uint8_t kReportDescriptorGivenUp = 0xF3;
 /// The device was read through its own report descriptor. Not boot.
 constexpr std::uint8_t kReportDescriptorUsed = 0xF2;
+/// A keyboard descriptor was retained for evidence before selecting boot.
+constexpr std::uint8_t kKeyboardReportDescriptorCaptured = 0xF1;
 
 /// HID 1.11 section 7.2.5. The controller has no command for this one.
 constexpr std::uint8_t kRequestSetProtocol = 0x0B;
@@ -230,15 +232,10 @@ SetupProgress DescriptorSetup::parse_long_configuration() {
     return SetupProgress::Busy;
 }
 
-/// Ask the mouse where it keeps its fields, or take the path already working.
-///
-/// Only a mouse. A boot keyboard's report is fixed by HID 1.11 Appendix B.1 -
-/// modifiers, a reserved byte, six key slots - which is what
-/// KeyboardNormalizer is written against and what the captured traces in
-/// tests/vectors replay. There is no wheel to recover on a keyboard and
-/// nothing to gain by reading its descriptor, so it keeps boot protocol.
+/// Ask the selected HID interface for its report descriptor.
 SetupProgress DescriptorSetup::request_report_descriptor(std::uint32_t now_us) {
-    if (capabilities_.kind != DeviceKind::Mouse) {
+    if (capabilities_.kind != DeviceKind::Mouse &&
+        capabilities_.kind != DeviceKind::Keyboard) {
         return select_boot_protocol(now_us);
     }
     if (report_silences_ >= kReportDescriptorAttempts) {
@@ -336,6 +333,12 @@ SetupProgress DescriptorSetup::apply_report_descriptor(std::uint32_t now_us) {
         // where the only post-mortem evidence is this status and byte count.
         report_error_ = ReportDescriptorError::None;
         return abandon_report_descriptor(now_us, kReportDescriptorUnreadable);
+    }
+
+    if (capabilities_.kind == DeviceKind::Keyboard) {
+        report_error_ = ReportDescriptorError::None;
+        report_status_ = kKeyboardReportDescriptorCaptured;
+        return select_boot_protocol(now_us);
     }
 
     MouseReportLayout layout = boot_mouse_layout();

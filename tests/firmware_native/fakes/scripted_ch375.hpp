@@ -276,9 +276,9 @@ public:
     void serve_composite_mouse_with_report_descriptor(
         const std::vector<std::uint8_t>& descriptor);
 
-    /// A boot keyboard that declares a report descriptor and will hand it
-    /// over. Nothing should ever ask it for one.
-    void serve_keyboard_with_report_descriptor(const std::vector<std::uint8_t>& descriptor);
+    /// A keyboard that declares a report descriptor and will hand it over.
+    void serve_report_keyboard(const std::vector<std::uint8_t>& descriptor,
+                               bool boot_capable = true);
 
     /// What endpoint zero carries in one packet (USB 2.0 9.6.1).
     ///

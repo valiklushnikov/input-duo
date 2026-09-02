@@ -752,9 +752,10 @@ std::vector<std::uint8_t> hid_record(std::uint16_t report_length) {
             static_cast<std::uint8_t>(report_length >> 8)};
 }
 
-std::vector<std::uint8_t> endpoint_record(std::uint8_t address, std::uint16_t max_packet) {
+std::vector<std::uint8_t> endpoint_record(std::uint8_t address, std::uint16_t max_packet,
+                                          std::uint8_t interval = 10) {
     return {7, 0x05, address, 0x03, static_cast<std::uint8_t>(max_packet & 0xFF),
-            static_cast<std::uint8_t>(max_packet >> 8), 10};
+            static_cast<std::uint8_t>(max_packet >> 8), interval};
 }
 
 void append(std::vector<std::uint8_t>& into, const std::vector<std::uint8_t>& more) {
@@ -1026,13 +1027,13 @@ void FakeCh375Chip::serve_composite_mouse_with_report_descriptor(
     append(configuration_, body);
 }
 
-void FakeCh375Chip::serve_keyboard_with_report_descriptor(
-    const std::vector<std::uint8_t>& descriptor) {
+void FakeCh375Chip::serve_report_keyboard(const std::vector<std::uint8_t>& descriptor,
+                                          bool boot_capable) {
     report_descriptor_ = descriptor;
     std::vector<std::uint8_t> body;
-    append(body, interface_record(0, 0x03, 0x01, 0x01, 1));
+    append(body, interface_record(0, 0x03, boot_capable ? 0x01 : 0x00, 0x01, 1));
     append(body, hid_record(static_cast<std::uint16_t>(descriptor.size())));
-    append(body, endpoint_record(0x81, 8));
+    append(body, endpoint_record(0x81, 8, 1));
     configuration_ = configuration_header(9 + body.size(), 1);
     append(configuration_, body);
 }

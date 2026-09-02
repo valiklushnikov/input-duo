@@ -21,6 +21,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <string>
 #include <vector>
 
 using duo_input::u1::ch375::Ch375Transport;
@@ -74,6 +77,57 @@ struct Rig {
         return SetupProgress::Busy;
     }
 };
+
+bool decode_hex(const std::string& encoded, std::vector<std::uint8_t>& decoded) {
+    if ((encoded.size() & 1u) != 0) {
+        return false;
+    }
+
+    std::vector<std::uint8_t> candidate;
+    candidate.reserve(encoded.size() / 2);
+    auto nibble = [](char digit, std::uint8_t& value) {
+        if (digit >= '0' && digit <= '9') {
+            value = static_cast<std::uint8_t>(digit - '0');
+            return true;
+        }
+        if (digit >= 'A' && digit <= 'F') {
+            value = static_cast<std::uint8_t>(digit - 'A' + 10);
+            return true;
+        }
+        if (digit >= 'a' && digit <= 'f') {
+            value = static_cast<std::uint8_t>(digit - 'a' + 10);
+            return true;
+        }
+        return false;
+    };
+
+    for (std::size_t offset = 0; offset < encoded.size(); offset += 2) {
+        std::uint8_t high = 0;
+        std::uint8_t low = 0;
+        if (!nibble(encoded[offset], high) || !nibble(encoded[offset + 1], low)) {
+            return false;
+        }
+        candidate.push_back(static_cast<std::uint8_t>((high << 4) | low));
+    }
+    decoded = candidate;
+    return true;
+}
+
+bool read_aula_keyboard_descriptor(std::vector<std::uint8_t>& descriptor) {
+    const std::filesystem::path fixture =
+        std::filesystem::path(__FILE__).parent_path().parent_path() / "vectors" /
+        "usb_descriptors" / "aula_f75_keyboard_report.hex";
+    std::ifstream input(fixture);
+    std::string encoded;
+    if (!std::getline(input, encoded)) {
+        return false;
+    }
+    std::string unexpected_line;
+    if (std::getline(input, unexpected_line)) {
+        return false;
+    }
+    return decode_hex(encoded, descriptor);
+}
 
 }  // namespace
 
@@ -1047,6 +1101,39 @@ TEST_CASE(a_device_silent_every_time_is_eventually_left_on_boot) {
 
 // ------------------------------------------------------------- the keyboard
 
+TEST_CASE(a_keyboard_descriptor_is_captured_before_boot_is_selected) {
+    Rig rig;
+    const std::vector<std::uint8_t> descriptor = {
+        0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00,
+        0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x75, 0x08, 0x95, 0x06, 0x19, 0x00, 0x29, 0x65,
+        0x81, 0x00,
+    };
+    rig.chip.attach_device();
+    rig.chip.serve_report_keyboard(descriptor);
+    rig.begin(rig.chip.now_us());
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK_EQ(rig.setup.report_descriptor_bytes(), descriptor.size());
+    CHECK(rig.setup.boot_protocol_selected());
+}
+
+TEST_CASE(the_captured_aula_keyboard_descriptor_is_complete) {
+    std::vector<std::uint8_t> descriptor;
+    if (!read_aula_keyboard_descriptor(descriptor)) {
+        CHECK(false);
+        return;
+    }
+
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_report_keyboard(descriptor);
+    rig.begin(rig.chip.now_us());
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK_EQ(descriptor.size(), std::size_t{77});
+    CHECK_EQ(rig.setup.report_descriptor_bytes(), descriptor.size());
+    CHECK(rig.setup.boot_protocol_selected());
+}
+
 TEST_CASE(a_keyboard_is_not_asked_for_its_report_descriptor) {
     Rig rig;
     rig.chip.attach_device();
@@ -1111,20 +1198,19 @@ TEST_CASE(the_descriptor_request_names_the_interface_the_mouse_is_on) {
              static_cast<std::uint16_t>(plain_wheel_mouse_descriptor().size()));
 }
 
-TEST_CASE(a_keyboard_that_declares_a_report_descriptor_is_still_not_asked) {
+TEST_CASE(a_keyboard_that_declares_a_report_descriptor_is_asked) {
     Rig rig;
     rig.chip.attach_device();
-    // A keyboard with a HID record naming a real report descriptor, which is
-    // what every keyboard actually has. Nothing about it should be fetched:
-    // its boot report is fixed by HID 1.11 Appendix B.1, that is what the
-    // keyboard normalizer reads, and the captured traces replay against it.
-    rig.chip.serve_keyboard_with_report_descriptor(plain_wheel_mouse_descriptor());
+    // The descriptor is retained as evidence even though this capture stage
+    // deliberately leaves the keyboard normalizer on boot protocol.
+    rig.chip.serve_report_keyboard(plain_wheel_mouse_descriptor());
 
     rig.begin(rig.chip.now_us());
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
 
     CHECK_EQ(static_cast<int>(rig.setup.kind()), static_cast<int>(DeviceKind::Keyboard));
-    CHECK_EQ(rig.chip.report_descriptor_requests(), 0);
+    CHECK_EQ(rig.chip.report_descriptor_requests(), 1);
+    CHECK_EQ(rig.setup.report_descriptor_bytes(), plain_wheel_mouse_descriptor().size());
     CHECK_FALSE(rig.setup.has_mouse_layout());
     // And it is put into boot protocol, exactly as before.
     CHECK(rig.setup.boot_protocol_selected());
