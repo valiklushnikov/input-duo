@@ -347,4 +347,443 @@ ReportDescriptorError parse_mouse_report_descriptor(protocol::ByteView descripto
     return ReportDescriptorError::None;
 }
 
+namespace {
+
+constexpr std::uint8_t kKeyboardTagLogicalMinimum = 0x1;
+constexpr std::uint8_t kKeyboardTagLogicalMaximum = 0x2;
+constexpr std::uint8_t kKeyboardTagPush = 0xA;
+constexpr std::uint8_t kKeyboardTagPop = 0xB;
+constexpr std::uint8_t kKeyboardTagUsageMinimum = 0x1;
+constexpr std::uint8_t kKeyboardTagUsageMaximum = 0x2;
+
+constexpr std::uint16_t kPageKeyboard = 0x07;
+constexpr std::uint16_t kModifierMinimum = 0xE0;
+constexpr std::uint16_t kModifierMaximum = 0xE7;
+constexpr std::uint32_t kMaximumKeyboardReportBits = 64 * 8;
+constexpr std::size_t kMaximumKeyboardReports = 8;
+constexpr std::size_t kMaximumKeyboardGlobals = 4;
+constexpr std::size_t kMaximumKeyboardUsages = 16;
+
+struct KeyboardGlobalState {
+    std::uint16_t usage_page = 0;
+    std::int32_t logical_minimum = 0;
+    std::uint32_t logical_maximum_raw = 0;
+    std::uint8_t logical_maximum_size = 0;
+    std::uint32_t report_size = 0;
+    std::uint32_t report_count = 0;
+    std::uint8_t report_id = 0;
+};
+
+struct KeyboardUsage {
+    std::uint16_t page = 0;
+    std::uint16_t value = 0;
+};
+
+struct KeyboardLocalState {
+    KeyboardUsage usages[kMaximumKeyboardUsages] = {};
+    std::size_t usage_count = 0;
+    bool have_minimum = false;
+    bool have_maximum = false;
+    KeyboardUsage minimum;
+    KeyboardUsage maximum;
+};
+
+struct KeyboardReportState {
+    std::uint8_t report_id = 0;
+    std::uint32_t input_bits = 0;
+    bool has_keys = false;
+    KeyboardReportLayout layout;
+    std::uint32_t required_bits = 0;
+};
+
+std::int32_t signed_item(std::uint32_t data, std::size_t length) {
+    if (length == 1) {
+        return static_cast<std::int8_t>(data);
+    }
+    if (length == 2) {
+        return static_cast<std::int16_t>(data);
+    }
+    if (length == 4) {
+        return static_cast<std::int32_t>(data);
+    }
+    return 0;
+}
+
+std::int64_t logical_maximum(const KeyboardGlobalState& globals) {
+    if (globals.logical_minimum < 0) {
+        return signed_item(globals.logical_maximum_raw, globals.logical_maximum_size);
+    }
+    return globals.logical_maximum_raw;
+}
+
+bool logical_range_is_valid(const KeyboardGlobalState& globals) {
+    return static_cast<std::int64_t>(globals.logical_minimum) <= logical_maximum(globals);
+}
+
+KeyboardUsage usage_from_item(std::uint32_t data,
+                              std::size_t length,
+                              std::uint16_t global_page) {
+    KeyboardUsage usage;
+    usage.page = length == 4 ? static_cast<std::uint16_t>(data >> 16) : global_page;
+    usage.value = static_cast<std::uint16_t>(data & 0xFFFF);
+    return usage;
+}
+
+bool local_range_is_valid(const KeyboardLocalState& locals) {
+    return locals.have_minimum == locals.have_maximum &&
+           (!locals.have_minimum ||
+            (locals.minimum.page == locals.maximum.page &&
+             locals.minimum.value <= locals.maximum.value));
+}
+
+bool is_modifier(std::uint16_t usage) {
+    return usage >= kModifierMinimum && usage <= kModifierMaximum;
+}
+
+void keep_required_bit(KeyboardReportState& report, std::uint32_t bit_after_field) {
+    if (bit_after_field > report.required_bits) {
+        report.required_bits = bit_after_field;
+    }
+}
+
+bool record_modifier(KeyboardReportState& report,
+                     std::uint16_t usage,
+                     std::uint32_t bit_offset) {
+    if (!is_modifier(usage) || bit_offset >= kMaximumKeyboardReportBits) {
+        return bit_offset < kMaximumKeyboardReportBits;
+    }
+    const std::size_t index = usage - kModifierMinimum;
+    if (report.layout.modifier_bits[index] == kNoKeyboardBit) {
+        report.layout.modifier_bits[index] = static_cast<std::uint16_t>(bit_offset);
+        keep_required_bit(report, bit_offset + 1);
+    }
+    return true;
+}
+
+KeyboardReportState* keyboard_report(KeyboardReportState* reports,
+                                     std::size_t& report_count,
+                                     std::uint8_t report_id) {
+    for (std::size_t index = 0; index < report_count; ++index) {
+        if (reports[index].report_id == report_id) {
+            return &reports[index];
+        }
+    }
+    if (report_count == kMaximumKeyboardReports) {
+        return nullptr;
+    }
+    KeyboardReportState& report = reports[report_count++];
+    report.report_id = report_id;
+    report.layout.report_id_value = report_id;
+    return &report;
+}
+
+bool keyboard_range(const KeyboardLocalState& locals,
+                    std::uint16_t& minimum,
+                    std::uint16_t& maximum) {
+    if (!locals.have_minimum || !locals.have_maximum ||
+        locals.minimum.page != kPageKeyboard ||
+        locals.maximum.page != kPageKeyboard) {
+        return false;
+    }
+    minimum = locals.minimum.value;
+    maximum = locals.maximum.value;
+    return true;
+}
+
+bool record_keyboard_modifiers(KeyboardReportState& report,
+                               const KeyboardLocalState& locals,
+                               std::uint32_t report_size,
+                               std::uint32_t report_count,
+                               std::uint32_t first_bit) {
+    if (report_size != 1) {
+        return true;
+    }
+
+    if (locals.have_minimum && locals.minimum.page == kPageKeyboard) {
+        for (std::uint32_t index = 0; index < report_count; ++index) {
+            const std::uint32_t usage =
+                static_cast<std::uint32_t>(locals.minimum.value) + index;
+            if (usage > locals.maximum.value) {
+                break;
+            }
+            if (!record_modifier(report,
+                                 static_cast<std::uint16_t>(usage),
+                                 first_bit + index)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    for (std::uint32_t index = 0;
+         index < report_count && index < locals.usage_count;
+         ++index) {
+        if (locals.usages[index].page == kPageKeyboard &&
+            !record_modifier(report,
+                             locals.usages[index].value,
+                             first_bit + index)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool record_keyboard_keys(KeyboardReportState& report,
+                          KeyboardFieldKind kind,
+                          std::uint32_t first_bit,
+                          std::uint32_t element_bits,
+                          std::uint32_t element_count,
+                          std::uint16_t usage_minimum,
+                          std::uint16_t usage_maximum) {
+    if (report.has_keys || first_bit >= kMaximumKeyboardReportBits ||
+        element_bits == 0 || element_bits > 0xFF ||
+        element_count == 0 || element_count > 0xFF) {
+        return false;
+    }
+    report.has_keys = true;
+    report.layout.key_kind = kind;
+    report.layout.key_bit_offset = static_cast<std::uint16_t>(first_bit);
+    report.layout.key_element_bits = static_cast<std::uint8_t>(element_bits);
+    report.layout.key_element_count = static_cast<std::uint8_t>(element_count);
+    report.layout.key_usage_minimum = usage_minimum;
+    report.layout.key_usage_maximum = usage_maximum;
+    keep_required_bit(report, first_bit + element_bits * element_count);
+    return true;
+}
+
+}  // namespace
+
+KeyboardReportLayout boot_keyboard_layout() {
+    KeyboardReportLayout layout;
+    for (std::uint16_t modifier = 0; modifier < 8; ++modifier) {
+        layout.modifier_bits[modifier] = modifier;
+    }
+    layout.key_kind = KeyboardFieldKind::Array;
+    layout.key_bit_offset = 16;
+    layout.key_element_bits = 8;
+    layout.key_element_count = 6;
+    layout.key_usage_minimum = 0;
+    layout.key_usage_maximum = 0x00FF;
+    layout.minimum_body_bytes = 8;
+    return layout;
+}
+
+ReportDescriptorError parse_keyboard_report_descriptor(protocol::ByteView descriptor,
+                                                       KeyboardReportLayout& out) {
+    if (descriptor.data == nullptr || descriptor.size == 0) {
+        return ReportDescriptorError::Truncated;
+    }
+
+    KeyboardGlobalState globals;
+    KeyboardGlobalState global_stack[kMaximumKeyboardGlobals] = {};
+    std::size_t global_depth = 0;
+    KeyboardLocalState locals;
+    KeyboardReportState reports[kMaximumKeyboardReports] = {};
+    std::size_t report_count = 0;
+    bool any_report_id = false;
+
+    std::size_t at = 0;
+    while (at < descriptor.size) {
+        const std::uint8_t prefix = descriptor.data[at];
+        if (prefix == kLongItemPrefix) {
+            if (descriptor.size - at < 3) {
+                return ReportDescriptorError::Truncated;
+            }
+            const std::size_t length = descriptor.data[at + 1];
+            if (descriptor.size - at - 3 < length) {
+                return ReportDescriptorError::Truncated;
+            }
+            at += 3 + length;
+            continue;
+        }
+
+        const std::uint8_t stored = static_cast<std::uint8_t>(prefix & 0x03);
+        const std::size_t length = stored == 3 ? 4 : stored;
+        if (descriptor.size - at - 1 < length) {
+            return ReportDescriptorError::Truncated;
+        }
+
+        std::uint32_t data = 0;
+        for (std::size_t index = 0; index < length; ++index) {
+            data |= static_cast<std::uint32_t>(descriptor.data[at + 1 + index])
+                    << (8 * index);
+        }
+        const std::uint8_t type = static_cast<std::uint8_t>((prefix >> 2) & 0x03);
+        const std::uint8_t tag = static_cast<std::uint8_t>((prefix >> 4) & 0x0F);
+        at += 1 + length;
+
+        if (type == kTypeGlobal) {
+            switch (tag) {
+                case kTagUsagePage:
+                    globals.usage_page = static_cast<std::uint16_t>(data & 0xFFFF);
+                    break;
+                case kKeyboardTagLogicalMinimum:
+                    globals.logical_minimum = signed_item(data, length);
+                    break;
+                case kKeyboardTagLogicalMaximum:
+                    globals.logical_maximum_raw = data;
+                    globals.logical_maximum_size = static_cast<std::uint8_t>(length);
+                    break;
+                case kTagReportSize:
+                    globals.report_size = data;
+                    break;
+                case kTagReportId:
+                    if (data == 0 || data > 0xFF) {
+                        return ReportDescriptorError::UnsupportedLayout;
+                    }
+                    globals.report_id = static_cast<std::uint8_t>(data);
+                    any_report_id = true;
+                    if (keyboard_report(reports, report_count, globals.report_id) == nullptr) {
+                        return ReportDescriptorError::UnsupportedLayout;
+                    }
+                    break;
+                case kTagReportCount:
+                    globals.report_count = data;
+                    break;
+                case kKeyboardTagPush:
+                    if (global_depth == kMaximumKeyboardGlobals) {
+                        return ReportDescriptorError::MalformedGlobalState;
+                    }
+                    global_stack[global_depth++] = globals;
+                    break;
+                case kKeyboardTagPop:
+                    if (global_depth == 0) {
+                        return ReportDescriptorError::MalformedGlobalState;
+                    }
+                    globals = global_stack[--global_depth];
+                    break;
+                default:
+                    break;
+            }
+            continue;
+        }
+
+        if (type == kTypeLocal) {
+            const KeyboardUsage usage = usage_from_item(data, length, globals.usage_page);
+            if (tag == kTagUsage && locals.usage_count < kMaximumKeyboardUsages) {
+                locals.usages[locals.usage_count++] = usage;
+            } else if (tag == kKeyboardTagUsageMinimum) {
+                locals.have_minimum = true;
+                locals.minimum = usage;
+            } else if (tag == kKeyboardTagUsageMaximum) {
+                locals.have_maximum = true;
+                locals.maximum = usage;
+            }
+            continue;
+        }
+
+        if (type != kTypeMain) {
+            continue;
+        }
+
+        if (tag == kTagInput) {
+            if (globals.report_size == 0 || globals.report_count == 0 ||
+                !logical_range_is_valid(globals) || !local_range_is_valid(locals)) {
+                return ReportDescriptorError::UnsupportedLayout;
+            }
+            KeyboardReportState* report =
+                keyboard_report(reports, report_count, globals.report_id);
+            if (report == nullptr) {
+                return ReportDescriptorError::UnsupportedLayout;
+            }
+
+            const std::uint64_t field_bits =
+                static_cast<std::uint64_t>(globals.report_size) * globals.report_count;
+            const std::uint64_t bit_after_field =
+                static_cast<std::uint64_t>(report->input_bits) + field_bits;
+            if (field_bits > kMaximumKeyboardReportBits ||
+                bit_after_field > kMaximumKeyboardReportBits) {
+                return ReportDescriptorError::UnsupportedLayout;
+            }
+
+            const bool constant = (data & kInputConstant) != 0;
+            const bool variable = (data & kInputVariable) != 0;
+            if (!constant) {
+                std::uint16_t usage_minimum = 0;
+                std::uint16_t usage_maximum = 0;
+                const bool have_keyboard_range =
+                    keyboard_range(locals, usage_minimum, usage_maximum);
+
+                if (variable) {
+                    if (!record_keyboard_modifiers(*report,
+                                                   locals,
+                                                   globals.report_size,
+                                                   globals.report_count,
+                                                   report->input_bits)) {
+                        return ReportDescriptorError::UnsupportedLayout;
+                    }
+                    const bool modifier_range =
+                        have_keyboard_range &&
+                        usage_minimum >= kModifierMinimum &&
+                        usage_maximum <= kModifierMaximum;
+                    if (have_keyboard_range && !modifier_range) {
+                        const std::uint32_t usage_count =
+                            static_cast<std::uint32_t>(usage_maximum) - usage_minimum + 1;
+                        if (globals.report_size != 1 ||
+                            globals.report_count != usage_count ||
+                            !record_keyboard_keys(*report,
+                                                  KeyboardFieldKind::Bitmap,
+                                                  report->input_bits,
+                                                  globals.report_size,
+                                                  globals.report_count,
+                                                  usage_minimum,
+                                                  usage_maximum)) {
+                            return ReportDescriptorError::UnsupportedLayout;
+                        }
+                    }
+                } else {
+                    if (!have_keyboard_range && globals.usage_page == kPageKeyboard) {
+                        const std::int64_t maximum = logical_maximum(globals);
+                        if (globals.logical_minimum < 0 || maximum > 0xFFFF) {
+                            return ReportDescriptorError::UnsupportedLayout;
+                        }
+                        usage_minimum = static_cast<std::uint16_t>(globals.logical_minimum);
+                        usage_maximum = static_cast<std::uint16_t>(maximum);
+                    }
+                    if (have_keyboard_range || globals.usage_page == kPageKeyboard) {
+                        if (globals.report_size > 16 ||
+                            !record_keyboard_keys(*report,
+                                                  KeyboardFieldKind::Array,
+                                                  report->input_bits,
+                                                  globals.report_size,
+                                                  globals.report_count,
+                                                  usage_minimum,
+                                                  usage_maximum)) {
+                            return ReportDescriptorError::UnsupportedLayout;
+                        }
+                    }
+                }
+            }
+            report->input_bits = static_cast<std::uint32_t>(bit_after_field);
+        }
+
+        // HID local items apply to one Main item, including Output, Feature,
+        // Collection, and End Collection. Only Input advances an Input cursor.
+        locals = KeyboardLocalState{};
+    }
+
+    KeyboardReportState* found = nullptr;
+    for (std::size_t index = 0; index < report_count; ++index) {
+        if (!reports[index].has_keys) {
+            continue;
+        }
+        if (found != nullptr && found->report_id != reports[index].report_id) {
+            return ReportDescriptorError::AmbiguousKeyboardReport;
+        }
+        found = &reports[index];
+    }
+    if (found == nullptr) {
+        return ReportDescriptorError::NoKeyboardReport;
+    }
+    if (any_report_id && found->report_id == 0) {
+        return ReportDescriptorError::UnsupportedLayout;
+    }
+
+    found->layout.report_id = any_report_id;
+    found->layout.minimum_body_bytes =
+        static_cast<std::uint8_t>((found->required_bits + 7) / 8);
+    out = found->layout;
+    return ReportDescriptorError::None;
+}
+
 }  // namespace duo_input::u1::ch375

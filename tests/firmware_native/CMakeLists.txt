@@ -582,6 +582,9 @@ target_include_directories(duo_report_descriptor_test PRIVATE
     ${CMAKE_SOURCE_DIR}/firmware/u1_main
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
+target_compile_definitions(duo_report_descriptor_test PRIVATE
+    DUO_USB_DESCRIPTORS_PATH="${CMAKE_SOURCE_DIR}/tests/vectors/usb_descriptors"
+)
 
 if(MSVC)
     target_compile_options(duo_report_descriptor_test PRIVATE /EHsc)
