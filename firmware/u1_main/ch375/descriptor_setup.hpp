@@ -140,6 +140,19 @@ public:
     /// the normalizer nothing.
     const MouseReportLayout& mouse_layout() const { return mouse_layout_; }
 
+    /// Did this keyboard describe a report layout this firmware can read?
+    ///
+    /// False for a keyboard that declares no report descriptor, one whose
+    /// descriptor could not be fetched, and one whose bytes did not describe a
+    /// keyboard. All of those are on boot protocol, and only after the device
+    /// has actually been put there - the fixed layout is a description of the
+    /// boot report, not a guess about the report the device is still sending.
+    bool has_keyboard_layout() const { return have_keyboard_layout_; }
+
+    /// Where this keyboard keeps its fields - its own layout when one was
+    /// read, and boot protocol's when it was not.
+    const KeyboardReportLayout& keyboard_layout() const { return keyboard_layout_; }
+
     /// Why the report descriptor was not used, for a bring-up build to report.
     std::uint8_t last_report_descriptor_status() const { return report_status_; }
     ReportDescriptorError last_report_descriptor_error() const { return report_error_; }
@@ -215,6 +228,8 @@ private:
     SetupProgress apply_report_descriptor(std::uint32_t now_us);
     /// Give up on the descriptor and take the path that was already working.
     SetupProgress abandon_report_descriptor(std::uint32_t now_us, std::uint8_t status);
+    /// Put a keyboard back on the fixed layout, or refuse it if there is none.
+    SetupProgress fallback_keyboard_to_boot(std::uint32_t now_us);
     /// Ask a boot-capable interface to switch, or finish without asking.
     SetupProgress select_boot_protocol(std::uint32_t now_us);
     /// True while the outcome of the protocol request is still outstanding.
@@ -247,6 +262,8 @@ private:
     // --- the report descriptor ---------------------------------------------
     MouseReportLayout mouse_layout_ = boot_mouse_layout();
     bool have_mouse_layout_ = false;
+    KeyboardReportLayout keyboard_layout_ = boot_keyboard_layout();
+    bool have_keyboard_layout_ = false;
     ReportDescriptorError report_error_ = ReportDescriptorError::None;
     std::uint8_t report_status_ = 0;
     /// How many times running the device has said nothing to the request.

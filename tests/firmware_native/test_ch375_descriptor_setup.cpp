@@ -1100,8 +1100,13 @@ TEST_CASE(a_device_silent_every_time_is_eventually_left_on_boot) {
 }
 
 // ------------------------------------------------------------- the keyboard
+//
+// A keyboard is read in the protocol it declares, and put into boot protocol
+// only when its own description cannot be used. Boot's report is eight fixed
+// bytes; a keyboard that declares five slots and a vendor byte is not sending
+// that, and forcing it to is how a key nobody pressed arrives and stays down.
 
-TEST_CASE(a_keyboard_descriptor_is_captured_before_boot_is_selected) {
+TEST_CASE(a_keyboard_that_describes_itself_is_read_in_its_own_protocol) {
     Rig rig;
     const std::vector<std::uint8_t> descriptor = {
         0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00,
@@ -1112,12 +1117,25 @@ TEST_CASE(a_keyboard_descriptor_is_captured_before_boot_is_selected) {
     rig.chip.attach_device();
     rig.chip.serve_report_keyboard(descriptor);
     rig.begin(rig.chip.now_us());
+
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
     CHECK_EQ(rig.setup.report_descriptor_bytes(), descriptor.size());
-    CHECK(rig.setup.boot_protocol_selected());
+    CHECK(rig.setup.has_keyboard_layout());
+    CHECK_EQ(rig.setup.keyboard_layout().key_element_count, std::uint8_t{6});
+    CHECK_EQ(rig.setup.keyboard_layout().key_bit_offset, std::uint16_t{8});
+
+    // And no SET_PROTOCOL. Asking for boot now throws away the very thing
+    // this step went and fetched, and the one setup packet on the wire is the
+    // GET_DESCRIPTOR that fetched it.
+    CHECK_FALSE(rig.setup.boot_protocol_selected());
+    CHECK_FALSE(rig.chip.boot_protocol_selected());
+    CHECK_EQ(rig.chip.setup_packets().size(), std::size_t{1});
+    SetupPacket packet;
+    CHECK(read_setup(only_setup(rig.chip), packet));
+    CHECK_EQ(packet.request, std::uint8_t{0x06});
 }
 
-TEST_CASE(the_captured_aula_keyboard_descriptor_is_complete) {
+TEST_CASE(the_captured_aula_keyboard_descriptor_is_used_as_the_aula_declared_it) {
     std::vector<std::uint8_t> descriptor;
     if (!read_aula_keyboard_descriptor(descriptor)) {
         CHECK(false);
@@ -1128,10 +1146,20 @@ TEST_CASE(the_captured_aula_keyboard_descriptor_is_complete) {
     rig.chip.attach_device();
     rig.chip.serve_report_keyboard(descriptor);
     rig.begin(rig.chip.now_us());
+
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
     CHECK_EQ(descriptor.size(), std::size_t{77});
     CHECK_EQ(rig.setup.report_descriptor_bytes(), descriptor.size());
-    CHECK(rig.setup.boot_protocol_selected());
+    CHECK(rig.setup.has_keyboard_layout());
+
+    // Five slots, not six, and the body ends at seven bytes with a vendor byte
+    // after it. Read at boot offsets that eighth byte is a sixth key slot, and
+    // whatever the keyboard puts there is a keystroke nobody made.
+    CHECK_EQ(rig.setup.keyboard_layout().key_element_count, std::uint8_t{5});
+    CHECK_EQ(rig.setup.keyboard_layout().key_bit_offset, std::uint16_t{16});
+    CHECK_EQ(rig.setup.keyboard_layout().minimum_body_bytes, std::uint8_t{7});
+    CHECK_FALSE(rig.setup.keyboard_layout().report_id);
+    CHECK_FALSE(rig.setup.boot_protocol_selected());
 }
 
 TEST_CASE(a_keyboard_is_not_asked_for_its_report_descriptor) {
@@ -1142,13 +1170,190 @@ TEST_CASE(a_keyboard_is_not_asked_for_its_report_descriptor) {
     rig.begin(rig.chip.now_us());
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
 
-    // A boot keyboard's report is fixed by HID 1.11 Appendix B.1 and is what
-    // the keyboard normalizer and the captured traces are written against.
-    // There is no wheel to recover and nothing to gain by reading it.
+    // It declares no report descriptor at all, so there is nothing to ask for
+    // and boot protocol's fixed layout is the only one there is.
     CHECK_EQ(static_cast<int>(rig.setup.kind()), static_cast<int>(DeviceKind::Keyboard));
     CHECK_EQ(rig.chip.report_descriptor_requests(), 0);
     CHECK(rig.setup.boot_protocol_selected());
+    CHECK_FALSE(rig.setup.has_keyboard_layout());
+    CHECK_EQ(rig.setup.keyboard_layout().key_element_count, std::uint8_t{6});
     CHECK_FALSE(rig.setup.has_mouse_layout());
+}
+
+TEST_CASE(a_keyboard_layout_does_not_survive_into_the_next_device) {
+    std::vector<std::uint8_t> descriptor;
+    if (!read_aula_keyboard_descriptor(descriptor)) {
+        CHECK(false);
+        return;
+    }
+
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_report_keyboard(descriptor);
+    rig.begin(rig.chip.now_us());
+    rig.settle();
+    CHECK(rig.setup.has_keyboard_layout());
+
+    // Somebody unplugs it and plugs in a keyboard that says nothing about
+    // itself. Kept, the Aula's five-slot layout would read the second
+    // keyboard's sixth slot as a vendor byte and drop every key struck in it.
+    rig.chip.serve_composite_keyboard();
+    rig.begin(rig.chip.now_us());
+    rig.settle();
+
+    CHECK_FALSE(rig.setup.has_keyboard_layout());
+    CHECK_EQ(rig.setup.keyboard_layout().key_element_count, std::uint8_t{6});
+    CHECK_EQ(rig.setup.keyboard_layout().minimum_body_bytes, std::uint8_t{8});
+    CHECK(rig.setup.boot_protocol_selected());
+}
+
+// ------------------------------------- a keyboard whose description fails
+//
+// Each of these has to end exactly where the firmware ended before this step
+// existed: a working keyboard on boot protocol's fixed eight-byte report. The
+// fixed layout is only correct once the device has actually been put into
+// boot, so every one of them checks that the switch landed too.
+
+TEST_CASE(a_keyboard_that_refuses_the_descriptor_request_falls_back_to_boot) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_report_keyboard(plain_wheel_mouse_descriptor());
+    rig.chip.refuse_report_descriptor(true);
+
+    rig.begin(rig.chip.now_us());
+
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK_FALSE(rig.setup.has_keyboard_layout());
+    CHECK_EQ(rig.setup.keyboard_layout().key_element_count, std::uint8_t{6});
+    CHECK(rig.setup.boot_protocol_selected());
+    CHECK(rig.chip.boot_protocol_selected());
+}
+
+TEST_CASE(a_keyboard_silent_every_time_is_eventually_left_on_boot) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_report_keyboard(plain_wheel_mouse_descriptor());
+    rig.chip.ignore_report_descriptor(true);
+
+    SetupProgress last = SetupProgress::Failed;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        rig.begin(rig.chip.now_us());
+        last = rig.settle();
+        if (last == SetupProgress::Done) {
+            break;
+        }
+    }
+
+    // Otherwise a keyboard that types perfectly well on boot protocol would
+    // re-enumerate for ever over a control it never had.
+    CHECK_EQ(static_cast<int>(last), static_cast<int>(SetupProgress::Done));
+    CHECK_FALSE(rig.setup.has_keyboard_layout());
+    CHECK(rig.setup.boot_protocol_selected());
+    CHECK(rig.chip.boot_protocol_selected());
+}
+
+TEST_CASE(a_keyboard_whose_data_stage_carries_nothing_falls_back_to_boot) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_report_keyboard(plain_wheel_mouse_descriptor());
+    rig.chip.empty_report_descriptor(true);
+
+    rig.begin(rig.chip.now_us());
+
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK_EQ(rig.setup.report_descriptor_bytes(), std::uint16_t{0});
+    CHECK_FALSE(rig.setup.has_keyboard_layout());
+    CHECK(rig.setup.boot_protocol_selected());
+    CHECK(rig.chip.boot_protocol_selected());
+}
+
+TEST_CASE(a_keyboard_descriptor_that_will_not_parse_falls_back_to_boot) {
+    Rig rig;
+    rig.chip.attach_device();
+    // A perfectly well-formed mouse descriptor, which is not a keyboard.
+    rig.chip.serve_report_keyboard(plain_wheel_mouse_descriptor());
+
+    rig.begin(rig.chip.now_us());
+
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    // It was fetched - the failure is in the bytes, not in the fetching.
+    CHECK_EQ(rig.chip.report_descriptor_requests(), 1);
+    CHECK_EQ(rig.setup.report_descriptor_bytes(), plain_wheel_mouse_descriptor().size());
+    CHECK_FALSE(rig.setup.has_keyboard_layout());
+    CHECK_EQ(rig.setup.keyboard_layout().key_element_count, std::uint8_t{6});
+    CHECK(rig.setup.boot_protocol_selected());
+    CHECK(rig.chip.boot_protocol_selected());
+}
+
+TEST_CASE(a_keyboard_descriptor_longer_than_there_is_room_for_falls_back_to_boot) {
+    Rig rig;
+    rig.chip.attach_device();
+    std::vector<std::uint8_t> huge = plain_wheel_mouse_descriptor();
+    huge.resize(duo_input::u1::ch375::kMaxReportDescriptorBytes + 1, 0xC0);
+    rig.chip.serve_report_keyboard(huge);
+
+    rig.begin(rig.chip.now_us());
+
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    // Not asked for at all: the length is known before a byte goes on the wire.
+    CHECK_EQ(rig.chip.report_descriptor_requests(), 0);
+    CHECK_FALSE(rig.setup.has_keyboard_layout());
+    CHECK(rig.setup.boot_protocol_selected());
+    CHECK(rig.chip.boot_protocol_selected());
+}
+
+TEST_CASE(a_non_boot_keyboard_whose_descriptor_will_not_parse_is_unsupported) {
+    Rig rig;
+    rig.chip.attach_device();
+    // The same bytes as the test three above, on an interface that does not
+    // declare the boot subclass. There is no fixed report behind it to fall
+    // back to, so there is nothing this firmware can read it as.
+    rig.chip.serve_report_keyboard(plain_wheel_mouse_descriptor(), false);
+
+    rig.begin(rig.chip.now_us());
+
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Failed));
+    CHECK_FALSE(rig.setup.has_keyboard_layout());
+    CHECK_FALSE(rig.setup.boot_protocol_selected());
+}
+
+TEST_CASE(a_non_boot_keyboard_that_refuses_the_request_has_nothing_to_fall_back_on) {
+    Rig rig;
+    rig.chip.attach_device();
+    // No boot subclass, and it will not give up its report descriptor either.
+    // There is no layout left that describes what this device sends, and boot
+    // offsets applied to a report it never agreed to send are keystrokes
+    // nobody made arriving on somebody's computer.
+    rig.chip.serve_report_keyboard(plain_wheel_mouse_descriptor(), false);
+    rig.chip.refuse_report_descriptor(true);
+
+    rig.begin(rig.chip.now_us());
+
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Failed));
+    CHECK_FALSE(rig.setup.has_keyboard_layout());
+    CHECK_FALSE(rig.setup.boot_protocol_selected());
+}
+
+TEST_CASE(a_non_boot_keyboard_that_describes_itself_needs_no_boot_at_all) {
+    std::vector<std::uint8_t> descriptor;
+    if (!read_aula_keyboard_descriptor(descriptor)) {
+        CHECK(false);
+        return;
+    }
+
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_report_keyboard(descriptor, false);
+
+    rig.begin(rig.chip.now_us());
+
+    // The whole point of reading the descriptor: a keyboard with no boot
+    // report at all is usable, where before it was a device with nothing to
+    // read it as.
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK(rig.setup.has_keyboard_layout());
+    CHECK_EQ(rig.setup.keyboard_layout().key_element_count, std::uint8_t{5});
+    CHECK_FALSE(rig.setup.boot_protocol_selected());
 }
 
 // ------------------------------------------------- one device at a time
@@ -1196,25 +1401,6 @@ TEST_CASE(the_descriptor_request_names_the_interface_the_mouse_is_on) {
     CHECK_EQ(packet.index, std::uint16_t{1});
     CHECK_EQ(packet.length,
              static_cast<std::uint16_t>(plain_wheel_mouse_descriptor().size()));
-}
-
-TEST_CASE(a_keyboard_that_declares_a_report_descriptor_is_asked) {
-    Rig rig;
-    rig.chip.attach_device();
-    // The descriptor is retained as evidence even though this capture stage
-    // deliberately leaves the keyboard normalizer on boot protocol.
-    rig.chip.serve_report_keyboard(plain_wheel_mouse_descriptor());
-
-    rig.begin(rig.chip.now_us());
-    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
-
-    CHECK_EQ(static_cast<int>(rig.setup.kind()), static_cast<int>(DeviceKind::Keyboard));
-    CHECK_EQ(rig.chip.report_descriptor_requests(), 1);
-    CHECK_EQ(rig.setup.report_descriptor_bytes(), plain_wheel_mouse_descriptor().size());
-    CHECK_FALSE(rig.setup.has_mouse_layout());
-    // And it is put into boot protocol, exactly as before.
-    CHECK(rig.setup.boot_protocol_selected());
-    CHECK(rig.chip.boot_protocol_selected());
 }
 
 // --------------------------------------------------- what the device says it is

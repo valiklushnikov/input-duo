@@ -88,6 +88,8 @@ void DescriptorSetup::begin(std::uint32_t now_us) {
     // read at another mouse's offsets.
     mouse_layout_ = boot_mouse_layout();
     have_mouse_layout_ = false;
+    keyboard_layout_ = boot_keyboard_layout();
+    have_keyboard_layout_ = false;
     report_error_ = ReportDescriptorError::None;
     report_status_ = 0;
     control_packet_ = 8;
@@ -336,9 +338,25 @@ SetupProgress DescriptorSetup::apply_report_descriptor(std::uint32_t now_us) {
     }
 
     if (capabilities_.kind == DeviceKind::Keyboard) {
-        report_error_ = ReportDescriptorError::None;
-        report_status_ = kKeyboardReportDescriptorCaptured;
-        return select_boot_protocol(now_us);
+        KeyboardReportLayout layout = boot_keyboard_layout();
+        report_error_ = parse_keyboard_report_descriptor(
+            protocol::ByteView{report_buffer_, report_received_}, layout);
+        if (report_error_ != ReportDescriptorError::None) {
+            // Bytes that do not add up, two keyboard reports with no way to
+            // say which is which, a descriptor that is not a keyboard at all.
+            // Each is a device that may still type on boot protocol's fixed
+            // report - if it has one.
+            report_status_ = kReportDescriptorUnusable;
+            return fallback_keyboard_to_boot(now_us);
+        }
+
+        keyboard_layout_ = layout;
+        have_keyboard_layout_ = true;
+        // And no SET_PROTOCOL. Boot protocol's report is eight fixed bytes
+        // with six key slots in it, and a keyboard that declares five slots
+        // and a vendor byte is not sending that - so asking for boot now
+        // throws away the very thing this step went and fetched.
+        return finish(kReportDescriptorUsed);
     }
 
     MouseReportLayout layout = boot_mouse_layout();
@@ -366,6 +384,30 @@ SetupProgress DescriptorSetup::abandon_report_descriptor(std::uint32_t now_us,
     // arrived; a non-zero count plus kReportDescriptorUnusable means the
     // parser rejected actual evidence.  begin() resets the count before the
     // next device, so preserving it here cannot leak into another attempt.
+    if (capabilities_.kind == DeviceKind::Keyboard) {
+        return fallback_keyboard_to_boot(now_us);
+    }
+    return select_boot_protocol(now_us);
+}
+
+/// A keyboard whose own description cannot be used, put back on the fixed one.
+///
+/// Only a boot-capable interface has a fixed report behind it. Without one
+/// there is no layout left to read this device at: boot's offsets would be a
+/// guess about a report the keyboard never agreed to send, and a guess here is
+/// keystrokes nobody made arriving on somebody's computer.
+///
+/// Mice do not come through here. A mouse with no usable descriptor still
+/// moves the pointer on boot protocol whether or not the interface says so,
+/// and refusing one would take away a device that worked.
+///
+/// The layout needs no resetting: begin() sets it to boot's for every attempt,
+/// and the only thing that replaces it is a descriptor that parsed - which
+/// finishes immediately and never reaches here.
+SetupProgress DescriptorSetup::fallback_keyboard_to_boot(std::uint32_t now_us) {
+    if (!capabilities_.boot_protocol) {
+        return fail(kEndedUnsupported);
+    }
     return select_boot_protocol(now_us);
 }
 
