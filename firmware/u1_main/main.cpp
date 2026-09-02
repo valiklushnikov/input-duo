@@ -400,6 +400,7 @@ void core1_entry() {
                 // the backlog worth knowing about.
                 g_runtime.set_event_origin_us(event.received_us);
                 pipelines[index]->on_event(event, setups[index]->kind(),
+                                           setups[index]->keyboard_layout(),
                                            setups[index]->mouse_layout(), now_ms,
                                            setups[index]->vendor_id(),
                                            setups[index]->product_id());
@@ -677,6 +678,7 @@ namespace {
             " hid=%s ep=%u pkt=%u boot=%s/%s setup=%u last=%02X cfgerr=%u\n"
             " rd=%02X err=%u got/want=%u/%u layout=%s id=%s/%u "
             "b=%u x=%u/%u+%u:%u y=%u/%u+%u:%u w=%u p=%u min=%u\n"
+            " klayout=%s kkind=%u kbits=%u/%u@%u kid=%s/%u kmin=%u\n"
             " last=%u:%02X %02X %02X %02X port=%u refused=%u "
             "recover=%u/%u/%u/%u/%u slow=%u drop=%u\n",
             names[index], state < 7 ? kStates[state] : "?",
@@ -718,6 +720,17 @@ namespace {
             setups[index]->mouse_layout().wheel.offset,
             setups[index]->mouse_layout().pan.offset,
             setups[index]->mouse_layout().minimum_body_bytes,
+            // Whether this keyboard is being read in its own protocol or in
+            // boot's. The one field that says which of the two paths a run of
+            // the compatibility matrix was actually on.
+            setups[index]->has_keyboard_layout() ? "report" : "boot",
+            static_cast<unsigned>(setups[index]->keyboard_layout().key_kind),
+            setups[index]->keyboard_layout().key_element_bits,
+            setups[index]->keyboard_layout().key_element_count,
+            setups[index]->keyboard_layout().key_bit_offset,
+            setups[index]->keyboard_layout().report_id ? "yes" : "no",
+            setups[index]->keyboard_layout().report_id_value,
+            setups[index]->keyboard_layout().minimum_body_bytes,
             tally.last_size, tally.last[0], tally.last[1], tally.last[2], tally.last[3],
             (index == 0 ? g_keyboard_port : g_mouse_port).baud(),
             device.baud_change_failures(), device.setup_mode_failures(),

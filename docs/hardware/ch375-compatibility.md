@@ -119,6 +119,33 @@ in this project, believed on weaker evidence than it deserved.
   vertical. "It says it can" and "it is" are claims about different devices,
   and only the second byte says which one is attached.
 
+- **A keyboard is read in the protocol it declares, and put into boot protocol
+  only when it cannot be.** The report descriptor is fetched for keyboards as
+  well as mice now. When it parses, the layout it gives is what the normalizer
+  reads and no `SET_PROTOCOL` goes out at all; the diagnostic build prints
+  `klayout=report` beside `kbits=<bits>/<count>@<offset>` and `kid=<yes|no>/<id>`.
+  When it does not - refused, silent, empty, malformed, oversized, or simply
+  not a keyboard - the fixed boot layout is used and `SET_PROTOCOL` is sent
+  first, printed as `klayout=boot`. The fixed layout is a description of the
+  *boot* report, so it is only correct once the device has actually been put
+  there; a keyboard whose interface does not declare the boot subclass and
+  whose descriptor cannot be used is refused as unsupported rather than read
+  at offsets it never agreed to.
+
+  Mice are not on that rule. One with no usable descriptor still moves the
+  pointer on boot protocol whether or not the interface advertises it, and
+  refusing such a mouse would take away a device that worked.
+
+- **The Aula F75 declares five key slots, not six, and a vendor byte where the
+  sixth would be.** Its 77-byte report descriptor
+  (`tests/vectors/usb_descriptors/aula_f75_keyboard_report.hex`) is eight
+  modifier bits, a constant byte, five 8-bit array slots over usages
+  `0x00-0xFF`, and then one byte on vendor page `0xFF00`. Read at boot
+  protocol's offsets that eighth byte is a sixth key slot, so whatever the
+  keyboard puts there arrives as a keystroke nobody made - and one nothing
+  will ever release, because the report that clears it looks like the release
+  of something real.
+
 - **A key slot holding `0x01` is not necessarily a rollover.** The receiver at
   `0x3554:0xFA09` sends boot reports with `0x01` in the *first* key slot and
   zeros in the other five, where the wired keyboard in the same socket sends an
