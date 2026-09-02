@@ -127,6 +127,106 @@ could distinguish them from their absence:
   the layout to boot's for every attempt, and the only thing that replaces it
   is a descriptor that parsed — which finishes and never reaches the fallback.
 
+## Bench session, 2026-09-02 - what the hardware said
+
+**Status: the polling fix is PROVISIONAL. The operator is testing through the
+day; nothing below should be read as a closed result.**
+
+### The feature itself works
+
+Flashed the probe U1 and read `tools\keychron_probe.py COM18`. The Aula row:
+
+```
+hid=keyboard ep=1 pkt=8 boot=yes/no setup=2 last=F2
+rd=00 err=0 got/want=77/77
+klayout=report kkind=1 kbits=8/5@16 kid=no/0 kmin=7
+kbd-desc=77/77:05010906A101...0903750895018102C0
+```
+
+Boot advertised and **not** selected, layout read from the device's own
+descriptor, five slots at bit 16, descriptor complete, bytes identical to the
+captured fixture. That is Task 6 step 3 satisfied for this keyboard.
+
+### But it did not stop the loss, and four theories were wrong
+
+The operator still lost letters when typing fast. Each theory was measured and
+each was disproved by the measurement, not by argument:
+
+| Theory | Measurement | Verdict |
+| --- | --- | --- |
+| Five `0x01` values read as "nothing held" (the rollover rule this plan specified as "six") | `kerr[5]=0` - the receiver never sends more than one | wrong |
+| Every keystroke doubled by false releases | `down` rose 105, not 204 | wrong |
+| Reports refused whole by the normalizer | `ref=0 rej=0` throughout | wrong |
+| Publish grace expiring and collapsing presses | `unpaced=0` throughout | wrong |
+
+An arithmetic error of mine belongs here too: `down` exceeding the characters
+on screen was read as "lost after the normalizer", when the operator had been
+correcting typos and every Backspace is a keystroke that removes a character.
+Corrected by a run with a known target string, where `down` matched the
+characters exactly.
+
+The operator also had to correct me on the topology: the laptop is attached to
+**U1**, so U2 is not in this path at all. Time was spent reading `u2_endpoint`
+for nothing.
+
+### The cause
+
+`report_poll_interval_us` derives how often the endpoint carrying the reports
+must be sampled - 2 ms, because a key whose whole press falls between two polls
+was never here. A composite receiver spends every other token on its service
+endpoint, so that interval was halved for the endpoint it was derived for.
+
+Measured with both receivers attached:
+
+| Channel | Tokens/s | To the report endpoint | Interval |
+| --- | --- | --- | --- |
+| Aula (keyboard) | 521 | 260 | **3.86 ms** |
+| Keychron (mouse) | 152 | 76 | **13.2 ms** |
+
+3.86 ms sits inside the band already recorded beside `kFastestReportPollUs`:
+this receiver lost two keys in thirty-nine at 8 ms and none in two hundred and
+thirty-one at 2 ms. Its own service endpoint had sent **one** report in the
+whole session while taking half of every poll.
+
+Fixed in `a5864f1`: the token clock runs at the endpoint's interval divided by
+the number of endpoints sharing it. After it, same bench:
+
+| Channel | Tokens/s | To the report endpoint | Interval |
+| --- | --- | --- | --- |
+| Aula | 1024 | 512 | **1.95 ms** |
+| Keychron | 1525 | 763 | **1.31 ms** |
+
+2549 tokens a second across both channels against 673, both devices still
+`Ready`. The service endpoint keeps its every-other-token share, so the wedging
+the Keychron receiver is known for is unaffected.
+
+The first test written for this passed with the polling loop still using the
+old interval - caught by mutation and replaced with one that compares a device
+sharing its schedule against one that does not.
+
+### Evidence for the fix, and its limits
+
+| Run | Typed | Lost |
+| --- | --- | --- |
+| `тест` x13, before the fix | 13 words | one `тст` - a letter inside a word |
+| `тест` x11, after | 11 words | none; two spaces between words |
+| `привет` x10, after | 69 chars | none |
+
+Letters inside words stopped disappearing, which is the symptom that was
+reproducing. Two caveats, stated plainly:
+
+- Repeated words are **not** the sensitive test. Before the fix, `1234567890`
+  x6 typed fast was already clean; the losses showed up in live Russian prose.
+  No prose run has been done since the fix.
+- In the second run two spaces were missing while `down` said both were read
+  and `kusb sent` said every state went out. Either there is a further stage of
+  loss not yet measured, or a hand typing the same word eleven times sometimes
+  misses the space. The counters cannot separate those.
+
+The `0x01`-in-one-report-of-four behaviour of the receiver is unchanged at 28%
+before and after. It stopped costing anything because a real state now arrives
+between two of them.
+
 ## What is still to do
 
 1. Flash the probe U1 (after checking the drive label reads `RPI-RP2`) and read
@@ -151,7 +251,10 @@ could distinguish them from their absence:
 
 ## Limits of this record
 
-- No hardware was touched: nothing flashed, nothing typed, nothing observed.
+- The hardware section above supersedes this: the probe U1 was flashed several
+  times and the operator typed through it. The release build was never flashed
+  and none of the routing, reconnect or mouse acceptance was run.
+- The polling fix is provisional pending a day of use by the operator.
 - The 77-byte Aula descriptor is real, captured on hardware in Task 1. The
   five-slot reading of it is decoded from those bytes and asserted in
   `the_captured_aula_keyboard_descriptor_is_used_as_the_aula_declared_it`.
