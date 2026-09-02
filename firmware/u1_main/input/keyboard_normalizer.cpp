@@ -107,6 +107,9 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
     if (layout_.key_kind == ch375::KeyboardFieldKind::None ||
         layout_.key_element_bits == 0 || layout_.key_element_count == 0 ||
         layout_.key_element_bits > kMaxKeyElementBits) {
+#if DUO_CH375_PROBE
+        ++probe_rejected_;
+#endif
         return 0;
     }
 
@@ -119,6 +122,9 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
     std::size_t body_bytes = report.size;
     if (layout_.report_id) {
         if (body_bytes == 0 || body[0] != layout_.report_id_value) {
+#if DUO_CH375_PROBE
+            ++probe_rejected_;
+#endif
             return 0;
         }
         ++body;
@@ -128,6 +134,9 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
         // Half a report is not a report. Read as a whole one it would release
         // every key the user is holding - and the fields past its end would be
         // read out of whatever happens to follow it in memory.
+#if DUO_CH375_PROBE
+        ++probe_rejected_;
+#endif
         return 0;
     }
 
@@ -187,11 +196,25 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
     // keystroke; a thrown-away press is a letter that never arrives at all.
     const bool rollover = error_slots == kKeySlots;
 
+#if DUO_CH375_PROBE
+    // Counted before anything acts on it. The whole question is whether the
+    // number of ErrorRollOver values this device sends ever equals the number
+    // of slots it declared - because the rule above asks for six of them, and
+    // this keyboard has five.
+    ++probe_error_slots_[error_slots < 8 ? error_slots : 7];
+    if (rollover) {
+        ++probe_rollovers_;
+    }
+#endif
+
     // More keys than the six-key report onward can carry. Six of the seven is
     // a state nobody's hands were in, and the seventh would stay dropped for
     // as long as it is held. The whole report waits instead - including its
     // modifiers, because a report is applied whole or not at all.
     if (!rollover && (overflowed || now_count > kKeySlots)) {
+#if DUO_CH375_PROBE
+        ++probe_refused_;
+#endif
         return 0;
     }
 
@@ -217,11 +240,17 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
         for (std::size_t index = 0; index < held_count_; ++index) {
             if (!contains(now, now_count, held_[index])) {
                 emit(out, capacity, used, InputEventKind::KeyUp, held_[index]);
+#if DUO_CH375_PROBE
+                ++probe_key_ups_;
+#endif
             }
         }
         for (std::size_t index = 0; index < now_count; ++index) {
             if (!contains(held_, held_count_, now[index])) {
                 emit(out, capacity, used, InputEventKind::KeyDown, now[index]);
+#if DUO_CH375_PROBE
+                ++probe_key_downs_;
+#endif
             }
         }
         for (std::size_t index = 0; index < now_count; ++index) {
@@ -239,6 +268,11 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
         const std::uint16_t usage = static_cast<std::uint16_t>(kFirstModifierUsage + bit);
         emit(out, capacity, used,
              (modifiers & mask) != 0 ? InputEventKind::KeyDown : InputEventKind::KeyUp, usage);
+#if DUO_CH375_PROBE
+        if ((modifiers & mask) != 0) {
+            ++probe_modifier_downs_;
+        }
+#endif
     }
     modifiers_ = modifiers;
 

@@ -94,11 +94,48 @@ public:
     /// computer the person cannot reach from here.
     std::size_t release_all(InputEvent* out, std::size_t capacity);
 
+#if DUO_CH375_PROBE
+    /// How many reports carried exactly N ErrorRollOver values in their key
+    /// field, for N of 0 through 7.
+    ///
+    /// The question this exists to answer: HID 1.11 8.3 says a keyboard that
+    /// has lost count puts ErrorRollOver in *every* array field, and the Aula
+    /// declares five of them - so "every" is five here, not the six a boot
+    /// report has. If index 5 is climbing while typing, reports that mean
+    /// "I cannot say what is held" are being read as "nothing is held".
+    std::uint16_t probe_error_slots(unsigned count) const {
+        return count < 8 ? probe_error_slots_[count] : 0;
+    }
+    /// Reports refused whole because they held more keys than can be carried.
+    std::uint16_t probe_refused() const { return probe_refused_; }
+    /// Reports recognised as a rollover and frozen on.
+    std::uint16_t probe_rollovers() const { return probe_rollovers_; }
+    /// Reports refused because they were short, mislabelled, or unreadable.
+    std::uint16_t probe_rejected() const { return probe_rejected_; }
+    /// Key presses this normalizer actually emitted, modifiers counted apart.
+    ///
+    /// The number to compare against what arrived on the far computer. Equal
+    /// means everything read here was handed on and the loss is further down
+    /// the line; short means the keystroke never reached this code at all.
+    std::uint16_t probe_key_downs() const { return probe_key_downs_; }
+    std::uint16_t probe_key_ups() const { return probe_key_ups_; }
+    std::uint16_t probe_modifier_downs() const { return probe_modifier_downs_; }
+#endif
+
 private:
     ch375::KeyboardReportLayout layout_ = ch375::boot_keyboard_layout();
     std::uint8_t modifiers_ = 0;
     std::uint16_t held_[kKeySlots] = {};
     std::uint8_t held_count_ = 0;
+#if DUO_CH375_PROBE
+    std::uint16_t probe_error_slots_[8] = {};
+    std::uint16_t probe_refused_ = 0;
+    std::uint16_t probe_rollovers_ = 0;
+    std::uint16_t probe_rejected_ = 0;
+    std::uint16_t probe_key_downs_ = 0;
+    std::uint16_t probe_key_ups_ = 0;
+    std::uint16_t probe_modifier_downs_ = 0;
+#endif
 };
 
 }  // namespace duo_input::u1::input

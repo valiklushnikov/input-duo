@@ -70,6 +70,8 @@ public:
     /// kind of device they came from.
     std::uint32_t unclaimed_reports() const { return unclaimed_; }
 #if DUO_CH375_PROBE
+    /// What the keyboard normalizer made of the reports it was handed.
+    const KeyboardNormalizer& keyboard_normalizer() const { return keyboard_; }
     std::uint32_t keychron_side_presses() const {
         return keychron_side_presses_.load(std::memory_order_relaxed);
     }
