@@ -883,3 +883,101 @@ TEST_CASE(unsupported_keyboard_layouts_are_refused_whole) {
         CHECK_EQ(layout.key_element_count, std::uint8_t{6});
     }
 }
+
+// A descriptor that names Report IDs at all names them for every report it
+// declares. A keyboard left in the unnamed report 0 alongside identified ones
+// cannot be read: the device prefixes every packet with an identifier, so
+// offsets measured without one are all a byte late and no packet ever matches
+// identifier 0. Boot protocol is the only honest answer.
+TEST_CASE(a_keyboard_report_without_an_id_beside_identified_reports_is_refused) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x07,
+        0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,  // modifiers, in no named report
+        0x19, 0x00, 0x29, 0x65, 0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x06, 0x81, 0x00,  // keys, in no named report
+        0x85, 0x02,                          // Report ID (2), too late
+        0x05, 0x0C, 0x09, 0x01, 0x75, 0x08, 0x95, 0x02, 0x81, 0x02,
+    };
+    KeyboardReportLayout layout = boot_keyboard_layout();
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+    CHECK_FALSE(layout.report_id);
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{16});
+    CHECK_EQ(layout.key_element_count, std::uint8_t{6});
+}
+
+// Two key fields inside one report leave no way to say which one a pressed key
+// arrives in. Taking the last one silently discards the first, which is how a
+// whole half of a keyboard goes quiet; refusing sends the device to boot.
+TEST_CASE(a_second_key_field_in_one_report_is_refused) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x07,
+        0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x19, 0x00, 0x29, 0x65, 0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x06, 0x81, 0x00,  // six slots at bit 8
+        0x19, 0x00, 0x29, 0x65, 0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x06, 0x81, 0x00,  // six more at bit 56
+    };
+    KeyboardReportLayout layout = boot_keyboard_layout();
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{16});
+}
+
+// The bit ceiling is a property of the whole report, not of the fields read out
+// of it. A padding field declared after the keys can push the report past what
+// the bounded reader will ever be handed, and the keys found before it are no
+// reason to accept the rest.
+TEST_CASE(a_report_that_outgrows_sixty_four_bytes_after_its_keys_is_refused) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x07,
+        0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x19, 0x00, 0x29, 0x65, 0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x06, 0x81, 0x00,  // keys end at bit 56
+        0x75, 0x08, 0x96, 0x41, 0x00, 0x81, 0x01,  // 65 constant bytes after
+    };
+    KeyboardReportLayout layout = boot_keyboard_layout();
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{16});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{8});
+}
+
+// An NKRO bitmap is read by counting bits off its usage minimum, so the field
+// has to hold exactly one bit per usage in the declared range. A field that
+// holds fewer bits, or wider ones, maps every key past the first onto the wrong
+// usage - a descriptor that reports the letter next to the one that was struck.
+TEST_CASE(a_bitmap_whose_bit_count_disagrees_with_its_usage_range_is_refused) {
+    const std::vector<std::uint8_t> modifiers = {
+        0x05, 0x07,
+        0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+    };
+    const std::vector<std::vector<std::uint8_t>> tails = {
+        // 112 usages declared, 96 bits sent.
+        {0x19, 0x04, 0x29, 0x73, 0x15, 0x00, 0x25, 0x01,
+         0x75, 0x01, 0x95, 0x60, 0x81, 0x02},
+        // Eight usages, eight elements - but a byte each, not a bit each.
+        {0x19, 0x04, 0x29, 0x0B, 0x15, 0x00, 0x25, 0x01,
+         0x75, 0x08, 0x95, 0x08, 0x81, 0x02},
+    };
+
+    for (const std::vector<std::uint8_t>& tail : tails) {
+        std::vector<std::uint8_t> bytes = modifiers;
+        bytes.insert(bytes.end(), tail.begin(), tail.end());
+        KeyboardReportLayout layout = boot_keyboard_layout();
+
+        CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+                 static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+        CHECK_EQ(static_cast<int>(layout.key_kind),
+                 static_cast<int>(KeyboardFieldKind::Array));
+        CHECK_EQ(layout.key_element_bits, std::uint8_t{8});
+        CHECK_EQ(layout.key_element_count, std::uint8_t{6});
+    }
+}
