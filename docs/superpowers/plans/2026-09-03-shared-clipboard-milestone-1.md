@@ -895,7 +895,7 @@ git commit -m "Frame what the two machines say to each other"
 
 **Interfaces:**
 - Consumes: `ClipboardOffer` из `offer.py`.
-- Produces: `ORIGIN_MIME = "application/x-duo-input-origin"`; `ClipboardSnapshot` — `payloads: dict[str, bytes]`; `ContentFetcher` — вызываемое `(mime: str) -> bytes`; `RemoteMimeData(offer, fetcher)` — подкласс `QMimeData`; `ClipboardBackend` — `Protocol` с сигналом `snapshot_taken` и методами `start()`, `stop()`, `publish(offer, fetcher)`, `payload(mime) -> bytes | None`.
+- Produces: `ORIGIN_MIME = "application/x-duo-input-origin"`; `base_mime(mime_type: str) -> str`; `ClipboardSnapshot` — `payloads: dict[str, bytes]`; `ContentFetcher` — вызываемое `(mime: str) -> bytes`; `RemoteMimeData(offer, fetcher)` — подкласс `QMimeData`; `ClipboardBackend` — `Protocol` с сигналом `snapshot_taken` и методами `start()`, `stop()`, `publish(offer, fetcher)`, `payload(mime) -> bytes | None`.
 
 - [ ] **Step 1: Написать падающие тесты**
 
@@ -957,6 +957,17 @@ def test_a_format_that_was_never_announced_is_not_fetched():
     assert calls == []
 
 
+def test_a_charset_parameter_still_finds_the_announced_format():
+    """Qt спрашивает text/plain;charset=utf-8, а объявляли мы text/plain.
+
+    Точное сравнение строк здесь означало бы вставку, которая не работает
+    никогда и ничего об этом не сообщает. Так было замечено в спайке Task 1.
+    """
+    data = RemoteMimeData(_offer(), lambda mime: "привет".encode("utf-8"))
+
+    assert bytes(data.retrieveData("text/plain;charset=utf-8", None)) == "привет".encode("utf-8")
+
+
 def test_a_failed_fetch_yields_nothing_rather_than_raising():
     def fetch(mime: str) -> bytes:
         raise TimeoutError("пир не ответил")
@@ -1000,6 +1011,16 @@ ORIGIN_MIME = "application/x-duo-input-origin"
 ContentFetcher = Callable[[str], bytes]
 
 
+def base_mime(mime_type: str) -> str:
+    """Имя формата без параметров: ``text/plain;charset=utf-8`` -> ``text/plain``.
+
+    Qt спрашивает содержимое под именем с параметром, а объявляли мы имя без
+    него. Сравнение строк целиком означало бы вставку, которая молча не
+    работает: ни ошибки, ни записи в журнале, просто пустой буфер.
+    """
+    return mime_type.split(";", 1)[0].strip()
+
+
 class ClipboardSnapshot:
     """Локальный снимок буфера: что скопировали на этой машине."""
 
@@ -1024,17 +1045,18 @@ class RemoteMimeData(QMimeData):
         return [*self._offer.mimes(), ORIGIN_MIME]
 
     def retrieveData(self, mime_type: str, preferred_type):  # noqa: N802 - Qt API
-        if mime_type == ORIGIN_MIME:
+        requested = base_mime(mime_type)
+        if requested == ORIGIN_MIME:
             return self._marker
-        if mime_type not in self._offer.mimes():
+        if requested not in self._offer.mimes():
             return b""
-        if mime_type in self._cache:
-            return self._cache[mime_type]
+        if requested in self._cache:
+            return self._cache[requested]
         try:
-            payload = self._fetcher(mime_type)
+            payload = self._fetcher(requested)
         except Exception:  # noqa: BLE001 - пустая вставка честнее, чем падение
             return b""
-        self._cache[mime_type] = payload
+        self._cache[requested] = payload
         return payload
 
 
@@ -1057,6 +1079,7 @@ __all__ = [
     "ClipboardSnapshot",
     "ContentFetcher",
     "RemoteMimeData",
+    "base_mime",
 ]
 ```
 
