@@ -319,14 +319,12 @@ def test_discovery_returns_false_on_bind_failure(qapp):
 
 def test_discovery_readyread_signal_connection(qapp):
     # Тест проверяет, что readyRead сигнал действительно подключен к обработчику.
+    # Сокет передается в конструктор, поэтому подключение делает сам класс.
     socket = MockUdpSocket()
     beacon = Beacon(OURS, "LAPTOP-ONE", "a" * 64, 47654, PROTOCOL_MAJOR)
 
-    discovery = Discovery(OURS)
-    # Заменить сокет и переподключить сигнал
-    discovery._socket.readyRead.disconnect()
-    discovery._socket = socket
-    socket.readyRead.connect(discovery._on_ready_read)
+    # Передать мок-сокет в конструктор - тогда подключение делает сам Discovery
+    discovery = Discovery(OURS, socket=socket)
 
     peer_seen_spy = Mock()
     discovery.peer_seen.connect(peer_seen_spy)

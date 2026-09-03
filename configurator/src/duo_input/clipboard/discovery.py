@@ -86,11 +86,16 @@ class Discovery(QObject):
 
     peer_seen = Signal(object, str)
 
-    def __init__(self, own_origin_id: str, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        own_origin_id: str,
+        parent: QObject | None = None,
+        socket: QUdpSocket | None = None,
+    ) -> None:
         super().__init__(parent)
         self._own_origin_id = own_origin_id
         self._beacon: Beacon | None = None
-        self._socket = QUdpSocket(self)
+        self._socket = socket if socket is not None else QUdpSocket(self)
         self._socket.readyRead.connect(self._on_ready_read)
         self._timer = QTimer(self)
         self._timer.setInterval(BEACON_INTERVAL_MS)
