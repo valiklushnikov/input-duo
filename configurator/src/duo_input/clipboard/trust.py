@@ -36,14 +36,29 @@ class TrustStore:
         if not isinstance(raw, dict):
             return None
         try:
-            return TrustedPeer(
-                origin_id=str(raw["origin_id"]),
-                machine_name=str(raw["machine_name"]),
-                fingerprint=str(raw["fingerprint"]),
-                last_address=str(raw["last_address"]),
-            )
+            origin_id = raw["origin_id"]
+            machine_name = raw["machine_name"]
+            fingerprint = raw["fingerprint"]
+            last_address = raw["last_address"]
         except KeyError:
             return None
+
+        # Все поля должны быть непустыми строками, не другими типами
+        if not isinstance(origin_id, str) or not origin_id:
+            return None
+        if not isinstance(machine_name, str) or not machine_name:
+            return None
+        if not isinstance(fingerprint, str) or not fingerprint:
+            return None
+        if not isinstance(last_address, str) or not last_address:
+            return None
+
+        return TrustedPeer(
+            origin_id=origin_id,
+            machine_name=machine_name,
+            fingerprint=fingerprint,
+            last_address=last_address,
+        )
 
     def remember(self, peer: TrustedPeer) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
