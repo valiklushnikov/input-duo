@@ -72,3 +72,19 @@ def test_from_dict_refuses_a_dictionary_with_wrong_types():
                 ],
             }
         )
+
+
+def test_from_dict_refuses_a_boolean_seq(): # M7: то же исключение bool, что и в маячке
+    with pytest.raises(ValueError):
+        ClipboardOffer.from_dict({"origin_id": "a" * 32, "seq": True, "descriptors": []})
+
+
+def test_from_dict_refuses_a_boolean_size():
+    with pytest.raises(ValueError):
+        ClipboardOffer.from_dict(
+            {
+                "origin_id": "a" * 32,
+                "seq": 1,
+                "descriptors": [{"mime": "text/plain", "size": True, "sha256": "abc"}],
+            }
+        )

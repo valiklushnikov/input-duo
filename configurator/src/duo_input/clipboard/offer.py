@@ -75,7 +75,11 @@ class ClipboardOffer:
                 raise TypeError("raw должна быть dict")
             if not isinstance(raw.get("origin_id"), str):
                 raise TypeError("origin_id должна быть str")
-            if not isinstance(raw.get("seq"), int):
+            seq = raw.get("seq")
+            # Проверка типов, не приведение, и bool исключён - тот же
+            # порядок, что уже принят для маячка в discovery.py: bool - подтип
+            # int, а seq=True не должен молча сойти за seq=1.
+            if not isinstance(seq, int) or isinstance(seq, bool):
                 raise TypeError("seq должна быть int")
             if not isinstance(raw.get("descriptors"), list):
                 raise TypeError("descriptors должна быть list")
@@ -86,7 +90,8 @@ class ClipboardOffer:
                     raise TypeError("каждый дескриптор должен быть dict")
                 if not isinstance(d.get("mime"), str):
                     raise TypeError("mime должна быть str")
-                if not isinstance(d.get("size"), int):
+                size = d.get("size")
+                if not isinstance(size, int) or isinstance(size, bool):
                     raise TypeError("size должна быть int")
                 if not isinstance(d.get("sha256"), str):
                     raise TypeError("sha256 должна быть str")
