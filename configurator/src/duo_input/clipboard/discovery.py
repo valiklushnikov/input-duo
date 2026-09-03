@@ -52,16 +52,16 @@ def decode_beacon(raw: bytes, own_origin_id: str) -> Beacon | None:
         port_value = parsed["port"]
         protocol_major_value = parsed["protocol_major"]
 
-        # Проверка типов, не приведение.
+        # Проверка типов, не приведение. Исключаем bool, так как bool подтип int.
         if not isinstance(origin_id, str):
             return None
         if not isinstance(machine_name, str):
             return None
         if not isinstance(fingerprint, str):
             return None
-        if not isinstance(port_value, int):
+        if not isinstance(port_value, int) or isinstance(port_value, bool):
             return None
-        if not isinstance(protocol_major_value, int):
+        if not isinstance(protocol_major_value, int) or isinstance(protocol_major_value, bool):
             return None
 
         beacon = Beacon(
