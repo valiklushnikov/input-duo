@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import Mock, MagicMock, call
 
-from PySide6.QtCore import QByteArray
+from PySide6.QtCore import QByteArray, QObject, Signal
 from PySide6.QtNetwork import QHostAddress, QUdpSocket
 
 from duo_input.clipboard.discovery import Beacon, Discovery, decode_beacon, encode_beacon
@@ -137,11 +137,13 @@ def test_beacon_with_missing_required_field_is_ignored():
 
 # Discovery class tests
 
-class MockUdpSocket:
-    """Мок сокета для тестирования Discovery."""
+class MockUdpSocket(QObject):
+    """Мок сокета для тестирования Discovery. Использует настоящий Qt-сигнал."""
+
+    readyRead = Signal()
 
     def __init__(self):
-        self.readyRead = Mock()
+        super().__init__()
         self.pending_datagrams = []
         self.sent_datagrams = []
         self.is_bound = False
@@ -265,7 +267,7 @@ def test_discovery_ignores_garbage_datagram():
     assert peer_seen_spy.called is False
 
 
-def test_discovery_stop_closes_socket():
+def test_discovery_stop_closes_socket(qapp):
     socket = MockUdpSocket()
     beacon = Beacon(OURS, "LAPTOP-ONE", "a" * 64, 47654, PROTOCOL_MAJOR)
 
@@ -273,6 +275,7 @@ def test_discovery_stop_closes_socket():
     discovery._socket = socket
 
     assert discovery.start(beacon) is True
+    assert discovery._timer.isActive() is True
     discovery.stop()
 
     assert socket.is_closed is True
@@ -302,7 +305,7 @@ def test_discovery_after_stop_ignores_datagrams():
     assert peer_seen_spy.called is False
 
 
-def test_discovery_returns_false_on_bind_failure():
+def test_discovery_returns_false_on_bind_failure(qapp):
     socket = MockUdpSocket()
     socket.should_bind_fail = True
     beacon = Beacon(OURS, "LAPTOP-ONE", "a" * 64, 47654, PROTOCOL_MAJOR)
@@ -312,3 +315,33 @@ def test_discovery_returns_false_on_bind_failure():
 
     assert discovery.start(beacon) is False
     assert discovery._timer.isActive() is False
+
+
+def test_discovery_readyread_signal_connection(qapp):
+    # Тест проверяет, что readyRead сигнал действительно подключен к обработчику.
+    socket = MockUdpSocket()
+    beacon = Beacon(OURS, "LAPTOP-ONE", "a" * 64, 47654, PROTOCOL_MAJOR)
+
+    discovery = Discovery(OURS)
+    # Заменить сокет и переподключить сигнал
+    discovery._socket.readyRead.disconnect()
+    discovery._socket = socket
+    socket.readyRead.connect(discovery._on_ready_read)
+
+    peer_seen_spy = Mock()
+    discovery.peer_seen.connect(peer_seen_spy)
+
+    assert discovery.start(beacon) is True
+
+    # Добавить датаграмму и испустить сигнал readyRead
+    peer_beacon = Beacon(THEIRS, "LAPTOP-TWO", "f" * 64, 47654, PROTOCOL_MAJOR)
+    socket.add_pending_datagram(encode_beacon(peer_beacon), "192.168.1.100")
+
+    # Испустить сигнал вместо прямого вызова обработчика
+    socket.readyRead.emit()
+
+    # Проверить, что сигнал был испущен
+    assert peer_seen_spy.called is True
+    call_args = peer_seen_spy.call_args
+    assert call_args[0][0] == peer_beacon
+    assert call_args[0][1] == "192.168.1.100"
