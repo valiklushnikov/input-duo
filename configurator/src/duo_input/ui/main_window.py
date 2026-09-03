@@ -906,14 +906,24 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ close
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
-        """Close without asking. The configuration lives on the device.
+        """Закрыть окно. Выйти или уйти в трей - решает общий буфер.
 
-        There was a prompt here about unsaved changes. It belonged to a
-        document model where the file was the truth; now an edit that was
-        never written to the board is simply an edit that was never written,
-        and the title bar says so while the window is open.
+        Конфигурация живёт на устройстве, поэтому спрашивать о несохранённом
+        нечего. Но если общий буфер включён, окно - не всё приложение: за ним
+        стоит подсистема, которую закрытие окна останавливать не должно.
+        Резидентность включается вместе с фичей и выключается вместе с ней:
+        тот, кто настраивает макросы, не получает вечно висящую программу.
         """
+        if self.background_mode:
+            self.hide()
+            event.ignore()
+            return
         event.accept()
+
+    @property
+    def background_mode(self) -> bool:
+        """Продолжает ли приложение работать после закрытия окна."""
+        return bool(self._settings.value("clipboard/enabled", False, type=bool))
 
 
 def _command_name(command: object) -> str:

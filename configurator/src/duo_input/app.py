@@ -1,7 +1,9 @@
 """Entry point for the Duo Input configurator.
 
-The application runs without administrator rights, makes no network requests
-and collects no telemetry.
+The application runs without administrator rights and collects no telemetry.
+It opens network connections only inside the local network, only to a computer
+the operator explicitly paired with, and only while the shared clipboard is
+switched on. With the shared clipboard off, no socket is ever opened.
 """
 
 from __future__ import annotations
@@ -9,6 +11,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import QSettings
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
@@ -100,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
     # The look is installed before the first widget exists, so nothing is ever
     # built, shown and then restyled in front of the operator.
     apply_theme(application)
+
+    # Резидентность включается вместе с общим буфером и только вместе с ним.
+    settings = QSettings()
+    if bool(settings.value("clipboard/enabled", False, type=bool)):
+        application.setQuitOnLastWindowClosed(False)
 
     # The language is installed before any widget exists, so every label is
     # built in the language the operator chose last time.
