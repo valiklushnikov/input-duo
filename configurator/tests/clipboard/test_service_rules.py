@@ -120,3 +120,28 @@ def test_content_for_answers_only_for_the_offer_we_last_sent():
 
     assert service.content_for("text/plain", seq) == b"hello"
     assert service.content_for("text/plain", seq + 1) is None
+
+
+def test_an_empty_snapshot_does_not_produce_an_offer():
+    service, _ = _service()
+    # Сначала отправляем нормальный snapshot, чтобы был last_sent_offer
+    sent: list[ClipboardOffer] = []
+    service.offer_ready.connect(sent.append)
+    service.on_local_snapshot(ClipboardSnapshot({"text/plain": b"hello"}))
+    assert len(sent) == 1
+    first_offer = sent[0]
+    first_seq = first_offer.seq
+
+    # Очищаем список отправленных объявлений
+    sent.clear()
+
+    # Отправляем пустой snapshot (буфер заперт другим процессом)
+    service.on_local_snapshot(ClipboardSnapshot({}))
+
+    # Проверяем, что:
+    # 1. Сигнал offer_ready не испускается
+    assert sent == []
+    # 2. last_sent_offer остаётся прежним
+    assert service.last_sent_offer == first_offer
+    # 3. Номер объявления не увеличился (не расходует последовательность)
+    assert service.last_sent_offer.seq == first_seq
