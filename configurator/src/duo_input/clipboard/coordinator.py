@@ -113,6 +113,8 @@ class ClipboardCoordinator(QObject):
         # связь (_link) не появляется, пока обе стороны не согласились.
         self._pairing = False
         self._pairing_link: PeerLink | None = None
+        self._pairing_message_slot = None
+        self._pairing_lost_slot = None
         self._pairing_candidate: PairingCandidate | None = None
         self._local_agreed = False
         self._remote_agreed = False
@@ -167,15 +169,12 @@ class ClipboardCoordinator(QObject):
     def stop(self) -> None:
         self._retry.stop()
         self._silence.stop()
-        self._pairing_window.stop()
-        self._discovery.stop()
+        self._clear_pairing_attempt(close_link=True)
+        self._end_pairing()
         self._listener.stop()
         if self._link is not None:
             self._link.close()
             self._link = None
-        if self._pairing_link is not None:
-            self._pairing_link.close()
-            self._pairing_link = None
         self._service.detach_link()
         self._set_state(LinkState.UNPAIRED if self.peer is None else LinkState.DISCONNECTED)
 
@@ -188,11 +187,10 @@ class ClipboardCoordinator(QObject):
     # ------------------------------------------------------------------ парринг: вход и код
 
     def begin_pairing(self) -> None:
+        # Повторный запуск начинает новый lifecycle. Согласия и callbacks
+        # прежней TLS-связи не имеют права перейти в него.
+        self._clear_pairing_attempt(close_link=True)
         self._pairing = True
-        self._pairing_link = None
-        self._pairing_candidate = None
-        self._local_agreed = False
-        self._remote_agreed = False
         # Только теперь и ровно на время связывания - чужой сертификат.
         self._listener.expect(None)
         self._discovery.start(
@@ -247,14 +245,33 @@ class ClipboardCoordinator(QObject):
         """Окно связывания истекло, либо пир отказался подтверждать - в обоих
         случаях связывание прекращается, а не продолжается в надежде на чудо.
         """
-        if self._pairing_link is not None:
-            self._pairing_link.close()
+        self._clear_pairing_attempt(close_link=True)
+        self._end_pairing()
+        self._set_state(LinkState.UNPAIRED if self.peer is None else LinkState.DISCONNECTED)
+
+    def _clear_pairing_attempt(self, *, close_link: bool) -> None:
+        """Отвязать конкретную попытку, не меняя состояние pairing-window."""
+        link = self._pairing_link
+        message_slot = self._pairing_message_slot
+        lost_slot = self._pairing_lost_slot
+
+        # Сначала делаем link неактуальным: close()/disconnect могут синхронно
+        # или уже из очереди доставить старый сигнал.
         self._pairing_link = None
+        self._pairing_message_slot = None
+        self._pairing_lost_slot = None
         self._pairing_candidate = None
         self._local_agreed = False
         self._remote_agreed = False
-        self._end_pairing()
-        self._set_state(LinkState.UNPAIRED if self.peer is None else LinkState.DISCONNECTED)
+
+        if link is None:
+            return
+        if message_slot is not None:
+            link.message_received.disconnect(message_slot)
+        if lost_slot is not None:
+            link.disconnected.disconnect(lost_slot)
+        if close_link:
+            link.close()
 
     def _offer_pairing(self, candidate: PairingCandidate) -> None:
         code = pairing_code(self._identity.fingerprint, candidate.fingerprint)
@@ -290,8 +307,12 @@ class ClipboardCoordinator(QObject):
             link.close()
             return
         self._pairing_link = link
-        link.message_received.connect(self._on_pairing_message)
-        link.disconnected.connect(self._on_pairing_link_lost)
+        message_slot = lambda message, source=link: self._on_pairing_message(source, message)
+        lost_slot = lambda reason, source=link: self._on_pairing_link_lost(source, reason)
+        self._pairing_message_slot = message_slot
+        self._pairing_lost_slot = lost_slot
+        link.message_received.connect(message_slot)
+        link.disconnected.connect(lost_slot)
         link.send(
             Message(
                 MessageType.PAIR_REQUEST,
@@ -305,11 +326,10 @@ class ClipboardCoordinator(QObject):
             )
         )
 
-    def _on_pairing_message(self, message: Message) -> None:
+    def _on_pairing_message(self, link: PeerLink, message: Message) -> None:
+        if link is not self._pairing_link:
+            return
         if message.type is MessageType.PAIR_REQUEST:
-            link = self._pairing_link
-            if link is None:
-                return
             candidate = PairingCandidate(
                 origin_id=str(message.header.get("origin_id", "")),
                 machine_name=str(message.header.get("machine_name", "")),
@@ -326,14 +346,13 @@ class ClipboardCoordinator(QObject):
             self._remote_agreed = True
             self._maybe_finish_pairing()
 
-    def _on_pairing_link_lost(self, _reason: str) -> None:
+    def _on_pairing_link_lost(self, link: PeerLink, _reason: str) -> None:
+        if link is not self._pairing_link:
+            return
         # Связь во время связывания оборвалась раньше согласия обеих сторон -
         # сбрасываем кандидата, но НЕ выходим из режима связывания целиком:
         # маячок ещё может привести к новой попытке до истечения окна.
-        self._pairing_link = None
-        self._pairing_candidate = None
-        self._local_agreed = False
-        self._remote_agreed = False
+        self._clear_pairing_attempt(close_link=False)
 
     def _maybe_finish_pairing(self) -> None:
         if not (self._local_agreed and self._remote_agreed):
@@ -342,12 +361,7 @@ class ClipboardCoordinator(QObject):
         link = self._pairing_link
         if candidate is None or link is None:
             return
-        link.message_received.disconnect(self._on_pairing_message)
-        link.disconnected.disconnect(self._on_pairing_link_lost)
-        self._pairing_link = None
-        self._pairing_candidate = None
-        self._local_agreed = False
-        self._remote_agreed = False
+        self._clear_pairing_attempt(close_link=False)
         self._trust.remember(candidate.as_trusted())
         self._end_pairing()
         self.peer_changed.emit(self._trust.peer())

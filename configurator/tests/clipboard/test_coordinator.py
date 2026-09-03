@@ -62,6 +62,45 @@ class _FakeLink(QObject):
         self.closed = True
 
 
+class _LateSignal:
+    """Signal-double, доставляющий уже поставленный в очередь callback после disconnect."""
+
+    def __init__(self) -> None:
+        self._connected: list[object] = []
+        self._queued: list[object] = []
+
+    def connect(self, callback) -> None:
+        self._connected.append(callback)
+
+    def disconnect(self, callback) -> None:
+        self._connected.remove(callback)
+        self._queued.append(callback)
+
+    def emit(self, *args) -> None:
+        callbacks = [*self._connected, *self._queued]
+        self._queued.clear()
+        for callback in callbacks:
+            callback(*args)
+
+
+class _LateSignalLink:
+    """Link-double: close/unsubscribe не отменяет уже queued delivery сигнала."""
+
+    def __init__(self, peer_fingerprint: str, peer_address: str = "192.168.1.5") -> None:
+        self.message_received = _LateSignal()
+        self.disconnected = _LateSignal()
+        self.sent: list[Message] = []
+        self.closed = False
+        self.peer_fingerprint = peer_fingerprint
+        self.peer_address = peer_address
+
+    def send(self, message: Message) -> None:
+        self.sent.append(message)
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _FakeTimer:
     """Заменитель `QTimer`, который просто запоминает, чем его попросили."""
 
@@ -91,12 +130,17 @@ def _reach_pairing_candidate(
     machine_name: str = "LAPTOP-TWO",
     fingerprint: str = "f" * 64,
     address: str = "192.168.1.5",
-) -> tuple[_FakeLink, PairingCandidate]:
+    *,
+    begin_pairing: bool = True,
+    link=None,
+) -> tuple[object, PairingCandidate]:
     """Довести парринг до момента, когда код уже показан и кандидат известен,
     но ни одна из сторон ещё не подтвердила.
     """
-    coordinator.begin_pairing()
-    link = _FakeLink(peer_fingerprint=fingerprint, peer_address=address)
+    if begin_pairing:
+        coordinator.begin_pairing()
+    if link is None:
+        link = _FakeLink(peer_fingerprint=fingerprint, peer_address=address)
     coordinator._on_incoming_link(link)
     link.message_received.emit(
         Message(
@@ -388,7 +432,7 @@ def test_after_the_pairing_window_expires_the_listener_refuses_unknown_certifica
     """Дверь, открытая на время связывания, обязана закрыться сама - без
     какого-либо дополнительного действия пользователя."""
     coordinator, _ = _make_coordinator(tmp_path)
-    coordinator.begin_pairing()
+    link, _candidate = _reach_pairing_candidate(coordinator)
     assert coordinator._listener._expected_fingerprint is None  # во время связывания - кто угодно
 
     coordinator._pairing_window.setInterval(50)
@@ -396,6 +440,9 @@ def test_after_the_pairing_window_expires_the_listener_refuses_unknown_certifica
     qtbot.waitUntil(lambda: not coordinator._pairing, timeout=2000)
 
     assert coordinator._listener._expected_fingerprint == ""
+    assert link.closed is True
+    assert coordinator._pairing_link is None
+    assert coordinator._pairing_candidate is None
 
 
 def test_after_the_pairing_window_expires_a_stranger_is_refused_again(tmp_path, qtbot):
@@ -521,6 +568,68 @@ def test_local_confirmation_alone_does_not_enable_the_exchange(tmp_path):
     assert coordinator.state is LinkState.SEARCHING
 
 
+def test_a_stale_link_cannot_confirm_a_new_pairing_after_pairing_is_restarted(tmp_path):
+    """Согласие принадлежит конкретной TLS-связи, а не общему состоянию.
+
+    Даже если закрытый fake поздно испустит оба своих сигнала, они не могут
+    подтвердить или сбросить кандидата, появившегося после нового begin_pairing().
+    """
+    coordinator, trust = _make_coordinator(tmp_path)
+    old_link = _LateSignalLink(peer_fingerprint="a" * 64)
+    old_link, _old_candidate = _reach_pairing_candidate(
+        coordinator,
+        origin_id="2" * 32,
+        fingerprint="a" * 64,
+        link=old_link,
+    )
+
+    coordinator.begin_pairing()
+    new_link, new_candidate = _reach_pairing_candidate(
+        coordinator,
+        origin_id="3" * 32,
+        fingerprint="b" * 64,
+        begin_pairing=False,
+    )
+    coordinator.confirm_pairing(new_candidate)
+
+    old_link.message_received.emit(Message(MessageType.PAIR_CONFIRM, {"agree": True}, b""))
+    old_link.disconnected.emit("поздний сигнал закрытой связи")
+
+    assert trust.peer() is None
+    assert coordinator._link is None
+    assert coordinator.service._link is None
+    assert old_link.closed is True
+    assert coordinator._pairing is True
+    assert coordinator._pairing_link is new_link
+    assert coordinator._pairing_candidate is new_candidate
+    assert coordinator._local_agreed is True
+    assert coordinator._remote_agreed is False
+    assert new_link.closed is False
+    assert coordinator.state is LinkState.SEARCHING
+
+
+def test_stop_fully_ends_pairing_and_stale_signals_are_harmless(tmp_path):
+    coordinator, trust = _make_coordinator(tmp_path)
+    link, candidate = _reach_pairing_candidate(coordinator)
+    coordinator.confirm_pairing(candidate)
+
+    coordinator.stop()
+    link.message_received.emit(Message(MessageType.PAIR_CONFIRM, {"agree": True}, b""))
+    link.disconnected.emit("поздний сигнал после stop")
+
+    assert link.closed is True
+    assert coordinator._pairing is False
+    assert coordinator._pairing_link is None
+    assert coordinator._pairing_candidate is None
+    assert coordinator._local_agreed is False
+    assert coordinator._remote_agreed is False
+    assert coordinator._pairing_window.isActive() is False
+    assert trust.peer() is None
+    assert coordinator._link is None
+    assert coordinator.service._link is None
+    assert coordinator.state is LinkState.UNPAIRED
+
+
 def test_confirmation_from_both_sides_enables_the_exchange(tmp_path):
     coordinator, trust = _make_coordinator(tmp_path)
     link, candidate = _reach_pairing_candidate(coordinator)
@@ -563,6 +672,10 @@ def test_the_peer_declining_confirmation_returns_to_unpaired(tmp_path):
     assert coordinator.state is LinkState.UNPAIRED
     assert link.closed is True
     assert coordinator._pairing is False
+    assert coordinator._pairing_link is None
+    assert coordinator._pairing_candidate is None
+    assert coordinator._local_agreed is False
+    assert coordinator._remote_agreed is False
 
 
 def test_forgetting_a_peer_returns_to_unpaired(tmp_path):
