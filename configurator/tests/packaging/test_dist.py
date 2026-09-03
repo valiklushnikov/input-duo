@@ -194,8 +194,6 @@ def test_the_licence_notices_ship(files):
 def test_the_executable_carries_the_project_version(dist):
     # The version is read from the built exe rather than trusted from the
     # source tree, so a stale build cannot pass as a current one.
-    import subprocess
-
     output = subprocess.run(
         [
             "powershell",
