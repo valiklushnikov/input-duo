@@ -4,6 +4,12 @@
 действия и не на цепочке подписей, поэтому сертификат самоподписанный и живёт
 десять лет. Истёкший сертификат означал бы, что связь между двумя спаренными
 компьютерами однажды молча перестала работать по календарю.
+
+Если хотя бы одного из трёх файлов идентичности нет на диске, идентичность
+создаётся заново целиком, а не достраивается. Это означает, что отпечаток
+меняется, и ранее спаренная машина перестанет принимать соединение, потребуя
+повторного парринга. Это осознанный выбор в пользу отказа, а не в пользу
+молчаливого продолжения с несогласованной парой.
 """
 
 from __future__ import annotations
@@ -11,7 +17,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from cryptography import x509
@@ -31,8 +37,8 @@ class NodeIdentity:
     """Постоянное имя этого узла и ключ, которым он себя доказывает."""
 
     origin_id: str
-    certificate_pem: bytes
-    key_pem: bytes
+    certificate_pem: bytes = field(repr=False)
+    key_pem: bytes = field(repr=False)
 
     @property
     def fingerprint(self) -> str:
