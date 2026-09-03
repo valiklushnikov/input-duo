@@ -21,6 +21,11 @@ STATE_LABELS = {
     "blocked": QCoreApplication.translate(
         "TrayIcon", "Windows не разрешила подключение — проверьте брандмауэр"
     ),
+    # Отдельная строка, а не общее "нет связи": повторные попытки здесь не
+    # исправят ничего сами - без обновления второй машины связь не заработает.
+    "protocol_mismatch": QCoreApplication.translate(
+        "TrayIcon", "Обновите вторую машину — версии протокола различаются"
+    ),
 }
 
 
@@ -72,6 +77,14 @@ class TrayIcon(QSystemTrayIcon):
         label = STATE_LABELS.get(state, STATE_LABELS["disconnected"])
         self.state_action.setText(label)
         self.setToolTip(f"Duo Input — {label}")
+
+    def set_sharing_checked(self, enabled: bool) -> None:
+        """Отразить состояние, не порождая новый sharing_toggled (C1: страница
+        и трей обязаны показывать одно и то же, даже если его выставили не
+        через сам трей)."""
+        self.sharing_action.blockSignals(True)
+        self.sharing_action.setChecked(enabled)
+        self.sharing_action.blockSignals(False)
 
     def _on_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:

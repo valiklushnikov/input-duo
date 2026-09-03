@@ -22,6 +22,16 @@ def test_enabling_creates_a_file_in_the_startup_folder(tmp_path, monkeypatch):
     assert autostart.shortcut_path().exists()
 
 
+def test_enabling_embeds_the_hidden_start_flag(tmp_path, monkeypatch):
+    """C2: без флага точка входа не узнала бы, что окно показывать не нужно."""
+    monkeypatch.setattr(autostart, "startup_directory", lambda: tmp_path)
+
+    autostart.enable(Path("C:/Program Files/Duo Input/DuoInput.exe"))
+
+    content = autostart.shortcut_path().read_text("utf-8")
+    assert autostart.HIDDEN_START_ARGUMENT in content
+
+
 def test_disabling_removes_it(tmp_path, monkeypatch):
     monkeypatch.setattr(autostart, "startup_directory", lambda: tmp_path)
     autostart.enable(Path("C:/Program Files/Duo Input/DuoInput.exe"))

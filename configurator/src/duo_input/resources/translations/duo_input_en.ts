@@ -325,6 +325,12 @@
         <source>Отпечаток: {0}</source>
         <translation>Fingerprint: {0}</translation>
     </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="68" />
+        <location filename="../../ui/clipboard_page.py" line="70" />
+        <source>Последние события</source>
+        <translation>Recent events</translation>
+    </message>
 </context>
 <context>
     <name>CountdownRing</name>
@@ -1758,6 +1764,11 @@ Code: {1}</translation>
         <location filename="../../ui/tray.py" line="21" />
         <source>Windows не разрешила подключение — проверьте брандмауэр</source>
         <translation>Windows blocked the connection - check the firewall</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="27" />
+        <source>Обновите вторую машину — версии протокола различаются</source>
+        <translation>Update the other computer - protocol versions differ</translation>
     </message>
     <message>
         <location filename="../../ui/tray.py" line="41" />

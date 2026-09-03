@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -20,6 +21,10 @@ from PySide6.QtWidgets import (
 
 from duo_input.clipboard.trust import TrustedPeer
 from duo_input.ui.tray import STATE_LABELS
+
+#: Сколько последних событий держим на экране - не журнал целиком, а то, что
+#: помогает понять, что произошло только что (§12).
+EVENTS_LIMIT = 20
 
 
 class ClipboardPage(QWidget):
@@ -58,6 +63,14 @@ class ClipboardPage(QWidget):
             lambda: self.address_changed.emit(self.address_field.text().strip())
         )
 
+        self.events_list = QListWidget(self)
+        self.events_list.setMaximumHeight(120)
+        self.events_list.setAccessibleName(self.tr("Последние события"))
+
+        events_box = QGroupBox(self.tr("Последние события"), self)
+        events_layout = QVBoxLayout(events_box)
+        events_layout.addWidget(self.events_list)
+
         peer_box = QGroupBox(self.tr("Второй компьютер"), self)
         peer_layout = QVBoxLayout(peer_box)
         peer_layout.addWidget(self.state_label)
@@ -74,10 +87,34 @@ class ClipboardPage(QWidget):
         layout.addWidget(peer_box)
         layout.addWidget(self.sharing_checkbox)
         layout.addWidget(self.autostart_checkbox)
+        layout.addWidget(events_box)
         layout.addStretch(1)
 
     def set_link_state(self, state: str) -> None:
         self.state_label.setText(STATE_LABELS.get(state, STATE_LABELS["disconnected"]))
+
+    def set_sharing_checked(self, enabled: bool) -> None:
+        """Отразить состояние переключателя, не порождая новый sharing_toggled.
+
+        Без блокировки сигналов чтение сохранённого состояния при запуске
+        само становилось бы новым переключением - обратная связь, а не
+        отображение состояния. Используется и при старте, и треем, чтобы
+        страница и трей всегда показывали одно и то же (C1).
+        """
+        self.sharing_checkbox.blockSignals(True)
+        self.sharing_checkbox.setChecked(enabled)
+        self.sharing_checkbox.blockSignals(False)
+
+    def set_autostart_checked(self, enabled: bool) -> None:
+        self.autostart_checkbox.blockSignals(True)
+        self.autostart_checkbox.setChecked(enabled)
+        self.autostart_checkbox.blockSignals(False)
+
+    def add_event(self, text: str) -> None:
+        """Добавить строку в список последних событий (§12), самый новый - сверху."""
+        self.events_list.insertItem(0, text)
+        while self.events_list.count() > EVENTS_LIMIT:
+            self.events_list.takeItem(self.events_list.count() - 1)
 
     def set_peer(self, peer: TrustedPeer | None) -> None:
         if peer is None:

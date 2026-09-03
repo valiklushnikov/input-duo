@@ -326,6 +326,12 @@
         <source>Отпечаток: {0}</source>
         <translation>Отпечаток: {0}</translation>
     </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="68"/>
+        <location filename="../../ui/clipboard_page.py" line="70"/>
+        <source>Последние события</source>
+        <translation>Последние события</translation>
+    </message>
 </context>
 <context>
     <name>CountdownRing</name>
@@ -1759,6 +1765,11 @@
         <location filename="../../ui/tray.py" line="21"/>
         <source>Windows не разрешила подключение — проверьте брандмауэр</source>
         <translation>Windows не разрешила подключение — проверьте брандмауэр</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="27"/>
+        <source>Обновите вторую машину — версии протокола различаются</source>
+        <translation>Обновите вторую машину — версии протокола различаются</translation>
     </message>
     <message>
         <location filename="../../ui/tray.py" line="41"/>
