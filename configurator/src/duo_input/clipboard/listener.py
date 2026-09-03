@@ -77,7 +77,15 @@ class PeerListener(QObject):
             link = PeerLink(self._identity, self)
             link.adopt(socket, self._expected_fingerprint)
             self._links.append(link)
+            # Без этого список растёт без границы: с резидентностью процесс
+            # живёт днями, а каждое принятое соединение оставляло бы в нём
+            # запись навсегда, даже разорванную секунду спустя.
+            link.disconnected.connect(lambda _reason, link=link: self._forget(link))
             self.link_ready.emit(link)
+
+    def _forget(self, link: PeerLink) -> None:
+        if link in self._links:
+            self._links.remove(link)
 
 
 __all__ = ["PeerListener"]

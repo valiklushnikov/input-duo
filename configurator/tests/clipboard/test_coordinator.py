@@ -305,6 +305,11 @@ def test_the_bigger_origin_id_waits_for_the_call(tmp_path, monkeypatch, qapp):
 
 
 def test_a_different_protocol_major_drops_the_link(tmp_path, qapp):
+    """§11: расхождение major версии - отдельное состояние, не обычный разрыв.
+
+    Обычный разрыв уходит в бесконечные повторы; здесь это было бы обманом -
+    вторая машина не обновится сама по себе от переподключения.
+    """
     coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
     link = _FakeLink()
 
@@ -313,8 +318,9 @@ def test_a_different_protocol_major_drops_the_link(tmp_path, qapp):
 
     coordinator._on_message(Message(MessageType.HELLO, {"protocol_major": PROTOCOL_MAJOR + 1}, b""))
 
-    assert coordinator.state is LinkState.DISCONNECTED
+    assert coordinator.state is LinkState.PROTOCOL_MISMATCH
     assert link.closed is True
+    assert coordinator._retry.isActive() is False
     coordinator.stop()
 
 
@@ -406,6 +412,47 @@ def test_an_incoming_link_with_the_right_fingerprint_still_connects(tmp_path, qa
 
     assert coordinator._link is link
     assert coordinator.state is LinkState.CONNECTED
+    coordinator.stop()
+
+
+def test_a_dropped_incoming_link_is_noticed_and_reconnection_is_accepted(tmp_path):
+    """I1: обрыв ВХОДЯЩЕЙ связи должен замечаться, как и обрыв исходящей.
+
+    До исправления disconnected подписывался только в _try_connect(); связь,
+    пришедшая через _on_incoming_link(), не имела обработчика разрыва вообще -
+    состояние застревало в CONNECTED, а новая связь от того же пира
+    отвергалась, потому что self._link всё ещё указывал на мёртвый объект.
+    """
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id="2" * 32)
+    link = _FakeLink(peer_fingerprint="f" * 64)
+    coordinator._on_incoming_link(link)
+    assert coordinator.state is LinkState.CONNECTED
+
+    link.disconnected.emit("сеть пропала")
+
+    assert coordinator.state is LinkState.DISCONNECTED
+    assert coordinator._link is None
+
+    second = _FakeLink(peer_fingerprint="f" * 64)
+    coordinator._on_incoming_link(second)
+
+    assert coordinator._link is second
+    assert coordinator.state is LinkState.CONNECTED
+    coordinator.stop()
+
+
+def test_a_dropped_link_from_a_finished_pairing_is_noticed(tmp_path):
+    """I1: то же самое для связи, пришедшей из завершившегося связывания."""
+    coordinator, trust = _make_coordinator(tmp_path)
+    link, candidate = _reach_pairing_candidate(coordinator)
+    coordinator.confirm_pairing(candidate)
+    link.message_received.emit(Message(MessageType.PAIR_CONFIRM, {"agree": True}, b""))
+    assert coordinator.state is LinkState.CONNECTED
+
+    link.disconnected.emit("сеть пропала")
+
+    assert coordinator.state is LinkState.DISCONNECTED
+    assert coordinator._link is None
     coordinator.stop()
 
 
@@ -765,3 +812,111 @@ def test_forgetting_a_peer_returns_to_unpaired(tmp_path):
 
     assert trust.peer() is None
     assert coordinator.state is LinkState.UNPAIRED
+
+
+# ---------------------------------------------------------------------- I2: забыть компьютер
+# останавливает всё, что могло бы само себя перезавести
+
+
+def test_forgetting_a_peer_stops_the_silence_watchdog_and_retry_timer(tmp_path, qapp):
+    """До исправления forget_peer() не трогал таймеры: сторож молчания по уже
+    закрытой связи срабатывал спустя SILENCE_LIMIT_MS, _drop() запускал
+    _retry, а _try_connect() (пира уже нет) включал маячок навсегда."""
+    coordinator, trust = _make_coordinator(tmp_path)
+    link, candidate = _reach_pairing_candidate(coordinator)
+    coordinator.confirm_pairing(candidate)
+    link.message_received.emit(Message(MessageType.PAIR_CONFIRM, {"agree": True}, b""))
+    assert coordinator._silence.isActive() is True
+
+    coordinator.forget_peer()
+
+    assert coordinator._silence.isActive() is False
+    assert coordinator._retry.isActive() is False
+
+
+def test_forgetting_a_peer_stops_the_beacon_from_announcing_forever(tmp_path, qtbot):
+    """Проверено исполнением в ревью: через 30 секунд узел начинал каждые 2
+    секунды объявлять всей сети свой идентификатор, имя машины и отпечаток -
+    бессрочно, вне режима связывания. Сокращаем сторож молчания, чтобы не
+    ждать настоящие 30 секунд, и убеждаемся, что после forget_peer() он не
+    воскрешает маячок."""
+    coordinator, trust = _make_coordinator(tmp_path)
+    link, candidate = _reach_pairing_candidate(coordinator)
+    coordinator.confirm_pairing(candidate)
+    link.message_received.emit(Message(MessageType.PAIR_CONFIRM, {"agree": True}, b""))
+
+    coordinator.forget_peer()
+
+    # Даже если бы сторож молчания и таймер повторов остались взведены (то,
+    # что чинит именно forget_peer), поиск не должен включаться заново: без
+    # доверенного пира _try_connect() обязан отказаться работать.
+    coordinator._try_connect()
+
+    assert coordinator._discovery._timer.isActive() is False
+    assert coordinator.state is LinkState.UNPAIRED
+
+
+def test_try_connect_refuses_to_search_without_a_trusted_peer(tmp_path, qapp):
+    """I2: попытки соединения отказываются работать, когда доверенного пира нет."""
+    coordinator, _ = _make_coordinator(tmp_path)
+    assert coordinator.peer is None
+
+    coordinator._try_connect()
+
+    assert coordinator._discovery._timer.isActive() is False
+    assert coordinator.state is LinkState.UNPAIRED
+
+
+# ---------------------------------------------------------------------- I3: ручной адрес
+# закрывает прежнюю связь, а не открывает вторую
+
+
+def test_setting_a_manual_address_while_connected_closes_the_previous_link(tmp_path, monkeypatch):
+    """До исправления set_manual_address() соединялся, не закрыв прежнюю
+    связь: старая оставалась живой и продолжала доставлять сообщения, а
+    повторный attach_link() у сервиса подключал offer_ready второй раз к тому
+    же слоту - каждое копирование уходило бы на второй компьютер дважды."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    first_link = _FakeLink()
+    coordinator._on_connected(first_link)
+    assert coordinator._link is first_link
+    assert coordinator.service._link is first_link
+
+    class _RecordingLink(QObject):
+        connected = Signal(str)
+        disconnected = Signal(str)
+        message_received = Signal(object)
+
+        def __init__(self, identity, parent=None) -> None:
+            super().__init__(parent)
+            self.sent: list[object] = []
+
+        def connect_to(self, address, port, expected_fingerprint) -> None:
+            # Симулирует немедленное успешное рукопожатие - тесту нужен уже
+            # установленный self._link, чтобы проверить, что он единственный.
+            self.connected.emit(expected_fingerprint or "")
+
+        def send(self, message) -> None:
+            self.sent.append(message)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(coordinator_module, "PeerLink", _RecordingLink)
+
+    coordinator.set_manual_address("192.168.1.9")
+
+    assert first_link.closed is True
+    second_link = coordinator._link
+    assert second_link is not first_link
+    assert isinstance(second_link, _RecordingLink)
+
+    # offer_ready подключается к _send_offer заново в attach_link(); без
+    # detach_link() перед новой попыткой он остался бы подключён и от первого
+    # раза тоже, и один offer_ready.emit() ушёл бы на провод дважды.
+    second_link.sent.clear()
+    from duo_input.clipboard.offer import ClipboardOffer as _Offer
+
+    coordinator.service.offer_ready.emit(_Offer(origin_id="x", seq=1, descriptors=()))
+    assert len(second_link.sent) == 1
+    coordinator.stop()

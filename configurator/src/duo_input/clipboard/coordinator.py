@@ -30,6 +30,7 @@ PAIR_CONFIRM с согласием получен И отправлен, то е
 
 from __future__ import annotations
 
+import logging
 from enum import StrEnum
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -42,6 +43,8 @@ from .peer import PeerLink
 from .service import SILENCE_LIMIT_MS, ClipboardService
 from .trust import TrustStore, TrustedPeer
 from .wire import PROTOCOL_MAJOR, PROTOCOL_MINOR, Message, MessageType
+
+logger = logging.getLogger(__name__)
 
 TCP_PORT = 47654
 
@@ -62,6 +65,10 @@ class LinkState(StrEnum):
     CONNECTED = "connected"
     DISCONNECTED = "disconnected"
     BLOCKED = "blocked"
+    # Отдельное состояние, а не обычный разрыв: соединение с этим пиром
+    # никогда не заработает само по себе, поэтому вечные повторы здесь были
+    # бы обманом, а не терпением - см. _drop().
+    PROTOCOL_MISMATCH = "protocol_mismatch"
 
 
 def reconnect_delay_ms(attempt: int) -> int:
@@ -81,6 +88,9 @@ class ClipboardCoordinator(QObject):
     state_changed = Signal(str)
     pairing_code_ready = Signal(str, object)
     peer_changed = Signal(object)
+    #: Короткая, человекочитаемая строка для журнала и для списка последних
+    #: событий на странице - см. §12 спецификации.
+    event_logged = Signal(str)
 
     def __init__(
         self,
@@ -95,6 +105,7 @@ class ClipboardCoordinator(QObject):
         self._trust = trust
         self._machine_name = machine_name
         self._service = service if service is not None else ClipboardService(identity.origin_id)
+        self._service.content_failed.connect(self._on_content_failed)
 
         self._listener = PeerListener(identity, self)
         # Безопасное состояние по умолчанию, ещё до первого start(): чужой
@@ -153,6 +164,17 @@ class ClipboardCoordinator(QObject):
         self._state = state
         self.state_changed.emit(state.value)
 
+    def _on_content_failed(self, reason: str) -> None:
+        """Пир исчез между копированием и вставкой - §11: журнал и разрыв в трее.
+
+        Сама связь уже реагирует на разрыв отдельно (см. _on_disconnected);
+        здесь фиксируется именно неудачная попытка отдать содержимое, чтобы
+        она осталась видна в журнале и в списке последних событий.
+        """
+        message = f"не удалось передать содержимое буфера: {reason}"
+        logger.warning(message)
+        self.event_logged.emit(message)
+
     # ------------------------------------------------------------------ жизненный цикл
 
     def start(self) -> None:
@@ -179,10 +201,25 @@ class ClipboardCoordinator(QObject):
         self._set_state(LinkState.UNPAIRED if self.peer is None else LinkState.DISCONNECTED)
 
     def set_manual_address(self, address: str) -> None:
+        """Оператор ввёл адрес вручную - соединиться по нему заново.
+
+        Если связь уже жива, её нужно сперва закрыть: иначе прежняя связь
+        продолжает разговаривать (heartbeat, объявления) одновременно с
+        новой попыткой, а attach_link() у сервиса подключает offer_ready
+        второй раз к тому же слоту - каждое копирование уходило бы на
+        второй компьютер дважды.
+        """
         self._manual_address = address.strip()
-        if self.peer is not None:
-            self._attempt = 0
-            self._try_connect()
+        if self.peer is None:
+            return
+        self._retry.stop()
+        self._silence.stop()
+        if self._link is not None:
+            self._link.close()
+            self._link = None
+            self._service.detach_link()
+        self._attempt = 0
+        self._try_connect()
 
     # ------------------------------------------------------------------ парринг: вход и код
 
@@ -240,6 +277,19 @@ class ClipboardCoordinator(QObject):
                 self._abort_pairing()
 
     def forget_peer(self) -> None:
+        """Разорвать всё, что держало доверие к прежнему пиру - не только запись о нём.
+
+        Раньше здесь останавливалось хранилище доверия, но не таймеры: сторож
+        молчания продолжал тикать по уже закрытой связи, его срабатывание
+        запускало _drop() -> _retry, а _try_connect() (peer уже None, адреса
+        нет) включал маячок навсегда - забытый узел начинал бессрочно
+        объявлять себя всей сети, что прямо запрещено §9. Останавливать нужно
+        всё, что могло бы само себя перезавести.
+        """
+        self._retry.stop()
+        self._silence.stop()
+        self._discovery.stop()
+        self._attempt = 0
         self._trust.forget()
         if self._link is not None:
             self._link.close()
@@ -382,7 +432,12 @@ class ClipboardCoordinator(QObject):
         self._trust.remember(candidate.as_trusted())
         self._end_pairing()
         self.peer_changed.emit(self._trust.peer())
+        # Та же подписка, что и для входящей связи вне парринга: связь,
+        # рождённая связыванием, не проходит через _try_connect() и без
+        # этого не получила бы обработчик разрыва вовсе.
+        link.disconnected.connect(self._on_disconnected)
         self._on_connected(link)
+        self.event_logged.emit(f"связано с «{candidate.machine_name}»")
 
     # ------------------------------------------------------------------ рабочая связь
 
@@ -394,8 +449,14 @@ class ClipboardCoordinator(QObject):
 
     def _try_connect(self) -> None:
         peer = self.peer
+        if peer is None:
+            # Без доверенного пира соединяться не с кем, а искать его маячком
+            # означало бы объявлять себя всей сети бессрочно - см. §9 и
+            # forget_peer(). Единственный законный способ снова оказаться
+            # здесь без пира - забытый узел; тот обязан молчать.
+            return
         address = self._address()
-        if peer is None or not address:
+        if not address:
             self._start_looking()
             return
         if peer.origin_id < self._identity.origin_id:
@@ -437,6 +498,11 @@ class ClipboardCoordinator(QObject):
         if self._link is not None:
             link.close()
             return
+        # Без этой подписки обрыв входящей связи проходил незамеченным:
+        # _try_connect() подписывает disconnected сам, но эта связь пришла не
+        # оттуда - разрыв не приводил ни к _drop(), ни к переподключению, а
+        # координатор так и оставался в CONNECTED со связью, которой уже нет.
+        link.disconnected.connect(self._on_disconnected)
         self._on_connected(link)
 
     def _on_connected(self, link: PeerLink) -> None:
@@ -465,17 +531,32 @@ class ClipboardCoordinator(QObject):
         self._silence.start()
         if message.type is MessageType.HELLO:
             if int(message.header.get("protocol_major", -1)) != PROTOCOL_MAJOR:
-                self._drop("вторая машина говорит на другой версии протокола")
+                self._drop(
+                    "вторая машина говорит на другой версии протокола",
+                    protocol_mismatch=True,
+                )
 
     def _on_disconnected(self, reason: str) -> None:
         self._drop(reason)
 
-    def _drop(self, reason: str) -> None:
+    def _drop(self, reason: str, *, protocol_mismatch: bool = False) -> None:
+        """Разорвать рабочую связь. ``reason`` больше не исчезает молча -
+
+        §11 требует отдельного сообщения при расхождении старшей версии
+        протокола: обновление не случится само, поэтому бесконечные повторы
+        были бы враньём о том, что проблема временная, а трей всё равно
+        писал бы "нет связи", хотя чинить нужно не сеть.
+        """
         self._silence.stop()
         if self._link is not None:
             self._link.close()
             self._link = None
         self._service.detach_link()
+        logger.info("связь разорвана: %s", reason)
+        self.event_logged.emit(f"связь разорвана: {reason}")
+        if protocol_mismatch:
+            self._set_state(LinkState.PROTOCOL_MISMATCH)
+            return
         self._set_state(LinkState.DISCONNECTED)
         self._retry.start(reconnect_delay_ms(self._attempt))
         self._attempt += 1

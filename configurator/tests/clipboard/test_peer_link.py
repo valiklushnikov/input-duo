@@ -122,6 +122,33 @@ def test_the_listener_accepts_a_client_whose_fingerprint_it_expects(qtbot, ident
     client.close()
 
 
+def test_the_listener_forgets_a_link_once_it_disconnects(qtbot, identities):
+    """M4: список принятых связей не должен расти без границы.
+
+    С резидентностью процесс живёт днями; без удаления при разрыве каждое
+    принятое соединение оставляло бы в списке запись навсегда, даже если оно
+    прожило секунду.
+    """
+    server_identity, client_identity = identities
+
+    listener = PeerListener(server_identity)
+    assert listener.listen(0) is True
+
+    incoming: list[PeerLink] = []
+    listener.link_ready.connect(incoming.append)
+
+    client = PeerLink(client_identity)
+    with qtbot.waitSignal(client.connected, timeout=5000):
+        client.connect_to("127.0.0.1", listener.port, server_identity.fingerprint)
+    qtbot.waitUntil(lambda: bool(incoming), timeout=5000)
+    assert len(listener._links) == 1
+
+    client.close()
+    qtbot.waitUntil(lambda: not listener._links, timeout=5000)
+
+    listener.stop()
+
+
 def test_the_listener_refuses_a_client_whose_fingerprint_it_does_not_expect(qtbot, identities):
     """Закреплённый отпечаток на стороне слушателя защищает и в обратную сторону.
 
