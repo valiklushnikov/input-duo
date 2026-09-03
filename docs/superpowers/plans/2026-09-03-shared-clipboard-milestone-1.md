@@ -1650,14 +1650,20 @@ class ClipboardService(QObject):
     # ------------------------------------------------------------------ пояса
 
     def _echoes_what_we_received(self, snapshot: ClipboardSnapshot) -> bool:
-        """Второй пояс: это то, что нам только что прислали."""
-        if self._last_received is None:
+        """Второй пояс: снимок не несёт ничего, кроме того, что нам прислали.
+
+        Совпадения одного формата недостаточно. Пользователь, скопировавший тот
+        же текст из другого приложения, получит вдобавок `text/html`, и гашение
+        по частичному совпадению потеряло бы всю его копию молча. Эхо - это
+        точное воспроизведение принятого, а не пересечение с ним.
+        """
+        if self._last_received is None or not snapshot.payloads:
             return False
         for mime, payload in snapshot.payloads.items():
             expected = self._last_received.digest_of(mime)
-            if expected is not None and expected == hashlib.sha256(payload).hexdigest():
-                return True
-        return False
+            if expected is None or expected != hashlib.sha256(payload).hexdigest():
+                return False
+        return True
 
 
 __all__ = ["ClipboardService"]
@@ -1809,7 +1815,7 @@ def ssl_configuration(identity: NodeIdentity) -> QSslConfiguration:
     return configuration
 
 
-def _fingerprint_of_socket(socket: QSslSocket) -> str:
+def fingerprint_of_socket(socket: QSslSocket) -> str:
     certificate = socket.peerCertificate()
     if certificate.isNull():
         return ""
@@ -1877,7 +1883,7 @@ class PeerLink(QObject):
         socket = self._socket
         if socket is None:
             return
-        fingerprint = _fingerprint_of_socket(socket)
+        fingerprint = fingerprint_of_socket(socket)
         if self._expected_fingerprint is None and fingerprint:
             # Парринг: доверие ещё не выдано, его сейчас выдаст человек.
             socket.ignoreSslErrors()
@@ -1891,7 +1897,7 @@ class PeerLink(QObject):
         socket = self._socket
         if socket is None:
             return
-        self._peer_fingerprint = _fingerprint_of_socket(socket)
+        self._peer_fingerprint = fingerprint_of_socket(socket)
         if self._expected_fingerprint and self._peer_fingerprint != self._expected_fingerprint:
             self._fail("сертификат не тот, что был закреплён")
             return
@@ -1930,7 +1936,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtNetwork import QHostAddress, QSslServer, QSslSocket
 
 from .identity import NodeIdentity
-from .peer import PeerLink, ssl_configuration
+from .peer import PeerLink, fingerprint_of_socket, ssl_configuration
 
 
 class PeerListener(QObject):
@@ -1944,8 +1950,28 @@ class PeerListener(QObject):
         self._expected_fingerprint: str | None = None
         self._server = QSslServer(self)
         self._server.setSslConfiguration(ssl_configuration(identity))
+        # Без этого не завершается НИ ОДНО рукопожатие: самоподписанный
+        # сертификат отвергается на стороне сервера молча, и соединение никогда
+        # не доходит до nextPendingConnection.
+        self._server.sslErrors.connect(self._on_server_ssl_errors)
         self._server.pendingConnectionAvailable.connect(self._on_pending)
         self._links: list[PeerLink] = []
+
+    def _on_server_ssl_errors(self, socket: QSslSocket, errors) -> None:
+        """То же правило, что в PeerLink._on_ssl_errors, но для входящей стороны.
+
+        Не проигнорировать здесь - значит и не узнать, кто стучится: сокет так
+        и не станет доступен через nextPendingConnection.
+        """
+        fingerprint = fingerprint_of_socket(socket)
+        if self._expected_fingerprint is None and fingerprint:
+            # Парринг: доверие ещё не выдано, его сейчас выдаст человек.
+            socket.ignoreSslErrors()
+            return
+        if fingerprint and fingerprint == self._expected_fingerprint:
+            socket.ignoreSslErrors()
+            return
+        # Ничего не делаем: Qt сам оборвёт рукопожатие с чужим сертификатом.
 
     @property
     def port(self) -> int:
