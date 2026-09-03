@@ -199,9 +199,20 @@ def configure_runtime(
 
 def main(argv: list[str] | None = None) -> int:
     """Run the configurator; returns the Qt exit code."""
-    application = QApplication.instance() or QApplication(
-        list(argv) if argv is not None else sys.argv
-    )
+    arguments = list(argv) if argv is not None else sys.argv
+    if "--self-check-tls" in arguments:
+        # Собранная программа должна уметь доказать, что TLS в ней работает:
+        # недостающая криптографическая библиотека выглядит у пользователя
+        # как "нет связи" и никак иначе, поэтому проверка нужна именно здесь,
+        # до создания QApplication, чтобы её можно было вызвать из готового
+        # exe без графического окна.
+        from PySide6.QtNetwork import QSslSocket
+
+        print(f"tls: {'ok' if QSslSocket.supportsSsl() else 'missing'}")
+        print(f"backend: {QSslSocket.activeBackend()}")
+        return 0
+
+    application = QApplication.instance() or QApplication(arguments)
     application.setApplicationName(APPLICATION_NAME)
     application.setApplicationVersion(__version__)
     application.setOrganizationName(ORGANISATION_NAME)
