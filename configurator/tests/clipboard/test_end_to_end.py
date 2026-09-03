@@ -257,18 +257,89 @@ def test_link_state_changed_reports_connect_and_disconnect(qapp):
 def test_content_for_the_wrong_mime_is_ignored_while_waiting(qtbot):
     """CONTENT для другого формата, чем тот, что ждут, не должен подсунуть чужой ответ.
 
-    В обычной работе `_pending_fetch` заведён под конкретный mime: пришедшее
-    CONTENT с другим mime - это не тот ответ, который ждали, и подставлять
-    его содержимое было бы неверно.
+    Ожидания хранятся по ключу (seq, mime): пришедшее CONTENT с тем же seq, но
+    другим mime, адресуется другому ключу и не должно задеть эту запись.
     """
     service = ClipboardService(OURS)
     link = _FakeLink()
     service.attach_link(link)
-    service._pending_fetch = {"mime": "text/plain", "payload": None, "error": None}
+    entry = {"payload": None, "error": None, "loop": None}
+    service._pending_fetches[(1, "text/plain")] = [entry]
 
     service.handle_message(Message(MessageType.CONTENT, {"seq": 1, "mime": "text/html"}, "чужое".encode("utf-8")))
 
-    assert service._pending_fetch["payload"] is None
+    assert entry["payload"] is None
+
+
+def test_a_second_fetch_during_the_first_gets_its_own_answer_and_does_not_steal_the_others(qtbot):
+    """Воспроизводит сценарий ревью: второй _fetch во время первого - обычный порядок событий.
+
+    Windows запрашивает форматы одной вставки последовательно, но вложенный
+    цикл событий внутри _fetch прокачивает нативные сообщения тоже, поэтому
+    второй запрос (другого формата) стартует и завершается, пока первый ещё
+    ждёт. Раньше общие поля `_pending_fetch`/`_fetch_loop` одного объекта
+    переписывались вторым вызовом, и запоздавший ответ на первый запрос
+    терялся молча (или проваливался в TypeError на None). Здесь оба запроса
+    обязаны получить каждый свои данные.
+    """
+    service = ClipboardService(OURS)
+    link = _FakeLink()
+    service.attach_link(link)
+
+    offer_a = ClipboardOffer(THEIRS, 1, describe({"text/plain": b"A-data"}))
+    offer_b = ClipboardOffer(THEIRS, 1, describe({"text/html": b"B-data"}))
+
+    order: list[str] = []
+    result_b_holder: dict = {}
+
+    def during_first_wait() -> None:
+        order.append("b-start")
+        # Ответ на второй запрос приходит сразу же, пока первый ещё не получил свой.
+        QTimer.singleShot(
+            0,
+            lambda: service.handle_message(
+                Message(MessageType.CONTENT, {"seq": offer_b.seq, "mime": "text/html"}, b"B-data")
+            ),
+        )
+        result_b_holder["value"] = service._fetch("text/html", offer_b)
+        order.append("b-done")
+
+        # Только теперь доставляем запоздавший ответ на первый (A) запрос.
+        service.handle_message(
+            Message(MessageType.CONTENT, {"seq": offer_a.seq, "mime": "text/plain"}, b"A-data")
+        )
+
+    QTimer.singleShot(10, during_first_wait)
+
+    result_a = service._fetch("text/plain", offer_a)
+
+    assert order == ["b-start", "b-done"]
+    assert result_b_holder["value"] == b"B-data"
+    assert result_a == b"A-data"
+    # Обе записи должны быть убраны из внутреннего состояния - утечки нет.
+    assert service._pending_fetches == {}
+
+
+def test_detach_link_wakes_a_pending_fetch_quickly(qtbot):
+    """detach_link обязан будить ожидание так же быстро, как и разрыв связи по сигналу.
+
+    Именно detach_link - тот метод, которым связь рвут программно (по
+    сторожу молчания, по несовпадению версии протокола), так что для него
+    действует то же требование "мгновенного отказа", что и для _on_link_lost.
+    """
+    service = ClipboardService(OURS)
+    link = _FakeLink()
+    service.attach_link(link)
+    offer = ClipboardOffer(THEIRS, 1, describe({"text/plain": b"x"}))
+
+    QTimer.singleShot(50, service.detach_link)
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        service._fetch("text/plain", offer)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5.0
 
 
 def test_the_content_requested_signal_was_a_stub_and_is_gone() -> None:

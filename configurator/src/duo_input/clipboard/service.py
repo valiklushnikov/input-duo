@@ -45,8 +45,19 @@ class ClipboardService(QObject):
         self._last_sent_payloads: dict[str, bytes] = {}
         self._last_received: ClipboardOffer | None = None
         self._link = None
-        self._pending_fetch: dict[str, bytes] | None = None
-        self._fetch_loop: QEventLoop | None = None
+        # Ожидания содержимого - по ключу (seq, mime), а не одно на весь объект.
+        #
+        # Windows запрашивает форматы одной вставки последовательно, но
+        # вложенный цикл событий внутри _fetch прокачивает и нативные
+        # сообщения тоже - поэтому второй _fetch во время первого не теория,
+        # а обычный порядок событий (второй запрос форматов той же вставки
+        # приходит, пока первый ещё ждёт ответа по сети). Общее поле на весь
+        # объект здесь было ошибкой: второй вызов переписывал бы состояние
+        # первого, и пришедший позже ответ на первый запрос терялся бы молча.
+        # Список значений на ключ - на случай, если два запроса одного и того
+        # же (seq, mime) идут параллельно: оба ждут один и тот же ответ, и
+        # оба должны его получить.
+        self._pending_fetches: dict[tuple[int, str], list[dict]] = {}
         self._heartbeat = QTimer(self)
         self._heartbeat.setInterval(HEARTBEAT_MS)
         self._heartbeat.timeout.connect(self._send_ping)
@@ -110,27 +121,41 @@ class ClipboardService(QObject):
         Вставляющее приложение ждёт ответа, поэтому здесь крутится вложенный
         цикл событий. Обработка новых снимков на это время не нужна и не
         выполняется: снимок делает граница платформы, а она вызвала нас сама.
+
+        Состояние ожидания (`entry`) - локальная переменная этого вызова, а
+        не поле объекта: параллельный вызов _fetch (для другого формата той
+        же вставки, пока этот ещё ждёт) заводит свою собственную запись и
+        свой собственный вложенный цикл, не трогая этот. Ответ приходит по
+        сети с указанием (seq, mime) и адресуется по этому же ключу - см.
+        _receive_content и _receive_content_error.
         """
         if self._link is None:
             raise TimeoutError("нет связи со вторым компьютером")
 
-        self._pending_fetch = {"mime": mime, "payload": None, "error": None}
+        key = (offer.seq, mime)
+        entry: dict = {"payload": None, "error": None, "loop": None}
+        self._pending_fetches.setdefault(key, []).append(entry)
+
         self._send(Message(MessageType.FETCH, {"seq": offer.seq, "mime": mime}, b""))
 
         loop = QEventLoop()
-        self._fetch_loop = loop
+        entry["loop"] = loop
         QTimer.singleShot(TRANSFER_TIMEOUT_MS, loop.quit)
         loop.exec()
-        self._fetch_loop = None
 
-        pending, self._pending_fetch = self._pending_fetch, None
-        if pending["error"] is not None:
-            self.content_failed.emit(pending["error"])
-            raise TimeoutError(pending["error"])
-        if pending["payload"] is None:
+        waiters = self._pending_fetches.get(key)
+        if waiters is not None and entry in waiters:
+            waiters.remove(entry)
+            if not waiters:
+                del self._pending_fetches[key]
+
+        if entry["error"] is not None:
+            self.content_failed.emit(entry["error"])
+            raise TimeoutError(entry["error"])
+        if entry["payload"] is None:
             self.content_failed.emit("второй компьютер не ответил")
             raise TimeoutError("второй компьютер не ответил")
-        return pending["payload"]
+        return entry["payload"]
 
     # ------------------------------------------------------------------ связь
 
@@ -144,6 +169,16 @@ class ClipboardService(QObject):
         self.link_state_changed.emit("connected")
 
     def detach_link(self) -> None:
+        """Отсоединиться от связи по собственной инициативе (не по её разрыву).
+
+        Симметрично _on_link_lost и в части остановки heartbeat, и в части
+        пробуждения ожиданий содержимого: тому, кто ждёт ответа по сети, всё
+        равно, почему связи больше нет. Без этого явный detach_link во время
+        ожидания не отпускал бы вложенный цикл, и вызов вернулся бы только
+        через TRANSFER_TIMEOUT_MS вместо немедленного отказа - а именно
+        detach_link является тем методом, которым связь рвут программно (по
+        сторожу молчания, по несовпадению версии протокола и так далее).
+        """
         if self._link is None:
             return
         self._heartbeat.stop()
@@ -152,6 +187,7 @@ class ClipboardService(QObject):
         except (RuntimeError, TypeError):
             pass
         self._link = None
+        self._fail_all_pending_fetches("связь закрыта")
         self.link_state_changed.emit("disconnected")
 
     def handle_message(self, message: Message) -> None:
@@ -179,9 +215,22 @@ class ClipboardService(QObject):
     def _on_link_lost(self, reason: str) -> None:
         self._heartbeat.stop()
         self._link = None
-        if self._fetch_loop is not None:
-            self._fetch_loop.quit()
+        self._fail_all_pending_fetches(f"связь потеряна: {reason}")
         self.link_state_changed.emit(f"disconnected: {reason}")
+
+    def _fail_all_pending_fetches(self, reason: str) -> None:
+        """Разбудить все ожидания содержимого сразу - связи больше нет ни для одного из них.
+
+        Каждое ожидание получает свой отказ и отпускает свой собственный
+        вложенный цикл; список очищает сам вызвавший его _fetch после
+        выхода из loop.exec().
+        """
+        for entries in self._pending_fetches.values():
+            for entry in entries:
+                entry["error"] = reason
+                loop = entry["loop"]
+                if loop is not None:
+                    loop.quit()
 
     def _answer_fetch(self, message: Message) -> None:
         mime = str(message.header.get("mime", ""))
@@ -199,20 +248,21 @@ class ClipboardService(QObject):
         self._send(Message(MessageType.CONTENT, {"seq": seq, "mime": mime}, payload))
 
     def _receive_content(self, message: Message) -> None:
-        if self._pending_fetch is None:
-            return
-        if str(message.header.get("mime")) != self._pending_fetch["mime"]:
-            return
-        self._pending_fetch["payload"] = message.blob
-        if self._fetch_loop is not None:
-            self._fetch_loop.quit()
+        key = (int(message.header.get("seq", -1)), str(message.header.get("mime", "")))
+        for entry in self._pending_fetches.get(key, []):
+            entry["payload"] = message.blob
+            loop = entry["loop"]
+            if loop is not None:
+                loop.quit()
 
     def _receive_content_error(self, message: Message) -> None:
-        if self._pending_fetch is None:
-            return
-        self._pending_fetch["error"] = str(message.header.get("reason", "отказ"))
-        if self._fetch_loop is not None:
-            self._fetch_loop.quit()
+        key = (int(message.header.get("seq", -1)), str(message.header.get("mime", "")))
+        reason = str(message.header.get("reason", "отказ"))
+        for entry in self._pending_fetches.get(key, []):
+            entry["error"] = reason
+            loop = entry["loop"]
+            if loop is not None:
+                loop.quit()
 
     # ------------------------------------------------------------------ пояса
 
