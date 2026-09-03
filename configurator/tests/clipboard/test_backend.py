@@ -75,3 +75,18 @@ def test_a_failed_fetch_yields_nothing_rather_than_raising(qapp):
     data = RemoteMimeData(_offer(), fetch)
 
     assert bytes(data.data("text/plain")) == b""
+
+
+def test_a_failed_fetch_is_logged_with_traceback(qapp, caplog):
+    """Ошибка при получении данных логируется с трассировкой для диагностики."""
+
+    def fetch(mime: str) -> bytes:
+        raise TimeoutError("пир не ответил")
+
+    data = RemoteMimeData(_offer(), fetch)
+
+    with caplog.at_level("WARNING", logger="duo_input.clipboard.backend"):
+        bytes(data.data("text/plain"))
+
+    assert "Failed to fetch clipboard format 'text/plain'" in caplog.text
+    assert "TimeoutError: пир не ответил" in caplog.text

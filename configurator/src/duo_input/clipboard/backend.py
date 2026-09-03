@@ -11,11 +11,14 @@ RemoteMimeData - это обещание, а не данные: она объя�
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, Protocol, runtime_checkable
 
 from PySide6.QtCore import QByteArray, QMimeData
 
 from .offer import ClipboardOffer
+
+logger = logging.getLogger(__name__)
 
 #: Формат-метка: чьё это содержимое и под каким номером.
 ORIGIN_MIME = "application/x-duo-input-origin"
@@ -68,6 +71,7 @@ class RemoteMimeData(QMimeData):
         try:
             payload = self._fetcher(requested)
         except Exception:  # noqa: BLE001 - пустая вставка честнее, чем падение
+            logger.warning(f"Failed to fetch clipboard format {requested!r}", exc_info=True)
             return QByteArray()
         self._cache[requested] = payload
         return QByteArray(payload)
