@@ -37,6 +37,7 @@ from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.domain.validation import ValidationIssue
 from duo_input.i18n import TranslationManager
 from duo_input.ui.bindings import BindingsPage
+from duo_input.ui.clipboard_page import ClipboardPage
 from duo_input.ui.diagnostics import DiagnosticsPage
 from duo_input.ui.macros import MacrosPage
 from duo_input.ui.models.binding_table import MouseCapabilities
@@ -104,15 +105,17 @@ class MainWindow(QMainWindow):
         PAGE_BINDINGS,
         PAGE_MACROS,
         PAGE_MOUSE,
+        PAGE_CLIPBOARD,
         PAGE_DIAGNOSTICS,
         PAGE_SETTINGS,
-    ) = range(7)
+    ) = range(8)
     PAGE_ORDER = (
         PAGE_OVERVIEW,
         PAGE_PROFILES,
         PAGE_BINDINGS,
         PAGE_MACROS,
         PAGE_MOUSE,
+        PAGE_CLIPBOARD,
         PAGE_DIAGNOSTICS,
         PAGE_SETTINGS,
     )
@@ -196,6 +199,7 @@ class MainWindow(QMainWindow):
         self.bindings = BindingsPage(self._service, self.pages)
         self.macros = MacrosPage(self._service, self.pages)
         self.mouse = MouseSwitchPage(self._service, self.pages)
+        self.clipboard_page = ClipboardPage(self.pages)
         self.diagnostics = DiagnosticsPage(self._service, self.pages)
         self.settings = SettingsPage(self.translations, parent=self.pages)
         sections = (
@@ -204,6 +208,7 @@ class MainWindow(QMainWindow):
             (self.tr("Bindings"), self.bindings),
             (self.tr("Macros"), self.macros),
             (self.tr("Mouse"), self.mouse),
+            (self.tr("Общий буфер"), self.clipboard_page),
             (self.tr("Diagnostics"), self.diagnostics),
             (self.tr("Settings"), self.settings),
         )
