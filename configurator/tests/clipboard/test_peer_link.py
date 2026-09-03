@@ -47,6 +47,26 @@ def test_a_message_crosses_a_real_tls_connection(qtbot, identities):
     client.close()
 
 
+def test_a_fresh_identity_completes_a_real_tls_handshake_on_the_active_backend(
+    qtbot, tmp_path
+):
+    """The identity format must work with the Qt TLS backend shipped on Windows."""
+    server_identity = load_or_create(tmp_path / "fresh-server")
+    client_identity = load_or_create(tmp_path / "fresh-client")
+    listener = PeerListener(server_identity)
+    assert listener.listen(0) is True
+    incoming: list[PeerLink] = []
+    listener.link_ready.connect(incoming.append)
+
+    client = PeerLink(client_identity)
+    with qtbot.waitSignal(client.connected, timeout=5000):
+        client.connect_to("127.0.0.1", listener.port, server_identity.fingerprint)
+    qtbot.waitUntil(lambda: bool(incoming), timeout=5000)
+
+    listener.stop()
+    client.close()
+
+
 def test_a_wrong_fingerprint_is_refused(qtbot, identities):
     server_identity, client_identity = identities
 

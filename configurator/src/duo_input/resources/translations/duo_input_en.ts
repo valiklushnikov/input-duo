@@ -1439,19 +1439,29 @@
 <context>
     <name>PairingDialog</name>
     <message>
-        <location filename="../../app.py" line="118" />
+        <location filename="../../app.py" line="130" />
         <source>Подтвердите связывание</source>
         <extracomment>Console script target declared in ``pyproject.toml``.</extracomment>
         <translation>Confirm pairing</translation>
     </message>
     <message>
-        <location filename="../../app.py" line="119" />
+        <location filename="../../app.py" line="131" />
         <source>Компьютер «{0}» показывает тот же код?
 
 Код: {1}</source>
         <translation>Does “{0}” show the same code?
 
 Code: {1}</translation>
+    </message>
+    <message>
+        <location filename="../../app.py" line="141" />
+        <source>Связать</source>
+        <translation>Pair</translation>
+    </message>
+    <message>
+        <location filename="../../app.py" line="145" />
+        <source>Отказать</source>
+        <translation>Reject</translation>
     </message>
 </context>
 <context>

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSettings
+import pytest
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QMessageBox
 
 from duo_input import app as app_module
 from duo_input.app import build_main_window, configure_runtime, single_instance_lock
 from duo_input.clipboard.pairing import PairingCandidate
+from duo_input.i18n import TranslationManager
 
 
 def _settings(tmp_path, enabled: bool) -> QSettings:
@@ -26,6 +28,14 @@ def _candidate(
         address="192.168.1.5",
         port=47654,
     )
+
+
+def _click_role(dialog: QMessageBox, role: QMessageBox.ButtonRole) -> int:
+    button = next(
+        button for button in dialog.buttons() if dialog.buttonRole(button) is role
+    )
+    button.click()
+    return 0
 
 
 def test_nothing_is_built_while_sharing_is_off(qtbot, qapp, tmp_path, monkeypatch):
@@ -84,21 +94,24 @@ def test_pairing_dialog_accepts_the_exact_candidate_and_six_digit_code(
     qtbot.addWidget(window)
     coordinator = configure_runtime(qapp, window, settings)
     candidate = _candidate(machine_name="DESKTOP-ALPHA")
-    shown: list[tuple[object, str, str]] = []
+    shown: list[QMessageBox] = []
     confirmed: list[PairingCandidate] = []
 
-    def accept(parent, title, text, *_args):
-        shown.append((parent, title, text))
-        return QMessageBox.StandardButton.Yes
+    def accept(dialog):
+        shown.append(dialog)
+        return _click_role(dialog, QMessageBox.ButtonRole.AcceptRole)
 
-    monkeypatch.setattr(QMessageBox, "question", accept)
+    monkeypatch.setattr(QMessageBox, "exec", accept)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.Yes
+    )
     monkeypatch.setattr(coordinator, "confirm_pairing", confirmed.append)
 
     coordinator.pairing_code_ready.emit("004271", candidate)
 
-    assert shown[0][0] is window
-    assert "DESKTOP-ALPHA" in shown[0][2]
-    assert "004271" in shown[0][2]
+    assert shown[0].parent() is window
+    assert "DESKTOP-ALPHA" in shown[0].text()
+    assert "004271" in shown[0].text()
     assert confirmed == [candidate]
     coordinator.service._backend.stop()
     coordinator.stop()
@@ -115,8 +128,11 @@ def test_pairing_dialog_rejects_the_exact_candidate(qtbot, qapp, tmp_path, monke
 
     monkeypatch.setattr(
         QMessageBox,
-        "question",
-        lambda *_args: QMessageBox.StandardButton.No,
+        "exec",
+        lambda dialog: _click_role(dialog, QMessageBox.ButtonRole.RejectRole),
+    )
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *_args: QMessageBox.StandardButton.No
     )
     monkeypatch.setattr(coordinator, "reject_pairing", rejected.append, raising=False)
 
@@ -125,6 +141,56 @@ def test_pairing_dialog_rejects_the_exact_candidate(qtbot, qapp, tmp_path, monke
     assert rejected == [candidate]
     coordinator.service._backend.stop()
     coordinator.stop()
+
+
+def test_pairing_dialog_renders_an_untrusted_machine_name_as_plain_text(qtbot, qapp):
+    window = build_main_window(transport_factory=lambda: None)
+    qtbot.addWidget(window)
+    candidate = _candidate(machine_name="<b>NOT THE REAL NAME</b>")
+
+    dialog, _accept_button = app_module._pairing_confirmation_dialog(
+        window, "004271", candidate
+    )
+
+    assert dialog.textFormat() is Qt.TextFormat.PlainText
+    assert "<b>NOT THE REAL NAME</b>" in dialog.text()
+    assert "004271" in dialog.text()
+    dialog.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("language", "accept_text", "reject_text"),
+    (
+        ("ru", "Связать", "Отказать"),
+        ("en", "Pair", "Reject"),
+    ),
+)
+def test_pairing_dialog_owns_localized_button_labels(
+    qtbot, qapp, tmp_path, language, accept_text, reject_text
+):
+    manager = TranslationManager(
+        qapp,
+        settings=QSettings(
+            str(tmp_path / f"{language}.ini"), QSettings.Format.IniFormat
+        ),
+    )
+    assert manager.set_language(language, remember=False) is True
+    window = build_main_window(translations=manager, transport_factory=lambda: None)
+    qtbot.addWidget(window)
+
+    dialog, accept_button = app_module._pairing_confirmation_dialog(
+        window, "918205", _candidate()
+    )
+    labels = {
+        dialog.buttonRole(button): button.text()
+        for button in dialog.buttons()
+    }
+
+    assert dialog.standardButtons() == QMessageBox.StandardButton.NoButton
+    assert labels[QMessageBox.ButtonRole.AcceptRole] == accept_text
+    assert labels[QMessageBox.ButtonRole.RejectRole] == reject_text
+    assert accept_button.text() == accept_text
+    dialog.deleteLater()
 
 
 def test_the_second_instance_cannot_take_the_lock(qapp):

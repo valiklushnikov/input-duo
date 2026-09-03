@@ -24,7 +24,7 @@ def ssl_configuration(identity: NodeIdentity) -> QSslConfiguration:
     configuration = QSslConfiguration.defaultConfiguration()
     configuration.setLocalCertificate(QSslCertificate(QByteArray(identity.certificate_pem)))
     configuration.setPrivateKey(
-        QSslKey(QByteArray(identity.key_pem), QSsl.KeyAlgorithm.Ec)
+        QSslKey(QByteArray(identity.key_pem), QSsl.KeyAlgorithm.Rsa)
     )
     configuration.setPeerVerifyMode(QSslSocket.PeerVerifyMode.VerifyPeer)
     return configuration

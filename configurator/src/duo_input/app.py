@@ -12,10 +12,10 @@ import socket
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QSettings
+from PySide6.QtCore import QCoreApplication, QSettings, Qt
 from PySide6.QtGui import QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 from duo_input import __version__
 from duo_input.clipboard.coordinator import ClipboardCoordinator
@@ -115,22 +115,39 @@ def _show_pairing_confirmation(
     candidate: PairingCandidate,
 ) -> None:
     """Ask about the candidate emitted with this exact pairing attempt."""
+    dialog, accept_button = _pairing_confirmation_dialog(window, code, candidate)
+    dialog.exec()
+    if dialog.clickedButton() is accept_button:
+        coordinator.confirm_pairing(candidate)
+    else:
+        coordinator.reject_pairing(candidate)
+
+
+def _pairing_confirmation_dialog(
+    window: MainWindow, code: str, candidate: PairingCandidate
+) -> tuple[QMessageBox, QPushButton]:
+    """Build the plain-text, application-translated security prompt."""
     title = QCoreApplication.translate("PairingDialog", "Подтвердите связывание")
     text = QCoreApplication.translate(
         "PairingDialog",
         "Компьютер «{0}» показывает тот же код?\n\nКод: {1}",
     ).format(candidate.machine_name, code)
-    answer = QMessageBox.question(
-        window,
-        title,
-        text,
-        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        QMessageBox.StandardButton.No,
+    dialog = QMessageBox(window)
+    dialog.setIcon(QMessageBox.Icon.Question)
+    dialog.setWindowTitle(title)
+    dialog.setTextFormat(Qt.TextFormat.PlainText)
+    dialog.setText(text)
+    accept_button = dialog.addButton(
+        QCoreApplication.translate("PairingDialog", "Связать"),
+        QMessageBox.ButtonRole.AcceptRole,
     )
-    if answer == QMessageBox.StandardButton.Yes:
-        coordinator.confirm_pairing(candidate)
-    else:
-        coordinator.reject_pairing(candidate)
+    reject_button = dialog.addButton(
+        QCoreApplication.translate("PairingDialog", "Отказать"),
+        QMessageBox.ButtonRole.RejectRole,
+    )
+    dialog.setDefaultButton(reject_button)
+    dialog.setEscapeButton(reject_button)
+    return dialog, accept_button
 
 
 def configure_runtime(
