@@ -39,6 +39,10 @@ def _click_role(dialog: QMessageBox, role: QMessageBox.ButtonRole) -> int:
 
 
 def test_nothing_is_built_while_sharing_is_off(qtbot, qapp, tmp_path, monkeypatch):
+    """Подсистема общего буфера не собирается, пока фича выключена - но, в
+    отличие от прежнего правила, ``TrayIcon`` в этот список запретов больше не
+    входит: решение продукта от 2026-09-03 (§4) требует трей всегда, поэтому
+    его конструктор здесь не запрещён, а проверен отдельным тестом ниже."""
     window = build_main_window(settings=_settings(tmp_path, False))
     qtbot.addWidget(window)
 
@@ -50,11 +54,96 @@ def test_nothing_is_built_while_sharing_is_off(qtbot, qapp, tmp_path, monkeypatc
         "TrustStore",
         "ClipboardCoordinator",
         "WindowsClipboardBackend",
-        "TrayIcon",
     ):
         monkeypatch.setattr(app_module, name, forbidden, raising=False)
 
     assert configure_runtime(qapp, window, _settings(tmp_path, False)) is None
+
+
+def test_the_tray_icon_exists_even_while_sharing_is_off(qtbot, qapp, tmp_path, monkeypatch):
+    """КРИТИЧНО (§4, решение продукта 2026-09-03): без всегда-живого трея
+    окно, которое теперь всегда прячется по закрытию, стало бы недоступным
+    при выключенном общем буфере - показать нечем, выйти нечем."""
+    settings = _settings(tmp_path, False)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+
+    trays: list = []
+    real_tray_icon = app_module.TrayIcon
+
+    def _capturing_tray_icon(*args, **kwargs):
+        tray = real_tray_icon(*args, **kwargs)
+        trays.append(tray)
+        return tray
+
+    monkeypatch.setattr(app_module, "TrayIcon", _capturing_tray_icon)
+    configure_runtime(qapp, window, settings)
+
+    assert len(trays) == 1
+    # Галочка отражает настоящую сохранённую настройку, а не принудительное
+    # "включено" (старый дефект: трей раньше ставился только вместе с
+    # подсистемой, поэтому его галочка была жёстко True).
+    assert trays[0].sharing_action.isChecked() is False
+
+
+def test_no_socket_listens_while_sharing_starts_disabled(qtbot, qapp, tmp_path):
+    """§4: пока общий буфер выключен, ни один сокет не открывается - включая
+    тот случай, когда фича никогда не включалась в этом запуске вовсе, а не
+    только когда её выключили после включения (это уже покрыто
+    ``test_switching_off_actually_releases_the_listening_socket``)."""
+    from PySide6.QtNetwork import QTcpServer
+
+    from duo_input.clipboard.coordinator import TCP_PORT
+
+    settings = _settings(tmp_path, False)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+
+    configure_runtime(qapp, window, settings)
+
+    probe = QTcpServer()
+    try:
+        assert probe.listen(port=TCP_PORT) is True, "порт должен быть свободен"
+    finally:
+        probe.close()
+
+
+def test_the_tray_checkbox_starts_and_stops_the_subsystem_from_a_cold_start(
+    qtbot, qapp, tmp_path, monkeypatch
+):
+    """Требование продукта: галочка в трее обязана работать в обе стороны
+    даже тогда, когда подсистема ни разу не запускалась в этом сеансе -
+    старт через настоящий пункт меню трея, а не через запись настройки."""
+    settings = _settings(tmp_path, False)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+
+    trays: list = []
+    real_tray_icon = app_module.TrayIcon
+
+    def _capturing_tray_icon(*args, **kwargs):
+        tray = real_tray_icon(*args, **kwargs)
+        trays.append(tray)
+        return tray
+
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(app_module, "TrayIcon", _capturing_tray_icon)
+    configure_runtime(qapp, window, settings)
+
+    tray = trays[0]
+    assert tray.sharing_action.isChecked() is False
+
+    tray.sharing_action.trigger()  # то же самое, что клик по пункту меню - вкл.
+
+    assert bool(settings.value("clipboard/enabled", False, type=bool)) is True
+    assert window.clipboard_page.sharing_checkbox.isChecked() is True
+    assert tray.sharing_action.isChecked() is True
+
+    tray.sharing_action.trigger()  # повторный клик - выкл.
+
+    assert bool(settings.value("clipboard/enabled", False, type=bool)) is False
+    assert window.clipboard_page.sharing_checkbox.isChecked() is False
+    assert tray.sharing_action.isChecked() is False
 
 
 def test_the_coordinator_is_built_when_sharing_is_on(qtbot, qapp, tmp_path, monkeypatch):

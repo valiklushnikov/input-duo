@@ -1,4 +1,11 @@
-"""Закрытие окна: выход или уход в трей, в зависимости от того, включена ли фича."""
+"""Закрытие окна: решение продукта от 2026-09-03 - всегда уход в трей, а не
+выход, независимо от того, включён ли общий буфер (§4 спецификации).
+
+До этого решения резидентность была следствием включённой фичи: выключенный
+общий буфер означал, что закрытие окна завершает процесс - см. историю этого
+файла. Тесты ниже проверяют новое правило и его симметрию: обе настройки
+общего буфера теперь ведут к одному и тому же поведению окна.
+"""
 
 from __future__ import annotations
 
@@ -15,34 +22,39 @@ def _settings(tmp_path, enabled: bool) -> QSettings:
     return settings
 
 
-def test_closing_quits_when_sharing_is_off(qtbot, tmp_path):
+def test_closing_hides_rather_than_quits_when_sharing_is_off(qtbot, tmp_path):
+    """Новое поведение: раньше выключенный общий буфер означал закрытие
+    процесса по нажатию крестика - теперь окно прячется в трей, как и при
+    включённом общем буфере. Без правки это событие принималось бы
+    (isAccepted() is True), и программа завершалась бы."""
     window = build_main_window(settings=_settings(tmp_path, False))
     qtbot.addWidget(window)
+    window.show()
 
-    assert window.background_mode is False
+    window.close()
 
-    # isVisible() после close() был бы False в обеих ветках (Qt прячет окно
-    # и когда событие принято, и когда оно отвергнуто, но окно спрятано
-    # вручную) - это не отличает ветки друг от друга. Отличает их
-    # accept()/ignore() события, поэтому проверяем именно его: мутация
-    # "всегда уходить в трей" должна уронить эту проверку.
+    assert window.isVisible() is False
+
+    # isVisible() после close() был бы False даже если бы событие было
+    # принято (Qt прячет окно перед разрушением) - это не отличало бы старое
+    # поведение от нового. Отличает их accept()/ignore(), поэтому проверяем
+    # именно его.
     event = QCloseEvent()
     window.closeEvent(event)
-    assert event.isAccepted() is True
+    assert event.isAccepted() is False
 
 
 def test_closing_hides_when_sharing_is_on(qtbot, tmp_path):
+    """Симметричная проверка: включённый общий буфер вёл себя так уже раньше,
+    и должен продолжать вести себя так же."""
     window = build_main_window(settings=_settings(tmp_path, True))
     qtbot.addWidget(window)
     window.show()
 
     window.close()
 
-    assert window.background_mode is True
     assert window.isVisible() is False
 
-    # Симметричная проверка: мутация "всегда закрываться насовсем" должна
-    # уронить именно эту ветку, а не только предыдущий тест.
     event = QCloseEvent()
     window.closeEvent(event)
     assert event.isAccepted() is False
