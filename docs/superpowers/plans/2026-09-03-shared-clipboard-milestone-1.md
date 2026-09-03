@@ -563,6 +563,22 @@ def test_offer_refuses_a_payload_over_the_ceiling():
 def test_from_dict_refuses_a_dictionary_missing_a_field():
     with pytest.raises(ValueError):
         ClipboardOffer.from_dict({"origin_id": "a" * 32, "seq": 1})
+
+
+def test_from_dict_refuses_a_dictionary_with_wrong_types():
+    """Словарь приходит по сети: доверять его форме нельзя.
+
+    Приведение типов приняло бы что угодно и превратило бы повреждённое
+    объявление в рабочее.
+    """
+    with pytest.raises(ValueError):
+        ClipboardOffer.from_dict(
+            {
+                "origin_id": "a" * 32,
+                "seq": 1,
+                "descriptors": [{"mime": 123, "size": 5, "sha256": "0" * 64}],
+            }
+        )
 ```
 
 - [ ] **Step 2: Убедиться, что тесты падают**
@@ -645,12 +661,37 @@ class ClipboardOffer:
 
     @classmethod
     def from_dict(cls, raw: dict) -> ClipboardOffer:
+        """Разобрать объявление, пришедшее от второй машины.
+
+        Типы проверяются, а не приводятся. `str(x)` принял бы что угодно и
+        превратил бы `None` в строку "None", то есть повреждённое объявление
+        стало бы рабочим. Здесь это данные из сети: доверять их форме нельзя.
+        """
         try:
-            descriptors = tuple(
-                ContentDescriptor(mime=str(d["mime"]), size=int(d["size"]), sha256=str(d["sha256"]))
-                for d in raw["descriptors"]
-            )
-            return cls(origin_id=str(raw["origin_id"]), seq=int(raw["seq"]), descriptors=descriptors)
+            if not isinstance(raw, dict):
+                raise TypeError("raw должна быть dict")
+            if not isinstance(raw.get("origin_id"), str):
+                raise TypeError("origin_id должна быть str")
+            if not isinstance(raw.get("seq"), int):
+                raise TypeError("seq должна быть int")
+            if not isinstance(raw.get("descriptors"), list):
+                raise TypeError("descriptors должна быть list")
+
+            descriptors = []
+            for d in raw["descriptors"]:
+                if not isinstance(d, dict):
+                    raise TypeError("каждый дескриптор должен быть dict")
+                if not isinstance(d.get("mime"), str):
+                    raise TypeError("mime должна быть str")
+                if not isinstance(d.get("size"), int):
+                    raise TypeError("size должна быть int")
+                if not isinstance(d.get("sha256"), str):
+                    raise TypeError("sha256 должна быть str")
+                descriptors.append(
+                    ContentDescriptor(mime=d["mime"], size=d["size"], sha256=d["sha256"])
+                )
+
+            return cls(origin_id=raw["origin_id"], seq=raw["seq"], descriptors=tuple(descriptors))
         except (KeyError, TypeError) as error:
             raise ValueError(f"объявление неполно: {error}") from error
 
