@@ -15,10 +15,14 @@
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from .backend import ORIGIN_MIME, ClipboardSnapshot, ContentFetcher, RemoteMimeData
 from .offer import MAX_CONTENT_BYTES, ClipboardOffer
+
+logger = logging.getLogger(__name__)
 
 #: Форматы, которые синхронизируются в milestone 1.
 SYNCED_MIMES = ("text/plain", "text/uri-list", "image/png")
@@ -54,7 +58,19 @@ def snapshot_from(mime_data) -> ClipboardSnapshot:
         if mime not in formats:
             continue
         payload = bytes(mime_data.data(mime))
-        if not payload or len(payload) > MAX_CONTENT_BYTES:
+        if not payload:
+            continue
+        if len(payload) > MAX_CONTENT_BYTES:
+            # §5: снимки больше 32 МиБ не объявляются - запись в журнал, без
+            # ошибки на экране. Раньше это происходило совсем молча: скопировали
+            # большую картинку, на второй машине ничего, и нигде не сказано
+            # почему.
+            logger.warning(
+                "формат %s занимает %d байт, потолок 32 МиБ (%d) — не объявляется",
+                mime,
+                len(payload),
+                MAX_CONTENT_BYTES,
+            )
             continue
         payloads[mime] = payload
     return ClipboardSnapshot(payloads)

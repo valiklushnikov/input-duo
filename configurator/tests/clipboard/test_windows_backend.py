@@ -98,6 +98,16 @@ def test_snapshot_of_an_oversized_payload_is_empty():
     assert snapshot_from(data).payloads == {}
 
 
+def test_snapshot_of_an_oversized_payload_is_logged(caplog):
+    """I5: скопировали большую картинку - должно быть видно почему её не отправило."""
+    data = _FakeMimeData({"image/png": b"x" * (MAX_CONTENT_BYTES + 1)})
+
+    with caplog.at_level("WARNING", logger="duo_input.clipboard.windows_backend"):
+        snapshot_from(data)
+
+    assert any("image/png" in record.message for record in caplog.records)
+
+
 def test_snapshot_accepts_payload_exactly_at_size_limit():
     """Граница должна быть закреплена: ровно потолок допустим."""
     data = _FakeMimeData({"text/plain": b"x" * MAX_CONTENT_BYTES})

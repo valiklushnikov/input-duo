@@ -7,7 +7,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from duo_input.clipboard.backend import ClipboardSnapshot
-from duo_input.clipboard.offer import ClipboardOffer, describe
+from duo_input.clipboard.offer import MAX_CONTENT_BYTES, ClipboardOffer, describe
 from duo_input.clipboard.service import ClipboardService
 
 OURS = "1" * 32
@@ -120,6 +120,28 @@ def test_content_for_answers_only_for_the_offer_we_last_sent():
 
     assert service.content_for("text/plain", seq) == b"hello"
     assert service.content_for("text/plain", seq + 1) is None
+
+
+def test_an_oversized_snapshot_is_logged_and_not_offered(caplog):
+    """I5: то же соглашение, что у платформенной границы - журнал, а не падение.
+
+    describe() продолжает бросать ValueError для тех, кто сам ничего не
+    отфильтровал; on_local_snapshot обязан поймать её и повести себя так же,
+    как и обычный отказ от объявления, а не уронить слот, подключённый к
+    сигналу Qt.
+    """
+    service, _ = _service()
+    sent: list[ClipboardOffer] = []
+    service.offer_ready.connect(sent.append)
+
+    with caplog.at_level("WARNING", logger="duo_input.clipboard.service"):
+        service.on_local_snapshot(
+            ClipboardSnapshot({"image/png": b"x" * (MAX_CONTENT_BYTES + 1)})
+        )
+
+    assert sent == []
+    assert service.last_sent_offer is None
+    assert caplog.records
 
 
 def test_an_empty_snapshot_does_not_produce_an_offer():
