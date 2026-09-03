@@ -5,9 +5,24 @@
 означала бы, что присутствие устройства видно всей сети всё время.
 
 Звонит тот, чей origin_id меньше. Это решает гонку встречных соединений без
-переговоров. Во время парринга origin_id пира ещё не известен, поэтому там
-соединяются оба, и лишнее соединение закрывается, как только одна из сторон
-уже установила связь.
+переговоров. Во время парринга доверенного пира ещё нет, поэтому тот же
+порядок применяется по origin_id из маячка, - а лишнее соединение закрывается,
+как только одна из сторон уже установила связь.
+
+Приём чужого сертификата разрешён ТОЛЬКО во время связывания. Вне связывания
+слушатель закреплён либо за отпечатком уже доверенного пира, либо (если пира
+ещё нет) за отпечатком, которому заведомо не сможет соответствовать ни один
+настоящий сертификат - так неспаренный узел не примет вообще никого. Это не
+формальность записи в хранилище доверия, а контроль над тем, что происходит с
+данными: соединение, до которого не дошло человеческое подтверждение обеих
+сторон, никогда не доходит до обмена буфером обмена.
+
+Само связывание - это отдельный протокол поверх TLS-соединения: HELLO в нём не
+участвует, участвуют PAIR_REQUEST (кто ты) и PAIR_CONFIRM (согласен ли ты,
+после того как человек сверил код на экране). Соединение времён связывания не
+становится рабочим само по себе - оно становится рабочим только когда
+PAIR_CONFIRM с согласием получен И отправлен, то есть когда согласны обе
+стороны, а не одна.
 
 Отказ брандмауэра отличается от отсутствия связи и сообщается отдельным
 состоянием: иначе пользователь начнёт чинить сеть, которая исправна.
@@ -33,6 +48,12 @@ TCP_PORT = 47654
 #: Пауза перед повторной попыткой: растёт и упирается в потолок. Бесконечно
 #: частые попытки были бы фоновой работой навсегда.
 RECONNECT_DELAYS_MS = (1000, 2000, 4000, 8000, 30000)
+
+#: Отпечаток, которому не может соответствовать ни один настоящий сертификат
+#: (тот всегда - непустая шестнадцатеричная строка). Используется вместо
+#: None, когда мы НЕ связываемся: слушатель обязан отказать всем подряд, а не
+#: принять кого угодно, как во время связывания.
+_NOBODY_IS_WELCOME = ""
 
 
 class LinkState(StrEnum):
@@ -76,15 +97,25 @@ class ClipboardCoordinator(QObject):
         self._service = service if service is not None else ClipboardService(identity.origin_id)
 
         self._listener = PeerListener(identity, self)
+        # Безопасное состояние по умолчанию, ещё до первого start(): чужой
+        # сертификат не принимается, пока явно не начато связывание.
+        self._listener.expect(self.peer.fingerprint if self.peer else _NOBODY_IS_WELCOME)
         self._listener.link_ready.connect(self._on_incoming_link)
         self._discovery = Discovery(identity.origin_id, self)
         self._discovery.peer_seen.connect(self._on_peer_seen)
 
         self._link: PeerLink | None = None
         self._attempt = 0
-        self._pairing = False
         self._manual_address = ""
         self._state = LinkState.UNPAIRED if trust.peer() is None else LinkState.DISCONNECTED
+
+        # Состояние самого связывания - отдельное от рабочей связи: рабочая
+        # связь (_link) не появляется, пока обе стороны не согласились.
+        self._pairing = False
+        self._pairing_link: PeerLink | None = None
+        self._pairing_candidate: PairingCandidate | None = None
+        self._local_agreed = False
+        self._remote_agreed = False
 
         self._retry = QTimer(self)
         self._retry.setSingleShot(True)
@@ -93,7 +124,7 @@ class ClipboardCoordinator(QObject):
         self._pairing_window = QTimer(self)
         self._pairing_window.setSingleShot(True)
         self._pairing_window.setInterval(PAIRING_WINDOW_MS)
-        self._pairing_window.timeout.connect(self._end_pairing)
+        self._pairing_window.timeout.connect(self._abort_pairing)
 
         self._silence = QTimer(self)
         self._silence.setSingleShot(True)
@@ -123,7 +154,7 @@ class ClipboardCoordinator(QObject):
     # ------------------------------------------------------------------ жизненный цикл
 
     def start(self) -> None:
-        self._listener.expect(self.peer.fingerprint if self.peer else None)
+        self._listener.expect(self.peer.fingerprint if self.peer else _NOBODY_IS_WELCOME)
         if not self._listener.listen(TCP_PORT):
             self._set_state(LinkState.BLOCKED)
             return
@@ -142,6 +173,9 @@ class ClipboardCoordinator(QObject):
         if self._link is not None:
             self._link.close()
             self._link = None
+        if self._pairing_link is not None:
+            self._pairing_link.close()
+            self._pairing_link = None
         self._service.detach_link()
         self._set_state(LinkState.UNPAIRED if self.peer is None else LinkState.DISCONNECTED)
 
@@ -151,10 +185,15 @@ class ClipboardCoordinator(QObject):
             self._attempt = 0
             self._try_connect()
 
-    # ------------------------------------------------------------------ парринг
+    # ------------------------------------------------------------------ парринг: вход и код
 
     def begin_pairing(self) -> None:
         self._pairing = True
+        self._pairing_link = None
+        self._pairing_candidate = None
+        self._local_agreed = False
+        self._remote_agreed = False
+        # Только теперь и ровно на время связывания - чужой сертификат.
         self._listener.expect(None)
         self._discovery.start(
             Beacon(
@@ -169,13 +208,21 @@ class ClipboardCoordinator(QObject):
         self._set_state(LinkState.SEARCHING)
 
     def confirm_pairing(self, candidate: PairingCandidate) -> None:
-        """Человек сверил код и подтвердил. Только теперь появляется доверие."""
-        self._trust.remember(candidate.as_trusted())
-        self._end_pairing()
-        self._listener.expect(candidate.fingerprint)
-        self.peer_changed.emit(self._trust.peer())
-        self._attempt = 0
-        self._try_connect()
+        """Человек сверил код и подтвердил свою половину.
+
+        Доверие закрепляется и обмен включается только тогда, когда согласны
+        ОБЕ стороны: наша половина - здесь и сейчас, вторая половина - в
+        PAIR_CONFIRM, который должен прийти от пира. Одностороннее
+        подтверждение не решает ничего само по себе - это ровно та щель, из-за
+        которой раньше чужой сертификат проходил без единого подтверждения.
+        """
+        if self._pairing_link is None or self._pairing_candidate is None:
+            return
+        if candidate.fingerprint != self._pairing_candidate.fingerprint:
+            return
+        self._local_agreed = True
+        self._pairing_link.send(Message(MessageType.PAIR_CONFIRM, {"agree": True}, b""))
+        self._maybe_finish_pairing()
 
     def forget_peer(self) -> None:
         self._trust.forget()
@@ -183,7 +230,7 @@ class ClipboardCoordinator(QObject):
             self._link.close()
             self._link = None
         self._service.detach_link()
-        self._listener.expect(None)
+        self._listener.expect(_NOBODY_IS_WELCOME)
         self.peer_changed.emit(None)
         self._set_state(LinkState.UNPAIRED)
 
@@ -191,6 +238,23 @@ class ClipboardCoordinator(QObject):
         self._pairing = False
         self._pairing_window.stop()
         self._discovery.stop()
+        # Дверь, открытая на время связывания, обязана закрыться: связывание
+        # закончилось (успехом или нет), а self.peer уже отражает новое
+        # доверие, если закрепление произошло раньше этого вызова.
+        self._listener.expect(self.peer.fingerprint if self.peer else _NOBODY_IS_WELCOME)
+
+    def _abort_pairing(self) -> None:
+        """Окно связывания истекло, либо пир отказался подтверждать - в обоих
+        случаях связывание прекращается, а не продолжается в надежде на чудо.
+        """
+        if self._pairing_link is not None:
+            self._pairing_link.close()
+        self._pairing_link = None
+        self._pairing_candidate = None
+        self._local_agreed = False
+        self._remote_agreed = False
+        self._end_pairing()
+        self._set_state(LinkState.UNPAIRED if self.peer is None else LinkState.DISCONNECTED)
 
     def _offer_pairing(self, candidate: PairingCandidate) -> None:
         code = pairing_code(self._identity.fingerprint, candidate.fingerprint)
@@ -203,17 +267,93 @@ class ClipboardCoordinator(QObject):
                 self._trust.update_address(address)
                 self._try_connect()
             return
-        self._offer_pairing(
-            PairingCandidate(
-                origin_id=beacon.origin_id,
-                machine_name=beacon.machine_name,
-                fingerprint=beacon.fingerprint,
-                address=address,
-                port=beacon.port,
+        if self._pairing_link is not None:
+            return  # кандидат на связывание уже есть - маячки остальных не трогаем
+        if self._identity.origin_id < beacon.origin_id:
+            self._pairing_connect(address, beacon.port)
+        # Иначе звонят они: origin_id из маячка меньше нашего, ждём их звонка.
+
+    # ------------------------------------------------------------------ парринг: TLS-рукопожатие
+
+    def _pairing_connect(self, address: str, port: int) -> None:
+        link = PeerLink(self._identity, self)
+        link.connected.connect(lambda _fingerprint: self._on_pairing_link_ready(link))
+        link.connect_to(address, port, None)
+
+    def _on_pairing_link_ready(self, link: PeerLink) -> None:
+        if not self._pairing:
+            # Связывание уже закончилось (окно истекло) раньше, чем
+            # рукопожатие успело завершиться - такому соединению тоже нет места.
+            link.close()
+            return
+        if self._pairing_link is not None:
+            link.close()
+            return
+        self._pairing_link = link
+        link.message_received.connect(self._on_pairing_message)
+        link.disconnected.connect(self._on_pairing_link_lost)
+        link.send(
+            Message(
+                MessageType.PAIR_REQUEST,
+                {
+                    "origin_id": self._identity.origin_id,
+                    "machine_name": self._machine_name,
+                    "protocol_major": PROTOCOL_MAJOR,
+                    "protocol_minor": PROTOCOL_MINOR,
+                },
+                b"",
             )
         )
 
-    # ------------------------------------------------------------------ соединение
+    def _on_pairing_message(self, message: Message) -> None:
+        if message.type is MessageType.PAIR_REQUEST:
+            link = self._pairing_link
+            if link is None:
+                return
+            candidate = PairingCandidate(
+                origin_id=str(message.header.get("origin_id", "")),
+                machine_name=str(message.header.get("machine_name", "")),
+                fingerprint=link.peer_fingerprint,
+                address=link.peer_address,
+                port=TCP_PORT,
+            )
+            self._pairing_candidate = candidate
+            self._offer_pairing(candidate)
+        elif message.type is MessageType.PAIR_CONFIRM:
+            if not bool(message.header.get("agree", False)):
+                self._abort_pairing()
+                return
+            self._remote_agreed = True
+            self._maybe_finish_pairing()
+
+    def _on_pairing_link_lost(self, _reason: str) -> None:
+        # Связь во время связывания оборвалась раньше согласия обеих сторон -
+        # сбрасываем кандидата, но НЕ выходим из режима связывания целиком:
+        # маячок ещё может привести к новой попытке до истечения окна.
+        self._pairing_link = None
+        self._pairing_candidate = None
+        self._local_agreed = False
+        self._remote_agreed = False
+
+    def _maybe_finish_pairing(self) -> None:
+        if not (self._local_agreed and self._remote_agreed):
+            return
+        candidate = self._pairing_candidate
+        link = self._pairing_link
+        if candidate is None or link is None:
+            return
+        link.message_received.disconnect(self._on_pairing_message)
+        link.disconnected.disconnect(self._on_pairing_link_lost)
+        self._pairing_link = None
+        self._pairing_candidate = None
+        self._local_agreed = False
+        self._remote_agreed = False
+        self._trust.remember(candidate.as_trusted())
+        self._end_pairing()
+        self.peer_changed.emit(self._trust.peer())
+        self._on_connected(link)
+
+    # ------------------------------------------------------------------ рабочая связь
 
     def _address(self) -> str:
         if self._manual_address:
@@ -252,6 +392,17 @@ class ClipboardCoordinator(QObject):
         )
 
     def _on_incoming_link(self, link: PeerLink) -> None:
+        if self._pairing:
+            self._on_pairing_link_ready(link)
+            return
+        peer = self.peer
+        if peer is None or link.peer_fingerprint != peer.fingerprint:
+            # Второй пояс защиты: даже если слушатель по ошибке пропустил
+            # чужого (см. expect() выше), координатор сам не пускает его
+            # дальше рукопожатия - до обмена данными он не должен дойти ни
+            # при каких обстоятельствах.
+            link.close()
+            return
         if self._link is not None:
             link.close()
             return

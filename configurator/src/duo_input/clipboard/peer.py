@@ -66,6 +66,19 @@ class PeerLink(QObject):
         return self._peer_fingerprint
 
     @property
+    def peer_address(self) -> str:
+        """IP второго конца этого соединения.
+
+        Нужен координатору для входящих соединений: адрес, который мы сами
+        набирали, и так известен (это то, что мы передали в connect_to), а
+        для входящего звонка единственный способ узнать, куда звонить в
+        следующий раз, - спросить у уже установленного сокета.
+        """
+        if self._socket is None:
+            return ""
+        return self._socket.peerAddress().toString()
+
+    @property
     def is_open(self) -> bool:
         return self._socket is not None and self._socket.isEncrypted()
 
