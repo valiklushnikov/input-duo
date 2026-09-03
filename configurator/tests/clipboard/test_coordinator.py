@@ -568,6 +568,83 @@ def test_local_confirmation_alone_does_not_enable_the_exchange(tmp_path):
     assert coordinator.state is LinkState.SEARCHING
 
 
+def test_local_rejection_sends_a_negative_confirmation_before_closing(tmp_path):
+    coordinator, trust = _make_coordinator(tmp_path)
+    link, candidate = _reach_pairing_candidate(coordinator)
+    events: list[str] = []
+    original_send = link.send
+    original_close = link.close
+
+    def record_send(message):
+        events.append(f"send:{message.type.name}:{message.header.get('agree')}")
+        original_send(message)
+
+    def record_close():
+        events.append("close")
+        original_close()
+
+    link.send = record_send
+    link.close = record_close
+
+    coordinator.reject_pairing(candidate)
+
+    assert events == ["send:PAIR_CONFIRM:False", "close"]
+    assert trust.peer() is None
+    assert coordinator.state is LinkState.UNPAIRED
+    assert coordinator._pairing is False
+    assert coordinator._pairing_link is None
+    assert coordinator._pairing_candidate is None
+
+
+def test_a_stale_dialog_cannot_confirm_a_new_link_with_the_same_candidate(tmp_path):
+    coordinator, trust = _make_coordinator(tmp_path)
+    old_link, old_candidate = _reach_pairing_candidate(coordinator)
+
+    coordinator.begin_pairing()
+    new_link, new_candidate = _reach_pairing_candidate(
+        coordinator,
+        origin_id=old_candidate.origin_id,
+        machine_name=old_candidate.machine_name,
+        fingerprint=old_candidate.fingerprint,
+        address=old_candidate.address,
+        begin_pairing=False,
+    )
+
+    coordinator.confirm_pairing(old_candidate)
+
+    assert old_link.closed is True
+    assert coordinator._pairing_link is new_link
+    assert coordinator._pairing_candidate is new_candidate
+    assert not any(message.type is MessageType.PAIR_CONFIRM for message in new_link.sent)
+    assert coordinator._local_agreed is False
+    assert trust.peer() is None
+
+
+def test_a_stale_dialog_cannot_reject_a_new_link_with_the_same_candidate(tmp_path):
+    coordinator, trust = _make_coordinator(tmp_path)
+    old_link, old_candidate = _reach_pairing_candidate(coordinator)
+
+    coordinator.begin_pairing()
+    new_link, new_candidate = _reach_pairing_candidate(
+        coordinator,
+        origin_id=old_candidate.origin_id,
+        machine_name=old_candidate.machine_name,
+        fingerprint=old_candidate.fingerprint,
+        address=old_candidate.address,
+        begin_pairing=False,
+    )
+
+    coordinator.reject_pairing(old_candidate)
+
+    assert old_link.closed is True
+    assert coordinator._pairing is True
+    assert coordinator._pairing_link is new_link
+    assert coordinator._pairing_candidate is new_candidate
+    assert not any(message.type is MessageType.PAIR_CONFIRM for message in new_link.sent)
+    assert new_link.closed is False
+    assert trust.peer() is None
+
+
 def test_a_stale_link_cannot_confirm_a_new_pairing_after_pairing_is_restarted(tmp_path):
     """Согласие принадлежит конкретной TLS-связи, а не общему состоянию.
 

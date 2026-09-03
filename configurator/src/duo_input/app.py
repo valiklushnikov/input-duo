@@ -8,25 +8,34 @@ switched on. With the shared clipboard off, no socket is ever opened.
 
 from __future__ import annotations
 
+import socket
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QCoreApplication, QSettings
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from duo_input import __version__
+from duo_input.clipboard.coordinator import ClipboardCoordinator
+from duo_input.clipboard.identity import load_or_create
+from duo_input.clipboard.pairing import PairingCandidate
+from duo_input.clipboard.trust import TrustStore
+from duo_input.clipboard.windows_backend import WindowsClipboardBackend
 from duo_input.device.service import DeviceService
 from duo_input.i18n import TranslationManager
-from duo_input.persistence.locations import configure_logging
+from duo_input.persistence.locations import application_directory, configure_logging
 from duo_input.ui.main_window import APPLICATION_NAME, MainWindow
 from duo_input.ui.models.project_session import ProjectSession
 from duo_input.ui.theme import apply_theme
+from duo_input.ui.tray import TrayIcon
 
 #: Console script target declared in ``pyproject.toml``.
 ENTRY_POINT = "duo_input.app:main"
 
 ORGANISATION_NAME = "Duo Input"
+SINGLE_INSTANCE_NAME = "duo-input-single-instance"
 
 
 def configure_application() -> Path:
@@ -84,6 +93,93 @@ def start_window(window: MainWindow) -> None:
     window.try_autoconnect()
 
 
+def single_instance_lock(name: str = SINGLE_INSTANCE_NAME) -> QLocalServer | None:
+    """Claim ``name``; ``None`` means another configurator already owns it."""
+    probe = QLocalSocket()
+    probe.connectToServer(name)
+    if probe.waitForConnected(100):
+        probe.disconnectFromServer()
+        return None
+
+    QLocalServer.removeServer(name)
+    server = QLocalServer()
+    if not server.listen(name):
+        return None
+    return server
+
+
+def _show_pairing_confirmation(
+    window: MainWindow,
+    coordinator: ClipboardCoordinator,
+    code: str,
+    candidate: PairingCandidate,
+) -> None:
+    """Ask about the candidate emitted with this exact pairing attempt."""
+    title = QCoreApplication.translate("PairingDialog", "Подтвердите связывание")
+    text = QCoreApplication.translate(
+        "PairingDialog",
+        "Компьютер «{0}» показывает тот же код?\n\nКод: {1}",
+    ).format(candidate.machine_name, code)
+    answer = QMessageBox.question(
+        window,
+        title,
+        text,
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No,
+    )
+    if answer == QMessageBox.StandardButton.Yes:
+        coordinator.confirm_pairing(candidate)
+    else:
+        coordinator.reject_pairing(candidate)
+
+
+def configure_runtime(
+    application: QApplication, window: MainWindow, settings: QSettings
+) -> ClipboardCoordinator | None:
+    """Assemble shared clipboard only when the operator enabled it."""
+    if not bool(settings.value("clipboard/enabled", False, type=bool)):
+        return None
+
+    application.setQuitOnLastWindowClosed(False)
+
+    directory = application_directory()
+    identity = load_or_create(directory)
+    coordinator = ClipboardCoordinator(
+        identity=identity,
+        trust=TrustStore(directory / "peers.json"),
+        machine_name=socket.gethostname(),
+        parent=application,
+    )
+
+    backend = WindowsClipboardBackend(application.clipboard(), coordinator)
+    coordinator.service.attach_backend(backend)
+    backend.snapshot_taken.connect(coordinator.service.on_local_snapshot)
+    backend.start()
+
+    tray = TrayIcon(application.windowIcon(), application)
+    tray.open_requested.connect(window.showNormal)
+    tray.quit_requested.connect(application.quit)
+    tray.sharing_action.setChecked(True)
+    coordinator.state_changed.connect(tray.set_link_state)
+    coordinator.state_changed.connect(window.clipboard_page.set_link_state)
+    coordinator.peer_changed.connect(window.clipboard_page.set_peer)
+    coordinator.pairing_code_ready.connect(
+        lambda code, candidate: _show_pairing_confirmation(
+            window, coordinator, code, candidate
+        )
+    )
+    window.clipboard_page.set_peer(coordinator.peer)
+    window.clipboard_page.pair_requested.connect(coordinator.begin_pairing)
+    window.clipboard_page.forget_requested.connect(coordinator.forget_peer)
+    window.clipboard_page.address_changed.connect(coordinator.set_manual_address)
+    tray.show()
+
+    application.aboutToQuit.connect(backend.stop)
+    application.aboutToQuit.connect(coordinator.stop)
+    coordinator.start()
+    return coordinator
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the configurator; returns the Qt exit code."""
     application = QApplication.instance() or QApplication(
@@ -104,17 +200,18 @@ def main(argv: list[str] | None = None) -> int:
     # built, shown and then restyled in front of the operator.
     apply_theme(application)
 
-    # Резидентность включается вместе с общим буфером и только вместе с ним.
-    settings = QSettings()
-    if bool(settings.value("clipboard/enabled", False, type=bool)):
-        application.setQuitOnLastWindowClosed(False)
-
     # The language is installed before any widget exists, so every label is
     # built in the language the operator chose last time.
     translations = TranslationManager(application)
     translations.load_saved()
 
-    window = build_main_window(translations=translations)
+    lock = single_instance_lock()
+    if lock is None:
+        return 0
+
+    settings = QSettings()
+    window = build_main_window(translations=translations, settings=settings)
+    configure_runtime(application, window, settings)
     start_window(window)
     return application.exec()
 
@@ -126,8 +223,11 @@ if __name__ == "__main__":  # pragma: no cover - manual launch
 __all__ = [
     "ENTRY_POINT",
     "ORGANISATION_NAME",
+    "SINGLE_INSTANCE_NAME",
     "build_main_window",
     "configure_application",
+    "configure_runtime",
     "icon_path",
     "main",
+    "single_instance_lock",
 ]

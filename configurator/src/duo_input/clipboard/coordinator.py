@@ -214,13 +214,30 @@ class ClipboardCoordinator(QObject):
         подтверждение не решает ничего само по себе - это ровно та щель, из-за
         которой раньше чужой сертификат проходил без единого подтверждения.
         """
-        if self._pairing_link is None or self._pairing_candidate is None:
-            return
-        if candidate.fingerprint != self._pairing_candidate.fingerprint:
+        if self._pairing_link is None or candidate is not self._pairing_candidate:
             return
         self._local_agreed = True
         self._pairing_link.send(Message(MessageType.PAIR_CONFIRM, {"agree": True}, b""))
         self._maybe_finish_pairing()
+
+    def reject_pairing(self, candidate: PairingCandidate) -> None:
+        """Refuse only the attempt that emitted ``candidate``.
+
+        A modal dialog runs a nested event loop, so its answer can arrive
+        after a disconnect and a new attempt. Object identity makes the
+        emitted candidate an attempt token even when the same computer comes
+        back with identical fields.
+        """
+        link = self._pairing_link
+        if link is None or candidate is not self._pairing_candidate:
+            return
+        try:
+            link.send(Message(MessageType.PAIR_CONFIRM, {"agree": False}, b""))
+        finally:
+            # Sending can synchronously pump a disconnect callback. Never let
+            # an old dialog close a replacement attempt installed meanwhile.
+            if link is self._pairing_link and candidate is self._pairing_candidate:
+                self._abort_pairing()
 
     def forget_peer(self) -> None:
         self._trust.forget()

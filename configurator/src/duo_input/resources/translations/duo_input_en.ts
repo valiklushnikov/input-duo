@@ -1437,6 +1437,24 @@
     </message>
 </context>
 <context>
+    <name>PairingDialog</name>
+    <message>
+        <location filename="../../app.py" line="118" />
+        <source>Подтвердите связывание</source>
+        <extracomment>Console script target declared in ``pyproject.toml``.</extracomment>
+        <translation>Confirm pairing</translation>
+    </message>
+    <message>
+        <location filename="../../app.py" line="119" />
+        <source>Компьютер «{0}» показывает тот же код?
+
+Код: {1}</source>
+        <translation>Does “{0}” show the same code?
+
+Code: {1}</translation>
+    </message>
+</context>
+<context>
     <name>ProfilesPage</name>
     <message>
         <location filename="../../ui/profiles.py" line="76" />
