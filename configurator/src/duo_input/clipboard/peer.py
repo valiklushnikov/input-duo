@@ -121,7 +121,7 @@ class PeerLink(QObject):
         if socket is None:
             return
         self._peer_fingerprint = fingerprint_of_socket(socket)
-        if self._expected_fingerprint and self._peer_fingerprint != self._expected_fingerprint:
+        if self._expected_fingerprint is not None and self._peer_fingerprint != self._expected_fingerprint:
             self._fail("сертификат не тот, что был закреплён")
             return
         self.connected.emit(self._peer_fingerprint)

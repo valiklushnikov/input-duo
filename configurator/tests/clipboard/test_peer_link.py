@@ -206,3 +206,36 @@ def test_an_empty_fingerprint_never_matches_an_empty_expectation(identities):
     client._on_ssl_errors([])
 
     assert fake.ignored is False
+
+
+def test_on_encrypted_treats_an_empty_expectation_as_pinned_not_pairing(identities):
+    """_on_encrypted обязана считать режимом парринга только None, как и _on_ssl_errors.
+
+    _on_ssl_errors проверяет режим парринга строго: `self._expected_fingerprint
+    is None`. Если бы _on_encrypted проверяла тот же режим через истинность
+    (`if self._expected_fingerprint and ...`), пустая строка была бы неотличима
+    от None: несовпадающий отпечаток пира при expected_fingerprint = "" прошёл
+    бы как парринг и получил бы `connected`, а не разрыв. Контракт обеих
+    проверок обязан быть одинаков: закреплённый отпечаток - это "не None",
+    а не "не пусто".
+    """
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtNetwork import QSslCertificate
+
+    server_identity, client_identity = identities
+    client = PeerLink(client_identity)
+    # Настоящий, но чужой сертификат - его отпечаток не совпадёт ни с чем,
+    # кроме самого себя.
+    fake = _FakeSocket(QSslCertificate(QByteArray(server_identity.certificate_pem)))
+    client._socket = fake
+    client._expected_fingerprint = ""  # закреплённый отпечаток, а не парринг
+
+    connected: list[str] = []
+    disconnected: list[str] = []
+    client.connected.connect(connected.append)
+    client.disconnected.connect(disconnected.append)
+
+    client._on_encrypted()
+
+    assert connected == []
+    assert disconnected != []
