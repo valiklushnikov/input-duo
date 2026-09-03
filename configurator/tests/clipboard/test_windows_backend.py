@@ -272,23 +272,35 @@ class TestWindowsClipboardBackendIdempotence:
     """Идемпотентность подписки и отписки."""
 
     def test_repeated_start_does_not_double_subscribe(self, qapp, qtbot):
-        """Повторный start не должен подписывать на сигнал второй раз."""
+        """Повторный start не должен подписывать на сигнал второй раз.
+
+        Тест считает ЧИСЛО ВЫЗОВОВ обработчика, а не число снимков,
+        потому что побочные эффекты _on_data_changed идемпотентны.
+        """
         clipboard = _FakeClipboard()
         backend = WindowsClipboardBackend(clipboard)
 
-        snapshots = []
-        backend.snapshot_taken.connect(lambda snapshot: snapshots.append(snapshot))
+        handler_call_count = [0]
+        original_on_data_changed = backend._on_data_changed
+
+        def counting_handler():
+            handler_call_count[0] += 1
+            original_on_data_changed()
+
+        # Подменим обработчик на счётчик
+        backend._on_data_changed = counting_handler
 
         backend.start()
-        backend.start()  # Второй раз
+        backend.start()  # Повторный start - НЕ должен подписываться ещё раз
 
         clipboard.set_raw_data({"text/plain": b"hello"})
         clipboard.dataChanged.emit()
 
         qtbot.wait(DEBOUNCE_MS + 50)
 
-        # Должно быть РОВНО ОДНО событие, несмотря на двойную подписку
-        assert len(snapshots) == 1
+        # Обработчик должен быть вызван РОВНО ОДИН раз,
+        # несмотря на двойный start()
+        assert handler_call_count[0] == 1
 
         backend.stop()
 
