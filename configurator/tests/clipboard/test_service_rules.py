@@ -145,3 +145,95 @@ def test_an_empty_snapshot_does_not_produce_an_offer():
     assert service.last_sent_offer == first_offer
     # 3. Номер объявления не увеличился (не расходует последовательность)
     assert service.last_sent_offer.seq == first_seq
+
+
+def test_second_belt_entire_snapshot_is_echo_only_if_all_formats_match():
+    service, _ = _service()
+    # Принимаем объявление с двумя форматами
+    service.on_remote_offer(
+        ClipboardOffer(THEIRS, 1, describe({"text/plain": b"hello", "text/html": b"<p>hello</p>"}))
+    )
+    sent: list[ClipboardOffer] = []
+    service.offer_ready.connect(sent.append)
+
+    # Снимок с обоими форматами, полностью совпадающий - это эхо
+    service.on_local_snapshot(ClipboardSnapshot({"text/plain": b"hello", "text/html": b"<p>hello</p>"}))
+    assert sent == []
+
+
+def test_second_belt_snapshot_with_one_new_format_is_not_echo():
+    service, _ = _service()
+    # Принимаем объявление с одним форматом
+    service.on_remote_offer(ClipboardOffer(THEIRS, 1, describe({"text/plain": b"hello"})))
+    sent: list[ClipboardOffer] = []
+    service.offer_ready.connect(sent.append)
+
+    # Снимок с тем же текстом, но добавлен новый формат - это НОВАЯ копия, не эхо
+    service.on_local_snapshot(ClipboardSnapshot({"text/plain": b"hello", "image/png": b"new image"}))
+
+    assert len(sent) == 1
+    assert sent[0].mimes() == ("image/png", "text/plain")
+
+
+def test_second_belt_snapshot_with_same_format_different_content_is_not_echo():
+    service, _ = _service()
+    # Принимаем объявление
+    service.on_remote_offer(ClipboardOffer(THEIRS, 1, describe({"text/plain": b"hello"})))
+    sent: list[ClipboardOffer] = []
+    service.offer_ready.connect(sent.append)
+
+    # Снимок с тем же форматом, но другим содержимым - это НОВАЯ копия, не эхо
+    service.on_local_snapshot(ClipboardSnapshot({"text/plain": b"goodbye"}))
+
+    assert len(sent) == 1
+    assert sent[0].mimes() == ("text/plain",)
+
+
+def test_second_belt_snapshot_with_subset_of_formats_all_matching_is_echo():
+    service, _ = _service()
+    # Принимаем объявление с тремя форматами
+    service.on_remote_offer(
+        ClipboardOffer(
+            THEIRS,
+            1,
+            describe({"text/plain": b"hello", "text/html": b"<p>hello</p>", "text/rtf": b"{\\rtf hello}"}),
+        )
+    )
+    sent: list[ClipboardOffer] = []
+    service.offer_ready.connect(sent.append)
+
+    # Снимок с подмножеством форматов (text/plain и text/html), оба совпадают.
+    # Это рассматривается как эхо: приложение-получатель потеряло маркер, но отдало
+    # ровно те форматы, что мы ему отправили. Любое новое содержимое пользователя
+    # должно отличаться хотя бы в одном формате, чтобы быть признанным новым.
+    service.on_local_snapshot(ClipboardSnapshot({"text/plain": b"hello", "text/html": b"<p>hello</p>"}))
+
+    assert sent == []
+
+
+def test_second_belt_snapshot_with_format_missing_from_received_is_not_echo():
+    service, _ = _service()
+    # Принимаем объявление с одним форматом
+    service.on_remote_offer(ClipboardOffer(THEIRS, 1, describe({"text/plain": b"hello"})))
+    sent: list[ClipboardOffer] = []
+    service.offer_ready.connect(sent.append)
+
+    # Снимок имеет ДРУГОЙ формат, который НЕ был в принятом объявлении - это НОВАЯ копия, не эхо
+    service.on_local_snapshot(ClipboardSnapshot({"application/json": b'{"key": "value"}'}))
+
+    assert len(sent) == 1
+    assert sent[0].mimes() == ("application/json",)
+
+
+def test_second_belt_snapshot_mixing_old_and_new_formats_is_not_echo():
+    service, _ = _service()
+    # Принимаем объявление с одним форматом
+    service.on_remote_offer(ClipboardOffer(THEIRS, 1, describe({"text/plain": b"hello"})))
+    sent: list[ClipboardOffer] = []
+    service.offer_ready.connect(sent.append)
+
+    # Снимок имеет оба формата: один совпадает, но один новый - это НОВАЯ копия, не эхо
+    service.on_local_snapshot(ClipboardSnapshot({"text/plain": b"hello", "image/png": b"new image"}))
+
+    assert len(sent) == 1
+    assert sent[0].mimes() == ("image/png", "text/plain")
