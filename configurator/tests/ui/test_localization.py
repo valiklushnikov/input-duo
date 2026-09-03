@@ -39,6 +39,8 @@ TRANSLATED_MODULES = (
     "ui/theme.py",
     "ui/models/binding_table.py",
     "ui/models/macro_steps.py",
+    "ui/tray.py",
+    "ui/clipboard_page.py",
 )
 
 

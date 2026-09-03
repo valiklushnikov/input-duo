@@ -284,6 +284,50 @@
     </message>
 </context>
 <context>
+    <name>ClipboardPage</name>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="38"/>
+        <location filename="../../ui/clipboard_page.py" line="84"/>
+        <source>Компьютер не выбран</source>
+        <translation>Компьютер не выбран</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="42"/>
+        <source>Связать компьютеры</source>
+        <translation>Связать компьютеры</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="45"/>
+        <source>Забыть компьютер</source>
+        <translation>Забыть компьютер</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="49"/>
+        <source>Общий буфер обмена</source>
+        <translation>Общий буфер обмена</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="52"/>
+        <source>Запускать вместе с Windows</source>
+        <translation>Запускать вместе с Windows</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="56"/>
+        <source>Адрес второго компьютера, если поиск не нашёл</source>
+        <translation>Адрес второго компьютера, если поиск не нашёл</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="61"/>
+        <source>Второй компьютер</source>
+        <translation>Второй компьютер</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="89"/>
+        <source>Отпечаток: {0}</source>
+        <translation>Отпечаток: {0}</translation>
+    </message>
+</context>
+<context>
     <name>CountdownRing</name>
     <message>
         <location filename="../../ui/theme.py" line="411"/>
@@ -1659,6 +1703,54 @@
         <location filename="../../ui/macros.py" line="803"/>
         <source>Confirm that you expect real key presses.</source>
         <translation>Подтвердите, что вы ожидаете настоящих нажатий клавиш.</translation>
+    </message>
+</context>
+<context>
+    <name>TrayIcon</name>
+    <message>
+        <location filename="../../ui/tray.py" line="15"/>
+        <source>Второй компьютер на связи</source>
+        <translation>Второй компьютер на связи</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="16"/>
+        <source>Нет связи со вторым компьютером</source>
+        <translation>Нет связи со вторым компьютером</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="17"/>
+        <source>Компьютеры не связаны</source>
+        <translation>Компьютеры не связаны</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="18"/>
+        <source>Поиск второго компьютера</source>
+        <translation>Поиск второго компьютера</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="21"/>
+        <source>Windows не разрешила подключение — проверьте брандмауэр</source>
+        <translation>Windows не разрешила подключение — проверьте брандмауэр</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="41"/>
+        <source>Открыть Duo Input</source>
+        <translation>Открыть Duo Input</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="51"/>
+        <source>Общий буфер обмена</source>
+        <translation>Общий буфер обмена</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="56"/>
+        <source>Передача файлов</source>
+        <translation>Передача файлов</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="63"/>
+        <source>Выход</source>
+        <translation>Выход</translation>
     </message>
 </context>
 </TS>

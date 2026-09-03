@@ -31,7 +31,9 @@ def test_the_fingerprint_is_shown_so_it_can_be_compared(qtbot):
     qtbot.addWidget(page)
     page.set_peer(PEER)
 
-    assert PEER.fingerprint[:16] in page.fingerprint_label.text()
+    # Отпечаток показан целиком, а не сокращённо: усечение молча снижает
+    # уверенность, с каким именно компьютером установлена связь.
+    assert PEER.fingerprint in page.fingerprint_label.text()
 
 
 def test_toggling_sharing_reports_the_new_value(qtbot):
