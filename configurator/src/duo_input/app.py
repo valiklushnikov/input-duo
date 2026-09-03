@@ -184,10 +184,16 @@ class _ClipboardRuntime(QObject):
     метод, `set_enabled`, поэтому "прочитать состояние" и "включить фичу"
     гарантированно ведут себя одинаково.
 
-    Пока `_start()` ни разу не вызван, ни `TrustStore`, ни
-    `ClipboardCoordinator`, ни `TrayIcon` не существуют - это и есть
-    требование спецификации §4: пока общий буфер выключен, ни один сокет не
-    открывается.
+    Трей (`self.tray`) создаётся здесь, в конструкторе, а не в `_start()` -
+    решение владельца продукта от 2026-09-03 (§4 спецификации) разделило
+    жизненный цикл окна и трея от подсистемы общего буфера: `MainWindow`
+    теперь ВСЕГДА уходит в трей по закрытию, независимо от того, включён ли
+    общий буфер, а значит трей обязан существовать всегда - иначе скрытое
+    окно с выключенной фичей стало бы недоступным (показать нечем, выйти
+    нечем). Пока `_start()` ни разу не вызван, ни `TrustStore`, ни
+    `ClipboardCoordinator` не существуют и ни один сокет не открывается - это
+    по-прежнему требование спецификации §4, и трей само по себе сокетов не
+    открывает.
     """
 
     def __init__(self, application: QApplication, window: MainWindow, settings: QSettings) -> None:
@@ -197,14 +203,17 @@ class _ClipboardRuntime(QObject):
         self._settings = settings
         self.coordinator: ClipboardCoordinator | None = None
         self._backend: WindowsClipboardBackend | None = None
-        self._tray: TrayIcon | None = None
+        self.tray = TrayIcon(application.windowIcon(), application)
+        self.tray.open_requested.connect(window.showNormal)
+        self.tray.quit_requested.connect(application.quit)
+        self.tray.sharing_toggled.connect(self.set_enabled)
+        self.tray.show()
 
     def set_enabled(self, enabled: bool) -> None:
         """Единственный вход для обоих переключателей (страница и трей)."""
         self._settings.setValue("clipboard/enabled", enabled)
         self._window.clipboard_page.set_sharing_checked(enabled)
-        if self._tray is not None:
-            self._tray.set_sharing_checked(enabled)
+        self.tray.set_sharing_checked(enabled)
         if enabled:
             self._start()
         else:
@@ -246,6 +255,7 @@ class _ClipboardRuntime(QObject):
             window.clipboard_page.add_event("общий буфер не запустился: нет доступа к файлам идентичности")
             self._settings.setValue("clipboard/enabled", False)
             window.clipboard_page.set_sharing_checked(False)
+            self.tray.set_sharing_checked(False)
             return
 
         application.setQuitOnLastWindowClosed(False)
@@ -261,13 +271,8 @@ class _ClipboardRuntime(QObject):
         backend.snapshot_taken.connect(coordinator.service.on_local_snapshot)
         backend.start()
 
-        tray = TrayIcon(application.windowIcon(), application)
-        tray.open_requested.connect(window.showNormal)
-        tray.quit_requested.connect(application.quit)
-        tray.sharing_toggled.connect(self.set_enabled)
-        tray.set_sharing_checked(True)
-        tray.set_link_state(coordinator.state.value)
-        coordinator.state_changed.connect(tray.set_link_state)
+        self.tray.set_link_state(coordinator.state.value)
+        coordinator.state_changed.connect(self.tray.set_link_state)
         coordinator.state_changed.connect(window.clipboard_page.set_link_state)
         coordinator.peer_changed.connect(window.clipboard_page.set_peer)
         coordinator.event_logged.connect(window.clipboard_page.add_event)
@@ -280,30 +285,30 @@ class _ClipboardRuntime(QObject):
         window.clipboard_page.pair_requested.connect(coordinator.begin_pairing)
         window.clipboard_page.forget_requested.connect(coordinator.forget_peer)
         window.clipboard_page.address_changed.connect(coordinator.set_manual_address)
-        tray.show()
 
         coordinator.start()
 
         self.coordinator = coordinator
         self._backend = backend
-        self._tray = tray
 
     def _stop(self) -> None:
         coordinator = self.coordinator
         if coordinator is None:
             return
         backend = self._backend
-        tray = self._tray
         self.coordinator = None
         self._backend = None
-        self._tray = None
 
+        # stop() эмитит финальный state_changed (UNPAIRED/DISCONNECTED) ДО
+        # отключения - трей сам обновляется на осмысленное значение вместо
+        # того, чтобы застыть на последнем состоянии живой связи. Отключаем
+        # только после этого: трей переживает остановку (в отличие от
+        # координатора и backend), а без отключения следующий _start() добавил
+        # бы вторую подписку поверх этой при создании нового координатора.
         coordinator.stop()
+        coordinator.state_changed.disconnect(self.tray.set_link_state)
         if backend is not None:
             backend.stop()
-        if tray is not None:
-            tray.hide()
-            tray.deleteLater()
 
         self._application.setQuitOnLastWindowClosed(True)
 
@@ -327,11 +332,15 @@ def configure_runtime(
 
     # Показать сохранённое состояние ОДИНАКОВО на странице и в трее - раньше
     # трей выставлялся принудительно checked=True независимо от настроек, а
-    # страница вообще не читала своё состояние при запуске.
+    # страница вообще не читала своё состояние при запуске. Трей теперь
+    # существует независимо от `enabled` (см. `_ClipboardRuntime.__init__`),
+    # так что этот вызов - единственное место, где его галочка узнаёт о
+    # реальном сохранённом состоянии на старте.
     enabled = bool(settings.value("clipboard/enabled", False, type=bool))
     autostart_enabled = bool(settings.value("clipboard/autostart", False, type=bool))
     window.clipboard_page.set_sharing_checked(enabled)
     window.clipboard_page.set_autostart_checked(autostart_enabled)
+    runtime.tray.set_sharing_checked(enabled)
     if enabled:
         runtime.set_enabled(True)
     return runtime.coordinator
