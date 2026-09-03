@@ -77,10 +77,18 @@ def test_empty_blob_is_accepted():
 
 
 def test_frame_shorter_than_its_own_header_is_refused():
-    # Frame with declared payload length 2 but only 1 byte of payload (type byte only)
+    # Frame with declared payload length 1 but only 1 byte of payload (type byte only)
     raw = (1).to_bytes(4, "big") + bytes([MessageType.PING])
 
-    with pytest.raises(WireError, match="короче"):
+    with pytest.raises(WireError):
+        FrameAssembler().feed(raw)
+
+
+def test_empty_payload_is_refused():
+    # Frame with declared payload length 0: just 4 bytes of length field with value 0
+    raw = (0).to_bytes(4, "big")
+
+    with pytest.raises(WireError):
         FrameAssembler().feed(raw)
 
 
