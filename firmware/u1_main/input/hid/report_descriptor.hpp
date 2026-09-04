@@ -105,6 +105,14 @@ enum class ReportDescriptorError : std::uint8_t {
     MalformedGlobalState,
 };
 
+/// The one supported report role exposed by a descriptor, if there is one.
+enum class ReportDescriptorRole : std::uint8_t {
+    None,
+    Keyboard,
+    Mouse,
+    Ambiguous,
+};
+
 /// Walk a HID report descriptor and find the mouse report inside it.
 ///
 /// Returns ReportDescriptorError::None and fills ``out`` on success; on any
@@ -118,5 +126,12 @@ ReportDescriptorError parse_mouse_report_descriptor(protocol::ByteView descripto
 /// A failure never changes ``out``.
 ReportDescriptorError parse_keyboard_report_descriptor(protocol::ByteView descriptor,
                                                        KeyboardReportLayout& out);
+
+/// Try both bounded parsers and retain a layout only when exactly one role is
+/// supported. This is the neutral composition shared by USB host backends;
+/// neither parser's implementation is copied or specialized by transport.
+ReportDescriptorRole classify_report_descriptor(protocol::ByteView descriptor,
+                                                KeyboardReportLayout& keyboard,
+                                                MouseReportLayout& mouse);
 
 }  // namespace duo_input::u1::input::hid

@@ -619,6 +619,28 @@ endif()
 
 add_test(NAME report_descriptor COMMAND duo_report_descriptor_test)
 
+add_executable(duo_pio_usb_hid_setup_test
+    test_main.cpp
+    test_pio_usb_hid_setup.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/hid_setup.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/hid/report_descriptor.cpp
+)
+
+target_link_libraries(duo_pio_usb_hid_setup_test PRIVATE duo_common)
+target_include_directories(duo_pio_usb_hid_setup_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_compile_definitions(duo_pio_usb_hid_setup_test PRIVATE
+    DUO_TEST_VECTOR_DIR="${CMAKE_SOURCE_DIR}/tests/vectors"
+)
+
+if(MSVC)
+    target_compile_options(duo_pio_usb_hid_setup_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME pio_usb_hid_setup COMMAND duo_pio_usb_hid_setup_test)
+
 add_executable(duo_pio_usb_startup_test
     test_main.cpp
     test_pio_usb_startup.cpp
@@ -641,6 +663,7 @@ add_executable(duo_pio_usb_device_registry_test
     fakes/tinyusb_host.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/backend.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/device_registry.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/hid_setup.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/tinyusb_host_callbacks.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/hid/report_descriptor.cpp
 )

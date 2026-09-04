@@ -786,4 +786,29 @@ ReportDescriptorError parse_keyboard_report_descriptor(protocol::ByteView descri
     return ReportDescriptorError::None;
 }
 
+ReportDescriptorRole classify_report_descriptor(protocol::ByteView descriptor,
+                                                KeyboardReportLayout& keyboard,
+                                                MouseReportLayout& mouse) {
+    KeyboardReportLayout parsed_keyboard;
+    MouseReportLayout parsed_mouse;
+    const bool has_keyboard =
+        parse_keyboard_report_descriptor(descriptor, parsed_keyboard) ==
+        ReportDescriptorError::None;
+    const bool has_mouse = parse_mouse_report_descriptor(descriptor, parsed_mouse) ==
+                           ReportDescriptorError::None;
+
+    if (has_keyboard && has_mouse) {
+        return ReportDescriptorRole::Ambiguous;
+    }
+    if (has_keyboard) {
+        keyboard = parsed_keyboard;
+        return ReportDescriptorRole::Keyboard;
+    }
+    if (has_mouse) {
+        mouse = parsed_mouse;
+        return ReportDescriptorRole::Mouse;
+    }
+    return ReportDescriptorRole::None;
+}
+
 }  // namespace duo_input::u1::input::hid

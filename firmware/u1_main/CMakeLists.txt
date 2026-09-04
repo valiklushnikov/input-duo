@@ -28,6 +28,7 @@ else()
     list(APPEND _duo_u1_sources
         pio_usb/backend.cpp
         pio_usb/device_registry.cpp
+        pio_usb/hid_setup.cpp
         pio_usb/tinyusb_host_callbacks.cpp
     )
 endif()

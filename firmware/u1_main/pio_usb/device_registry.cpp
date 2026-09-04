@@ -2,34 +2,21 @@
 
 #include <cstring>
 
-#include "crypto/sha256.hpp"
+#include "pio_usb/hid_setup.hpp"
 
 extern "C" bool tuh_hid_receive_report(std::uint8_t dev_addr, std::uint8_t instance);
 
 namespace duo_input::u1::pio_usb {
 namespace {
 
-constexpr std::uint8_t kProtocolKeyboard = 1;
-constexpr std::uint8_t kProtocolMouse = 2;
-
-LogicalRole role_for_protocol(std::uint8_t protocol) {
-    if (protocol == kProtocolKeyboard) {
+LogicalRole role_for_kind(input::DeviceKind kind) {
+    if (kind == input::DeviceKind::Keyboard) {
         return LogicalRole::Keyboard;
     }
-    if (protocol == kProtocolMouse) {
+    if (kind == input::DeviceKind::Mouse) {
         return LogicalRole::Mouse;
     }
     return LogicalRole::Ignored;
-}
-
-input::DeviceKind kind_for_role(LogicalRole role) {
-    if (role == LogicalRole::Keyboard) {
-        return input::DeviceKind::Keyboard;
-    }
-    if (role == LogicalRole::Mouse) {
-        return input::DeviceKind::Mouse;
-    }
-    return input::DeviceKind::Unknown;
 }
 
 std::size_t detach_slot(LogicalRole role) {
@@ -304,26 +291,24 @@ void DeviceRegistry::process(const CallbackRecord& record) {
             return;
         }
 
+        *interface = {};
         interface->mounted = true;
         interface->dev_addr = record.dev_addr;
         interface->instance = record.instance;
         interface->interface_protocol = record.interface_protocol;
         interface->descriptor_present = record.payload_present;
+        const bool classified = classify_hid(
+            record.interface_protocol,
+            record.payload_present ? record.payload : nullptr,
+            record.payload_present ? record.size : 0,
+            interface->identity);
         interface->identity.vendor_id = record.vendor_id;
         interface->identity.product_id = record.product_id;
-        if (record.payload_present) {
-            crypto::sha256(record.payload, record.size, interface->identity.descriptor_hash);
-        }
 
-        const LogicalRole wanted = role_for_protocol(record.interface_protocol);
+        const LogicalRole wanted =
+            classified ? role_for_kind(interface->identity.kind) : LogicalRole::Ignored;
         if (wanted != LogicalRole::Ignored && !role_is_owned(wanted)) {
             interface->role = wanted;
-            interface->identity.kind = kind_for_role(wanted);
-            if (wanted == LogicalRole::Keyboard) {
-                interface->identity.keyboard_layout = input::hid::boot_keyboard_layout();
-            } else {
-                interface->identity.mouse_layout = input::hid::boot_mouse_layout();
-            }
         } else {
             interface->role = LogicalRole::Ignored;
             ++ignored_interfaces_;

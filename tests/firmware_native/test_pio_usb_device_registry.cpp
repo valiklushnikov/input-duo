@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 using duo::test::tinyusb_host::kProtocolKeyboard;
 using duo::test::tinyusb_host::kProtocolMouse;
@@ -49,10 +50,27 @@ struct RegistryRig {
     }
 
     void hid(std::uint8_t address, std::uint8_t instance, std::uint8_t protocol) {
+        hid(address, instance, protocol, kDescriptor, sizeof(kDescriptor));
+    }
+
+    void hid(std::uint8_t address, std::uint8_t instance, std::uint8_t protocol,
+             const std::uint8_t* descriptor, std::uint16_t descriptor_size) {
         duo::test::tinyusb_host::set_protocol(address, instance, protocol);
-        tuh_hid_mount_cb(address, instance, kDescriptor, sizeof(kDescriptor));
+        tuh_hid_mount_cb(address, instance, descriptor, descriptor_size);
     }
 };
+
+std::vector<std::uint8_t> neutral_mouse_descriptor() {
+    return {
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00,
+        0x05, 0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00, 0x25, 0x01,
+        0x95, 0x05, 0x75, 0x01, 0x81, 0x02,
+        0x95, 0x01, 0x75, 0x03, 0x81, 0x03,
+        0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38,
+        0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x03, 0x81, 0x06,
+        0xC0, 0xC0,
+    };
+}
 
 }  // namespace
 
@@ -436,4 +454,97 @@ TEST_CASE(mount_processing_stores_vid_pid_protocol_descriptor_hash_and_neutral_l
                       kAbcSha256.size()) == 0);
     CHECK(entry->identity.keyboard_layout.key_kind !=
           duo_input::u1::input::hid::KeyboardFieldKind::None);
+}
+
+TEST_CASE(hid_mount_callback_only_copies_before_core1_classifies_a_neutral_mouse) {
+    RegistryRig rig;
+    const auto descriptor = neutral_mouse_descriptor();
+    rig.device(2, 0xCAFE, 0x0001);
+    rig.hid(2, 0, kProtocolNone, descriptor.data(),
+            static_cast<std::uint16_t>(descriptor.size()));
+
+    CHECK(rig.registry.find(2, 0) == nullptr);
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 0u);
+
+    rig.registry.process_pending();
+    const auto* mouse = rig.registry.owner(DeviceKind::Mouse);
+    CHECK(mouse != nullptr);
+    if (mouse != nullptr) {
+        CHECK_EQ(mouse->identity.mouse_layout.buttons.bits, std::uint8_t{5});
+        CHECK_EQ(mouse->identity.mouse_layout.wheel.offset, std::uint8_t{3});
+        CHECK_EQ(mouse->identity.mouse_layout.minimum_body_bytes, std::uint8_t{3});
+    }
+}
+
+TEST_CASE(absent_descriptor_is_not_the_sha256_of_empty_and_keeps_boot_fallback_explicit) {
+    RegistryRig rig;
+    rig.device(2, 0xCAFE, 0x0002);
+    rig.hid(2, 0, kProtocolMouse, nullptr, 0);
+    rig.registry.process_pending();
+
+    const auto* mouse = rig.registry.find(2, 0);
+    CHECK(mouse != nullptr);
+    CHECK_FALSE(mouse->descriptor_present);
+    CHECK_EQ(mouse->identity.kind, DeviceKind::Mouse);
+    CHECK_EQ(mouse->identity.mouse_layout.minimum_body_bytes, std::uint8_t{3});
+    CHECK(std::memcmp(mouse->identity.descriptor_hash, std::array<std::uint8_t, 32>{}.data(),
+                      sizeof(mouse->identity.descriptor_hash)) == 0);
+}
+
+TEST_CASE(prefix_equal_descriptor_lengths_keep_their_exact_registry_hashes) {
+    constexpr std::uint8_t short_descriptor[] = {'a', 'b', 'c'};
+    constexpr std::uint8_t long_descriptor[] = {'a', 'b', 'c', 'd'};
+    constexpr std::array<std::uint8_t, 32> kAbcdSha256 = {
+        0x88, 0xd4, 0x26, 0x6f, 0xd4, 0xe6, 0x33, 0x8d,
+        0x13, 0xb8, 0x45, 0xfc, 0xf2, 0x89, 0x57, 0x9d,
+        0x20, 0x9c, 0x89, 0x78, 0x23, 0xb9, 0x21, 0x7d,
+        0xa3, 0xe1, 0x61, 0x93, 0x6f, 0x03, 0x15, 0x89,
+    };
+    RegistryRig rig;
+    rig.device(2, 0xCAFE, 0x0003);
+    rig.device(3, 0xCAFE, 0x0004);
+    rig.hid(2, 0, kProtocolNone, short_descriptor, sizeof(short_descriptor));
+    rig.hid(3, 0, kProtocolNone, long_descriptor, sizeof(long_descriptor));
+    rig.registry.process_pending();
+
+    const auto* short_entry = rig.registry.find(2, 0);
+    const auto* long_entry = rig.registry.find(3, 0);
+    CHECK(short_entry != nullptr);
+    CHECK(long_entry != nullptr);
+    CHECK(short_entry->descriptor_present);
+    CHECK(long_entry->descriptor_present);
+    CHECK(std::memcmp(short_entry->identity.descriptor_hash, kAbcSha256.data(),
+                      kAbcSha256.size()) == 0);
+    CHECK(std::memcmp(long_entry->identity.descriptor_hash, kAbcdSha256.data(),
+                      kAbcdSha256.size()) == 0);
+}
+
+TEST_CASE(reconnect_clears_old_layout_vid_pid_hash_and_presence_before_reclassification) {
+    RegistryRig rig;
+    const auto descriptor = neutral_mouse_descriptor();
+    rig.device(2, 0x1111, 0x2222);
+    rig.hid(2, 0, kProtocolNone, descriptor.data(),
+            static_cast<std::uint16_t>(descriptor.size()));
+    rig.registry.process_pending();
+    CHECK_EQ(rig.registry.find(2, 0)->identity.kind, DeviceKind::Mouse);
+    CHECK(rig.registry.find(2, 0)->descriptor_present);
+
+    tuh_umount_cb(2);
+    rig.registry.process_pending();
+    rig.device(2, 0xAAAA, 0xBBBB);
+    rig.hid(2, 0, kProtocolKeyboard, nullptr, 0);
+    rig.registry.process_pending();
+
+    const auto* keyboard = rig.registry.find(2, 0);
+    CHECK(keyboard != nullptr);
+    if (keyboard != nullptr) {
+        CHECK_EQ(keyboard->identity.kind, DeviceKind::Keyboard);
+        CHECK_EQ(keyboard->identity.vendor_id, std::uint16_t{0xAAAA});
+        CHECK_EQ(keyboard->identity.product_id, std::uint16_t{0xBBBB});
+        CHECK_FALSE(keyboard->descriptor_present);
+        CHECK_EQ(keyboard->identity.mouse_layout.minimum_body_bytes, std::uint8_t{0});
+        CHECK(std::memcmp(keyboard->identity.descriptor_hash,
+                          std::array<std::uint8_t, 32>{}.data(),
+                          sizeof(keyboard->identity.descriptor_hash)) == 0);
+    }
 }
