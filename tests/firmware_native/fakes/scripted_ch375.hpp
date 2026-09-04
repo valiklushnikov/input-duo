@@ -287,6 +287,15 @@ public:
     /// default here is eight for that reason.
     void set_control_packet_size(std::uint8_t bytes) { control_packet_ = bytes; }
 
+    /// What the device descriptor's idVendor/idProduct answer as. Fixed at
+    /// 0x1234/0x5678 unless a test asks for something else - a device whose
+    /// identity a pipeline test needs to check by value, such as Keychron's
+    /// 3434:D030 receiver.
+    void set_device_ids(std::uint16_t vendor_id, std::uint16_t product_id) {
+        vendor_id_ = vendor_id;
+        product_id_ = product_id;
+    }
+
     /// Refuse the report-descriptor request with a STALL, as a device that
     /// does not implement it does. Every other request is still answered.
     void refuse_report_descriptor(bool refusing) { refuse_report_descriptor_ = refusing; }
@@ -688,6 +697,8 @@ private:
     bool control_read_data1_ = true;
     std::uint8_t receive_toggle_ = 0;
     std::uint8_t control_packet_ = 8;
+    std::uint16_t vendor_id_ = 0x1234;
+    std::uint16_t product_id_ = 0x5678;
     bool refuse_report_descriptor_ = false;
     bool ignore_report_descriptor_ = false;
     bool empty_report_descriptor_ = false;

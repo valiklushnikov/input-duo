@@ -479,11 +479,16 @@ add_test(NAME input_pipeline COMMAND duo_input_pipeline_test)
 add_executable(duo_input_source_test
     test_main.cpp
     test_input_source.cpp
+    fakes/scripted_ch375.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/pipeline.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/ch375_source_adapter.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/keyboard_normalizer.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/hid/report_descriptor.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/mouse_normalizer.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/device.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/enumerator.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/descriptor_setup.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/hid_parser.cpp
 )
 
 target_link_libraries(duo_input_source_test PRIVATE duo_common)

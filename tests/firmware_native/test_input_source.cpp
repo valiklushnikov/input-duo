@@ -8,7 +8,9 @@
 // ch375::Ch375Event directly, so a second backend that never heard of CH375
 // can produce the same events and get the same result.
 
+#include "ch375/descriptor_setup.hpp"
 #include "ch375/device.hpp"
+#include "fakes/scripted_ch375.hpp"
 #include "input/ch375_source_adapter.hpp"
 #include "input/pipeline.hpp"
 #include "input/source.hpp"
@@ -20,6 +22,12 @@
 using duo_input::protocol::ByteView;
 using duo_input::u1::ch375::Ch375Event;
 using duo_input::u1::ch375::Ch375EventKind;
+using duo_input::u1::ch375::Ch375Transport;
+using duo_input::u1::ch375::DescriptorSetup;
+using duo_input::u1::ch375::InterruptStatus;
+using duo_input::u1::ch375::ReplyProgress;
+using duo_input::u1::ch375::SetupProgress;
+using duo_input::u1::ch375::testing::FakeCh375Chip;
 using duo_input::u1::input::Ch375SourceAdapter;
 using duo_input::u1::input::DeviceKind;
 using duo_input::u1::input::IInputHandler;
@@ -132,6 +140,90 @@ constexpr std::uint8_t kKeychronSidePress[] = {0x01, 0x01, 0x00, 0x4F,
                                                0x00, 0x00, 0x00, 0x00, 0x03};
 constexpr std::uint8_t kKeychronSideRelease[] = {0x01, 0x00, 0x00, 0x00,
                                                  0x00, 0x00, 0x00, 0x00, 0x03};
+
+/// A minimal mouse report descriptor: buttons, X, Y, wheel. Enough for
+/// DescriptorSetup to read a real, non-empty layout and hash out of a
+/// device that is not merely on boot protocol - which is the case that
+/// distinguishes ``identity()`` actually reading the setup from it handing
+/// back an empty default.
+std::vector<std::uint8_t> wheel_mouse_descriptor() {
+    return {
+        0x05, 0x01,  // Usage Page (Generic Desktop)
+        0x09, 0x02,  // Usage (Mouse)
+        0xA1, 0x01,  // Collection (Application)
+        0x09, 0x01,  //   Usage (Pointer)
+        0xA1, 0x00,  //   Collection (Physical)
+        0x05, 0x09,  //     Usage Page (Button)
+        0x19, 0x01,  //     Usage Minimum (Button 1)
+        0x29, 0x05,  //     Usage Maximum (Button 5)
+        0x15, 0x00,  //     Logical Minimum (0)
+        0x25, 0x01,  //     Logical Maximum (1)
+        0x95, 0x05,  //     Report Count (5)
+        0x75, 0x01,  //     Report Size (1)
+        0x81, 0x02,  //     Input (Data,Var,Abs)
+        0x95, 0x01,  //     Report Count (1)
+        0x75, 0x03,  //     Report Size (3)
+        0x81, 0x03,  //     Input (Cnst,Var,Abs)
+        0x05, 0x01,  //     Usage Page (Generic Desktop)
+        0x09, 0x30,  //     Usage (X)
+        0x09, 0x31,  //     Usage (Y)
+        0x09, 0x38,  //     Usage (Wheel)
+        0x15, 0x81,  //     Logical Minimum (-127)
+        0x25, 0x7F,  //     Logical Maximum (127)
+        0x75, 0x08,  //     Report Size (8)
+        0x95, 0x03,  //     Report Count (3)
+        0x81, 0x06,  //     Input (Data,Var,Rel)
+        0xC0,        //   End Collection
+        0xC0,        // End Collection
+    };
+}
+
+/// Drives a DescriptorSetup exactly the way Ch375Device does, against a
+/// FakeCh375Chip standing in for the controller. Copied from the same rig
+/// test_ch375_descriptor_setup.cpp uses - this file is not about the setup
+/// state machine, only about what Ch375SourceAdapter::identity() reads back
+/// out of one that has already reached Done.
+struct Rig {
+    FakeCh375Chip chip;
+    Ch375Transport transport{chip};
+    DescriptorSetup setup{transport};
+
+    void begin(std::uint32_t now_us) {
+        if (transport.interrupt_pending()) {
+            transport.begin_status_read();
+            InterruptStatus held = InterruptStatus::Success;
+            while (transport.poll_status_read(held) == ReplyProgress::Waiting) {
+            }
+        }
+        setup.begin(now_us);
+    }
+
+    SetupProgress settle() {
+        for (int pass = 0; pass < 20000; ++pass) {
+            bool interrupted = false;
+            InterruptStatus status = InterruptStatus::Success;
+            if (transport.interrupt_pending()) {
+                transport.begin_status_read();
+                interrupted = transport.poll_status_read(status) == ReplyProgress::Answered;
+            }
+            const SetupProgress progress = setup.poll(chip.now_us(), interrupted, status);
+            if (progress != SetupProgress::Busy) {
+                return progress;
+            }
+            chip.advance(50);
+        }
+        return SetupProgress::Busy;
+    }
+};
+
+bool all_zero(const std::uint8_t* bytes, std::size_t size) {
+    for (std::size_t index = 0; index < size; ++index) {
+        if (bytes[index] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
 
 }  // namespace
 
@@ -270,4 +362,71 @@ TEST_CASE(the_adapter_maps_every_routed_ch375_event_kind_to_its_neutral_counterp
     fault.kind = Ch375EventKind::Fault;
     CHECK(adapter.convert(fault, out));
     CHECK(out.kind == SourceEventKind::Fault);
+}
+
+// ============================== Ch375SourceAdapter::identity(DescriptorSetup)
+//
+// Everything above this line hand-builds a SourceIdentity - the pipeline
+// tests do not care where one came from. This is the one place that proves
+// identity() itself reads a real, settled DescriptorSetup correctly: what it
+// is, whose product this is, and the layout and hash it declared. A
+// DescriptorSetup is driven to Done against a FakeCh375Chip exactly the way
+// Ch375Device drives one on hardware.
+
+TEST_CASE(identity_reads_kind_layout_and_hash_from_a_settled_mouse_setup) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_mouse_with_report_descriptor(wheel_mouse_descriptor(), true);
+    rig.begin(rig.chip.now_us());
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK(rig.setup.has_mouse_layout());
+
+    Ch375SourceAdapter adapter(0);
+    const SourceIdentity identity = adapter.identity(rig.setup);
+
+    // Read through its own report descriptor, not left on the boot
+    // fallback - the whole reason this device has a wheel field at all.
+    CHECK(identity.kind == DeviceKind::Mouse);
+    CHECK(identity.mouse_layout.wheel.present);
+    CHECK(std::memcmp(&identity.mouse_layout, &rig.setup.mouse_layout(),
+                      sizeof(identity.mouse_layout)) == 0);
+
+    // A real SHA-256 of a non-empty descriptor is not all zero. If it were
+    // copied wrong - or not copied at all - this and the memcmp below could
+    // not both hold.
+    CHECK(!all_zero(identity.descriptor_hash, sizeof(identity.descriptor_hash)));
+    CHECK(std::memcmp(identity.descriptor_hash, rig.setup.report_descriptor_hash(),
+                      sizeof(identity.descriptor_hash)) == 0);
+}
+
+TEST_CASE(
+    the_keychron_vendor_and_product_id_survive_setup_through_identity_to_the_synthesised_button) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.set_device_ids(kKeychronVendorId, kKeychronProductId);
+    rig.chip.serve_boot_mouse();
+    rig.begin(rig.chip.now_us());
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+
+    Ch375SourceAdapter adapter(0);
+    const SourceIdentity identity = adapter.identity(rig.setup);
+
+    // The exact bug this test exists to catch: a transposed vendor_id/
+    // product_id assignment inside identity() would still compile, still
+    // pass every hand-built-SourceIdentity test above, and would silently
+    // stop the Keychron side button from working on real hardware.
+    CHECK_EQ(identity.vendor_id, kKeychronVendorId);
+    CHECK_EQ(identity.product_id, kKeychronProductId);
+
+    Recorder recorder;
+    InputPipeline pipeline(recorder);
+    pipeline.on_event(ready_event(), identity, 1000);
+    pipeline.on_event(auxiliary_report_event(1, kKeychronSidePress, sizeof(kKeychronSidePress)),
+                      identity, 1010);
+    pipeline.on_event(
+        auxiliary_report_event(1, kKeychronSideRelease, sizeof(kKeychronSideRelease)), identity,
+        1020);
+
+    CHECK_EQ(recorder.of(InputEventKind::MouseButtonDown, 3), 1);
+    CHECK_EQ(recorder.of(InputEventKind::MouseButtonUp, 3), 1);
 }

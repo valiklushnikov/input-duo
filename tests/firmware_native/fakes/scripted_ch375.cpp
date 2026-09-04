@@ -523,9 +523,26 @@ void FakeCh375Chip::write_data(std::uint8_t value) {
                 break;
             }
             if (value == 1) {
-                // A device descriptor. Only its shape matters here.
-                pending_read_ = {18,   0x01, 0x10, 0x01, 0, 0, 0, control_packet_,
-                                 0x34, 0x12, 0x78, 0x56, 0, 1, 0, 0, 0, 1};
+                // A device descriptor. Only its shape matters here, plus
+                // whatever idVendor/idProduct a test asked for.
+                pending_read_ = {18,
+                                 0x01,
+                                 0x10,
+                                 0x01,
+                                 0,
+                                 0,
+                                 0,
+                                 control_packet_,
+                                 static_cast<std::uint8_t>(vendor_id_ & 0xFF),
+                                 static_cast<std::uint8_t>(vendor_id_ >> 8),
+                                 static_cast<std::uint8_t>(product_id_ & 0xFF),
+                                 static_cast<std::uint8_t>(product_id_ >> 8),
+                                 0,
+                                 1,
+                                 0,
+                                 0,
+                                 0,
+                                 1};
                 read_device_descriptor_ = true;
             } else if (value == 2) {
                 if (!read_device_descriptor_) {
