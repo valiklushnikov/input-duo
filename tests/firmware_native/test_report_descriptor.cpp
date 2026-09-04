@@ -15,7 +15,7 @@
 // the normalizer reads. A layout that cannot be expressed that way is refused
 // by name, and a refused layout is one the caller keeps out of report protocol.
 
-#include "ch375/report_descriptor.hpp"
+#include "input/hid/report_descriptor.hpp"
 #include "test_support.hpp"
 
 #include <cstdint>
@@ -24,14 +24,14 @@
 #include <string>
 #include <vector>
 
-using duo_input::u1::ch375::boot_keyboard_layout;
-using duo_input::u1::ch375::boot_mouse_layout;
-using duo_input::u1::ch375::KeyboardFieldKind;
-using duo_input::u1::ch375::KeyboardReportLayout;
-using duo_input::u1::ch375::MouseReportLayout;
-using duo_input::u1::ch375::parse_keyboard_report_descriptor;
-using duo_input::u1::ch375::parse_mouse_report_descriptor;
-using duo_input::u1::ch375::ReportDescriptorError;
+using duo_input::u1::input::hid::boot_keyboard_layout;
+using duo_input::u1::input::hid::boot_mouse_layout;
+using duo_input::u1::input::hid::KeyboardFieldKind;
+using duo_input::u1::input::hid::KeyboardReportLayout;
+using duo_input::u1::input::hid::MouseReportLayout;
+using duo_input::u1::input::hid::parse_keyboard_report_descriptor;
+using duo_input::u1::input::hid::parse_mouse_report_descriptor;
+using duo_input::u1::input::hid::ReportDescriptorError;
 
 namespace {
 

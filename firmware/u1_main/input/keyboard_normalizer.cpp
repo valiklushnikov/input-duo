@@ -55,7 +55,7 @@ std::uint32_t read_bits(const std::uint8_t* body, std::uint32_t first, std::uint
 /// field reaching past that length is read out of memory this report does not
 /// own. Where the two agree - which is every layout the parser builds - this
 /// is the same number.
-std::uint32_t needed_body_bits(const ch375::KeyboardReportLayout& layout) {
+std::uint32_t needed_body_bits(const hid::KeyboardReportLayout& layout) {
     std::uint32_t needed = 0;
 
     const std::uint32_t keys_end =
@@ -68,7 +68,7 @@ std::uint32_t needed_body_bits(const ch375::KeyboardReportLayout& layout) {
 
     for (std::uint8_t bit = 0; bit < 8; ++bit) {
         const std::uint16_t at = layout.modifier_bits[bit];
-        if (at != ch375::kNoKeyboardBit && static_cast<std::uint32_t>(at) + 1u > needed) {
+        if (at != hid::kNoKeyboardBit && static_cast<std::uint32_t>(at) + 1u > needed) {
             needed = static_cast<std::uint32_t>(at) + 1u;
         }
     }
@@ -77,7 +77,7 @@ std::uint32_t needed_body_bits(const ch375::KeyboardReportLayout& layout) {
 
 }  // namespace
 
-void KeyboardNormalizer::set_layout(const ch375::KeyboardReportLayout& layout) {
+void KeyboardNormalizer::set_layout(const hid::KeyboardReportLayout& layout) {
     layout_ = layout;
 }
 
@@ -104,7 +104,7 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
     // A layout with no key field says nothing about where the keys are.
     // Reading the boot offsets anyway is a guess, and it is wrong for exactly
     // the devices the descriptor path exists to serve.
-    if (layout_.key_kind == ch375::KeyboardFieldKind::None ||
+    if (layout_.key_kind == hid::KeyboardFieldKind::None ||
         layout_.key_element_bits == 0 || layout_.key_element_count == 0 ||
         layout_.key_element_bits > kMaxKeyElementBits) {
 #if DUO_CH375_PROBE
@@ -155,7 +155,7 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
 
     for (std::uint32_t index = 0; index < element_count; ++index) {
         std::uint16_t usage = 0;
-        if (layout_.key_kind == ch375::KeyboardFieldKind::Array) {
+        if (layout_.key_kind == hid::KeyboardFieldKind::Array) {
             usage = static_cast<std::uint16_t>(
                 read_bits(body, first_bit + index * element_bits,
                           layout_.key_element_bits));
@@ -226,7 +226,7 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
     std::uint8_t modifiers = 0;
     for (std::uint8_t bit = 0; bit < 8; ++bit) {
         const std::uint16_t at = layout_.modifier_bits[bit];
-        if (at == ch375::kNoKeyboardBit) {
+        if (at == hid::kNoKeyboardBit) {
             continue;
         }
         if (read_bits(body, at, 1) != 0) {

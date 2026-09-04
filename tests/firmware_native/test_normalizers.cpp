@@ -13,7 +13,7 @@
 // remembered to be holding. Releasing a key nobody pressed is a nuisance;
 // holding one nobody can release is not.
 
-#include "ch375/report_descriptor.hpp"
+#include "input/hid/report_descriptor.hpp"
 #include "input/keyboard_normalizer.hpp"
 #include "input/mouse_normalizer.hpp"
 #include "test_support.hpp"
@@ -25,12 +25,12 @@ using duo_input::u1::input::InputEventKind;
 using duo_input::u1::input::KeyboardNormalizer;
 using duo_input::u1::input::kMaxEventsPerReport;
 using duo_input::u1::input::MouseNormalizer;
-using duo_input::u1::ch375::boot_keyboard_layout;
-using duo_input::u1::ch375::boot_mouse_layout;
-using duo_input::u1::ch375::KeyboardFieldKind;
-using duo_input::u1::ch375::KeyboardReportLayout;
-using duo_input::u1::ch375::MouseReportLayout;
-using duo_input::u1::ch375::ReportField;
+using duo_input::u1::input::hid::boot_keyboard_layout;
+using duo_input::u1::input::hid::boot_mouse_layout;
+using duo_input::u1::input::hid::KeyboardFieldKind;
+using duo_input::u1::input::hid::KeyboardReportLayout;
+using duo_input::u1::input::hid::MouseReportLayout;
+using duo_input::u1::input::hid::ReportField;
 
 namespace {
 

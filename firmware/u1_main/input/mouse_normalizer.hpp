@@ -18,8 +18,8 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "ch375/report_descriptor.hpp"
 #include "input/events.hpp"
+#include "input/hid/report_descriptor.hpp"
 #include "protocol/bytes.hpp"
 
 namespace duo_input::u1::input {
@@ -40,7 +40,7 @@ public:
     /// descriptor said. A device that would not give one up keeps the boot
     /// layout this starts on, which is the layout every mouse here has been
     /// read under so far.
-    void set_layout(const ch375::MouseReportLayout& layout) { layout_ = layout; }
+    void set_layout(const hid::MouseReportLayout& layout) { layout_ = layout; }
 
     std::size_t apply(protocol::ByteView report, InputEvent* out, std::size_t capacity);
 
@@ -48,7 +48,7 @@ public:
     std::size_t release_all(InputEvent* out, std::size_t capacity);
 
 private:
-    ch375::MouseReportLayout layout_ = ch375::boot_mouse_layout();
+    hid::MouseReportLayout layout_ = hid::boot_mouse_layout();
     std::uint8_t buttons_ = 0;
 };
 

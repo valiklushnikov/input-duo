@@ -25,7 +25,7 @@ add_executable(duo_u1_main
     ch375/enumerator.cpp
     ch375/descriptor_setup.cpp
     ch375/hid_parser.cpp
-    ch375/report_descriptor.cpp
+    input/hid/report_descriptor.cpp
     diagnostics_service.cpp
 )
 

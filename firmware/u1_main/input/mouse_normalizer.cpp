@@ -21,7 +21,7 @@ bool emit(InputEvent* out, std::size_t capacity, std::size_t& used, const InputE
 ///
 /// Values are signed. A movement byte read unsigned turns a small step left
 /// into a leap across the screen, and the same is true of a wheel notch.
-bool read_field(const ch375::ReportField& field, const std::uint8_t* body,
+bool read_field(const hid::ReportField& field, const std::uint8_t* body,
                 std::size_t body_size, std::int16_t& out) {
     if (!field.present || field.bytes == 0) {
         return false;

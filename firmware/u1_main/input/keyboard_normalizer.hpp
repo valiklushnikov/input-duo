@@ -22,8 +22,8 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "ch375/report_descriptor.hpp"
 #include "input/events.hpp"
+#include "input/hid/report_descriptor.hpp"
 #include "protocol/bytes.hpp"
 
 namespace duo_input::u1::input {
@@ -77,7 +77,7 @@ public:
     ///
     /// Until this is called the boot layout is assumed, which is what every
     /// keyboard was read under before descriptors were fetched at all.
-    void set_layout(const ch375::KeyboardReportLayout& layout);
+    void set_layout(const hid::KeyboardReportLayout& layout);
 
     /// Read one report and write out what changed.
     ///
@@ -123,7 +123,7 @@ public:
 #endif
 
 private:
-    ch375::KeyboardReportLayout layout_ = ch375::boot_keyboard_layout();
+    hid::KeyboardReportLayout layout_ = hid::boot_keyboard_layout();
     std::uint8_t modifiers_ = 0;
     std::uint16_t held_[kKeySlots] = {};
     std::uint8_t held_count_ = 0;

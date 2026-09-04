@@ -258,7 +258,7 @@ add_executable(duo_ch375_device_test
     fakes/scripted_ch375.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/device.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/descriptor_setup.cpp
-    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/report_descriptor.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/hid/report_descriptor.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/hid_parser.cpp
 )
 
@@ -336,7 +336,7 @@ add_executable(duo_ch375_descriptor_setup_test
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/enumerator.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/descriptor_setup.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/hid_parser.cpp
-    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/report_descriptor.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/hid/report_descriptor.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/mouse_normalizer.cpp
 )
 
@@ -355,7 +355,7 @@ add_test(NAME ch375_descriptor_setup COMMAND duo_ch375_descriptor_setup_test)
 add_executable(duo_normalizers_test
     test_main.cpp
     test_normalizers.cpp
-    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/report_descriptor.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/hid/report_descriptor.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/keyboard_normalizer.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/mouse_normalizer.cpp
 )
@@ -376,7 +376,7 @@ add_executable(duo_trace_replay_test
     test_main.cpp
     test_trace_replay.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/keyboard_normalizer.cpp
-    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/report_descriptor.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/hid/report_descriptor.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/mouse_normalizer.cpp
 )
 
@@ -460,7 +460,7 @@ add_executable(duo_input_pipeline_test
     test_input_pipeline.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/pipeline.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/keyboard_normalizer.cpp
-    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/report_descriptor.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/hid/report_descriptor.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/mouse_normalizer.cpp
 )
 
@@ -574,7 +574,7 @@ add_test(NAME macro_publication COMMAND duo_macro_publication_test)
 add_executable(duo_report_descriptor_test
     test_main.cpp
     test_report_descriptor.cpp
-    ${CMAKE_SOURCE_DIR}/firmware/u1_main/ch375/report_descriptor.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/hid/report_descriptor.cpp
 )
 
 target_link_libraries(duo_report_descriptor_test PRIVATE duo_common)
