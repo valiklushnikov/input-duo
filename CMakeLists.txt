@@ -28,6 +28,28 @@ if(DUO_PICO_FIRMWARE)
     # compiles indicator code that drives a pad this board does not route
     # anywhere, which is worse than having no indicator: it looks like a signal.
     set(PICO_BOARD waveshare_rp2040_zero CACHE STRING "Target board")
+
+    # Which physical USB host path U1 uses. CH375 is the currently shipping
+    # implementation; PIO_USB is the native Pico-PIO-USB/TinyUSB host under
+    # migration (see docs/superpowers/specs/2026-09-02-pio-usb-hub-v1-design.md).
+    # An unrecognised value fails configuration outright: silently building
+    # one backend when a different one was asked for is worse than refusing
+    # to build at all.
+    set(DUO_INPUT_BACKEND "CH375" CACHE STRING "U1 USB host backend: CH375 or PIO_USB")
+    set_property(CACHE DUO_INPUT_BACKEND PROPERTY STRINGS CH375 PIO_USB)
+    if(NOT DUO_INPUT_BACKEND STREQUAL "CH375" AND NOT DUO_INPUT_BACKEND STREQUAL "PIO_USB")
+        message(FATAL_ERROR
+            "Unknown DUO_INPUT_BACKEND '${DUO_INPUT_BACKEND}'; expected CH375 or PIO_USB.")
+    endif()
+
+    if(DUO_INPUT_BACKEND STREQUAL "PIO_USB")
+        # Locates and verifies its own Pico SDK / TinyUSB / Pico-PIO-USB
+        # clones under .deps/, independently of PICO_SDK_PATH. The CH375
+        # branch below is untouched: it keeps resolving PICO_SDK_PATH from
+        # the environment exactly as it always has.
+        include(cmake/pio_usb_toolchain_lock.cmake)
+    endif()
+
     include(cmake/pico_sdk_import.cmake)
 endif()
 
@@ -41,12 +63,32 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(DUO_PICO_FIRMWARE)
+    if(DUO_INPUT_BACKEND STREQUAL "CH375")
+        add_compile_definitions(DUO_INPUT_BACKEND_CH375=1)
+    else()
+        add_compile_definitions(DUO_INPUT_BACKEND_PIO_USB=1)
+    endif()
     pico_sdk_init()
 endif()
 
 add_subdirectory(firmware/common)
 
 if(DUO_PICO_FIRMWARE)
+    # The PIO USB backend's own C++ sources (firmware/u1_main/pio_usb/...)
+    # arrive in a later task of this migration. Until then, a PIO_USB
+    # configure stops here, deliberately, once the toolchain above has
+    # already been located and its revisions verified - so a broken
+    # toolchain and "not implemented yet" produce two different, legible
+    # failures instead of one confusing one.
+    if(DUO_INPUT_BACKEND STREQUAL "PIO_USB" AND
+       NOT EXISTS "${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/backend.cpp")
+        message(FATAL_ERROR
+            "DUO_INPUT_BACKEND=PIO_USB: the toolchain is verified, but "
+            "firmware/u1_main/pio_usb/backend.cpp does not exist yet. It "
+            "arrives in a later task of the PIO USB migration "
+            "(docs/superpowers/plans/2026-09-03-pio-usb-hub-v1-implementation.md); "
+            "this is the expected stopping point until then.")
+    endif()
     add_subdirectory(firmware)
 endif()
 

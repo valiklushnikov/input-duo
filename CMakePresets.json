@@ -26,7 +26,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "MinSizeRel",
         "DUO_PICO_FIRMWARE": "ON",
-        "PICO_BOARD": "waveshare_rp2040_zero"
+        "PICO_BOARD": "waveshare_rp2040_zero",
+        "DUO_INPUT_BACKEND": "CH375"
       }
     },
     {
@@ -35,6 +36,26 @@
       "displayName": "RP2040 firmware (debug)",
       "description": "Same images with symbols, for a debug probe.",
       "binaryDir": "${sourceDir}/build/pico-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "pico-pio-usb-release",
+      "inherits": "pico-release",
+      "displayName": "RP2040 firmware (PIO USB host, release)",
+      "description": "U1 built against the native Pico-PIO-USB/TinyUSB host backend, from the verified .deps/ toolchain clones. Run tools/bootstrap_pio_usb_toolchain.ps1 first; see docs/release/firmware-build.md.",
+      "binaryDir": "${sourceDir}/build/pico-pio-usb-release",
+      "cacheVariables": {
+        "DUO_INPUT_BACKEND": "PIO_USB"
+      }
+    },
+    {
+      "name": "pico-pio-usb-debug",
+      "inherits": "pico-pio-usb-release",
+      "displayName": "RP2040 firmware (PIO USB host, debug)",
+      "description": "Same PIO USB host build with symbols, for a debug probe.",
+      "binaryDir": "${sourceDir}/build/pico-pio-usb-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
@@ -52,6 +73,14 @@
     {
       "name": "pico-debug",
       "configurePreset": "pico-debug"
+    },
+    {
+      "name": "pico-pio-usb-release",
+      "configurePreset": "pico-pio-usb-release"
+    },
+    {
+      "name": "pico-pio-usb-debug",
+      "configurePreset": "pico-pio-usb-debug"
     }
   ],
   "testPresets": [

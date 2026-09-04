@@ -25,3 +25,9 @@ artifacts/
 # Release folders assembled by tools/build_release.ps1 from a clean tree.
 # The inputs are tracked; the output is reproducible from them.
 dist/
+
+# The PIO USB toolchain: Pico SDK, TinyUSB and Pico-PIO-USB clones that
+# tools/bootstrap_pio_usb_toolchain.ps1 fetches at pinned revisions. The pin
+# lives in cmake/pio_usb_toolchain_lock.cmake; the clones are reproducible
+# from it and must never be tracked.
+.deps/

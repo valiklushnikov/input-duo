@@ -20,6 +20,24 @@ Inno Setup is likewise **not** bundled. The installer stub it produces is
 distributable under the [Inno Setup licence](https://jrsoftware.org/files/is/license.txt),
 which permits shipping installers built with it, including commercially.
 
+## Firmware build toolchain
+
+| Component | Revision pinned | Licence | Status |
+|---|---|---|---|
+| Raspberry Pi Pico SDK | 2.1.0 (CH375 build, environment-provided) / `98a542c1a62fb549ffb5d66a3e5892b06276b670` (PIO USB build, `.deps/`) | BSD-3-Clause | Compiled into every shipped U1/U2 UF2. |
+| TinyUSB | CH375 build: whatever revision Pico SDK 2.1.0's own `lib/tinyusb` submodule pins / PIO USB build: `86ad6e56c1700e85f1c5678607a762cfe3aa2f47` (`.deps/`, overrides the SDK's submodule via `PICO_TINYUSB_PATH`) | MIT | Compiled into every shipped U1/U2 UF2 (device stack; host stack additionally, once the PIO USB backend ships). |
+| Pico-PIO-USB | `3c1eec341a5232640e4c00628b889b641af34b28` (`.deps/`) | MIT | Pinned for the PIO USB backend build; **not yet linked into any shipped UF2** - its firmware sources arrive in a later task of the migration (`docs/superpowers/plans/2026-09-03-pio-usb-hub-v1-implementation.md`). This row will move to "shipped" alongside that task, or be removed if the migration lands the PIO USB backend without it. |
+
+All three are source-form, permissively licensed and statically linked into
+firmware, not into the configurator installer this file otherwise describes -
+they never touch `dist/DuoInput`. They are documented here anyway because the
+UF2 files travel in the same release folder the installer ships in (see
+`tools/build_release.ps1`), and "what the release actually contains" should
+not stop at the installer's own directory.
+
+See `docs/release/firmware-build.md` for how the PIO USB toolchain revisions
+are pinned, cloned and verified.
+
 ## Qt for Python licensing route
 
 **This is a decision, not a technical detail, and it is not yet made.**
