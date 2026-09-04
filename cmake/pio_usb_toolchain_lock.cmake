@@ -10,9 +10,10 @@
 # The PIO USB backend instead needs Pico SDK 2.3.0, TinyUSB and Pico-PIO-USB
 # at exact revisions. tools/bootstrap_pio_usb_toolchain.ps1 clones/fetches
 # those three into the git-ignored .deps/ directory and already verifies
-# each `rev-parse HEAD` there. This file verifies again at configure time, so
-# a stale, hand-edited or half-updated .deps/ tree fails configuration
-# loudly instead of silently building against the wrong revision.
+# each one both ways this file does. This file verifies again at configure
+# time, so a stale, hand-edited or half-updated .deps/ tree fails
+# configuration loudly instead of silently building against the wrong
+# revision.
 
 set(_duo_pio_usb_deps_dir "${CMAKE_SOURCE_DIR}/.deps")
 
@@ -28,9 +29,16 @@ if(NOT GIT_FOUND)
         "cmake/pio_usb_toolchain_lock.cmake, and was not found.")
 endif()
 
-# Checks that `dir` is a git checkout of exactly `expected_revision`, and
-# fails configuration otherwise - a mismatch here must stop the build, not
-# fall back to whatever `dir` happens to contain (e.g. main).
+# Checks that `dir` is a git checkout of exactly `expected_revision`, with no
+# uncommitted changes, and fails configuration otherwise - a mismatch here
+# must stop the build, not fall back to whatever `dir` happens to contain
+# (e.g. main).
+#
+# `git rev-parse HEAD` alone is not sufficient: a file edited in place inside
+# an already-correct checkout does not move HEAD, so a hand-edited tree would
+# otherwise still read as "verified" - exactly the case this function exists
+# to catch. `git status --porcelain` is what actually answers whether the
+# tree on disk still matches that commit.
 function(_duo_pio_usb_verify_clone label dir expected_revision out_verified_path)
     if(NOT EXISTS "${dir}")
         message(FATAL_ERROR
@@ -59,6 +67,29 @@ function(_duo_pio_usb_verify_clone label dir expected_revision out_verified_path
             "not the pinned ${expected_revision}. Configuration refuses to "
             "silently build against whatever revision happens to be "
             "there - re-run tools\\bootstrap_pio_usb_toolchain.ps1 to fix it.")
+    endif()
+
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C "${dir}" status --porcelain
+        OUTPUT_VARIABLE _duo_dirty_status
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _duo_git_status_status
+        ERROR_VARIABLE _duo_git_status_error
+    )
+    if(NOT _duo_git_status_status EQUAL 0)
+        message(FATAL_ERROR
+            "${label} at '${dir}': git status failed "
+            "(${_duo_git_status_error}). Re-run "
+            "tools\\bootstrap_pio_usb_toolchain.ps1.")
+    endif()
+    if(NOT _duo_dirty_status STREQUAL "")
+        message(FATAL_ERROR
+            "${label} at '${dir}' is checked out to the pinned "
+            "${expected_revision}, but has uncommitted changes "
+            "(git status --porcelain is not empty), so the tree on disk may "
+            "not actually match that commit. Configuration refuses to build "
+            "against a hand-edited clone - discard the changes or re-run "
+            "tools\\bootstrap_pio_usb_toolchain.ps1 to get a clean one.")
     endif()
 
     set(${out_verified_path} "${dir}" PARENT_SCOPE)

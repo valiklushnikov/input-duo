@@ -14,12 +14,16 @@
 
     Each dependency is fetched by exact commit SHA (GitHub serves any
     reachable commit this way, not only branch tips), then checked out and
-    verified with `git rev-parse HEAD`. A mismatch aborts the whole script:
-    silently falling back to `main`, or to whatever a stale .deps/ directory
-    already contains, is exactly the failure mode this script exists to rule
-    out. cmake/pio_usb_toolchain_lock.cmake verifies the same three revisions
-    again at configure time, so a .deps/ tree edited by hand after this
-    script ran still cannot be built against silently.
+    verified two ways: `git rev-parse HEAD` must equal the pinned SHA, and
+    `git status --porcelain` must be empty. HEAD alone is not enough - a file
+    edited in place inside an already-correct checkout does not move HEAD, so
+    a hand-edited tree would otherwise still read as "verified". A mismatch
+    on either check aborts the whole script: silently falling back to `main`,
+    or to whatever a stale or hand-edited .deps/ directory already contains,
+    is exactly the failure mode this script exists to rule out.
+    cmake/pio_usb_toolchain_lock.cmake verifies the same two things again at
+    configure time, so a .deps/ tree edited by hand after this script ran
+    still cannot be built against silently.
 
     No submodule of any of the three repositories is initialised. At these
     pinned revisions:
@@ -81,6 +85,21 @@ function Get-CurrentRevision([string]$Dir) {
     }
 }
 
+function Test-WorkingTreeClean([string]$Dir) {
+    # HEAD matching the pin says nothing about a file edited in place without
+    # being committed - `git status --porcelain` is what actually answers
+    # "does the tree on disk still match that commit".
+    Push-Location $Dir
+    try {
+        $status = (& git status --porcelain 2>$null)
+        if ($LASTEXITCODE -ne 0) { return $false }
+        return [string]::IsNullOrEmpty($status)
+    }
+    finally {
+        Pop-Location
+    }
+}
+
 foreach ($dependency in $Dependencies) {
     $name = $dependency.Name
     $url = $dependency.Url
@@ -91,12 +110,15 @@ foreach ($dependency in $Dependencies) {
 
     $current = Get-CurrentRevision $dir
     if ($current -eq $revision -and -not $Force) {
-        Write-Host "already at the pinned revision - skipping" -ForegroundColor DarkGray
-        continue
+        if (Test-WorkingTreeClean $dir) {
+            Write-Host "already at the pinned revision - skipping" -ForegroundColor DarkGray
+            continue
+        }
+        Write-Host "at the pinned revision but has uncommitted changes (git status --porcelain is not empty) - re-cloning" -ForegroundColor DarkGray
     }
 
     if (Test-Path $dir) {
-        Write-Host "removing existing $dir (stale or -Force)" -ForegroundColor DarkGray
+        Write-Host "removing existing $dir (stale, dirty or -Force)" -ForegroundColor DarkGray
         Remove-Item -Recurse -Force $dir
     }
 
@@ -132,8 +154,14 @@ foreach ($dependency in $Dependencies) {
         # is declared.
         throw "$name at $dir is $actual after checkout, not the pinned $revision"
     }
+    if (-not (Test-WorkingTreeClean $dir)) {
+        # Also should be unreachable right after a fresh checkout - but if
+        # something in this script or the environment left the tree dirty,
+        # that must fail loudly rather than be reported as verified.
+        throw "$name at $dir has uncommitted changes immediately after checkout"
+    }
 
-    Write-Host "verified: $name is at $actual" -ForegroundColor Green
+    Write-Host "verified: $name is at $actual (clean)" -ForegroundColor Green
 }
 
 Write-Step 'PIO USB toolchain ready'
