@@ -51,12 +51,11 @@ void reset() {
     pin_dp = 0xff;
 }
 
-void add_hub(std::uint8_t dev_addr, std::uint16_t vendor_id,
-             std::uint16_t product_id) {
+void add_hub(std::uint16_t vendor_id, std::uint16_t product_id) {
     // TinyUSB owns the hub entry internally and intentionally suppresses
     // the application tuh_mount_cb for it. The fake retains its address for
     // metadata parity but callers must not dispatch an application callback.
-    add_device(dev_addr, vendor_id, product_id);
+    add_device(kHubAddress, vendor_id, product_id);
 }
 
 void add_device(std::uint8_t dev_addr, std::uint16_t vendor_id,

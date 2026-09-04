@@ -44,9 +44,8 @@ struct RegistryRig {
         duo::test::tinyusb_host::add_device(address, vendor_id, product_id);
     }
 
-    void hub(std::uint8_t address, std::uint16_t vendor_id,
-             std::uint16_t product_id) {
-        duo::test::tinyusb_host::add_hub(address, vendor_id, product_id);
+    void hub(std::uint16_t vendor_id, std::uint16_t product_id) {
+        duo::test::tinyusb_host::add_hub(vendor_id, product_id);
     }
 
     void hid(std::uint8_t address, std::uint8_t instance, std::uint8_t protocol) {
@@ -60,43 +59,45 @@ struct RegistryRig {
 TEST_CASE(hub_is_internal_and_downstream_mount_orders_keep_the_same_keyboard_owner) {
     {
         RegistryRig rig;
-        rig.hub(1, 0x2109, 0x2817);
-        rig.device(4, 0x3434, 0xD030);
-        tuh_mount_cb(4);
-        rig.hid(4, 0, kProtocolKeyboard);
+        rig.hub(0x2109, 0x2817);
+        rig.device(duo::test::tinyusb_host::kFirstDownstreamAddress, 0x3434, 0xD030);
+        tuh_mount_cb(duo::test::tinyusb_host::kFirstDownstreamAddress);
+        rig.hid(duo::test::tinyusb_host::kFirstDownstreamAddress, 0, kProtocolKeyboard);
         rig.registry.process_pending();
 
         const auto* keyboard = rig.registry.owner(DeviceKind::Keyboard);
         CHECK(keyboard != nullptr);
-        CHECK_EQ(keyboard->dev_addr, 4u);
+        CHECK_EQ(keyboard->dev_addr, duo::test::tinyusb_host::kFirstDownstreamAddress);
         CHECK_EQ(keyboard->instance, 0u);
     }
 
     {
         RegistryRig rig;
-        rig.hub(1, 0x2109, 0x2817);
-        rig.device(4, 0x3434, 0xD030);
-        rig.hid(4, 0, kProtocolKeyboard);
-        tuh_mount_cb(4);
+        rig.hub(0x2109, 0x2817);
+        rig.device(duo::test::tinyusb_host::kFirstDownstreamAddress, 0x3434, 0xD030);
+        rig.hid(duo::test::tinyusb_host::kFirstDownstreamAddress, 0, kProtocolKeyboard);
+        tuh_mount_cb(duo::test::tinyusb_host::kFirstDownstreamAddress);
         rig.registry.process_pending();
 
         const auto* keyboard = rig.registry.owner(DeviceKind::Keyboard);
         CHECK(keyboard != nullptr);
-        CHECK_EQ(keyboard->dev_addr, 4u);
+        CHECK_EQ(keyboard->dev_addr, duo::test::tinyusb_host::kFirstDownstreamAddress);
         CHECK_EQ(rig.registry.device_count(), 1u);
     }
 }
 
 TEST_CASE(keyboard_and_mouse_ownership_follows_protocol_not_hub_address_order) {
     RegistryRig rig;
-    rig.device(2, 0x1111, 0x0001);
-    rig.device(5, 0x2222, 0x0002);
-    rig.hid(5, 0, kProtocolKeyboard);
-    rig.hid(2, 0, kProtocolMouse);
+    rig.device(duo::test::tinyusb_host::kFirstDownstreamAddress, 0x1111, 0x0001);
+    rig.device(duo::test::tinyusb_host::kFirstDownstreamAddress + 1, 0x2222, 0x0002);
+    rig.hid(duo::test::tinyusb_host::kFirstDownstreamAddress + 1, 0, kProtocolKeyboard);
+    rig.hid(duo::test::tinyusb_host::kFirstDownstreamAddress, 0, kProtocolMouse);
     rig.registry.process_pending();
 
-    CHECK_EQ(rig.registry.owner(DeviceKind::Keyboard)->dev_addr, 5u);
-    CHECK_EQ(rig.registry.owner(DeviceKind::Mouse)->dev_addr, 2u);
+    CHECK_EQ(rig.registry.owner(DeviceKind::Keyboard)->dev_addr,
+             duo::test::tinyusb_host::kFirstDownstreamAddress + 1);
+    CHECK_EQ(rig.registry.owner(DeviceKind::Mouse)->dev_addr,
+             duo::test::tinyusb_host::kFirstDownstreamAddress);
     CHECK_EQ(rig.registry.owner(DeviceKind::Keyboard)->role, LogicalRole::Keyboard);
     CHECK_EQ(rig.registry.owner(DeviceKind::Mouse)->role, LogicalRole::Mouse);
 }
@@ -293,17 +294,23 @@ TEST_CASE(full_callback_queue_latches_owed_fault_and_does_not_rearm) {
 
 TEST_CASE(maximum_downstream_burst_keeps_every_unmount_and_accepts_address_reuse) {
     RegistryRig rig;
-    constexpr std::uint8_t kFirstDownstreamAddress = 2;
-    constexpr std::uint8_t kDownstreamCount = 4;
+    constexpr std::uint8_t kFirstDownstreamAddress =
+        duo::test::tinyusb_host::kFirstDownstreamAddress;
+    constexpr std::uint8_t kLastDownstreamAddress =
+        duo::test::tinyusb_host::kLastDownstreamAddress;
+    constexpr std::uint8_t kDownstreamCount =
+        (kLastDownstreamAddress - kFirstDownstreamAddress) + 1;
     const std::uint8_t report[] = {0, 0, 0, 0, 0, 0, 0, 0};
 
-    rig.hub(1, 0x2109, 0x2817);
+    rig.hub(0x2109, 0x2817);
     for (std::uint8_t offset = 0; offset < kDownstreamCount; ++offset) {
         const std::uint8_t address = kFirstDownstreamAddress + offset;
         rig.device(address, static_cast<std::uint16_t>(0x1000u + address), 0x0001);
         tuh_mount_cb(address);
-        rig.hid(address, 0, offset == 0 ? kProtocolKeyboard : kProtocolNone);
-        rig.hid(address, 1, offset == 1 ? kProtocolMouse : kProtocolNone);
+        rig.hid(address, 0, address == kLastDownstreamAddress ? kProtocolKeyboard
+                                                               : kProtocolNone);
+        rig.hid(address, 1, address == kFirstDownstreamAddress ? kProtocolMouse
+                                                                : kProtocolNone);
     }
     rig.registry.process_pending();
 
@@ -312,13 +319,11 @@ TEST_CASE(maximum_downstream_burst_keeps_every_unmount_and_accepts_address_reuse
         tuh_hid_report_received_cb(address, 0, report, sizeof(report));
         tuh_hid_report_received_cb(address, 1, report, sizeof(report));
     }
-    // Vendored TinyUSB reports device removal before hidh_close() emits one
-    // HID unmount callback per interface.
-    for (std::uint8_t offset = 0; offset < kDownstreamCount; ++offset) {
-        tuh_umount_cb(kFirstDownstreamAddress + offset);
-    }
+    // Vendored TinyUSB reports each device removal before hidh_close() emits
+    // that same device's HID unmount callbacks.
     for (std::uint8_t offset = 0; offset < kDownstreamCount; ++offset) {
         const std::uint8_t address = kFirstDownstreamAddress + offset;
+        tuh_umount_cb(address);
         tuh_hid_umount_cb(address, 0);
         tuh_hid_umount_cb(address, 1);
     }
@@ -328,14 +333,14 @@ TEST_CASE(maximum_downstream_burst_keeps_every_unmount_and_accepts_address_reuse
     CHECK_EQ(rig.registry.device_count(), 0u);
     CHECK_EQ(rig.registry.interface_count(), 0u);
 
-    rig.device(kFirstDownstreamAddress, 0xBEEF, 0x0002);
-    tuh_mount_cb(kFirstDownstreamAddress);
-    rig.hid(kFirstDownstreamAddress, 0, kProtocolKeyboard);
+    rig.device(kLastDownstreamAddress, 0xBEEF, 0x0002);
+    tuh_mount_cb(kLastDownstreamAddress);
+    rig.hid(kLastDownstreamAddress, 0, kProtocolKeyboard);
     rig.registry.process_pending();
 
     const auto* keyboard = rig.registry.owner(DeviceKind::Keyboard);
     CHECK(keyboard != nullptr);
-    CHECK_EQ(keyboard->dev_addr, kFirstDownstreamAddress);
+    CHECK_EQ(keyboard->dev_addr, kLastDownstreamAddress);
     CHECK_EQ(keyboard->identity.vendor_id, 0xBEEFu);
     CHECK(keyboard->report_in_flight);
 }
