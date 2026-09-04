@@ -24,15 +24,12 @@ extern "C" {
 
 #define CFG_TUH_ENUMERATION_BUFSIZE 256
 
-// One hub, behind it a keyboard and a mouse - this board's whole USB
-// topology, and the bound these counts are written against rather than
-// "however many happen to enumerate". CFG_TUH_DEVICE_MAX excludes the hub
-// itself (TinyUSB's own convention); CFG_TUH_HID allows each of the two
-// downstream devices up to two HID interfaces, the same primary-plus-
-// auxiliary shape CH375's own compatibility matrix already reads composite
-// mice and keyboards through.
+// One hub plus at least four downstream addresses is the fixed registry
+// contract. CFG_TUH_DEVICE_MAX excludes the hub itself (TinyUSB's own
+// convention); CFG_TUH_HID leaves room for two HID interfaces per downstream
+// device, so composite receivers do not consume unbounded host state.
 #define CFG_TUH_HUB 1
-#define CFG_TUH_DEVICE_MAX 2
+#define CFG_TUH_DEVICE_MAX 4
 #define CFG_TUH_HID (2 * CFG_TUH_DEVICE_MAX)
 #endif
 

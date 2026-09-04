@@ -22,13 +22,17 @@ void PioUsbBackend::begin() {
     // SpiMaster::refresh_baudrate().
     set_sys_clock_khz(120000, true);
 
+    set_callback_registry(&registry_);
+
     pio_usb_configuration_t config = PIO_USB_DEFAULT_CONFIG;
     // D+ on GP0. Pico-PIO-USB requires D- to be the next pin up and derives
     // it from this one rather than taking it as a separate field - GP1 is
     // that adjacent pin, and nothing here names it.
     config.pin_dp = 0;
-    tuh_configure(1, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &config);
-    tuh_init(1);
+    const bool configured = tuh_configure(1, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &config);
+    const bool initialized = tuh_init(1);
+    host_ready_ = configured && initialized;
+    registry_.record_host_initialization(configured, initialized);
 
     // Last: the release store publishes every preceding clock/host write to
     // Core 0. Its acquire read is the point after which SPI may be touched.
@@ -39,16 +43,15 @@ bool PioUsbBackend::clock_settled() const { return clock_change_.settled(); }
 
 void PioUsbBackend::task(std::uint32_t now_us) {
     (void)now_us;
+    if (!host_ready_) {
+        return;
+    }
     tuh_task();
+    registry_.process_pending();
 }
 
 bool PioUsbBackend::take_event(input::SourceEvent& event, input::SourceIdentity& identity) {
-    (void)event;
-    (void)identity;
-    // Nothing is queued yet: tinyusb_host_callbacks.cpp does not fill any
-    // storage this task, so there is never anything to hand back. Tasks 6-8
-    // add that storage and make this answer true.
-    return false;
+    return registry_.take_event(event, identity);
 }
 
 int PioUsbBackend::logical_port(input::DeviceKind kind) {

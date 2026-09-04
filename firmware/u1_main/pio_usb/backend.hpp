@@ -23,16 +23,16 @@
 // owns; nothing downstream ever sees a pointer into memory a callback still
 // owns.
 //
-// This task's callbacks are empty and take_event() always returns false:
-// the host stack comes up, runs and can be asked for events, but nothing yet
-// arms a device's reports or fills the storage take_event() would drain.
-// That storage, the callbacks that fill it and take_event()'s real answer
-// arrive in tasks 6 through 8 of this migration.
+// The callback-facing registry is fixed-capacity. It assigns boot-protocol
+// roles, owns one receive at a time per mounted HID interface, and surfaces
+// host/capture faults through take_event(). Report classification and normal
+// report publication remain later migration tasks.
 
 #include <atomic>
 #include <cstdint>
 
 #include "input/source.hpp"
+#include "pio_usb/device_registry.hpp"
 
 namespace duo_input::u1::pio_usb {
 
@@ -111,6 +111,8 @@ public:
 
 private:
     ClockChangeBarrier clock_change_;
+    DeviceRegistry registry_;
+    bool host_ready_ = false;
 };
 
 }  // namespace duo_input::u1::pio_usb

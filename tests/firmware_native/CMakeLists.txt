@@ -634,3 +634,26 @@ if(MSVC)
 endif()
 
 add_test(NAME pio_usb_startup COMMAND duo_pio_usb_startup_test)
+
+add_executable(duo_pio_usb_device_registry_test
+    test_main.cpp
+    test_pio_usb_device_registry.cpp
+    fakes/tinyusb_host.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/backend.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/device_registry.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/tinyusb_host_callbacks.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/hid/report_descriptor.cpp
+)
+
+target_link_libraries(duo_pio_usb_device_registry_test PRIVATE duo_common)
+target_include_directories(duo_pio_usb_device_registry_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/fakes
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+if(MSVC)
+    target_compile_options(duo_pio_usb_device_registry_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME pio_usb_device_registry COMMAND duo_pio_usb_device_registry_test)

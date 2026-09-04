@@ -92,6 +92,7 @@ def test_pio_usb_branch_links_pico_pio_usb():
 def test_pio_usb_branch_compiles_the_backend_sources():
     text = _pio_usb_branch_text(_u1_cmakelists_text())
     assert "pio_usb/backend.cpp" in text
+    assert "pio_usb/device_registry.cpp" in text
     assert "pio_usb/tinyusb_host_callbacks.cpp" in text
 
 
@@ -119,6 +120,8 @@ def test_tusb_config_enables_the_pio_usb_host_only_under_the_pio_backend():
     assert "CFG_TUH_HUB" in block
     assert "CFG_TUH_RPI_PIO_USB" in block
     assert "CFG_TUH_HID" in block
+    assert re.search(r"#define\s+CFG_TUH_DEVICE_MAX\s+4\b", block)
+    assert re.search(r"#define\s+CFG_TUH_HID\s+\(2 \* CFG_TUH_DEVICE_MAX\)", block)
     # RHPort 0 stays the device port outside this block; RHPort 1 is what
     # the PIO backend adds.
     assert "CFG_TUSB_RHPORT1_MODE" in block
@@ -174,15 +177,28 @@ def test_every_core0_runtime_spi_transfer_uses_the_clock_startup_gate():
     assert guarded.count("send_release_all(now_ms)") == 2
 
 
-def test_task5_callbacks_do_not_arm_or_rearm_hid_reports():
+def test_task6_callbacks_only_capture_records_and_never_arm_or_route():
     callbacks = _source_text("firmware/u1_main/pio_usb/tinyusb_host_callbacks.cpp")
     without_comments = re.sub(r"//.*?$|/\*.*?\*/", "", callbacks, flags=re.MULTILINE | re.DOTALL)
 
     assert "tuh_hid_receive_report" not in without_comments
     for callback in ("tuh_hid_mount_cb", "tuh_hid_umount_cb", "tuh_hid_report_received_cb"):
         assert re.search(rf"void\s+{callback}\s*\(", without_comments), (
-            f"{callback} must remain an explicit compile-only callback"
+            f"{callback} must remain an explicit bounded callback"
         )
+
+    for forbidden in ("InputPipeline", "parse_", "Normalizer", "logical_port"):
+        assert forbidden not in without_comments
+
+
+def test_failed_host_initialization_is_recorded_before_clock_settled_is_published():
+    backend = _source_text("firmware/u1_main/pio_usb/backend.cpp")
+    configure = backend.index("const bool configured = tuh_configure")
+    initialize = backend.index("const bool initialized = tuh_init")
+    record = backend.index("registry_.record_host_initialization(configured, initialized)")
+    publish = backend.index("clock_change_.publish_settled()")
+
+    assert configure < initialize < record < publish
 
 
 # ------------------------------------------------------------------ the ELFs
@@ -268,9 +284,7 @@ def test_pio_usb_elf_contains_tuh_task():
 def test_pio_usb_elf_contains_tuh_hid_receive_report():
     symbols = _symbols(_pio_elf)
     assert any("tuh_hid_receive_report" in name for name in symbols), (
-        "PIO USB ELF does not retain the HID receive API that Task 6 will arm; "
-        "the empty-callback disassembly test separately proves Task 5 does "
-        "not call it yet"
+        "PIO USB ELF does not contain the HID receive API that Task 6 arms"
     )
 
 
@@ -294,12 +308,21 @@ def test_pio_usb_elf_contains_no_ch375_device_tick():
 
 
 @pio_usb_elf_required
-def test_task5_callbacks_are_empty_in_the_linked_elf():
+def test_task6_callbacks_do_not_arm_or_route_in_the_linked_elf():
     disassembly = _disassembly(_pio_usb_build_dir(), _pio_elf)
 
     for callback in ("tuh_hid_mount_cb", "tuh_hid_umount_cb", "tuh_hid_report_received_cb"):
         body = _function_disassembly(disassembly, callback)
-        assert not re.search(r"\bblx?\b", body), f"{callback} calls into live host behavior:\n{body}"
+        assert "tuh_hid_receive_report" not in body
+        assert "InputPipeline" not in body
+        assert "parse_" not in body
+
+
+@pio_usb_elf_required
+def test_pio_usb_elf_contains_the_bounded_registry_and_real_arm_path():
+    symbols = _symbols(_pio_elf)
+    assert any("DeviceRegistry15process_pendingEv" in name for name in symbols)
+    assert any("DeviceRegistry13arm_if_needed" in name for name in symbols)
 
 
 @pio_usb_elf_required

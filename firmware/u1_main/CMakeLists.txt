@@ -27,6 +27,7 @@ if(DUO_INPUT_BACKEND STREQUAL "CH375")
 else()
     list(APPEND _duo_u1_sources
         pio_usb/backend.cpp
+        pio_usb/device_registry.cpp
         pio_usb/tinyusb_host_callbacks.cpp
     )
 endif()
@@ -94,11 +95,6 @@ else()
         tinyusb_host
         tinyusb_pico_pio_usb
         hardware_clocks
-    )
-    # Task 5's ELF contract keeps the arm API available while its callbacks
-    # deliberately make no call to it. Task 6 adds the first real reference.
-    target_link_options(duo_u1_main PRIVATE
-        "LINKER:--undefined=tuh_hid_receive_report"
     )
 endif()
 
