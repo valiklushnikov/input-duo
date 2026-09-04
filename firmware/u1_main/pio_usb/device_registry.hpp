@@ -15,9 +15,16 @@ enum class LogicalRole : std::uint8_t {
 
 class DeviceRegistry {
 public:
-    static constexpr std::size_t kDeviceCapacity = 5;
-    static constexpr std::size_t kInterfaceCapacity = 8;
-    static constexpr std::size_t kCallbackQueueCapacity = 16;
+    static constexpr std::size_t kDownstreamDeviceCapacity = 4;
+    static constexpr std::size_t kInterfacesPerDownstreamDevice = 2;
+    static constexpr std::size_t kDeviceCapacity = 1 + kDownstreamDeviceCapacity;
+    static constexpr std::size_t kInterfaceCapacity =
+        kDownstreamDeviceCapacity * kInterfacesPerDownstreamDevice;
+    // A Core 1 pass can receive every in-flight HID report, then TinyUSB's
+    // one downstream-device unmount and one HID-instance unmount per
+    // interface: 8 reports + 4 device removals + 8 HID removals = 20.
+    static constexpr std::size_t kCallbackQueueCapacity =
+        (2 * kInterfaceCapacity) + kDownstreamDeviceCapacity;
     static constexpr std::size_t kMaxDescriptorBytes = 256;
 
     struct Interface {
@@ -29,6 +36,7 @@ public:
         LogicalRole role = LogicalRole::Ignored;
         input::SourceIdentity identity{};
         bool report_in_flight = false;
+        bool fault_pending = false;
         bool faulted = false;
         bool fault_event_pending = false;
     };

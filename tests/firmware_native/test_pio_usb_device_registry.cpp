@@ -44,6 +44,11 @@ struct RegistryRig {
         duo::test::tinyusb_host::add_device(address, vendor_id, product_id);
     }
 
+    void hub(std::uint8_t address, std::uint16_t vendor_id,
+             std::uint16_t product_id) {
+        duo::test::tinyusb_host::add_hub(address, vendor_id, product_id);
+    }
+
     void hid(std::uint8_t address, std::uint8_t instance, std::uint8_t protocol) {
         duo::test::tinyusb_host::set_protocol(address, instance, protocol);
         tuh_hid_mount_cb(address, instance, kDescriptor, sizeof(kDescriptor));
@@ -52,12 +57,11 @@ struct RegistryRig {
 
 }  // namespace
 
-TEST_CASE(hub_first_and_device_first_mount_orders_keep_the_same_keyboard_owner) {
+TEST_CASE(hub_is_internal_and_downstream_mount_orders_keep_the_same_keyboard_owner) {
     {
         RegistryRig rig;
-        rig.device(1, 0x2109, 0x2817);
+        rig.hub(1, 0x2109, 0x2817);
         rig.device(4, 0x3434, 0xD030);
-        tuh_mount_cb(1);
         tuh_mount_cb(4);
         rig.hid(4, 0, kProtocolKeyboard);
         rig.registry.process_pending();
@@ -70,17 +74,16 @@ TEST_CASE(hub_first_and_device_first_mount_orders_keep_the_same_keyboard_owner) 
 
     {
         RegistryRig rig;
-        rig.device(1, 0x2109, 0x2817);
+        rig.hub(1, 0x2109, 0x2817);
         rig.device(4, 0x3434, 0xD030);
         rig.hid(4, 0, kProtocolKeyboard);
         tuh_mount_cb(4);
-        tuh_mount_cb(1);
         rig.registry.process_pending();
 
         const auto* keyboard = rig.registry.owner(DeviceKind::Keyboard);
         CHECK(keyboard != nullptr);
         CHECK_EQ(keyboard->dev_addr, 4u);
-        CHECK_EQ(rig.registry.device_count(), 2u);
+        CHECK_EQ(rig.registry.device_count(), 1u);
     }
 }
 
@@ -163,6 +166,12 @@ TEST_CASE(fixed_device_and_interface_capacity_counts_and_ignores_overflow) {
 
     CHECK(DeviceRegistry::kDeviceCapacity >= 5u);
     CHECK(DeviceRegistry::kInterfaceCapacity >= 8u);
+    CHECK_EQ(DeviceRegistry::kInterfaceCapacity,
+             DeviceRegistry::kDownstreamDeviceCapacity *
+                 DeviceRegistry::kInterfacesPerDownstreamDevice);
+    CHECK(DeviceRegistry::kCallbackQueueCapacity >=
+          (2u * DeviceRegistry::kInterfaceCapacity) +
+              DeviceRegistry::kDownstreamDeviceCapacity);
     CHECK_EQ(rig.registry.device_count(), DeviceRegistry::kDeviceCapacity);
     CHECK_EQ(rig.registry.interface_count(), DeviceRegistry::kInterfaceCapacity);
     CHECK_EQ(rig.registry.device_overflow_count(), 1u);
@@ -279,6 +288,92 @@ TEST_CASE(full_callback_queue_latches_owed_fault_and_does_not_rearm) {
     CHECK(rig.registry.find(2, 0)->report_in_flight);
 
     rig.registry.process_pending();
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 1u);
+}
+
+TEST_CASE(maximum_downstream_burst_keeps_every_unmount_and_accepts_address_reuse) {
+    RegistryRig rig;
+    constexpr std::uint8_t kFirstDownstreamAddress = 2;
+    constexpr std::uint8_t kDownstreamCount = 4;
+    const std::uint8_t report[] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+    rig.hub(1, 0x2109, 0x2817);
+    for (std::uint8_t offset = 0; offset < kDownstreamCount; ++offset) {
+        const std::uint8_t address = kFirstDownstreamAddress + offset;
+        rig.device(address, static_cast<std::uint16_t>(0x1000u + address), 0x0001);
+        tuh_mount_cb(address);
+        rig.hid(address, 0, offset == 0 ? kProtocolKeyboard : kProtocolNone);
+        rig.hid(address, 1, offset == 1 ? kProtocolMouse : kProtocolNone);
+    }
+    rig.registry.process_pending();
+
+    for (std::uint8_t offset = 0; offset < kDownstreamCount; ++offset) {
+        const std::uint8_t address = kFirstDownstreamAddress + offset;
+        tuh_hid_report_received_cb(address, 0, report, sizeof(report));
+        tuh_hid_report_received_cb(address, 1, report, sizeof(report));
+    }
+    // Vendored TinyUSB reports device removal before hidh_close() emits one
+    // HID unmount callback per interface.
+    for (std::uint8_t offset = 0; offset < kDownstreamCount; ++offset) {
+        tuh_umount_cb(kFirstDownstreamAddress + offset);
+    }
+    for (std::uint8_t offset = 0; offset < kDownstreamCount; ++offset) {
+        const std::uint8_t address = kFirstDownstreamAddress + offset;
+        tuh_hid_umount_cb(address, 0);
+        tuh_hid_umount_cb(address, 1);
+    }
+
+    CHECK_EQ(rig.registry.callback_overflow_count(), 0u);
+    rig.registry.process_pending();
+    CHECK_EQ(rig.registry.device_count(), 0u);
+    CHECK_EQ(rig.registry.interface_count(), 0u);
+
+    rig.device(kFirstDownstreamAddress, 0xBEEF, 0x0002);
+    tuh_mount_cb(kFirstDownstreamAddress);
+    rig.hid(kFirstDownstreamAddress, 0, kProtocolKeyboard);
+    rig.registry.process_pending();
+
+    const auto* keyboard = rig.registry.owner(DeviceKind::Keyboard);
+    CHECK(keyboard != nullptr);
+    CHECK_EQ(keyboard->dev_addr, kFirstDownstreamAddress);
+    CHECK_EQ(keyboard->identity.vendor_id, 0xBEEFu);
+    CHECK(keyboard->report_in_flight);
+}
+
+TEST_CASE(pending_fatal_report_blocks_duplicate_mount_from_rearming) {
+    RegistryRig rig;
+    rig.device(2, 0x1234, 0x5678);
+    rig.hid(2, 0, kProtocolKeyboard);
+    rig.registry.process_pending();
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 1u);
+
+    rig.hid(2, 0, kProtocolKeyboard);
+    std::array<std::uint8_t, 65> oversized{};
+    tuh_hid_report_received_cb(2, 0, oversized.data(), oversized.size());
+    rig.registry.process_pending();
+
+    SourceEvent event;
+    SourceIdentity identity;
+    CHECK(rig.registry.take_event(event, identity));
+    CHECK_EQ(event.kind, SourceEventKind::Fault);
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 1u);
+}
+
+TEST_CASE(receive_arm_refusal_is_counted_once_without_in_flight_or_spin) {
+    RegistryRig rig;
+    duo::test::tinyusb_host::set_receive_result(false);
+    rig.device(2, 0x1234, 0x5678);
+    rig.hid(2, 0, kProtocolKeyboard);
+    rig.registry.process_pending();
+
+    const auto* keyboard = rig.registry.find(2, 0);
+    CHECK(keyboard != nullptr);
+    CHECK_FALSE(keyboard->report_in_flight);
+    CHECK_EQ(rig.registry.arm_failure_count(), 1u);
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 1u);
+
+    rig.registry.process_pending();
+    CHECK_EQ(rig.registry.arm_failure_count(), 1u);
     CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 1u);
 }
 

@@ -125,7 +125,8 @@ bool DeviceRegistry::capture_report(std::uint8_t dev_addr, std::uint8_t instance
                                     const std::uint8_t* report,
                                     std::uint16_t report_size) {
     Interface* interface = find_mutable(dev_addr, instance);
-    if (interface == nullptr || !interface->report_in_flight || interface->faulted) {
+    if (interface == nullptr || !interface->report_in_flight || interface->fault_pending ||
+        interface->faulted) {
         return false;
     }
 
@@ -150,7 +151,11 @@ bool DeviceRegistry::capture_report(std::uint8_t dev_addr, std::uint8_t instance
         return false;
     }
 
-    // Only an accepted, bounded record advances the logical receive state.
+    // An accepted fatal record blocks later mount/report processing before it
+    // reaches the queue head. Only then may this receive cease to be in flight.
+    if (record.kind == CallbackKind::ReportFault) {
+        interface->fault_pending = true;
+    }
     interface->report_in_flight = false;
     return true;
 }
@@ -226,7 +231,8 @@ const DeviceRegistry::Interface* DeviceRegistry::owner(input::DeviceKind kind) c
 }
 
 void DeviceRegistry::arm_if_needed(Interface& interface) {
-    if (!interface.mounted || interface.faulted || interface.report_in_flight) {
+    if (!interface.mounted || interface.fault_pending || interface.faulted ||
+        interface.report_in_flight) {
         return;
     }
     if (tuh_hid_receive_report(interface.dev_addr, interface.instance)) {
@@ -237,6 +243,7 @@ void DeviceRegistry::arm_if_needed(Interface& interface) {
 }
 
 void DeviceRegistry::latch_fault(Interface& interface) {
+    interface.fault_pending = false;
     interface.faulted = true;
     if (interface.role != LogicalRole::Ignored) {
         interface.fault_event_pending = true;
