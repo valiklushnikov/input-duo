@@ -25,8 +25,11 @@
 //
 // The callback-facing registry is fixed-capacity. It assigns boot-protocol
 // roles, owns one receive at a time per mounted HID interface, and surfaces
-// host/capture faults through take_event(). Report classification and normal
-// report publication remain later migration tasks.
+// Ready, Report and host/capture faults through take_event() in the shape
+// Ch375SourceAdapter::convert() already produces from CH375's side. Recovery
+// after a detach, a stall or a reconnect - bounded retry, generation
+// counters, ordered teardown across a whole hub - is Task 10's job, not this
+// file's.
 
 #include <atomic>
 #include <cstdint>

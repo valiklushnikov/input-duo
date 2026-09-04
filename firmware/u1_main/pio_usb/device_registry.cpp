@@ -231,9 +231,18 @@ void DeviceRegistry::arm_if_needed(Interface& interface) {
 
 void DeviceRegistry::latch_fault(Interface& interface) {
     interface.fault_pending = false;
+    const bool was_already_faulted = interface.faulted;
     interface.faulted = true;
-    if (interface.role != LogicalRole::Ignored) {
-        interface.fault_event_pending = true;
+    // Once, not on every call: capture_unmount's callback-queue-overflow
+    // fallback loops over every interface on a device and can reach one that
+    // a Report path already faulted. A second Fault would only make
+    // InputPipeline's release_all a no-op the second time - harmless - but
+    // still spends a slot this interface's own stream may still need before
+    // Task 10's recovery gives it a fresh generation.
+    if (interface.role != LogicalRole::Ignored && !was_already_faulted) {
+        if (!push_event(interface, input::SourceEventKind::Fault, 0, nullptr, 0, 0)) {
+            ++event_overflows_;
+        }
     }
 }
 
@@ -261,7 +270,51 @@ void DeviceRegistry::remove_device(std::uint8_t dev_addr) {
     }
 }
 
-void DeviceRegistry::process(const CallbackRecord& record) {
+bool DeviceRegistry::push_event(const Interface& interface, input::SourceEventKind kind,
+                                std::uint8_t endpoint, const std::uint8_t* report,
+                                std::size_t report_size, std::uint32_t received_us) {
+    // Fault keeps the last slot for itself. Every Ready/Report push here
+    // refuses one slot early, so an interface's own overflow Fault - pushed
+    // straight after this same push already failed - is never the second
+    // thing a full queue makes unqueueable in the same breath. Without this,
+    // "synthesize a Fault on overflow" would drop the Fault too, exactly the
+    // owed-release loss the requirement forbids.
+    const std::size_t capacity =
+        kind == input::SourceEventKind::Fault ? kEventQueueCapacity : kEventQueueCapacity - 1;
+    if (event_count_ >= capacity) {
+        return false;
+    }
+    const std::size_t index = (event_head_ + event_count_) % kEventQueueCapacity;
+    PendingEvent& slot = event_queue_[index];
+    slot.present = true;
+    slot.event = input::SourceEvent{};
+    slot.event.kind = kind;
+    slot.event.source_id = interface.dev_addr;
+    slot.event.endpoint = endpoint;
+    slot.event.received_us = received_us;
+    if (report != nullptr && report_size != 0) {
+        std::memcpy(slot.event.report, report, report_size);
+    }
+    slot.event.report_size = report_size;
+    slot.identity = interface.identity;
+    ++event_count_;
+    return true;
+}
+
+bool DeviceRegistry::pop_event(input::SourceEvent& event, input::SourceIdentity& identity) {
+    if (event_count_ == 0) {
+        return false;
+    }
+    PendingEvent& slot = event_queue_[event_head_];
+    event = slot.event;
+    identity = slot.identity;
+    slot = PendingEvent{};
+    event_head_ = (event_head_ + 1) % kEventQueueCapacity;
+    --event_count_;
+    return true;
+}
+
+void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us) {
     if (record.kind == CallbackKind::DeviceMount) {
         ensure_device(record.dev_addr, record.vendor_id, record.product_id);
         return;
@@ -313,6 +366,17 @@ void DeviceRegistry::process(const CallbackRecord& record) {
             interface->role = LogicalRole::Ignored;
             ++ignored_interfaces_;
         }
+        if (interface->role != LogicalRole::Ignored) {
+            // Told once, before its first Report: InputPipeline::on_event
+            // reads Ready to learn what this source is and which layout to
+            // read its reports through, and a Report ahead of that would be
+            // read under whatever the pipeline was left holding from before.
+            if (!push_event(*interface, input::SourceEventKind::Ready, 0, nullptr, 0, 0)) {
+                ++event_overflows_;
+                latch_fault(*interface);
+                return;
+            }
+        }
         arm_if_needed(*interface);
         return;
     }
@@ -325,16 +389,31 @@ void DeviceRegistry::process(const CallbackRecord& record) {
         latch_fault(*interface);
         return;
     }
-    // Task 6 proves bounded capture and receive ownership. Task 8 converts
-    // this accepted copy into a SourceEvent; until then it is deliberately
-    // consumed here, outside the callback, and no routing code is called.
+    if (interface->role == LogicalRole::Ignored) {
+        // Serviced so a second, unrouted interface on the same device cannot
+        // stall the bus behind an un-drained endpoint - never turned into an
+        // event, because nothing above this line would know which owner's
+        // stream it belonged to.
+        arm_if_needed(*interface);
+        return;
+    }
+    if (!push_event(*interface, input::SourceEventKind::Report, record.instance,
+                    record.payload_present ? record.payload : nullptr, record.size, now_us)) {
+        ++event_overflows_;
+        // The report that did not fit is not retried and this interface is
+        // not re-armed: re-arming here would ask TinyUSB for another report
+        // while this one is already unaccounted for, and whatever it held is
+        // exactly the owed release Fault exists to cover instead.
+        latch_fault(*interface);
+        return;
+    }
     arm_if_needed(*interface);
 }
 
-void DeviceRegistry::process_pending() {
+void DeviceRegistry::process_pending(std::uint32_t now_us) {
     CallbackRecord record;
     while (pop(record)) {
-        process(record);
+        process(record, now_us);
     }
 }
 
@@ -355,17 +434,7 @@ bool DeviceRegistry::take_event(input::SourceEvent& event,
             return true;
         }
     }
-    for (Interface& interface : interfaces_) {
-        if (interface.mounted && interface.fault_event_pending) {
-            interface.fault_event_pending = false;
-            event = {};
-            event.kind = input::SourceEventKind::Fault;
-            event.source_id = interface.dev_addr;
-            identity = interface.identity;
-            return true;
-        }
-    }
-    return false;
+    return pop_event(event, identity);
 }
 
 std::size_t DeviceRegistry::device_count() const {

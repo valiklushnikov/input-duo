@@ -680,3 +680,35 @@ if(MSVC)
 endif()
 
 add_test(NAME pio_usb_device_registry COMMAND duo_pio_usb_device_registry_test)
+
+add_executable(duo_pio_usb_keyboard_test
+    test_main.cpp
+    test_pio_usb_keyboard.cpp
+    fakes/tinyusb_host.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/backend.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/device_registry.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/hid_setup.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/tinyusb_host_callbacks.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/hid/report_descriptor.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/pipeline.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/keyboard_normalizer.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/mouse_normalizer.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/core1_runtime.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/macros/scheduler.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/capture.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/engine.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/routes.cpp
+)
+
+target_link_libraries(duo_pio_usb_keyboard_test PRIVATE duo_common)
+target_include_directories(duo_pio_usb_keyboard_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/fakes
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+if(MSVC)
+    target_compile_options(duo_pio_usb_keyboard_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME pio_usb_keyboard COMMAND duo_pio_usb_keyboard_test)

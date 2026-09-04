@@ -42,12 +42,11 @@ void PioUsbBackend::begin() {
 bool PioUsbBackend::clock_settled() const { return clock_change_.settled(); }
 
 void PioUsbBackend::task(std::uint32_t now_us) {
-    (void)now_us;
     if (!host_ready_) {
         return;
     }
     tuh_task();
-    registry_.process_pending();
+    registry_.process_pending(now_us);
 }
 
 bool PioUsbBackend::take_event(input::SourceEvent& event, input::SourceIdentity& identity) {

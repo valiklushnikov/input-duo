@@ -26,6 +26,15 @@ public:
     static constexpr std::size_t kCallbackQueueCapacity =
         (2 * kInterfaceCapacity) + kDownstreamDeviceCapacity;
     static constexpr std::size_t kMaxDescriptorBytes = 256;
+    // Ready, Report and interface-level Fault are each produced by processing
+    // exactly one CallbackRecord (HidMount, Report, or ReportFault
+    // respectively) - never more than one SourceEvent per record - so sizing
+    // this to kCallbackQueueCapacity guarantees a genuine single pass, which
+    // drains at most that many records, can never overflow this queue. The
+    // only way to reach the overflow path exercised in tests is to withhold
+    // draining across many passes, the same way Task 6's callback-queue
+    // overflow tests withhold processing.
+    static constexpr std::size_t kEventQueueCapacity = kCallbackQueueCapacity;
 
     struct Interface {
         bool mounted = false;
@@ -38,7 +47,6 @@ public:
         bool report_in_flight = false;
         bool fault_pending = false;
         bool faulted = false;
-        bool fault_event_pending = false;
     };
 
     void record_host_initialization(bool configure_succeeded, bool init_succeeded);
@@ -53,7 +61,11 @@ public:
     bool capture_report(std::uint8_t dev_addr, std::uint8_t instance,
                         const std::uint8_t* report, std::uint16_t report_size);
 
-    void process_pending();
+    /// Process every queued callback record. ``now_us`` stamps the
+    /// ``received_us`` of any Report SourceEvent this pass produces - the
+    /// same per-pass granularity Ch375Device::tick's own received_us already
+    /// uses, not a separate per-callback clock read.
+    void process_pending(std::uint32_t now_us = 0);
     bool take_event(input::SourceEvent& event, input::SourceIdentity& identity);
 
     const Interface* find(std::uint8_t dev_addr, std::uint8_t instance) const;
@@ -67,6 +79,10 @@ public:
     std::uint32_t duplicate_mount_count() const { return duplicate_mounts_; }
     std::uint32_t ignored_interface_count() const { return ignored_interfaces_; }
     std::uint32_t arm_failure_count() const { return arm_failures_; }
+    /// How many Ready/Report/Fault SourceEvents could not be queued because
+    /// kEventQueueCapacity was already full. Only reachable by withholding
+    /// take_event() drains across many passes - see kEventQueueCapacity.
+    std::uint32_t event_overflow_count() const { return event_overflows_; }
 
 private:
     struct Device {
@@ -111,12 +127,30 @@ private:
     void arm_if_needed(Interface& interface);
     void latch_fault(Interface& interface);
     void remove_device(std::uint8_t dev_addr);
-    void process(const CallbackRecord& record);
+    void process(const CallbackRecord& record, std::uint32_t now_us);
+    /// Queue one Ready/Report/Fault SourceEvent for ``interface``'s own
+    /// stream. False means kEventQueueCapacity was already full; the caller
+    /// counts the overflow and decides what happens to the interface - this
+    /// never trims or retries, matching every other bounded copy in this file.
+    bool push_event(const Interface& interface, input::SourceEventKind kind,
+                    std::uint8_t endpoint, const std::uint8_t* report,
+                    std::size_t report_size, std::uint32_t received_us);
+    bool pop_event(input::SourceEvent& event, input::SourceIdentity& identity);
 
     Device devices_[kDeviceCapacity] = {};
     Interface interfaces_[kInterfaceCapacity] = {};
     CallbackRecord callbacks_[kCallbackQueueCapacity] = {};
     PendingEvent detach_events_[2] = {};
+    // Ready, Report and interface-level Fault, in the order they were
+    // produced. Kept apart from detach_events_ above: ordering a Detached
+    // callback (whole-device teardown, several interfaces at once) against
+    // this queue is Task 10's "ordered teardown" job, not this one's - what
+    // this queue guarantees is that a single interface's own Ready/Report/
+    // Fault stream is never reordered against itself, which is what a
+    // ReportFault following an already-queued Report would otherwise risk.
+    PendingEvent event_queue_[kEventQueueCapacity] = {};
+    std::size_t event_head_ = 0;
+    std::size_t event_count_ = 0;
     std::size_t callback_head_ = 0;
     std::size_t callback_count_ = 0;
     bool host_fault_pending_ = false;
@@ -126,6 +160,7 @@ private:
     std::uint32_t duplicate_mounts_ = 0;
     std::uint32_t ignored_interfaces_ = 0;
     std::uint32_t arm_failures_ = 0;
+    std::uint32_t event_overflows_ = 0;
 };
 
 void set_callback_registry(DeviceRegistry* registry) noexcept;

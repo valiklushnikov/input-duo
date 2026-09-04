@@ -58,6 +58,19 @@ struct RegistryRig {
         duo::test::tinyusb_host::set_protocol(address, instance, protocol);
         tuh_hid_mount_cb(address, instance, descriptor, descriptor_size);
     }
+
+    /// Discard whatever take_event() has queued - a mount's own Ready among
+    /// it, once a role is assigned. A real Core 1 pass always drains
+    /// completely before its next tuh_task() call; a test that mounts, does
+    /// not drain, then checks for exactly one LATER event (a Detached, a
+    /// Fault) needs this first so that later event is not read behind a
+    /// Ready this file's older tests were written before Task 8 existed.
+    void drain_ready() {
+        SourceEvent event;
+        SourceIdentity identity;
+        while (registry.take_event(event, identity)) {
+        }
+    }
 };
 
 std::vector<std::uint8_t> neutral_mouse_descriptor() {
@@ -220,6 +233,7 @@ TEST_CASE(repeated_unmount_by_device_address_is_safe) {
     rig.device(6, 0x3434, 0xD030);
     rig.hid(6, 0, kProtocolMouse);
     rig.registry.process_pending();
+    rig.drain_ready();
 
     tuh_umount_cb(6);
     tuh_hid_umount_cb(6, 0);
@@ -271,6 +285,7 @@ TEST_CASE(oversized_report_becomes_fault_without_truncation_or_rearm) {
     rig.device(2, 0x1234, 0x5678);
     rig.hid(2, 0, kProtocolKeyboard);
     rig.registry.process_pending();
+    rig.drain_ready();
 
     std::array<std::uint8_t, 65> report{};
     tuh_hid_report_received_cb(2, 0, report.data(), report.size());
@@ -290,6 +305,7 @@ TEST_CASE(full_callback_queue_latches_owed_fault_and_does_not_rearm) {
     rig.device(2, 0x1234, 0x5678);
     rig.hid(2, 0, kProtocolKeyboard);
     rig.registry.process_pending();
+    rig.drain_ready();
 
     rig.device(1, 0x2109, 0x2817);
     for (std::size_t index = 0; index < DeviceRegistry::kCallbackQueueCapacity; ++index) {
@@ -369,6 +385,7 @@ TEST_CASE(pending_fatal_report_blocks_duplicate_mount_from_rearming) {
     rig.hid(2, 0, kProtocolKeyboard);
     rig.registry.process_pending();
     CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 1u);
+    rig.drain_ready();
 
     rig.hid(2, 0, kProtocolKeyboard);
     std::array<std::uint8_t, 65> oversized{};

@@ -1264,9 +1264,12 @@ int main() {
         config.set_peripherals(describe_port(g_keyboard_device, g_keyboard_setup),
                                describe_port(g_mouse_device, g_mouse_setup));
 #else
-        // Nothing is read yet - this task's callbacks are empty - so the
-        // honest reply is "not attached", not a guess dressed up as one.
-        // Tasks 6-8 are what give this something real to describe.
+        // Reports flow through the registry now (Tasks 6-8), but wiring that
+        // into PeripheralPort - U1's backend-neutral diagnostics surface - is
+        // Task 11's job: it adds the backend identifier this reply still
+        // lacks, and reads the same registry this branch would otherwise
+        // reach into directly. Until then the honest reply is "not attached",
+        // not a guess dressed up as one.
         config.set_peripherals(duo_input::u1::PeripheralPort{}, duo_input::u1::PeripheralPort{});
 #endif
 
