@@ -11,6 +11,7 @@ add_executable(duo_u1_main
     core1_runtime.cpp
     core_bridge.cpp
     input/pipeline.cpp
+    input/ch375_source_adapter.cpp
     input/keyboard_normalizer.cpp
     input/mouse_normalizer.cpp
     mapping/capture.cpp

@@ -43,9 +43,8 @@ bool keychron_side_state(protocol::ByteView report, bool& held) {
 
 }  // namespace
 
-void InputPipeline::set_kind(ch375::DeviceKind kind,
-                             const ch375::KeyboardReportLayout& keyboard_layout,
-                             const ch375::MouseReportLayout& mouse_layout) {
+void InputPipeline::set_kind(DeviceKind kind, const hid::KeyboardReportLayout& keyboard_layout,
+                             const hid::MouseReportLayout& mouse_layout) {
     kind_ = kind;
     // Both set on every Ready, not only when a descriptor was read: a device
     // that would not describe itself hands over boot protocol's layout, and
@@ -65,10 +64,10 @@ void InputPipeline::on_report(protocol::ByteView report, std::uint32_t now_ms) {
     InputEvent events[kMaxEventsPerReport];
 
     switch (kind_) {
-        case ch375::DeviceKind::Keyboard:
+        case DeviceKind::Keyboard:
             emit(events, keyboard_.apply(report, events, kMaxEventsPerReport), now_ms);
             return;
-        case ch375::DeviceKind::Mouse:
+        case DeviceKind::Mouse:
             emit(events, mouse_.apply(report, events, kMaxEventsPerReport), now_ms);
             return;
         default:
@@ -86,7 +85,7 @@ void InputPipeline::on_auxiliary_report(std::uint8_t endpoint, protocol::ByteVie
     // by the receiver's later keyboard interface, never by the mouse report.
     // Endpoint and the report structure are both required so an unrelated
     // composite device cannot become a mouse click by resemblance.
-    if (kind_ != ch375::DeviceKind::Mouse || !keychron_receiver_ || endpoint != 1) {
+    if (kind_ != DeviceKind::Mouse || !keychron_receiver_ || endpoint != 1) {
         return;
     }
 
@@ -118,10 +117,10 @@ void InputPipeline::on_detached(std::uint32_t now_ms) {
     // this, pulling a cable mid-keystroke leaves that key held on a computer
     // that has no way to find out, and it types until somebody reboots it.
     switch (kind_) {
-        case ch375::DeviceKind::Keyboard:
+        case DeviceKind::Keyboard:
             count = keyboard_.release_all(events, kMaxEventsPerReport);
             break;
-        case ch375::DeviceKind::Mouse:
+        case DeviceKind::Mouse:
             count = mouse_.release_all(events, kMaxEventsPerReport);
             if (keychron_side_button_held_.load(std::memory_order_relaxed) &&
                 count < kMaxEventsPerReport) {
@@ -137,38 +136,32 @@ void InputPipeline::on_detached(std::uint32_t now_ms) {
     emit(events, count, now_ms);
     keychron_side_button_held_.store(false, std::memory_order_relaxed);
     keychron_receiver_ = false;
-    kind_ = ch375::DeviceKind::Unknown;
+    kind_ = DeviceKind::Unknown;
 }
 
-void InputPipeline::on_event(const ch375::Ch375Event& event, ch375::DeviceKind kind,
-                             const ch375::KeyboardReportLayout& keyboard_layout,
-                             const ch375::MouseReportLayout& mouse_layout,
-                             std::uint32_t now_ms, std::uint16_t vendor_id,
-                             std::uint16_t product_id) {
+void InputPipeline::on_event(const SourceEvent& event, const SourceIdentity& identity,
+                             std::uint32_t now_ms) {
     switch (event.kind) {
-        case ch375::Ch375EventKind::Ready:
+        case SourceEventKind::Ready:
             // What it is - and how it is read - becomes known only once it
             // has been configured.
-            keychron_receiver_ = vendor_id == kKeychronVendorId &&
-                                 product_id == kKeychronProductId;
-            set_kind(kind, keyboard_layout, mouse_layout);
+            keychron_receiver_ = identity.vendor_id == kKeychronVendorId &&
+                                 identity.product_id == kKeychronProductId;
+            set_kind(identity.kind, identity.keyboard_layout, identity.mouse_layout);
             return;
 
-        case ch375::Ch375EventKind::Report:
+        case SourceEventKind::Report:
             on_report(protocol::ByteView{event.report, event.report_size}, now_ms);
             return;
 
-        case ch375::Ch375EventKind::AuxiliaryReport:
+        case SourceEventKind::AuxiliaryReport:
             on_auxiliary_report(event.endpoint,
                                 protocol::ByteView{event.report, event.report_size}, now_ms);
             return;
 
-        case ch375::Ch375EventKind::Detached:
-        case ch375::Ch375EventKind::Fault:
+        case SourceEventKind::Detached:
+        case SourceEventKind::Fault:
             on_detached(now_ms);
-            return;
-
-        default:
             return;
     }
 }

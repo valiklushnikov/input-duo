@@ -32,6 +32,7 @@
 #include "diagnostics/ch375_baud_scan.hpp"
 #include "diagnostics_service.hpp"
 #include "hid/state_manager.hpp"
+#include "input/ch375_source_adapter.hpp"
 #include "input/pipeline.hpp"
 #include "output_runtime.hpp"
 #include "pico_flash.hpp"
@@ -116,6 +117,11 @@ public:
 RuntimeInput g_input;
 duo_input::u1::input::InputPipeline g_keyboard_pipeline(g_input);
 duo_input::u1::input::InputPipeline g_mouse_pipeline(g_input);
+// Reads CH375's own events and setup across the neutral source boundary. The
+// id each carries is just this channel's index - the pipeline never
+// interprets it.
+duo_input::u1::input::Ch375SourceAdapter g_keyboard_source(0);
+duo_input::u1::input::Ch375SourceAdapter g_mouse_source(1);
 
 // The controllers, the ports beneath them and the enumeration above them.
 //
@@ -358,6 +364,8 @@ void core1_entry() {
         duo_input::u1::ch375::DescriptorSetup* setups[2] = {&g_keyboard_setup, &g_mouse_setup};
         duo_input::u1::input::InputPipeline* pipelines[2] = {&g_keyboard_pipeline,
                                                              &g_mouse_pipeline};
+        duo_input::u1::input::Ch375SourceAdapter* sources[2] = {&g_keyboard_source,
+                                                                 &g_mouse_source};
 #if DUO_CH375_PROBE
         DeviceTally* tallies[2] = {&g_keyboard_tally, &g_mouse_tally};
 #endif
@@ -392,6 +400,19 @@ void core1_entry() {
                         break;
                 }
 #endif
+                // Read across the neutral source boundary before anything
+                // above it sees this event. convert() returns false for a
+                // Ch375EventKind this boundary carries no case for - Attached
+                // and the empty None - which the pipeline never acted on
+                // either.
+                //
+                // Static for the same reason as ``event`` above: this core's
+                // stack is two kilobytes for everything below it.
+                static duo_input::u1::input::SourceEvent source_event;
+                if (!sources[index]->convert(event, source_event)) {
+                    continue;
+                }
+
                 // A detach synthesises the releases the peripheral never sent,
                 // which is the only thing standing between a yanked cable and
                 // a computer that types until it is rebooted.
@@ -401,12 +422,9 @@ void core1_entry() {
                 // than from the clock here: the report may have been queued a
                 // pass or two ago, and timing it from now would hide exactly
                 // the backlog worth knowing about.
-                g_runtime.set_event_origin_us(event.received_us);
-                pipelines[index]->on_event(event, setups[index]->kind(),
-                                           setups[index]->keyboard_layout(),
-                                           setups[index]->mouse_layout(), now_ms,
-                                           setups[index]->vendor_id(),
-                                           setups[index]->product_id());
+                g_runtime.set_event_origin_us(source_event.received_us);
+                pipelines[index]->on_event(source_event, sources[index]->identity(*setups[index]),
+                                           now_ms);
                 // Cleared immediately. A stamp left standing would be attached
                 // to whatever the device did next - a macro step, a timeout's
                 // release - and the further from the report that happened, the
