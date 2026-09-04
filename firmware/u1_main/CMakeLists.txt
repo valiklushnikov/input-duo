@@ -18,6 +18,20 @@ set(_duo_u1_sources
     core1_runtime.cpp
     core_bridge.cpp
     input/pipeline.cpp
+)
+
+if(DUO_INPUT_BACKEND STREQUAL "CH375")
+    list(APPEND _duo_u1_sources
+        input/ch375_source_adapter.cpp
+    )
+else()
+    list(APPEND _duo_u1_sources
+        pio_usb/backend.cpp
+        pio_usb/tinyusb_host_callbacks.cpp
+    )
+endif()
+
+list(APPEND _duo_u1_sources
     input/keyboard_normalizer.cpp
     input/mouse_normalizer.cpp
     mapping/capture.cpp
@@ -26,13 +40,10 @@ set(_duo_u1_sources
     macros/scheduler.cpp
     pico_flash.cpp
     buttons.cpp
-    input/hid/report_descriptor.cpp
-    diagnostics_service.cpp
 )
 
 if(DUO_INPUT_BACKEND STREQUAL "CH375")
     list(APPEND _duo_u1_sources
-        input/ch375_source_adapter.cpp
         ch375_probe.cpp
         ch375/pio_transport.cpp
         ch375/device.cpp
@@ -41,11 +52,14 @@ if(DUO_INPUT_BACKEND STREQUAL "CH375")
         ch375/hid_parser.cpp
     )
 else()
-    list(APPEND _duo_u1_sources
-        pio_usb/backend.cpp
-        pio_usb/tinyusb_host_callbacks.cpp
-    )
+    # No additional PIO USB source belongs at this position. Keeping the
+    # split here preserves the shipping CH375 object's original link order.
 endif()
+
+list(APPEND _duo_u1_sources
+    input/hid/report_descriptor.cpp
+    diagnostics_service.cpp
+)
 
 add_executable(duo_u1_main ${_duo_u1_sources})
 
@@ -80,6 +94,11 @@ else()
         tinyusb_host
         tinyusb_pico_pio_usb
         hardware_clocks
+    )
+    # Task 5's ELF contract keeps the arm API available while its callbacks
+    # deliberately make no call to it. Task 6 adds the first real reference.
+    target_link_options(duo_u1_main PRIVATE
+        "LINKER:--undefined=tuh_hid_receive_report"
     )
 endif()
 

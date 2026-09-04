@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,6 +43,10 @@ def _u1_cmakelists_text() -> str:
 
 def _tusb_config_text() -> str:
     return (REPOSITORY_ROOT / "firmware" / "u1_main" / "tusb_config.h").read_text(encoding="utf-8")
+
+
+def _source_text(relative: str) -> str:
+    return (REPOSITORY_ROOT / relative).read_text(encoding="utf-8")
 
 
 #: Both the source list and the target_link_libraries() call in
@@ -130,6 +135,56 @@ def test_tusb_config_device_rhport_is_unconditional():
     assert "OPT_MODE_DEVICE" in before_pio_block
 
 
+def test_clock_handoff_is_a_release_acquire_atomic_contract():
+    header = _source_text("firmware/u1_main/pio_usb/backend.hpp")
+    implementation = _source_text("firmware/u1_main/pio_usb/backend.cpp")
+
+    assert "std::atomic<std::uint32_t>" in header
+    assert "std::memory_order_acquire" in header
+    assert "std::memory_order_release" in header
+    assert implementation.index("set_sys_clock_khz(120000, true)") < implementation.index(
+        "publish_settled()"
+    )
+
+
+def test_spi_baud_is_restored_to_the_requested_one_megahertz():
+    header = _source_text("firmware/u1_main/spi_master.hpp")
+    implementation = _source_text("firmware/u1_main/spi_master.cpp")
+
+    assert re.search(r"kSpiBaudRate\s*=\s*1'000'000", header)
+    refresh = re.search(
+        r"void\s+SpiMaster::refresh_baudrate\(\)\s*\{(?P<body>.*?)\}",
+        implementation,
+        re.DOTALL,
+    )
+    assert refresh, "SpiMaster::refresh_baudrate() is missing"
+    assert "spi_set_baudrate(kSpi, kSpiBaudRate)" in refresh.group("body")
+
+
+def test_every_core0_runtime_spi_transfer_uses_the_clock_startup_gate():
+    main = _source_text("firmware/u1_main/main.cpp")
+    guarded = re.findall(
+        r"with_link\(\[&\]\s*\{\s*"
+        r"link\.(send_release_all\(now_ms\)|poll\(now_ms,\s*g_outputs\));\s*"
+        r"\}\);",
+        main,
+    )
+
+    assert guarded.count("poll(now_ms, g_outputs)") == 1
+    assert guarded.count("send_release_all(now_ms)") == 2
+
+
+def test_task5_callbacks_do_not_arm_or_rearm_hid_reports():
+    callbacks = _source_text("firmware/u1_main/pio_usb/tinyusb_host_callbacks.cpp")
+    without_comments = re.sub(r"//.*?$|/\*.*?\*/", "", callbacks, flags=re.MULTILINE | re.DOTALL)
+
+    assert "tuh_hid_receive_report" not in without_comments
+    for callback in ("tuh_hid_mount_cb", "tuh_hid_umount_cb", "tuh_hid_report_received_cb"):
+        assert re.search(rf"void\s+{callback}\s*\(", without_comments), (
+            f"{callback} must remain an explicit compile-only callback"
+        )
+
+
 # ------------------------------------------------------------------ the ELFs
 
 def _pio_usb_build_dir() -> Path:
@@ -150,6 +205,40 @@ def _symbols(elf: Path):
     from dump_usb_descriptors import Elf32
 
     return Elf32(elf.read_bytes()).symbols()
+
+
+def _tool_from_cache(build_dir: Path, cache_name: str) -> Path:
+    cache = (build_dir / "CMakeCache.txt").read_text(encoding="utf-8", errors="replace")
+    match = re.search(rf"^{re.escape(cache_name)}:[^=]*=(.+)$", cache, re.MULTILINE)
+    assert match, f"{cache_name} is absent from {build_dir / 'CMakeCache.txt'}"
+    tool = Path(match.group(1).strip())
+    assert tool.is_file(), f"{cache_name} points to missing tool {tool}"
+    return tool
+
+
+def _disassembly(build_dir: Path, elf: Path) -> str:
+    objdump = _tool_from_cache(build_dir, "CMAKE_OBJDUMP")
+    completed = subprocess.run(
+        [str(objdump), "-d", "-C", str(elf)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return completed.stdout
+
+
+def _function_disassembly(disassembly: str, symbol: str) -> str:
+    lines = disassembly.splitlines()
+    marker = f"<{symbol}>:"
+    start = next((index for index, line in enumerate(lines) if marker in line), None)
+    assert start is not None, f"ELF disassembly has no {symbol}"
+
+    body = []
+    for line in lines[start + 1 :]:
+        if re.match(r"^[0-9a-fA-F]+ <.*>:$", line):
+            break
+        body.append(line)
+    return "\n".join(body)
 
 
 _pio_elf = _u1_elf(_pio_usb_build_dir())
@@ -179,8 +268,9 @@ def test_pio_usb_elf_contains_tuh_task():
 def test_pio_usb_elf_contains_tuh_hid_receive_report():
     symbols = _symbols(_pio_elf)
     assert any("tuh_hid_receive_report" in name for name in symbols), (
-        "PIO USB ELF does not contain tuh_hid_receive_report - nothing arms "
-        "HID report reception, so no report could ever arrive"
+        "PIO USB ELF does not retain the HID receive API that Task 6 will arm; "
+        "the empty-callback disassembly test separately proves Task 5 does "
+        "not call it yet"
     )
 
 
@@ -200,6 +290,42 @@ def test_pio_usb_elf_contains_no_ch375_device_tick():
     assert not any("Ch375Device4tick" in name for name in symbols), (
         "PIO USB ELF contains Ch375Device::tick - the CH375 sources leaked "
         "into a build that must never link them"
+    )
+
+
+@pio_usb_elf_required
+def test_task5_callbacks_are_empty_in_the_linked_elf():
+    disassembly = _disassembly(_pio_usb_build_dir(), _pio_elf)
+
+    for callback in ("tuh_hid_mount_cb", "tuh_hid_umount_cb", "tuh_hid_report_received_cb"):
+        body = _function_disassembly(disassembly, callback)
+        assert not re.search(r"\bblx?\b", body), f"{callback} calls into live host behavior:\n{body}"
+
+
+@pio_usb_elf_required
+def test_linked_clock_handoff_contains_both_arm_memory_barriers():
+    disassembly = _disassembly(_pio_usb_build_dir(), _pio_elf)
+    begin = _function_disassembly(
+        disassembly, "duo_input::u1::pio_usb::PioUsbBackend::begin()"
+    )
+    settled = _function_disassembly(
+        disassembly, "duo_input::u1::pio_usb::PioUsbBackend::clock_settled() const"
+    )
+
+    assert "dmb" in begin, "release publication compiled without an ARM memory barrier"
+    assert "dmb" in settled, "acquire observation compiled without an ARM memory barrier"
+
+
+@pio_usb_elf_required
+def test_linked_baud_refresh_requests_one_megahertz():
+    disassembly = _disassembly(_pio_usb_build_dir(), _pio_elf)
+    refresh = _function_disassembly(
+        disassembly, "duo_input::u1::SpiMaster::refresh_baudrate()"
+    )
+
+    assert "spi_set_baudrate" in refresh
+    assert "000f4240" in refresh.lower(), (
+        "refresh_baudrate does not load the literal 1,000,000 (0x000f4240)"
     )
 
 

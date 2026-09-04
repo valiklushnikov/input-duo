@@ -98,6 +98,21 @@ public:
     /// Claim SPI1 and the four pins. Call once.
     void begin();
 
+#ifdef DUO_INPUT_BACKEND_PIO_USB
+    /// Recompute the PL022 prescalers against whatever clk_peri is right now.
+    ///
+    /// begin() picks the prescalers that reach kSpiBaudRate against clk_peri
+    /// as it was at that moment, and nothing after that call watches for
+    /// clk_peri changing again - the RP2040 has no interrupt for it. The PIO
+    /// USB backend's begin() reparents clk_peri on this SDK (see
+    /// pio_usb/backend.hpp), which is not this class's concern to know about
+    /// by name, but *that the clock underneath it can move* is: call this
+    /// once, after whatever changed it has finished changing it and before
+    /// the next transfer, or the link keeps running at whatever SCK the old
+    /// clk_peri produced against prescalers meant for a different one.
+    void refresh_baudrate();
+#endif
+
     /// Send whatever PC2 needs to know, if anything.
     ///
     /// Returns whether a frame went out. Called every loop; it sends only when

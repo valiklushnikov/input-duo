@@ -12,6 +12,14 @@ void PioUsbBackend::begin() {
     // timing is written against. RHPort 0's device side does not move: it
     // runs off the RP2040's dedicated 48 MHz USB PLL, which this call does
     // not touch.
+    //
+    // clk_peri does move, though, and this class does not own it: on this
+    // SDK (PICO_CLOCK_ADJUST_PERI_CLOCK_WITH_SYS_CLOCK is 0 here, so
+    // set_sys_clock_pll takes the branch that does not keep clk_peri tied to
+    // clk_sys) this call reparents clk_peri onto PLL_USB at 48 MHz as a side
+    // effect. clock_settled() is what tells Core 0's SPI code that side
+    // effect has already happened - see backend.hpp and
+    // SpiMaster::refresh_baudrate().
     set_sys_clock_khz(120000, true);
 
     pio_usb_configuration_t config = PIO_USB_DEFAULT_CONFIG;
@@ -21,7 +29,13 @@ void PioUsbBackend::begin() {
     config.pin_dp = 0;
     tuh_configure(1, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &config);
     tuh_init(1);
+
+    // Last: the release store publishes every preceding clock/host write to
+    // Core 0. Its acquire read is the point after which SPI may be touched.
+    clock_change_.publish_settled();
 }
+
+bool PioUsbBackend::clock_settled() const { return clock_change_.settled(); }
 
 void PioUsbBackend::task(std::uint32_t now_us) {
     (void)now_us;

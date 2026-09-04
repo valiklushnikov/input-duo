@@ -23,27 +23,30 @@
 #include "hardware/watchdog.h"
 
 #include "buttons.hpp"
+#ifdef DUO_INPUT_BACKEND_CH375
+#include "ch375/descriptor_setup.hpp"
+#include "ch375_probe.hpp"
+#endif
 #include "config_profiles.hpp"
 #include "config_service.hpp"
 #include "core1_runtime.hpp"
 #include "core_bridge.hpp"
+#ifdef DUO_INPUT_BACKEND_CH375
+#include "diagnostics/ch375_baud_scan.hpp"
+#endif
 #include "diagnostics_service.hpp"
 #include "hid/state_manager.hpp"
+#ifdef DUO_INPUT_BACKEND_CH375
+#include "input/ch375_source_adapter.hpp"
+#else
+#include "pio_usb/backend.hpp"
+#endif
 #include "input/pipeline.hpp"
 #include "output_runtime.hpp"
 #include "pico_flash.hpp"
 #include "spi_master.hpp"
 #include "storage/ab_store.hpp"
 #include "usb_service.hpp"
-
-#ifdef DUO_INPUT_BACKEND_CH375
-#include "ch375/descriptor_setup.hpp"
-#include "ch375_probe.hpp"
-#include "diagnostics/ch375_baud_scan.hpp"
-#include "input/ch375_source_adapter.hpp"
-#else
-#include "pio_usb/backend.hpp"
-#endif
 
 namespace {
 
@@ -1136,6 +1139,18 @@ int main() {
     // the flash routines about itself once it can be stopped by them.
     multicore_launch_core1(core1_entry);
 
+#ifdef DUO_INPUT_BACKEND_PIO_USB
+    // Every run-time call which can touch SPI goes through this one gate.
+    // Before Core 1 publishes the completed clock change the action is simply
+    // skipped; on the first published pass the old prescalers are recomputed
+    // before the action. No Core 0 service waits here.
+    duo_input::u1::pio_usb::LinkStartupGate link_startup;
+    const auto with_link = [&](auto&& action) {
+        return link_startup.run_if_ready(
+            g_pio_usb_backend.clock_settled(), [&] { link.refresh_baudrate(); }, action);
+    };
+#endif
+
     duo_input::u1::Buttons buttons;
     bool was_mounted = false;
 
@@ -1172,7 +1187,11 @@ int main() {
         }
         if (config.take_release_all_request()) {
             g_outputs.release_all();
+#ifdef DUO_INPUT_BACKEND_CH375
             link.send_release_all(now_ms);
+#else
+            with_link([&] { link.send_release_all(now_ms); });
+#endif
             // Asked for rather than done here: the command queue has exactly
             // one producer and this core is not it.
             g_runtime.request_release_all();
@@ -1201,7 +1220,11 @@ int main() {
         // PC2's half of the state goes over the link. It sends on change and
         // otherwise heartbeats, so a quiet device does not saturate the bus
         // and does not look severed either.
+#ifdef DUO_INPUT_BACKEND_CH375
         link.poll(now_ms, g_outputs);
+#else
+        with_link([&] { link.poll(now_ms, g_outputs); });
+#endif  // DUO_INPUT_BACKEND_CH375
 
         // Published every pass, so the host can see the link rather than infer
         // it from an absence of errors.
@@ -1277,7 +1300,11 @@ int main() {
                 break;
             case duo_input::u1::ButtonEvent::StopReleaseAll:
                 g_outputs.release_all();
+#ifdef DUO_INPUT_BACKEND_CH375
                 link.send_release_all(now_ms);
+#else
+                with_link([&] { link.send_release_all(now_ms); });
+#endif
                 // The macro that is holding keys down is on the other core,
                 // and a stop that leaves it typing is not a stop.
                 g_runtime.request_release_all();

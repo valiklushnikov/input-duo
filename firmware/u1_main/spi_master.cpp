@@ -144,6 +144,10 @@ void SpiMaster::begin() {
     gpio_set_function(kPinSpiCs, GPIO_FUNC_SPI);
 }
 
+#ifdef DUO_INPUT_BACKEND_PIO_USB
+void SpiMaster::refresh_baudrate() { spi_set_baudrate(kSpi, kSpiBaudRate); }
+#endif
+
 bool SpiMaster::send(protocol::SpiMessageType type, protocol::ByteView payload,
                      std::uint32_t now_ms) {
     protocol::SpiFrame frame;
