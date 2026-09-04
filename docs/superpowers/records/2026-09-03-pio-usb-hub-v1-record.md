@@ -178,8 +178,8 @@ $ sha256sum build/pico-release/firmware/u1_main/duo_u1_main.uf2 build/pico-relea
 
 | Board | UF2 | SHA-256 |
 |---|---|---|
-| U1 | `build/pico-release/firmware/u1_main/duo_u1_main.uf2` | `2b866ea7b90e6de88e1325b9ac88a1dc41f819bf61dcbf9cbb1f0328c02771d4` |
-| U2 | `build/pico-release/firmware/u2_endpoint/duo_u2_endpoint.uf2` | `4c0673e1e1cfce2c74cd2f7a018b0f0c284d6a78fb1ebc318aee2abfc19223ae` |
+| U1 | `build/pico-release/firmware/u1_main/duo_u1_main.uf2` | `2b866ea7b90e6de88e1325b9ac88a1dc41f819bf61dcbf9cbb1f0328c02771d4` **— superseded, see "Correction" below; do not use as a comparison baseline** |
+| U2 | `build/pico-release/firmware/u2_endpoint/duo_u2_endpoint.uf2` | `4c0673e1e1cfce2c74cd2f7a018b0f0c284d6a78fb1ebc318aee2abfc19223ae` — still current |
 
 Firmware artifact contract test:
 
@@ -211,10 +211,196 @@ $ git add docs/superpowers && git commit -m "Record PIO USB migration baseline"
 | Native tests | `ctest --preset native` | 36/36 passed |
 | Pico SDK revision | `git -C C:/Users/Valentyn/pico-sdk rev-parse HEAD` | `95ea6acad131124694cda1c162c52cd30e0aece0` (2.1.0) |
 | Firmware build | `cmake --build --preset pico-release` | built, then `ninja: no work to do` on re-run |
-| U1 UF2 hash | `sha256sum .../duo_u1_main.uf2` | `2b866ea7b90e6de88e1325b9ac88a1dc41f819bf61dcbf9cbb1f0328c02771d4` |
+| U1 UF2 hash | `sha256sum .../duo_u1_main.uf2` | `2b866ea7b90e6de88e1325b9ac88a1dc41f819bf61dcbf9cbb1f0328c02771d4` — **superseded, see "Correction" below** |
 | U2 UF2 hash | `sha256sum .../duo_u2_endpoint.uf2` | `4c0673e1e1cfce2c74cd2f7a018b0f0c284d6a78fb1ebc318aee2abfc19223ae` |
 | Firmware artifact contract | `pytest tests/build/test_firmware_artifacts.py -q` | 13/13 passed |
 | Known-good CH375 release | `dist/release/0.1.0-rc1/SHA256SUMS.txt` | present, untouched, from commit `b7a97c5` |
 
 No claim in this record is unmeasured; every row above was produced by a
 command run in this session.
+
+## Correction (Task 5 fix round, 2026-09-04): the U1 baseline hash
+
+Task 5's own review turned up that the U1 UF2 hash carried by this record
+since Task 1, `2b866ea7b90e6de88e1325b9ac88a1dc41f819bf61dcbf9cbb1f0328c02771d4`,
+does not match a from-clean-source build measured during that review, and
+that Task 5's own first-draft figure (`b5bb529d...`, since superseded in
+`.superpowers/sdd/2026-09-03-pio-usb-hub-v1-implementation/task-5-report.md`)
+did not either. This section is the correction: what was actually
+established, what was not, and the rule this record now sets for every
+later comparison.
+
+### What was verified
+
+A clean build of commit `c948a4b` (`Cover Ch375SourceAdapter::identity()
+against a real DescriptorSetup` — the commit immediately before Task 5's own
+changes, and the CH375 source this whole migration branches from at that
+point) was made in an isolated detached worktree with no other build
+directory reused:
+
+```
+C:\Users\Valentyn\AppData\Local\Temp\duo-task5-c948-e7afe62292ed40bb99b2486288ba2d1f
+$ git rev-parse HEAD
+c948a4b0ffb420e09d73709149b7406b6b13072c
+$ git status --short
+(no output)
+
+$ cmd.exe /d /c 'call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 && set "PICO_SDK_PATH=C:\Users\Valentyn\pico-sdk" && set "SOURCE_DATE_EPOCH=1788545287" && cmake -S . -B build\baseline-ch375-v2 -G Ninja -DCMAKE_BUILD_TYPE=MinSizeRel -DDUO_PICO_FIRMWARE=ON -DPICO_BOARD=waveshare_rp2040_zero -DDUO_INPUT_BACKEND=CH375 -DCMAKE_MAKE_PROGRAM=C:\Users\Valentyn\Documents\Codex\2026-08-01\new-chat\work\duo-input-mvp\.superpowers\runtime-venv\Scripts\ninja.exe'
+$ cmd.exe /d /c 'call "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64 && set "PICO_SDK_PATH=C:\Users\Valentyn\pico-sdk" && set "SOURCE_DATE_EPOCH=1788545287" && cmake --build build\baseline-ch375-v2 --parallel'
+[230/230] Linking CXX executable firmware\u2_endpoint\duo_u2_endpoint.elf
+```
+
+`SOURCE_DATE_EPOCH=1788545287` is `c948a4b`'s own commit timestamp
+(2026-09-04 21:08:07 +0300, confirmed by `git show -s --format=%ci
+c948a4b`), pinned explicitly rather than left to the wall clock, per
+`cmake/source_date.cmake`'s own rule. Pico SDK revision `95ea6acad131...`
+(2.1.0), the same one Task 1 used; `arm-none-eabi-gcc 10.3.1`; CMake `4.4.3`;
+Ninja `1.13.0`; MSVC host tools `19.51.36252` from this same `vcvarsall.bat`.
+
+Independently re-verified in this correction directly against the artifacts
+already on disk (not retyped from a report table):
+
+```
+$ sha256sum build/pico-release/firmware/u1_main/duo_u1_main.uf2 build/pico-release/firmware/u1_main/duo_u1_main.bin build/pico-release/firmware/u2_endpoint/duo_u2_endpoint.uf2 build/pico-release/firmware/u2_endpoint/duo_u2_endpoint.bin
+26cc0f4982075a5e5a3f7d16fb7d6a1c3c8c085dcf5f8c5de282fdd792a50689  build/pico-release/firmware/u1_main/duo_u1_main.uf2
+79dff4550e9b7e58b2b799d22d2ba387c5d46736cf9eded26ee3ecbf0e1942e8  build/pico-release/firmware/u1_main/duo_u1_main.bin
+4c0673e1e1cfce2c74cd2f7a018b0f0c284d6a78fb1ebc318aee2abfc19223ae  build/pico-release/firmware/u2_endpoint/duo_u2_endpoint.uf2
+8022e001f99e2b153eca98f7b6b4ddf6a992da5ee7cce31f389c5a9c5d5676b8  build/pico-release/firmware/u2_endpoint/duo_u2_endpoint.bin
+
+$ arm-none-eabi-objcopy --strip-debug build/pico-release/firmware/u1_main/duo_u1_main.elf /tmp/u1-stripped.elf
+$ arm-none-eabi-objcopy --strip-debug build/pico-release/firmware/u2_endpoint/duo_u2_endpoint.elf /tmp/u2-stripped.elf
+$ sha256sum /tmp/u1-stripped.elf /tmp/u2-stripped.elf
+0f42d76a3daf199311299b79b35575defbbe9dff38beddeb6cb94b91cf659858  u1-stripped.elf
+629183b5bac1f07922a56be31068996e7a8caa654c4520a50d7933b776610fc6  u2-stripped.elf
+
+$ sha256sum C:\Users\Valentyn\AppData\Local\Temp\duo-task5-c948-e7afe62292ed40bb99b2486288ba2d1f\build\baseline-ch375-v2\firmware\u1_main\duo_u1_main.uf2
+26cc0f4982075a5e5a3f7d16fb7d6a1c3c8c085dcf5f8c5de282fdd792a50689  ...\baseline-ch375-v2\...\duo_u1_main.uf2
+```
+
+The last line confirms the isolated `c948a4b` worktree's own build produces
+the same U1 UF2 hash as `build/pico-release` in this working tree at commit
+`0e015fc` (Task 5, fixed). Task 5's fix round additionally compared both
+builds' `arm-none-eabi-nm -S --defined-only` output (every symbol, type,
+size and address — 1109/1109 matching for U1, 421/421 for U2, zero deltas)
+and both builds' `arm-none-eabi-objdump -drwC` and `-s` output after
+stripping debug info (byte-for-byte identical instruction streams and
+section contents for both boards); see
+`.superpowers/sdd/2026-09-03-pio-usb-hub-v1-implementation/task-5-report.md`,
+"Fix round 1/5", for the full comparison. **`26cc0f4982075a5e5a3f7d16fb7d6a1c3c8c085dcf5f8c5de282fdd792a50689`
+is the verified, clean-build, reproducible U1 UF2 hash for commit `c948a4b`
+and for this branch's CH375 build as it stands after Task 5's fix
+(`0e015fc`).** U2 did not move: `4c0673e1e1cfce2c74cd2f7a018b0f0c284d6a78fb1ebc318aee2abfc19223ae`
+is the same value Task 1 recorded, confirmed above from the same
+independent re-hash, and no U2 source file has changed at any point in this
+migration.
+
+| Board | Artifact | SHA-256 (clean `c948a4b`, `build\baseline-ch375-v2`) |
+|---|---|---|
+| U1 | UF2 | `26cc0f4982075a5e5a3f7d16fb7d6a1c3c8c085dcf5f8c5de282fdd792a50689` |
+| U1 | BIN | `79dff4550e9b7e58b2b799d22d2ba387c5d46736cf9eded26ee3ecbf0e1942e8` |
+| U1 | ELF, stripped (`objcopy --strip-debug`) | `0f42d76a3daf199311299b79b35575defbbe9dff38beddeb6cb94b91cf659858` |
+| U2 | UF2 | `4c0673e1e1cfce2c74cd2f7a018b0f0c284d6a78fb1ebc318aee2abfc19223ae` |
+| U2 | BIN | `8022e001f99e2b153eca98f7b6b4ddf6a992da5ee7cce31f389c5a9c5d5676b8` |
+| U2 | ELF, stripped (`objcopy --strip-debug`) | `629183b5bac1f07922a56be31068996e7a8caa654c4520a50d7933b776610fc6` |
+
+The full (non-stripped) ELF hashes are **not** listed as canonical: they
+differ between the two build directories (different absolute worktree
+paths embedded in DWARF debug info) even though the stripped ELFs, and
+everything derived from them (UF2, BIN), are identical. Compare stripped
+ELFs or the UF2/BIN, never the raw `.elf`, when the two builds being
+compared do not share a build directory path.
+
+### What was not established, and is recorded as unknown rather than guessed
+
+This correction did **not** perform an isolated clean rebuild of `af49b2f`
+or `73b3f14` — Task 1's own baseline commit and branch point, the commit
+`2b866ea7...` was actually recorded against. Only `c948a4b`, a later commit,
+was rebuilt clean. Whether `2b866ea7...` would reproduce from a genuinely
+fresh, isolated build of `af49b2f`/`73b3f14` itself was **not tested** and
+is **not known** either way. Do not read the rest of this section as proof
+that `2b866ea7...` was numerically wrong for its own commit — that specific
+question was not answered here.
+
+Two things, independent of that open question, were established and are
+both, on their own, sufficient reason `2b866ea7...` cannot be compared
+directly against `26cc0f49...` or used as a stand-in for it:
+
+1. **Real source changes.** Tasks 3 and 4 changed files the CH375 U1 image
+   actually compiles, between `af49b2f`/`73b3f14` and `c948a4b`:
+
+   ```
+   $ git diff --stat af49b2f c948a4b -- firmware/u1_main
+    firmware/u1_main/CMakeLists.txt                  |   3 +-
+    firmware/u1_main/ch375/report_descriptor.cpp     | 790 +----------------------
+    firmware/u1_main/ch375/report_descriptor.hpp     | 131 +---
+    firmware/u1_main/input/ch375_source_adapter.cpp  |  71 ++
+    firmware/u1_main/input/ch375_source_adapter.hpp  |  41 ++
+    firmware/u1_main/input/hid/report_descriptor.cpp | 789 ++++++++++++++++++++++
+    firmware/u1_main/input/hid/report_descriptor.hpp | 122 ++++
+    firmware/u1_main/input/keyboard_normalizer.cpp   |  12 +-
+    firmware/u1_main/input/keyboard_normalizer.hpp   |   6 +-
+    firmware/u1_main/input/mouse_normalizer.cpp      |   2 +-
+    firmware/u1_main/input/mouse_normalizer.hpp      |   6 +-
+    firmware/u1_main/input/pipeline.cpp              |  43 +-
+    firmware/u1_main/input/pipeline.hpp              |  30 +-
+    firmware/u1_main/input/source.hpp                | 113 ++++
+    firmware/u1_main/main.cpp                        |  30 +-
+    15 files changed, 1228 insertions(+), 961 deletions(-)
+   ```
+
+   `main.cpp`, both normalizers, `input/pipeline.*` and the HID report
+   descriptor parser (moved from `ch375/` to `input/hid/`, Task 3) are all
+   part of the CH375 build's own source list. A hash difference between a
+   build of `af49b2f`/`73b3f14` and a build of `c948a4b` is expected on this
+   basis alone, with no build-directory defect required to explain it.
+
+2. **Different embedded build date.** `af49b2f` and `73b3f14` are dated
+   2026-09-02; `c948a4b` is dated 2026-09-04 — two days apart. Absent
+   `SOURCE_DATE_EPOCH`, `cmake/source_date.cmake` stamps
+   `PICO_PROGRAM_BUILD_DATE` from the HEAD commit's own timestamp (Task 1's
+   record itself does not show `SOURCE_DATE_EPOCH` being set), so the two
+   builds embed different date strings regardless of any other change.
+
+What genuinely is a documented irregularity, independent of both points
+above, is Task 1's own account of how `2b866ea7...` was measured:
+
+> Build directory `build/pico-release` was reused (already configured; its
+> cache already recorded `PICO_SDK_PATH=C:/Users/Valentyn/pico-sdk`,
+> `arm-none-eabi-gcc` from `C:/ProgramData/chocolatey/lib/gcc-arm-embedded/...`,
+> and the same vendored ninja).
+
+— quoted verbatim from this record's own Task 1 section, above. A reused,
+already-configured build directory is not what a canonical baseline
+measurement should come from, whether or not it actually produced a wrong
+number in this instance: Ninja's incremental build is only as correct as
+its dependency graph, and nothing in that Task 1 session verified the
+directory's history (which branch/commit it was last configured or built
+against, whether any file had been touched outside of Ninja's tracking).
+The safe, checkable state is a build directory that has never held any
+other commit's objects. `build/pico-release` in the current working tree,
+and `build/pico-pio-usb-release`/`build/pico-pio-usb-debug`, have all seen
+multiple commits and multiple backends across this migration by now and are
+in exactly the same position — reused, not fresh — which is why the rule
+below exists.
+
+### The rule this record sets, effective immediately
+
+**Image comparisons - any comparison between two U1 or U2 builds meant to
+answer "did the image change" - are made between clean builds, each in its
+own fresh build directory that has never held any other commit's or any
+other backend's build state, never against or from a directory that was
+incrementally reused.** A `git clone`/`git archive`/detached-worktree
+checkout into an empty directory, configured and built once, is what
+"clean" means here. This is what Task 5's fix round did for `c948a4b`
+above, and what produced a number that, unlike `2b866ea7...` or the
+original `b5bb529d...`, is now verified two independent ways (bit-for-bit
+UF2/BIN/stripped-ELF match, and a full symbol-and-disassembly comparison)
+against a second, separately-built copy of the same commit.
+
+Task 14's hardware gate, and any other later task that compares a U1 or U2
+image against "what it was before," must build both sides of that
+comparison this way. `26cc0f4982075a5e5a3f7d16fb7d6a1c3c8c085dcf5f8c5de282fdd792a50689`
+(U1) and `4c0673e1e1cfce2c74cd2f7a018b0f0c284d6a78fb1ebc318aee2abfc19223ae`
+(U2) are the CH375 baseline this migration now compares against; the
+Task 1 hashes at the top of this record are superseded and must not be
+used for that comparison.
