@@ -23,22 +23,27 @@
 #include "hardware/watchdog.h"
 
 #include "buttons.hpp"
-#include "ch375/descriptor_setup.hpp"
-#include "ch375_probe.hpp"
 #include "config_profiles.hpp"
 #include "config_service.hpp"
 #include "core1_runtime.hpp"
 #include "core_bridge.hpp"
-#include "diagnostics/ch375_baud_scan.hpp"
 #include "diagnostics_service.hpp"
 #include "hid/state_manager.hpp"
-#include "input/ch375_source_adapter.hpp"
 #include "input/pipeline.hpp"
 #include "output_runtime.hpp"
 #include "pico_flash.hpp"
 #include "spi_master.hpp"
 #include "storage/ab_store.hpp"
 #include "usb_service.hpp"
+
+#ifdef DUO_INPUT_BACKEND_CH375
+#include "ch375/descriptor_setup.hpp"
+#include "ch375_probe.hpp"
+#include "diagnostics/ch375_baud_scan.hpp"
+#include "input/ch375_source_adapter.hpp"
+#else
+#include "pio_usb/backend.hpp"
+#endif
 
 namespace {
 
@@ -77,6 +82,7 @@ duo_input::u1::StoredProfiles g_profiles;
 /// Everything between a peripheral report and a queued command.
 duo_input::u1::Core1Runtime g_runtime(g_commands, g_profiles);
 
+#ifdef DUO_INPUT_BACKEND_CH375
 /// What one peripheral port has on it, as the host has to see it.
 ///
 /// Read from the two objects that already know - the controller's state machine
@@ -104,6 +110,7 @@ duo_input::u1::PeripheralPort describe_port(
                 sizeof(port.descriptor_hash));
     return port;
 }
+#endif  // DUO_INPUT_BACKEND_CH375
 
 /// Where a normalized event goes.
 class RuntimeInput final : public duo_input::u1::input::IInputHandler {
@@ -117,6 +124,8 @@ public:
 RuntimeInput g_input;
 duo_input::u1::input::InputPipeline g_keyboard_pipeline(g_input);
 duo_input::u1::input::InputPipeline g_mouse_pipeline(g_input);
+
+#ifdef DUO_INPUT_BACKEND_CH375
 // Reads CH375's own events and setup across the neutral source boundary. The
 // id each carries is just this channel's index - the pipeline never
 // interprets it.
@@ -140,6 +149,13 @@ duo_input::u1::ch375::DescriptorSetup g_keyboard_setup(g_keyboard_commands);
 duo_input::u1::ch375::DescriptorSetup g_mouse_setup(g_mouse_commands);
 duo_input::u1::ch375::Ch375Device g_keyboard_device(g_keyboard_commands, g_keyboard_setup);
 duo_input::u1::ch375::Ch375Device g_mouse_device(g_mouse_commands, g_mouse_setup);
+#else
+// U1's whole USB host: one XL334P4 hub on RHPort 1, standing in for both
+// CH375 channels above. See firmware/u1_main/pio_usb/backend.hpp - it is
+// Core 1's only door into it, the same way the two Ch375SourceAdapters above
+// are Core 1's only door into a CH375 channel.
+duo_input::u1::pio_usb::PioUsbBackend g_pio_usb_backend;
+#endif
 
 #if DUO_CH375_PROBE
 struct DeviceTally {
@@ -330,6 +346,17 @@ void core1_entry() {
     multicore_lockout_victim_init();
     duo_input::u1::set_core1_running(true);
 
+#ifndef DUO_INPUT_BACKEND_CH375
+    // The physical input path is product functionality, not a bring-up
+    // probe - compare the CH375 branch's g_keyboard_port.begin() /
+    // g_mouse_port.begin() calls in main(), which run before Core 1 exists.
+    // This backend's tuh_init has to run on Core 1 itself - see backend.hpp -
+    // so it happens here instead, as the first thing this core does once it
+    // can be stopped by a flash write, and before anything below reads a
+    // clock or a device it changes.
+    g_pio_usb_backend.begin();
+#endif
+
     std::uint8_t installed = g_profiles.active_profile_id();
     g_runtime.set_profile_now(installed);
     install_macros(installed);
@@ -360,6 +387,7 @@ void core1_entry() {
         g_last_pass_us = now_us;
 #endif
 
+#ifdef DUO_INPUT_BACKEND_CH375
         duo_input::u1::ch375::Ch375Device* devices[2] = {&g_keyboard_device, &g_mouse_device};
         duo_input::u1::ch375::DescriptorSetup* setups[2] = {&g_keyboard_setup, &g_mouse_setup};
         duo_input::u1::input::InputPipeline* pipelines[2] = {&g_keyboard_pipeline,
@@ -432,6 +460,36 @@ void core1_entry() {
                 g_runtime.set_event_origin_us(0);
             }
         }
+#else
+        // One backend, one door: task() services tuh_task() and whatever it
+        // queues comes out through take_event(), in the same neutral shape
+        // Ch375SourceAdapter::convert() produces on the CH375 side above.
+        // logical_port() is this board's only routing decision - which of
+        // the two InputPipelines a resolved DeviceKind belongs to - the same
+        // one CH375's per-channel adapters make by construction, having one
+        // adapter per physical port.
+        g_pio_usb_backend.task(now_us);
+
+        duo_input::u1::input::InputPipeline* pipelines[2] = {&g_keyboard_pipeline,
+                                                             &g_mouse_pipeline};
+        // Static for the same reason as CH375's own event/source_event
+        // above: this core's stack is two kilobytes for everything below it.
+        static duo_input::u1::input::SourceEvent source_event;
+        static duo_input::u1::input::SourceIdentity source_identity;
+        while (g_pio_usb_backend.take_event(source_event, source_identity)) {
+            const int port = duo_input::u1::pio_usb::PioUsbBackend::logical_port(
+                source_identity.kind);
+            if (port < 0) {
+                // Unknown resolves to nothing to route - the same thing an
+                // Attached CH375 event above resolves to before convert()
+                // ever returns true for it.
+                continue;
+            }
+            g_runtime.set_event_origin_us(source_event.received_us);
+            pipelines[port]->on_event(source_event, source_identity, now_ms);
+            g_runtime.set_event_origin_us(0);
+        }
+#endif  // DUO_INPUT_BACKEND_CH375
 
         g_runtime.tick(now_ms);
 
@@ -999,6 +1057,7 @@ int main() {
 
 #endif
 
+#ifdef DUO_INPUT_BACKEND_CH375
     // The physical input path is product functionality, not a bring-up probe.
     // Only the observations around it are conditional; both ports and both
     // device state machines run in every release image.
@@ -1006,6 +1065,10 @@ int main() {
                           duo_input::u1::kPinKeyboardInt);
     g_mouse_port.begin(pio0, duo_input::u1::kPinMouseTx, duo_input::u1::kPinMouseRx,
                        duo_input::u1::kPinMouseInt);
+#endif  // DUO_INPUT_BACKEND_CH375
+    // The PIO USB backend has nothing to bring up here: its tuh_init has to
+    // run on Core 1 itself (see core1_entry's g_pio_usb_backend.begin()
+    // call), and GP0/GP1 are claimed there, not by this core.
 
 #if DUO_CH375_PROBE
     // Before a single byte goes out, on either port.
@@ -1174,8 +1237,15 @@ int main() {
         // reply is the only place anything can learn what it was - which is
         // what a compatibility matrix row needs and what nothing else can
         // supply. Both ports always: an empty port is a fact about the run.
+#ifdef DUO_INPUT_BACKEND_CH375
         config.set_peripherals(describe_port(g_keyboard_device, g_keyboard_setup),
                                describe_port(g_mouse_device, g_mouse_setup));
+#else
+        // Nothing is read yet - this task's callbacks are empty - so the
+        // honest reply is "not attached", not a guess dressed up as one.
+        // Tasks 6-8 are what give this something real to describe.
+        config.set_peripherals(duo_input::u1::PeripheralPort{}, duo_input::u1::PeripheralPort{});
+#endif
 
         show_link(link.status().answered);
 

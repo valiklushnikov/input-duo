@@ -1,6 +1,8 @@
 #pragma once
 
-// TinyUSB configuration for U1: three HID interfaces and one CDC.
+// TinyUSB configuration for U1: three HID interfaces and one CDC on RHPort 0,
+// device mode, in every build. The PIO USB backend adds a host stack on
+// RHPort 1 - see docs/superpowers/specs/2026-09-02-pio-usb-hub-v1-design.md.
 
 #ifdef __cplusplus
 extern "C" {
@@ -9,6 +11,30 @@ extern "C" {
 #define CFG_TUSB_MCU OPT_MCU_RP2040
 #define CFG_TUSB_OS OPT_OS_PICO
 #define CFG_TUSB_RHPORT0_MODE (OPT_MODE_DEVICE | OPT_MODE_FULL_SPEED)
+
+#ifdef DUO_INPUT_BACKEND_PIO_USB
+// RHPort 1 is Pico-PIO-USB's host controller, dual-role alongside the device
+// port above; tusb_option.h resolves TUD to whichever RHPORTx_MODE carries
+// OPT_MODE_DEVICE and TUH to whichever carries OPT_MODE_HOST, so the two
+// stacks land on the ports this migration fixed them to without either one
+// naming a port number itself.
+#define CFG_TUSB_RHPORT1_MODE (OPT_MODE_HOST | OPT_MODE_FULL_SPEED)
+#define CFG_TUH_RPI_PIO_USB 1
+#define CFG_TUH_ENABLED 1
+
+#define CFG_TUH_ENUMERATION_BUFSIZE 256
+
+// One hub, behind it a keyboard and a mouse - this board's whole USB
+// topology, and the bound these counts are written against rather than
+// "however many happen to enumerate". CFG_TUH_DEVICE_MAX excludes the hub
+// itself (TinyUSB's own convention); CFG_TUH_HID allows each of the two
+// downstream devices up to two HID interfaces, the same primary-plus-
+// auxiliary shape CH375's own compatibility matrix already reads composite
+// mice and keyboards through.
+#define CFG_TUH_HUB 1
+#define CFG_TUH_DEVICE_MAX 2
+#define CFG_TUH_HID (2 * CFG_TUH_DEVICE_MAX)
+#endif
 
 // Debug output would go somewhere this board has no room to send it.
 #define CFG_TUSB_DEBUG 0
