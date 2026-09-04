@@ -1,7 +1,8 @@
 # Native PIO USB host, single-hub prototype
 
 **Date:** 2026-09-02  
-**Status:** design agreed in conversation, awaiting document review  
+**Status:** Approved for implementation  
+**Approved plan:** `docs/superpowers/plans/2026-09-03-pio-usb-hub-v1-implementation.md`  
 **Target branch after approval:** `feature/pio-usb-host-hub-v1`
 
 ## Problem
