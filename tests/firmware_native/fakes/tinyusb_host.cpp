@@ -52,6 +52,7 @@ bool host_inited = false;
 std::uint32_t system_clock_hz = 0;
 std::uint32_t system_clock_hz_at_configure = 0;
 std::uint32_t sof_frames = 0;
+bool hub_mounted = false;
 
 }  // namespace
 
@@ -84,6 +85,7 @@ void reset() {
     system_clock_hz = 120000000u;
     system_clock_hz_at_configure = 0;
     sof_frames = 0;
+    hub_mounted = false;
     pio_usb_root_port[0] = root_port_t{};
     pio_usb_root_port[1] = root_port_t{};
     for (endpoint_t& endpoint : pio_usb_ep_pool) {
@@ -142,6 +144,8 @@ void set_endpoint(std::size_t index, std::uint16_t size, std::uint8_t failed_cou
         pio_usb_ep_pool[index].failed_count = failed_count;
     }
 }
+
+void set_hub_mounted(bool mounted) { hub_mounted = mounted; }
 
 std::uint32_t clock_hz_at_configure() { return system_clock_hz_at_configure; }
 
@@ -260,6 +264,10 @@ extern "C" bool tuh_rhport_is_active(std::uint8_t rhport) {
 }
 
 extern "C" bool tuh_inited(void) { return host_inited; }
+
+extern "C" bool tuh_mounted(std::uint8_t dev_addr) {
+    return dev_addr == duo::test::tinyusb_host::kHubAddress && hub_mounted;
+}
 
 extern "C" void tuh_task(void) { ++host_tasks; }
 

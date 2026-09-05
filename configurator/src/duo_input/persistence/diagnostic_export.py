@@ -230,6 +230,7 @@ _HOST_STACK_ROWS = (
     ("max_pass_gap_us", "Longest input-core pass gap (us)"),
     ("max_sof_gap", "Largest SOF-frame jump between passes"),
     ("root_port_resets", "Root-port resets seen (lower bound)"),
+    ("hub_mount_events", "Hub mounts seen (lower bound)"),
 )
 
 

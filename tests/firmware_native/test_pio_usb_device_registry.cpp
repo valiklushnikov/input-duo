@@ -757,6 +757,37 @@ TEST_CASE(root_port_resets_count_only_connected_suspended_cycles_and_saturate) {
     CHECK_EQ(backend.observe().root_port_resets, 2u);
 }
 
+TEST_CASE(hub_mount_edges_are_counted_even_though_tinyusb_suppresses_its_mount_callback) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    backend.task(1000u);
+    duo::test::tinyusb_host::set_hub_mounted(true);
+    backend.task(2000u);
+    backend.task(3000u);
+    CHECK_EQ(backend.observe().hub_mount_events, 1u);
+
+    duo::test::tinyusb_host::set_hub_mounted(false);
+    backend.task(4000u);
+    duo::test::tinyusb_host::set_hub_mounted(true);
+    backend.task(5000u);
+    CHECK_EQ(backend.observe().hub_mount_events, 2u);
+
+    for (std::uint32_t count = 2u; count < 0xFFFFu; ++count) {
+        duo::test::tinyusb_host::set_hub_mounted(false);
+        backend.task(5001u + count * 2u);
+        duo::test::tinyusb_host::set_hub_mounted(true);
+        backend.task(5002u + count * 2u);
+    }
+    CHECK_EQ(backend.observe().hub_mount_events, 0xFFFFu);
+    duo::test::tinyusb_host::set_hub_mounted(false);
+    backend.task(200000u);
+    duo::test::tinyusb_host::set_hub_mounted(true);
+    backend.task(200001u);
+    CHECK_EQ(backend.observe().hub_mount_events, 0xFFFFu);
+}
+
 TEST_CASE(mount_processing_stores_vid_pid_protocol_descriptor_hash_and_neutral_layout) {
     RegistryRig rig;
     rig.device(8, 0xABCD, 0x0123);

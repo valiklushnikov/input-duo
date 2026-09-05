@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #define TUH_CFGID_RPI_PIO_USB_CONFIGURATION 1u
+#define CFG_TUH_DEVICE_MAX 4u
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,6 +21,7 @@ void tuh_task(void);
 // something else had already started.
 bool tuh_inited(void);
 bool tuh_rhport_is_active(uint8_t rhport);
+bool tuh_mounted(uint8_t dev_addr);
 
 #ifdef __cplusplus
 }

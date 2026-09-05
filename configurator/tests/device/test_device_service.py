@@ -1298,6 +1298,7 @@ def _host_block(
     max_pass_gap_us: int = 0,
     max_sof_gap: int = 0,
     root_port_resets: int = 0,
+    hub_mount_events: int | None = None,
 ) -> bytes:
     """The appended host suffix: one length byte, then the fields behind it."""
     import struct
@@ -1324,6 +1325,8 @@ def _host_block(
             max_sof_gap,
             root_port_resets,
         )
+        if hub_mount_events is not None:
+            fields += struct.pack("<H", hub_mount_events)
     return bytes((len(fields),)) + fields
 
 
@@ -1415,6 +1418,7 @@ def test_the_host_block_is_read_behind_a_backend_that_publishes_counters() -> No
             max_pass_gap_us=450_000,
             max_sof_gap=7,
             root_port_resets=2,
+            hub_mount_events=1,
         )
     )
 
@@ -1451,6 +1455,7 @@ def test_the_host_block_is_read_behind_a_backend_that_publishes_counters() -> No
     assert observation.max_pass_gap_us == 450_000
     assert observation.max_sof_gap == 7
     assert observation.root_port_resets == 2
+    assert observation.hub_mount_events == 1
 
 
 def test_a_host_started_on_the_wrong_core_reads_as_such() -> None:

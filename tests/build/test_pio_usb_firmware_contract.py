@@ -198,6 +198,7 @@ def test_host_observation_mapping_carries_every_appended_wire_progress_field():
         "max_pass_gap_us",
         "max_sof_gap",
         "root_port_resets",
+        "hub_mount_events",
     ):
         assert f"out.{field} = observed.{field};" in mapping
 

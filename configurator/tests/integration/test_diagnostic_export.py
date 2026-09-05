@@ -416,6 +416,7 @@ def test_the_report_carries_what_the_host_stack_and_root_port_are_doing(
         450_000,
         7,
         2,
+        1,
     )
     service = DeviceService(timeout_ms=5000)
     with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
@@ -445,6 +446,7 @@ def test_the_report_carries_what_the_host_stack_and_root_port_are_doing(
     assert host["Longest input-core pass gap (us)"] == "450000"
     assert host["Largest SOF-frame jump between passes"] == "7"
     assert host["Root-port resets seen (lower bound)"] == "2"
+    assert host["Hub mounts seen (lower bound)"] == "1"
     # No derived clock row. There was one, it called a healthy board faulty,
     # and it separated nothing - a healthy board prints these same two numbers.
     assert not any("unchanged since bring-up" in label for label in host)

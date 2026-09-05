@@ -98,7 +98,8 @@ struct HostObservability {
     /// apart, so it must be readable that way and must not saturate low.
     std::uint32_t core1_passes = 0;
     /// Application device-mount callbacks since boot, regardless of whether a
-    /// callback registry was available to accept the metadata.
+    /// callback registry was available to accept the metadata. TinyUSB omits
+    /// hubs from these callbacks; hub_mount_events below covers that case.
     std::uint16_t mount_events = 0;
     std::uint16_t umount_events = 0;
     std::uint16_t hid_mount_events = 0;
@@ -112,6 +113,11 @@ struct HostObservability {
     std::uint16_t max_sof_gap = 0;
     /// Completed connected suspended->running cycles observed by polling.
     std::uint16_t root_port_resets = 0;
+    /// Configured-hub transitions observed through tuh_mounted().
+    ///
+    /// A separate lower-bound counter is necessary because TinyUSB
+    /// deliberately does not call tuh_mount_cb for hub addresses.
+    std::uint16_t hub_mount_events = 0;
 };
 
 struct HostCallbackObservability {
@@ -270,6 +276,8 @@ private:
     bool root_port_was_connected_ = false;
     std::uint16_t root_port_resets_ = 0;
     bool root_port_reset_in_progress_ = false;
+    std::uint16_t hub_mount_events_ = 0;
+    bool hub_was_mounted_ = false;
 
     std::uint8_t ep_slots_opened_ = 0;
     std::uint8_t ep_max_failed_count_ = 0;

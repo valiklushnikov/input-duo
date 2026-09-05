@@ -21,6 +21,10 @@ namespace duo_input::u1::pio_usb {
 namespace {
 
 constexpr std::uint8_t kHostRhPort = 1;
+// TinyUSB allocates hub addresses immediately above its ordinary device
+// range. CFG_TUH_HUB is one in this image, so this is the sole root hub's
+// address and remains tied to the pinned stack's public configuration.
+constexpr std::uint8_t kHubAddress = CFG_TUH_DEVICE_MAX + 1;
 
 }  // namespace
 
@@ -174,6 +178,18 @@ void PioUsbBackend::task(std::uint32_t now_us) {
         return;
     }
     tuh_task();
+
+    // TinyUSB intentionally suppresses tuh_mount_cb for hub addresses, so
+    // that callback counter cannot answer whether the hub itself configured.
+    // Poll the public mounted state and count rising edges separately. Like
+    // the root-port edge counters this is a saturating lower bound: a whole
+    // mount/unmount cycle between two passes is not observable.
+    const bool hub_mounted = tuh_mounted(kHubAddress);
+    if (hub_mounted && !hub_was_mounted_ && hub_mount_events_ != 0xFFFFu) {
+        ++hub_mount_events_;
+    }
+    hub_was_mounted_ = hub_mounted;
+
     registry_.process_pending(now_us);
     registry_.retry_pending_arms(now_us);
 }
@@ -195,6 +211,7 @@ HostObservability PioUsbBackend::observe() const {
     out.max_pass_gap_us = max_pass_gap_us_;
     out.max_sof_gap = max_sof_gap_;
     out.root_port_resets = root_port_resets_;
+    out.hub_mount_events = hub_mount_events_;
 
     const root_port_t& root = pio_usb_root_port[0];
     std::uint8_t state = 0;

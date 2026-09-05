@@ -44,6 +44,7 @@ void set_sof_frame_count(std::uint32_t frames);
 /// Populate one Pico-PIO-USB endpoint-pool entry with the two fields the
 /// backend samples for its bounded wire-progress high-water marks.
 void set_endpoint(std::size_t index, std::uint16_t size, std::uint8_t failed_count);
+void set_hub_mounted(bool mounted);
 /// The four root-port flags PioUsbBackend::observe() packs into one byte.
 void set_root_port(bool initialized, bool connected, bool suspended,
                    bool is_fullspeed);

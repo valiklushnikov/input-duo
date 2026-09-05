@@ -208,6 +208,7 @@ duo_input::u1::HostObservation describe_host_observation(
     out.max_pass_gap_us = observed.max_pass_gap_us;
     out.max_sof_gap = observed.max_sof_gap;
     out.root_port_resets = observed.root_port_resets;
+    out.hub_mount_events = observed.hub_mount_events;
     return out;
 }
 #endif  // DUO_INPUT_BACKEND_CH375

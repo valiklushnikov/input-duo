@@ -169,6 +169,7 @@ def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
         450_000,
         7,
         2,
+        1,
     )
     with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
         page.service.connect_device(emulator)
@@ -190,6 +191,7 @@ def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
     assert "Longest input-core pass gap (us): 450000" in reported
     assert "Largest SOF-frame jump between passes: 7" in reported
     assert "Root-port resets seen (lower bound): 2" in reported
+    assert "Hub mounts seen (lower bound): 1" in reported
     # The page must not carry the old derived row either: it called a healthy
     # board faulty and it separated this board from a healthy one not at all.
     assert "unchanged since bring-up" not in reported

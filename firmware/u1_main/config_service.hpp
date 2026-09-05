@@ -236,11 +236,14 @@ struct HostObservation {
     std::uint32_t max_pass_gap_us = 0;
     std::uint16_t max_sof_gap = 0;
     std::uint16_t root_port_resets = 0;
+    /// Configured-hub transitions, polled because TinyUSB excludes hubs from
+    /// its application mount callback. A saturating lower bound.
+    std::uint16_t hub_mount_events = 0;
 };
 
 /// The observation's own bytes on the wire, without its leading length.
 inline constexpr std::size_t kHostObservationBytes =
-    1 + 4 + 4 + 4 + 1 + 2 + 4 + 2 + 2 + 2 + 1 + 1 + 4 + 2 + 2;
+    1 + 4 + 4 + 4 + 1 + 2 + 4 + 2 + 2 + 2 + 1 + 1 + 4 + 2 + 2 + 2;
 
 /// The appended host block: one length byte, then that many bytes.
 ///

@@ -490,6 +490,8 @@ std::size_t ConfigService::write_host_observation(std::uint8_t* out) const {
     at += 2;
     put_u16(out + at, host_observation_.root_port_resets);
     at += 2;
+    put_u16(out + at, host_observation_.hub_mount_events);
+    at += 2;
     return at;
 }
 

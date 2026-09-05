@@ -309,7 +309,7 @@ _ROOT_FULLSPEED = 1 << 3
 #: init flags, the two clock readings, the SOF count, the packed root-port
 #: state, the attach count and Core 1's pass count.
 _HOST_OBSERVATION_BASE = struct.Struct("<BIIIBHI")
-_HOST_OBSERVATION_WIRE = struct.Struct("<BIIIBHIHHHBBIHH")
+_HOST_OBSERVATION_WIRE = struct.Struct("<BIIIBHIHHHBBIHHH")
 
 
 @dataclass(frozen=True)
@@ -393,6 +393,10 @@ class HostObservation:
     max_pass_gap_us: int | None = None
     max_sof_gap: int | None = None
     root_port_resets: int | None = None
+    #: Configured-hub transitions. TinyUSB excludes hub addresses from its
+    #: application mount callback, so the device polls tuh_mounted() instead.
+    #: This is a saturating lower bound.
+    hub_mount_events: int | None = None
 
 
 @dataclass(frozen=True)
@@ -874,7 +878,7 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
     ) = _HOST_OBSERVATION_BASE.unpack_from(body, 0)
     extension_values: list[int | None] = []
     at = _HOST_OBSERVATION_BASE.size
-    for field in ("<H", "<H", "<H", "<B", "<B", "<I", "<H", "<H"):
+    for field in ("<H", "<H", "<H", "<B", "<B", "<I", "<H", "<H", "<H"):
         width = struct.calcsize(field)
         if declared == at:
             extension_values.append(None)
@@ -913,6 +917,7 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
         max_pass_gap_us=extension[5],
         max_sof_gap=extension[6],
         root_port_resets=extension[7],
+        hub_mount_events=extension[8],
     )
 
 

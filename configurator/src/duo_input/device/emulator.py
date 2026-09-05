@@ -151,7 +151,8 @@ class U1Emulator(AbstractByteTransport):
         #: Core 1 began, clk_sys now, SOF frames, packed root-port state,
         #: attach count, input-core passes, device mount/unmount/HID mount
         #: counts, endpoint-slot/failure high-waters, maximum pass/SOF gaps,
-        #: and root-port resets). ``None`` means this image has no
+        #: root-port resets and configured-hub mount edges). ``None`` means
+        #: this image has no
         #: host stack to observe and sends a length of zero - which is what the
         #: real CH375 image does, and a different fact from an older firmware
         #: that sends no host block at all.
@@ -635,7 +636,7 @@ class U1Emulator(AbstractByteTransport):
         if self.host_observation is None:
             host = bytes((0,))
         else:
-            layout = "<BIIIBHI" if len(self.host_observation) == 7 else "<BIIIBHIHHHBBIHH"
+            layout = "<BIIIBHI" if len(self.host_observation) == 7 else "<BIIIBHIHHHBBIHHH"
             fields = struct.pack(layout, *self.host_observation)
             host = bytes((len(fields),)) + fields
         return latency + ports + backend + host

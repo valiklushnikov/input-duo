@@ -105,7 +105,8 @@ each self-delimiting so the one behind it can always be found:
   `init_flags:u8, clk_hz_at_begin:u32, clk_hz_now:u32, sof_frame_count:u32, root_port_state:u8,
   root_port_connects:u16, core1_passes:u32, mount_events:u16, umount_events:u16,
   hid_mount_events:u16, ep_slots_opened:u8, ep_max_failed_count:u8, max_pass_gap_us:u32,
-  max_sof_gap:u16, root_port_resets:u16`. Its length byte plays the same role the backend
+  max_sof_gap:u16, root_port_resets:u16, hub_mount_events:u16`. Its length byte plays the same
+  role the backend
   block's count does: an image with no host stack sends zero, which is a different fact from an
   older firmware that sends no block at all.
 
@@ -129,7 +130,11 @@ each self-delimiting so the one behind it can always be found:
   zero is strong evidence that nothing attached rather than proof of it. `core1_passes` unchanged
   across two reads twenty seconds apart means the input core stopped.
 
-  `mount_events`, `umount_events`, and `hid_mount_events` are saturating callback counts. The
+  `mount_events`, `umount_events`, and `hid_mount_events` are saturating callback counts. TinyUSB
+  deliberately excludes hub addresses from its application mount and unmount callbacks, so
+  `hub_mount_events` separately counts rising edges from `tuh_mounted(CFG_TUH_DEVICE_MAX + 1)`.
+  It is a saturating, polled lower bound; a nonzero value proves the hub configured even when
+  `mount_events` remains zero. The
   endpoint fields are high-water readings from Pico-PIO-USB's fixed endpoint pool: a nonzero
   `ep_slots_opened` proves endpoint open ran, and `ep_max_failed_count == 3` means the pinned
   host exhausted its transaction retry limit. `max_pass_gap_us` measures blocking between input
