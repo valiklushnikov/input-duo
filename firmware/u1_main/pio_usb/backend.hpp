@@ -44,6 +44,76 @@
 
 namespace duo_input::u1::pio_usb {
 
+/// What begin() found and what the raw root port is doing, below TinyUSB.
+///
+/// Every counter the registry keeps starts one level too high to answer the
+/// question that cost a whole bench session: a host that never initialised and
+/// a host that initialised and saw nothing produce the same twelve zeros, and
+/// so does a Core 1 that stopped inside begin(). None of these fields go
+/// through the registry, the callbacks or TinyUSB's device model. They are
+/// read straight off the host stack's own flags and Pico-PIO-USB's root port,
+/// which is the only layer that still says something when everything above it
+/// is silent.
+///
+/// All fixed width, all copied by value into the CDC reply on Core 0.
+struct HostObservability {
+    /// The four kHostInit* bits below.
+    std::uint8_t init_flags = 0;
+    /// clk_sys as begin() found it, before set_sys_clock_khz(120000).
+    ///
+    /// Pico-PIO-USB computes every PIO divider once, from clk_sys, and never
+    /// recomputes one. Read against clk_hz_now this settles arithmetically -
+    /// with no scope on GP0/GP1 - whether the bus is being driven at the rate
+    /// the dividers were built for.
+    std::uint32_t clk_hz_at_begin = 0;
+    /// clk_sys when the reply was built, sampled on Core 0.
+    std::uint32_t clk_hz_now = 0;
+    /// pio_usb_host_get_frame_number(): the free-running SOF count.
+    ///
+    /// Below TinyUSB and below the registry. Read twice a second apart it
+    /// says whether U1 is driving the bus at all, and at what rate. Sampled
+    /// live on Core 0, deliberately: a frozen core1_passes beside a climbing
+    /// frame count is a Core 1 that died under a host that did not.
+    std::uint32_t sof_frame_count = 0;
+    /// The four kRootPort* bits below, sampled live.
+    std::uint8_t root_port_state = 0;
+    /// How many times the root port has gone from disconnected to connected.
+    ///
+    /// Whether U1 ever saw the hub's D+ pull-up, independently of whether any
+    /// transaction on it ever succeeded. Saturates rather than wrapping: a
+    /// count that rolled over to zero would read as "never attached".
+    std::uint16_t root_port_connects = 0;
+    /// Passes of Core 1's loop. This project's established proof that Core 1
+    /// stopped is this counter unchanged across two reads twenty seconds
+    /// apart, so it must be readable that way and must not saturate low.
+    std::uint32_t core1_passes = 0;
+};
+
+/// tuh_rhport_is_active(1) as begin() found it, before it changed anything.
+///
+/// The smoking gun. Set means something initialised the host stack before
+/// Core 1 reached begin() - which is what usb_service.cpp's argument-less
+/// tusb_init() used to do on Core 0, at the wrong clock, before
+/// tuh_configure(). It must read clear on a correct image.
+inline constexpr std::uint8_t kHostInitHostAlreadyActive = 1u << 0;
+/// What tuh_configure() returned.
+inline constexpr std::uint8_t kHostInitConfigured = 1u << 1;
+/// What tuh_init() returned. True on its own proves nothing: tuh_init on an
+/// already-active rhport returns true without doing anything, which is why
+/// kHostInitHostAlreadyActive is read first and reported beside it.
+inline constexpr std::uint8_t kHostInitInitialized = 1u << 2;
+/// tuh_inited() after both calls.
+inline constexpr std::uint8_t kHostInitInited = 1u << 3;
+
+/// PIO_USB_ROOT_PORT(0)->initialized.
+inline constexpr std::uint8_t kRootPortInitialized = 1u << 0;
+/// PIO_USB_ROOT_PORT(0)->connected.
+inline constexpr std::uint8_t kRootPortConnected = 1u << 1;
+/// PIO_USB_ROOT_PORT(0)->suspended.
+inline constexpr std::uint8_t kRootPortSuspended = 1u << 2;
+/// PIO_USB_ROOT_PORT(0)->is_fullspeed.
+inline constexpr std::uint8_t kRootPortFullSpeed = 1u << 3;
+
 /// One-way Core 1 -> Core 0 publication for the shared clock change.
 class ClockChangeBarrier {
 public:
@@ -127,10 +197,42 @@ public:
     /// frame is and the CDC service does not know what a TinyUSB interface is.
     const DeviceRegistry& registry() const { return registry_; }
 
+    /// What the host stack and the raw root port are doing right now.
+    ///
+    /// Called from Core 0 while it builds a GET_DIAGNOSTICS reply, for the
+    /// same reason registry() is: the reply must be able to read this core's
+    /// state without being able to change any of it. The live halves
+    /// (clk_sys, the SOF count, the root port's own flags) are sampled here
+    /// rather than cached by task(), so they still answer when Core 1 has
+    /// stopped - which is precisely the case they exist to tell apart.
+    ///
+    /// Bounded, non-allocating and non-blocking: four volatile reads and a
+    /// register read. It takes no lock, so a root-port flag can change under
+    /// it; nothing here is a decision, only a reading.
+    HostObservability observe() const;
+
 private:
     ClockChangeBarrier clock_change_;
     DeviceRegistry registry_;
     bool host_ready_ = false;
+
+    // Written once by begin() on Core 1 and read by Core 0 afterwards, the
+    // same discipline the registry's own counters already use: plain fixed
+    // width words, published before clock_change_.publish_settled().
+    std::uint8_t host_init_flags_ = 0;
+    std::uint32_t clk_hz_at_begin_ = 0;
+
+    // The attach edge has to be polled - nothing below TinyUSB reports one -
+    // so task() samples it every pass. Both are Core 1's alone; Core 0 only
+    // ever reads the counter.
+    std::uint16_t root_port_connects_ = 0;
+    bool root_port_was_connected_ = false;
+
+    // Incremented once per task() call, and task() is called exactly once per
+    // pass of core1_entry's loop, unconditionally - ahead of the host_ready_
+    // early return, so a backend that refused to start still proves the core
+    // itself is turning.
+    std::uint32_t core1_passes_ = 0;
 };
 
 }  // namespace duo_input::u1::pio_usb

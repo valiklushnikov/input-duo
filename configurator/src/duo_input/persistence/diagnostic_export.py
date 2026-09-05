@@ -81,6 +81,16 @@ class DiagnosticSnapshot:
     #: sent. Empty for a backend that publishes none and for firmware that
     #: names no backend at all.
     input_backend_counters: dict[str, int] = field(default_factory=dict)
+    #: What that backend's host stack and its raw root port are doing.
+    #:
+    #: Every counter above is a reason a peripheral that enumerated was not
+    #: read; none of them says anything when nothing enumerates. These are the
+    #: readings from below all of that - whether the host stack started, on
+    #: whose clock, whether the port is being driven and whether U1's input
+    #: core is still turning. ``unknown`` wherever the device reported nothing:
+    #: a firmware that predates the block, and an image with no host stack to
+    #: observe, both genuinely measured none of this.
+    host_stack: dict[str, str] = field(default_factory=dict)
     peripherals: tuple[PeripheralIdentity, ...] = ()
     advertised_capabilities: tuple[str, ...] = ()
     device_generation: str = UNKNOWN
@@ -145,6 +155,7 @@ class DiagnosticSnapshot:
             dropped_commands=_counter(counters, "dropped_commands"),
             input_backend=_backend_name(counters),
             input_backend_counters=_backend_counters(counters),
+            host_stack=_host_stack(counters),
             peripherals=_peripherals(counters),
         )
 
@@ -189,6 +200,71 @@ def _backend_counters(counters: object) -> dict[str, int]:
     if backend is None or not hasattr(backend, "counters"):
         return {}
     return dict(backend.counters())
+
+
+#: The host block's fields in the order a person reads them: did the stack
+#: start, on whose clock, is the port being driven, is the core alive.
+_HOST_STACK_ROWS = (
+    ("host_already_active", "Host stack was already up before Core 1"),
+    ("host_configured", "Host configure succeeded"),
+    ("host_initialized", "Host init succeeded"),
+    ("host_inited", "Host stack reports itself initialised"),
+    ("clock_hz_at_begin", "System clock when the host came up (Hz)"),
+    ("clock_hz_now", "System clock now (Hz)"),
+    ("sof_frame_count", "Root-port frames sent"),
+    ("root_port_initialized", "Root port initialised"),
+    ("root_port_connected", "Root port connected"),
+    ("root_port_suspended", "Root port suspended"),
+    ("root_port_fullspeed", "Root port at full speed"),
+    ("root_port_connects", "Root-port attaches seen"),
+    ("core1_passes", "Input core passes"),
+)
+
+
+#: The row a broken host block gets instead of readings.
+HOST_STACK_UNREADABLE = "Host stack readings"
+
+
+def _host_stack(counters: object) -> dict[str, str]:
+    """What the host stack reported, by label, or nothing at all.
+
+    An empty mapping covers both firmware that predates the block and an image
+    with no host stack to observe. Neither measured any of this, and a report
+    printing "Root-port frames sent: 0" for a board with no root port would
+    have invented a measurement - the same rule the backend counters above
+    already follow.
+
+    A block that arrived and could not be read is neither of those, and it says
+    so in its own row rather than reading as an absence. A firmware that sent a
+    broken block is not a firmware that sent none, and a report that conflated
+    them would hide the defect behind the same blank the CH375 image leaves.
+    """
+    observation = getattr(counters, "host_observation", None)
+    if observation is None:
+        return {}
+    state = getattr(observation, "state", None)
+    if state == "unreadable":
+        reason = getattr(observation, "unreadable_reason", None) or "no reason given"
+        return {HOST_STACK_UNREADABLE: f"unreadable: {reason}"}
+    if state != "reported":
+        return {}
+    rows: dict[str, str] = {}
+    for name, label in _HOST_STACK_ROWS:
+        value = getattr(observation, name, None)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            rows[label] = "yes" if value else "no"
+        else:
+            rows[label] = str(value)
+    # Derived, and printed beside the two numbers rather than instead of them:
+    # the PIO dividers are computed once from the first clock and never
+    # recomputed, so a mismatch is a bit-rate error on a bus that otherwise
+    # looks healthy from every counter above.
+    agree = getattr(observation, "clocks_agree", None)
+    if agree is not None:
+        rows["Host clock unchanged since bring-up"] = "yes" if agree else "no"
+    return rows
 
 
 def _peripherals(counters: object) -> tuple[PeripheralIdentity, ...]:

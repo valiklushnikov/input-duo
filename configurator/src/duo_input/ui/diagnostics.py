@@ -107,6 +107,11 @@ class DiagnosticsPage(QWidget):
                 # cannot change what any of them do.
                 ("input_backend", QT_TRANSLATE_NOOP("DiagnosticsPage", "Input backend")),
                 ("input_backend_counters", QT_TRANSLATE_NOOP("DiagnosticsPage", "Input backend counters")),
+                # What the backend's host stack and its raw root port are
+                # doing. Every counter above is a reason a peripheral that
+                # enumerated was not read, and none of them says anything when
+                # nothing enumerates - which is the state this row exists for.
+                ("host_stack", QT_TRANSLATE_NOOP("DiagnosticsPage", "Input host stack")),
                 ("peripherals", QT_TRANSLATE_NOOP("DiagnosticsPage", "Peripherals")),
             ),
         ),
@@ -316,13 +321,17 @@ class DiagnosticsPage(QWidget):
 
 def _as_text(value: object) -> str:
     if isinstance(value, dict):
-        # Only the counters that counted something. Twelve zeros in a row is
-        # noise an operator has to read past to find the one that is not zero,
-        # and a backend that publishes none of them sends an empty mapping -
-        # which is an absence, not a row of zeros.
-        counted = ", ".join(f"{name} {count}" for name, count in value.items() if count)
         if not value:
             return UNKNOWN
+        # Two kinds of mapping reach this. The backend counters are numbers,
+        # and only the ones that counted something are worth showing: twelve
+        # zeros in a row is noise an operator has to read past to find the one
+        # that is not zero. The host-stack readings are already text, and every
+        # one of them is worth showing - "no" against "Root port connected" is
+        # the whole answer on a board that enumerated nothing.
+        if all(isinstance(entry, str) for entry in value.values()):
+            return "; ".join(f"{name}: {entry}" for name, entry in value.items())
+        counted = ", ".join(f"{name} {count}" for name, count in value.items() if count)
         return counted or "none counted"
     if isinstance(value, (tuple, list)):
         return ", ".join(str(item) for item in value) if value else UNKNOWN

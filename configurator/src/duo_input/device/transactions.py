@@ -290,6 +290,102 @@ class InputBackendReport:
         }
 
 
+#: Bit positions in the host block's init_flags byte, in the firmware's order
+#: (firmware/u1_main/pio_usb/backend.hpp kHostInit*).
+_HOST_ALREADY_ACTIVE = 1 << 0
+_HOST_CONFIGURED = 1 << 1
+_HOST_INITIALIZED = 1 << 2
+_HOST_INITED = 1 << 3
+
+#: Bit positions in the host block's root_port_state byte, in the firmware's
+#: order (firmware/u1_main/pio_usb/backend.hpp kRootPort*), which is itself
+#: Pico-PIO-USB's own root_port_t field order.
+_ROOT_INITIALIZED = 1 << 0
+_ROOT_CONNECTED = 1 << 1
+_ROOT_SUSPENDED = 1 << 2
+_ROOT_FULLSPEED = 1 << 3
+
+#: The host block's fields, little-endian, behind its one-byte length:
+#: init flags, the two clock readings, the SOF count, the packed root-port
+#: state, the attach count and Core 1's pass count.
+_HOST_OBSERVATION = struct.Struct("<BIIIBHI")
+
+
+@dataclass(frozen=True)
+class HostObservation:
+    """What U1's own USB host stack and its raw root port are doing.
+
+    Every counter in :class:`InputBackendReport` is a reason a peripheral that
+    enumerated was not read. None of them says anything when nothing enumerates
+    at all, and none distinguishes a host stack that never started from one
+    that started and saw an empty bus - or from a U1 whose input core stopped
+    before it could count anything. These fields are read from below all of
+    that, and they are what make those three cases three different readings.
+    """
+
+    #: ``"reported"`` - the fields below are real readings.
+    #: ``"none"`` - the firmware carries this block and has no host stack to
+    #: observe. The CH375 image is the case: it has no TinyUSB host, no root
+    #: port and no input-core backend loop, so every field below is ``None``
+    #: rather than zero, because zero would be a measurement of hardware that
+    #: is not there.
+    #: ``"unreadable"`` - a block was there and did not parse.
+    state: str
+    #: Why the block did not parse. Set only when ``state`` is
+    #: ``"unreadable"``.
+    unreadable_reason: str | None = None
+
+    #: The host stack was ALREADY up when the input core reached its own
+    #: bring-up. The smoking gun for the defect this block was added for:
+    #: after it, the configure and init calls below are no-ops that still
+    #: report success, so ``host_configured`` and ``host_initialized`` being
+    #: true means nothing while this is true.
+    host_already_active: bool | None = None
+    host_configured: bool | None = None
+    host_initialized: bool | None = None
+    #: The host stack reported itself initialised after those calls.
+    host_inited: bool | None = None
+
+    #: The system clock the host stack's PIO dividers were computed from, and
+    #: the system clock now. They must match: the dividers are computed once
+    #: and never recomputed, so a bus brought up at 125 MHz and running at
+    #: 120 MHz is off by 4% against full-speed USB's 0.25% tolerance.
+    clock_hz_at_begin: int | None = None
+    clock_hz_now: int | None = None
+
+    #: The root port's free-running frame counter. Zero and static means the
+    #: bus is not being driven at all; climbing while every counter above is
+    #: still zero means it is being driven and nothing on it answers. Read it
+    #: twice about a second apart to tell those apart.
+    sof_frame_count: int | None = None
+
+    root_port_initialized: bool | None = None
+    #: Something is pulling D+ up right now.
+    root_port_connected: bool | None = None
+    root_port_suspended: bool | None = None
+    root_port_fullspeed: bool | None = None
+    #: Disconnected-to-connected transitions since the device booted: whether
+    #: U1 ever saw anything attach at all, independently of whether it could
+    #: then talk to it.
+    root_port_connects: int | None = None
+
+    #: Passes of U1's input core loop. Unchanged across two reads twenty
+    #: seconds apart means that core stopped - which is a different fault from
+    #: a silent bus and has to be told apart from one.
+    core1_passes: int | None = None
+
+    @property
+    def clocks_agree(self) -> bool | None:
+        """Whether the bus is running at the rate its dividers were built for.
+
+        ``None`` when either reading is absent. This is a derived reading and
+        never a substitute for the two numbers: a report shows both.
+        """
+        if self.clock_hz_at_begin is None or self.clock_hz_now is None:
+            return None
+        return self.clock_hz_at_begin == self.clock_hz_now
+
+
 @dataclass(frozen=True)
 class DeviceDiagnostics:
     bad_crc: int
@@ -357,6 +453,13 @@ class DeviceDiagnostics:
     # cannot read reports ``name == "unreadable"`` instead, because a broken
     # block and no block at all are different facts about the device.
     backend: InputBackendReport | None = None
+
+    # What that backend's host stack and root port are doing, appended after
+    # it. ``None`` when the firmware predates the block - a valid older payload
+    # and not a parse error, the same way ``backend`` is. A firmware that sent
+    # a block this cannot read reports ``state == "unreadable"``, and one that
+    # has no host stack to observe reports ``state == "none"``.
+    host_observation: HostObservation | None = None
 
 
 @dataclass(frozen=True)
@@ -511,7 +614,8 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
     latency_bytes = _latency_block_size(rest)
     keyboard_latency, mouse_latency = _parse_latency(rest[:latency_bytes])
     peripherals, appended = _parse_peripherals(rest[latency_bytes:])
-    backend = _parse_backend(appended)
+    backend, after_backend = _parse_backend(appended)
+    host_observation = _parse_host_observation(after_backend)
 
     return DeviceDiagnostics(
         bad_crc,
@@ -532,6 +636,7 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
         mouse_latency=mouse_latency,
         peripherals=peripherals,
         backend=backend,
+        host_observation=host_observation,
     )
 
 
@@ -640,7 +745,7 @@ def _parse_peripherals(
     return (tuple(ports), bytes(block[2 * _PERIPHERAL.size :]))
 
 
-def _parse_backend(block: bytes) -> InputBackendReport | None:
+def _parse_backend(block: bytes) -> tuple[InputBackendReport | None, bytes]:
     """Read the appended backend block, in both compatibility directions.
 
     ``None`` means the firmware sent no block. That is a valid older payload -
@@ -661,36 +766,119 @@ def _parse_backend(block: bytes) -> InputBackendReport | None:
     follow, then that many counters. The count is what lets a backend publish
     none of them - CH375 keeps none of these figures, and twelve zeros would
     read as twelve measurements - and what lets a reader find the end of a
-    block whose counter list is longer than the one it knows. Being the last
-    block, its length is checked exactly; whoever appends the next block
-    changes that the same way the peripheral block above was changed.
+    block whose counter list is longer than the one it knows.
+
+    That count is now also what finds the START of the block behind it. This
+    stopped being the last block on the wire when the host block was appended,
+    which is exactly how it was designed to grow, so whatever follows the
+    counters is handed back untouched rather than read as a defect - the way
+    ``_parse_peripherals`` above already hands this block back.
     """
     if not block:
-        return None
+        return (None, b"")
     if len(block) < 2:
-        return InputBackendReport(
-            "unreadable",
-            unreadable_reason=(
-                "the backend block is one byte long: an identifier with no "
-                "count of the counters behind it"
+        return (
+            InputBackendReport(
+                "unreadable",
+                unreadable_reason=(
+                    "the backend block is one byte long: an identifier with no "
+                    "count of the counters behind it"
+                ),
             ),
+            b"",
         )
     identifier, count = block[0], block[1]
     expected = 2 + 4 * count
-    if len(block) != expected:
-        return InputBackendReport(
-            "unreadable",
-            unreadable_reason=(
-                f"the backend block claims {count} counters, which needs "
-                f"{expected} bytes, and {len(block)} arrived"
+    if len(block) < expected:
+        return (
+            InputBackendReport(
+                "unreadable",
+                unreadable_reason=(
+                    f"the backend block claims {count} counters, which needs "
+                    f"{expected} bytes, and {len(block)} arrived"
+                ),
             ),
+            b"",
         )
     values = [_U32.unpack_from(block, 2 + 4 * index)[0] for index in range(count)]
     # Counters past the ones this configurator knows about were appended by a
     # later firmware; reading the ones in common and ignoring the rest is the
     # same append-only rule that lets older firmware be read here at all.
     named = dict(zip(_BACKEND_COUNTER_FIELDS, values))
-    return InputBackendReport(_INPUT_BACKENDS.get(identifier, "unknown"), **named)
+    report = InputBackendReport(_INPUT_BACKENDS.get(identifier, "unknown"), **named)
+    return (report, bytes(block[expected:]))
+
+
+def _parse_host_observation(block: bytes) -> HostObservation | None:
+    """Read the appended host block, in both compatibility directions.
+
+    ``None`` means the firmware sent no block. That is a valid older payload -
+    everything here was appended behind the backend block precisely so that
+    firmware predating it stays readable - and refusing it would make this
+    configurator the thing that broke.
+
+    A leading length of zero means the firmware HAS the block and has nothing
+    to put in it: the CH375 image has no host stack, no root port and no input
+    core backend loop, so every field would be a reading of hardware that is
+    not there. That is reported as ``state == "none"`` with every field
+    ``None``, which is deliberately different from a firmware that sent no
+    block at all, and from a host that genuinely measured zero.
+
+    A block that IS there and cannot be read is reported as ``"unreadable"``
+    rather than raised, for the same reason the backend block is: everything in
+    front of it is complete and correct however garbled the suffix is.
+
+    The length byte is also what lets a later firmware append more fields here
+    without this reader changing: it reads the fields it knows and ignores the
+    rest.
+    """
+    if not block:
+        return None
+    declared = block[0]
+    if declared == 0:
+        return HostObservation("none")
+    body = block[1:]
+    if len(body) < declared:
+        return HostObservation(
+            "unreadable",
+            unreadable_reason=(
+                f"the host block declares {declared} bytes of fields and "
+                f"{len(body)} arrived"
+            ),
+        )
+    if declared < _HOST_OBSERVATION.size:
+        return HostObservation(
+            "unreadable",
+            unreadable_reason=(
+                f"the host block declares {declared} bytes of fields, fewer "
+                f"than the {_HOST_OBSERVATION.size} this configurator reads"
+            ),
+        )
+    (
+        init_flags,
+        clock_at_begin,
+        clock_now,
+        sof_frames,
+        root_state,
+        root_connects,
+        core1_passes,
+    ) = _HOST_OBSERVATION.unpack_from(body, 0)
+    return HostObservation(
+        "reported",
+        host_already_active=bool(init_flags & _HOST_ALREADY_ACTIVE),
+        host_configured=bool(init_flags & _HOST_CONFIGURED),
+        host_initialized=bool(init_flags & _HOST_INITIALIZED),
+        host_inited=bool(init_flags & _HOST_INITED),
+        clock_hz_at_begin=clock_at_begin,
+        clock_hz_now=clock_now,
+        sof_frame_count=sof_frames,
+        root_port_initialized=bool(root_state & _ROOT_INITIALIZED),
+        root_port_connected=bool(root_state & _ROOT_CONNECTED),
+        root_port_suspended=bool(root_state & _ROOT_SUSPENDED),
+        root_port_fullspeed=bool(root_state & _ROOT_FULLSPEED),
+        root_port_connects=root_connects,
+        core1_passes=core1_passes,
+    )
 
 
 def parse_capture_event(payload: bytes) -> Trigger:
@@ -760,6 +948,7 @@ __all__ = [
     "FrameOverflowError",
     "InputBackendReport",
     "LatencyHistogram",
+    "HostObservation",
     "PeripheralPort",
     "OperationFailure",
     "OperationResult",

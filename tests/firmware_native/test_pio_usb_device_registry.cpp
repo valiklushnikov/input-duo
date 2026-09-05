@@ -514,6 +514,137 @@ TEST_CASE(backend_reports_failed_host_initialization_without_servicing_a_dead_ho
     }
 }
 
+// ------------------------------------------- what the host stack is doing
+
+// The reading that was missing when the board enumerated nothing.
+//
+// begin() must sample tuh_rhport_is_active BEFORE it changes the clock or
+// calls anything, because that flag is the only thing that distinguishes a
+// host this backend started from one something else started first - after
+// which tuh_configure and tuh_init are no-ops that still return true, which is
+// exactly what they did.
+TEST_CASE(begin_reports_a_host_that_was_already_active_before_core1_reached_it) {
+    duo::test::tinyusb_host::reset();
+    duo::test::tinyusb_host::set_system_clock_hz(125000000u);
+    duo::test::tinyusb_host::set_host_already_active(true);
+    duo::test::tinyusb_host::set_host_inited(true);
+    PioUsbBackend backend;
+
+    backend.begin();
+    const auto observed = backend.observe();
+
+    CHECK((observed.init_flags & duo_input::u1::pio_usb::kHostInitHostAlreadyActive) != 0);
+    // And the other three still read "healthy", which is the whole problem:
+    // this is what a silently no-op host bring-up looks like from above.
+    CHECK((observed.init_flags & duo_input::u1::pio_usb::kHostInitConfigured) != 0);
+    CHECK((observed.init_flags & duo_input::u1::pio_usb::kHostInitInitialized) != 0);
+    CHECK((observed.init_flags & duo_input::u1::pio_usb::kHostInitInited) != 0);
+    // Captured before set_sys_clock_khz, not after: a divider computed at
+    // 125 MHz driving a 120 MHz bus is a 4% bit-rate error, and this pair of
+    // numbers is what proves it without a scope.
+    CHECK_EQ(observed.clk_hz_at_begin, 125000000u);
+    CHECK_EQ(observed.clk_hz_now, 120000000u);
+}
+
+TEST_CASE(begin_reports_no_already_active_host_on_a_correct_image) {
+    duo::test::tinyusb_host::reset();
+    duo::test::tinyusb_host::set_system_clock_hz(125000000u);
+    duo::test::tinyusb_host::set_host_already_active(false);
+    duo::test::tinyusb_host::set_host_inited(true);
+    PioUsbBackend backend;
+
+    backend.begin();
+    const auto observed = backend.observe();
+
+    CHECK_EQ(observed.init_flags & duo_input::u1::pio_usb::kHostInitHostAlreadyActive, 0u);
+    CHECK((observed.init_flags & duo_input::u1::pio_usb::kHostInitInited) != 0);
+}
+
+TEST_CASE(a_host_that_never_initialized_reports_it_in_the_flags) {
+    duo::test::tinyusb_host::reset();
+    duo::test::tinyusb_host::set_host_initialization_result(true, false);
+    duo::test::tinyusb_host::set_host_inited(false);
+    PioUsbBackend backend;
+
+    backend.begin();
+    const auto observed = backend.observe();
+
+    CHECK((observed.init_flags & duo_input::u1::pio_usb::kHostInitConfigured) != 0);
+    CHECK_EQ(observed.init_flags & duo_input::u1::pio_usb::kHostInitInitialized, 0u);
+    CHECK_EQ(observed.init_flags & duo_input::u1::pio_usb::kHostInitInited, 0u);
+}
+
+// Frozen across two reads twenty seconds apart is this project's established
+// proof that Core 1 stopped, so the counter has to move on every pass -
+// including the passes where the backend refuses to service a dead host, which
+// is precisely when somebody is asking whether Core 1 is alive.
+TEST_CASE(core1_passes_counts_every_pass_including_ones_a_dead_host_short_circuits) {
+    duo::test::tinyusb_host::reset();
+    duo::test::tinyusb_host::set_host_initialization_result(false, false);
+    PioUsbBackend backend;
+    backend.begin();
+
+    CHECK_EQ(backend.observe().core1_passes, 0u);
+    for (std::uint32_t pass = 1; pass <= 5; ++pass) {
+        backend.task(pass * 1000u);
+        CHECK_EQ(backend.observe().core1_passes, pass);
+    }
+    // The host really is not being serviced - the counter above is evidence
+    // about the core, not about the host.
+    CHECK_EQ(duo::test::tinyusb_host::host_task_count(), 0u);
+}
+
+// Whether U1 ever saw anything pull D+ up at all, which is a different
+// question from whether any transaction on it succeeded. Edges, not levels: a
+// device that attached and detached and attached again has been seen twice.
+TEST_CASE(root_port_attach_edges_are_counted_and_its_flags_are_reported_live) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    backend.task(1000u);
+    CHECK_EQ(backend.observe().root_port_connects, 0u);
+
+    duo::test::tinyusb_host::set_root_port(true, true, false, true);
+    backend.task(2000u);
+    backend.task(3000u);
+    CHECK_EQ(backend.observe().root_port_connects, 1u);
+    CHECK_EQ(backend.observe().root_port_state,
+             static_cast<std::uint8_t>(duo_input::u1::pio_usb::kRootPortInitialized |
+                                       duo_input::u1::pio_usb::kRootPortConnected |
+                                       duo_input::u1::pio_usb::kRootPortFullSpeed));
+
+    duo::test::tinyusb_host::set_root_port(true, false, true, true);
+    backend.task(4000u);
+    CHECK_EQ(backend.observe().root_port_connects, 1u);
+    CHECK_EQ(backend.observe().root_port_state,
+             static_cast<std::uint8_t>(duo_input::u1::pio_usb::kRootPortInitialized |
+                                       duo_input::u1::pio_usb::kRootPortSuspended |
+                                       duo_input::u1::pio_usb::kRootPortFullSpeed));
+
+    duo::test::tinyusb_host::set_root_port(true, true, false, true);
+    backend.task(5000u);
+    CHECK_EQ(backend.observe().root_port_connects, 2u);
+}
+
+// Raw root-port activity, below TinyUSB and below the registry. Sampled when
+// the reply is built rather than cached by task(), so it still answers when
+// Core 1 has stopped - a frozen core1_passes beside a climbing frame count is
+// a dead core under a live host, and nothing else in this reply can say that.
+TEST_CASE(the_sof_frame_count_is_read_live_rather_than_cached_by_a_pass) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_sof_frame_count(1000u);
+    CHECK_EQ(backend.observe().sof_frame_count, 1000u);
+    duo::test::tinyusb_host::set_sof_frame_count(2000u);
+    CHECK_EQ(backend.observe().sof_frame_count, 2000u);
+    // No task() call in between: the count moved without a pass, which is the
+    // case this field exists to be able to report.
+    CHECK_EQ(backend.observe().core1_passes, 0u);
+}
+
 TEST_CASE(mount_processing_stores_vid_pid_protocol_descriptor_hash_and_neutral_layout) {
     RegistryRig rig;
     rig.device(8, 0xABCD, 0x0123);

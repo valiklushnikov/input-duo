@@ -421,7 +421,7 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
     out[at++] = static_cast<std::uint8_t>(backend_);
     if (!backend_publishes_counters_) {
         out[at++] = 0;
-        return at;
+        return at + write_host_observation(out + at);
     }
     out[at++] = static_cast<std::uint8_t>(kBackendCounterCount);
     // Written out one by one, in the order BackendCounters declares them,
@@ -445,8 +445,38 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
         put_u32(out + at, counters[index]);
         at += 4;
     }
+    at += write_host_observation(out + at);
     return at;
 #endif
+}
+
+std::size_t ConfigService::write_host_observation(std::uint8_t* out) const {
+    // The leading length, for the same reason the backend block leads with a
+    // counter count: it is what lets an image with no host stack publish
+    // nothing here rather than seven zeros, and what lets a host that stops
+    // recognising this block still find where it ends. Everything in front of
+    // it is byte for byte what it always was, so a configurator that stops
+    // reading at the end of the backend block reads exactly what it always
+    // read.
+    if (!host_publishes_observation_) {
+        out[0] = 0;
+        return 1;
+    }
+    out[0] = static_cast<std::uint8_t>(kHostObservationBytes);
+    std::size_t at = 1;
+    out[at++] = host_observation_.init_flags;
+    put_u32(out + at, host_observation_.clk_hz_at_begin);
+    at += 4;
+    put_u32(out + at, host_observation_.clk_hz_now);
+    at += 4;
+    put_u32(out + at, host_observation_.sof_frame_count);
+    at += 4;
+    out[at++] = host_observation_.root_port_state;
+    put_u16(out + at, host_observation_.root_port_connects);
+    at += 2;
+    put_u32(out + at, host_observation_.core1_passes);
+    at += 4;
+    return at;
 }
 
 void ConfigService::reply_error(const CdcFrame& frame, CdcError error) {

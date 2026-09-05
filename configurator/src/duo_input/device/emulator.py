@@ -146,6 +146,14 @@ class U1Emulator(AbstractByteTransport):
             (0, 0, 0, 0, 0, 0, 0, bytes(32)),
             (0, 0, 0, 0, 0, 0, 0, bytes(32)),
         )
+        #: What the host stack and its root port are doing, in the shape
+        #: write_host_observation() puts on the wire: (init flags, clk_sys when
+        #: the host came up, clk_sys now, SOF frames, packed root-port state,
+        #: attach count, input-core passes). ``None`` means this image has no
+        #: host stack to observe and sends a length of zero - which is what the
+        #: real CH375 image does, and a different fact from an older firmware
+        #: that sends no host block at all.
+        self.host_observation: tuple[int, ...] | None = None
         self._timeout_once = False
         self._disconnect_once = False
         self._bad_crc_response_once = False
@@ -601,12 +609,12 @@ class U1Emulator(AbstractByteTransport):
         )
 
     def _appended_diagnostics(self) -> bytes:
-        """The latency, peripheral and backend blocks a current U1 appends.
+        """The latency, peripheral, backend and host blocks a current U1 appends.
 
         Empty until ``input_backend`` is set, so by default this emulator
         answers byte for byte the way firmware predating these blocks answers.
-        The blocks are positional, so the backend block cannot be sent without
-        the two in front of it.
+        The blocks are positional, so none of them can be sent without the ones
+        in front of it.
         """
         if self.input_backend is None:
             return b""
@@ -619,7 +627,15 @@ class U1Emulator(AbstractByteTransport):
         )
         backend = bytes((self.input_backend, len(self.backend_counters)))
         backend += b"".join(struct.pack("<I", value) for value in self.backend_counters)
-        return latency + ports + backend
+        # The host block's leading length carries the same meaning the backend
+        # block's counter count does: zero says this image has the field and
+        # nothing to put in it, rather than saying it measured zero.
+        if self.host_observation is None:
+            host = bytes((0,))
+        else:
+            fields = struct.pack("<BIIIBHI", *self.host_observation)
+            host = bytes((len(fields),)) + fields
+        return latency + ports + backend + host
 
     def _handle_factory_reset_arm(self, payload: bytes) -> bytes:
         if not self.physical_confirmation:

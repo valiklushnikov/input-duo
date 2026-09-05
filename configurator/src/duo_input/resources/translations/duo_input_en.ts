@@ -447,72 +447,77 @@
         <translation>Input backend counters</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="110" />
+        <location filename="../../ui/diagnostics.py" line="114" />
+        <source>Input host stack</source>
+        <translation>Input host stack</translation>
+    </message>
+    <message>
+        <location filename="../../ui/diagnostics.py" line="115" />
         <source>Peripherals</source>
         <translation>Peripherals</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="130" />
+        <location filename="../../ui/diagnostics.py" line="135" />
         <source>Diagnostics</source>
         <translation>Diagnostics</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="132" />
+        <location filename="../../ui/diagnostics.py" line="137" />
         <source>What the device reports about itself, and how to send it on.</source>
         <translation>What the device reports about itself, and how to send it on.</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="203" />
+        <location filename="../../ui/diagnostics.py" line="208" />
         <source>A report never contains your macro text. Including the saved project adds that file, and everything you typed into it.</source>
         <translation>A report never contains your macro text. Including the saved project adds that file, and everything you typed into it.</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="215" />
+        <location filename="../../ui/diagnostics.py" line="220" />
         <source>Refresh</source>
         <translation>Refresh</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="216" />
+        <location filename="../../ui/diagnostics.py" line="221" />
         <source>Ask the device for its counters</source>
         <translation>Ask the device for its counters</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="219" />
+        <location filename="../../ui/diagnostics.py" line="224" />
         <source>Include the saved project</source>
         <translation>Include the saved project</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="221" />
+        <location filename="../../ui/diagnostics.py" line="226" />
         <source>Include the saved project in the report</source>
         <translation>Include the saved project in the report</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="225" />
+        <location filename="../../ui/diagnostics.py" line="230" />
         <source>Export report...</source>
         <translation>Export report...</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="226" />
+        <location filename="../../ui/diagnostics.py" line="231" />
         <source>Save a diagnostic report</source>
         <translation>Save a diagnostic report</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="303" />
+        <location filename="../../ui/diagnostics.py" line="308" />
         <source>Export diagnostic report</source>
         <translation>Export diagnostic report</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="310" />
+        <location filename="../../ui/diagnostics.py" line="315" />
         <source>Export failed</source>
         <translation>Export failed</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="313" />
+        <location filename="../../ui/diagnostics.py" line="318" />
         <source>Report saved</source>
         <translation>Report saved</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="313" />
+        <location filename="../../ui/diagnostics.py" line="318" />
         <source>Saved to {0}</source>
         <translation>Saved to {0}</translation>
     </message>

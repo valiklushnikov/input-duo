@@ -1277,3 +1277,264 @@ def test_a_shorter_counter_run_than_this_configurator_knows_is_read_as_far_as_it
     assert backend.ignored_interfaces == 4
     assert backend.ignored_role_already_claimed == 3
     assert backend.event_overflows is None
+
+
+# -------------------------------------- what the host stack and port are doing
+
+
+def _host_block(
+    init_flags: int = 0,
+    clock_at_begin: int = 0,
+    clock_now: int = 0,
+    sof_frames: int = 0,
+    root_state: int = 0,
+    root_connects: int = 0,
+    core1_passes: int = 0,
+) -> bytes:
+    """The appended host suffix: one length byte, then the fields behind it."""
+    import struct
+
+    fields = struct.pack(
+        "<BIIIBHI",
+        init_flags,
+        clock_at_begin,
+        clock_now,
+        sof_frames,
+        root_state,
+        root_connects,
+        core1_passes,
+    )
+    return bytes((len(fields),)) + fields
+
+
+def _empty_host_block() -> bytes:
+    """What an image with no host stack to observe sends: a length of zero."""
+    return bytes((0,))
+
+
+def _twelve(backend: int = 2) -> bytes:
+    return _backend_block(backend, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+
+def test_firmware_that_sends_no_host_block_still_parses() -> None:
+    """The compatibility direction that matters most here.
+
+    Every U1 built before this block existed answers with the backend block as
+    its last block, exactly as it always did. Refusing that reply would make
+    this configurator the thing that broke, over a field the older device never
+    claimed to have - and it is also the reply the backend block's own
+    length-checking used to insist on.
+    """
+    from duo_input.device.transactions import parse_diagnostics
+
+    counters = parse_diagnostics(
+        _diagnostics_head() + _full_latency() + _both_ports() + _twelve()
+    )
+
+    assert counters.host_observation is None
+    # And the backend block in front of it is still read exactly as before.
+    assert counters.backend is not None
+    assert counters.backend.name == "PIO_USB"
+    assert counters.backend.callback_overflows == 0
+
+
+def test_an_image_with_no_host_stack_reports_none_rather_than_zeros() -> None:
+    """Zero readings and no readings are different facts about a device.
+
+    The CH375 image has no TinyUSB host, no root port and no input-core backend
+    loop. Reporting "Root-port frames sent: 0" for it would be inventing a
+    measurement of hardware that is not there - the same rule the backend
+    counters already follow with their count of zero.
+    """
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        _diagnostics_head()
+        + _full_latency()
+        + _both_ports()
+        + _backend_block(1)
+        + _empty_host_block()
+    )
+
+    observation = parse_diagnostics(payload).host_observation
+
+    assert observation is not None
+    assert observation.state == "none"
+    assert observation.sof_frame_count is None
+    assert observation.core1_passes is None
+    assert observation.clocks_agree is None
+
+
+def test_the_host_block_is_read_behind_a_backend_that_publishes_counters() -> None:
+    """The backend block stopped being the last block; its count finds the end.
+
+    A reader that took everything after the backend identifier as counters -
+    which is what the exact-length check used to amount to - would report this
+    whole reply as an unreadable backend block and lose both.
+    """
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        _diagnostics_head()
+        + _full_latency()
+        + _both_ports()
+        + _backend_block(2, 3, 2, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)
+        + _host_block(
+            init_flags=0b1110,
+            clock_at_begin=120_000_000,
+            clock_now=120_000_000,
+            sof_frames=41234,
+            root_state=0b1011,
+            root_connects=2,
+            core1_passes=987_654,
+        )
+    )
+
+    diagnostics = parse_diagnostics(payload)
+
+    assert diagnostics.backend is not None
+    assert diagnostics.backend.name == "PIO_USB"
+    assert diagnostics.backend.ignored_interfaces == 3
+    assert diagnostics.backend.callback_overflows == 37
+
+    observation = diagnostics.host_observation
+    assert observation is not None
+    assert observation.state == "reported"
+    assert observation.host_already_active is False
+    assert observation.host_configured is True
+    assert observation.host_initialized is True
+    assert observation.host_inited is True
+    assert observation.clock_hz_at_begin == 120_000_000
+    assert observation.clock_hz_now == 120_000_000
+    assert observation.clocks_agree is True
+    assert observation.sof_frame_count == 41234
+    assert observation.root_port_initialized is True
+    assert observation.root_port_connected is True
+    assert observation.root_port_suspended is False
+    assert observation.root_port_fullspeed is True
+    assert observation.root_port_connects == 2
+    assert observation.core1_passes == 987_654
+
+
+def test_a_host_started_on_the_wrong_core_reads_as_such() -> None:
+    """The reading the whole block was added for.
+
+    Bit 0 set says the host stack was already up before the input core reached
+    its own bring-up. The three bits behind it still say "healthy", because the
+    calls they report really did return true - on an rhport somebody else had
+    already activated. The two clock readings then disagree, which is the
+    arithmetic proof that the PIO dividers no longer match the bus.
+    """
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        _diagnostics_head()
+        + _full_latency()
+        + _both_ports()
+        + _twelve()
+        + _host_block(
+            init_flags=0b1111,
+            clock_at_begin=125_000_000,
+            clock_now=120_000_000,
+            sof_frames=880_000,
+            root_state=0b0001,
+            core1_passes=1_000_000,
+        )
+    )
+
+    observation = parse_diagnostics(payload).host_observation
+
+    assert observation is not None
+    assert observation.host_already_active is True
+    assert observation.host_inited is True
+    assert observation.clock_hz_at_begin == 125_000_000
+    assert observation.clock_hz_now == 120_000_000
+    assert observation.clocks_agree is False
+    # Frames are being emitted and nothing is attached: the bus is being driven
+    # at the wrong rate, which is a different fault from a bus nobody drives.
+    assert observation.sof_frame_count == 880_000
+    assert observation.root_port_connected is False
+
+
+def test_a_malformed_host_suffix_does_not_take_the_prefix_down() -> None:
+    """Everything in front of the host block is complete however garbled it is.
+
+    Reported as unreadable rather than as absent, for the same reason the
+    backend block is: a firmware that sent a broken block is not one that sent
+    none, and conflating them would hide the defect.
+    """
+    from duo_input.device.transactions import parse_diagnostics
+
+    prefix = _diagnostics_head() + _full_latency() + _both_ports() + _twelve()
+    # A declared length with fewer bytes than that behind it.
+    truncated = parse_diagnostics(prefix + bytes((20, 1, 2, 3)))
+    # A block shorter than the fields this configurator reads.
+    short = parse_diagnostics(prefix + bytes((4, 0, 0, 0, 0)))
+
+    for diagnostics in (truncated, short):
+        assert diagnostics.bad_crc == 0
+        assert diagnostics.peripherals is not None
+        assert diagnostics.backend is not None
+        assert diagnostics.backend.name == "PIO_USB"
+        assert diagnostics.host_observation is not None
+        assert diagnostics.host_observation.state == "unreadable"
+        assert diagnostics.host_observation.unreadable_reason
+        assert diagnostics.host_observation.sof_frame_count is None
+
+
+def test_a_longer_host_block_than_this_configurator_knows_is_read_as_far_as_it_goes() -> None:
+    """Append-only in the other direction: the length byte finds the end.
+
+    A later firmware appending an eighth field must not make this reader refuse
+    the seven it does know - that is the same rule that lets older firmware be
+    read here at all.
+    """
+    from duo_input.device.transactions import parse_diagnostics
+
+    import struct
+
+    fields = struct.pack("<BIIIBHI", 0b1110, 120_000_000, 120_000_000, 9, 0b0011, 1, 42)
+    fields += struct.pack("<I", 12345)
+    payload = (
+        _diagnostics_head()
+        + _full_latency()
+        + _both_ports()
+        + _twelve()
+        + bytes((len(fields),))
+        + fields
+    )
+
+    observation = parse_diagnostics(payload).host_observation
+
+    assert observation is not None
+    assert observation.state == "reported"
+    assert observation.sof_frame_count == 9
+    assert observation.core1_passes == 42
+
+
+def test_the_emulator_and_the_parser_agree_about_the_host_block() -> None:
+    """The emulator is the reference payload the firmware is written against.
+
+    A parser that agreed only with a payload this test file built itself would
+    prove nothing about either.
+    """
+    from duo_input.device.emulator import U1Emulator
+    from duo_input.device.transactions import parse_diagnostics
+
+    emulator = U1Emulator()
+    emulator.input_backend = 2
+    emulator.host_observation = (0b1110, 120_000_000, 120_000_000, 4321, 0b1011, 3, 55)
+
+    payload = emulator._handle_get_diagnostics(b"")
+    observation = parse_diagnostics(payload).host_observation
+
+    assert observation is not None
+    assert observation.state == "reported"
+    assert observation.sof_frame_count == 4321
+    assert observation.root_port_connects == 3
+    assert observation.core1_passes == 55
+
+    emulator.host_observation = None
+    empty = parse_diagnostics(emulator._handle_get_diagnostics(b"")).host_observation
+    assert empty is not None
+    assert empty.state == "none"

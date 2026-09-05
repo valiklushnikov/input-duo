@@ -632,11 +632,12 @@ TEST_CASE(diagnostics_carry_every_counter_the_host_expects) {
     const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
 
     CHECK_EQ(error_of(reply), CdcError::Ok);
-    // Every fixed block, plus the appended backend block's own two-byte head.
-    // The reply is no longer one fixed length: a backend that publishes no
-    // counters sends a shorter one, and kDiagnosticsPayloadSize is the ceiling
-    // rather than the length. Both ends of that are checked here.
-    CHECK_EQ(reply.payload.size, duo_input::u1::kBackendBlockOffset + 2);
+    // Every fixed block, plus the appended backend block's own two-byte head,
+    // plus the host block's one-byte length. The reply is no longer one fixed
+    // length: a backend that publishes no counters and an image that publishes
+    // no host observation both send a shorter one, and kDiagnosticsPayloadSize
+    // is the ceiling rather than the length. Both ends of that are checked here.
+    CHECK_EQ(reply.payload.size, duo_input::u1::kBackendBlockOffset + 2 + 1);
     CHECK(reply.payload.size <= duo_input::u1::kDiagnosticsPayloadSize);
     // Appended, never rearranged: a host reading only the first 43 bytes still
     // reads exactly what it always read.
@@ -790,7 +791,9 @@ TEST_CASE(the_diagnostics_name_which_backend_read_the_peripherals) {
     // backend that keeps none says so with a count of zero rather than
     // sending twelve zeros a reader would take for measurements.
     CHECK_EQ(p[at + 1], 0u);
-    CHECK_EQ(reply.payload.size, at + 2);
+    // Two for the backend head, one for the host block's length byte: nothing
+    // has published a host observation here either.
+    CHECK_EQ(reply.payload.size, at + 2 + 1);
 }
 
 // The counters the PIO USB host keeps, in the one fixed order the wire has.
@@ -827,7 +830,10 @@ TEST_CASE(the_pio_usb_backend_publishes_its_own_counters) {
     for (std::size_t index = 0; index < duo_input::u1::kBackendCounterCount; ++index) {
         CHECK_EQ(read_u32(p + at + 2 + 4 * index), expected[index]);
     }
-    CHECK_EQ(reply.payload.size, duo_input::u1::kDiagnosticsPayloadSize);
+    // Every counter, and an empty host block behind them - this test publishes
+    // no observation, so the ceiling is one field-block short of reached.
+    CHECK_EQ(reply.payload.size,
+             duo_input::u1::kBackendBlockOffset + duo_input::u1::kBackendBlockBytes + 1);
 }
 
 // V1 accepts exactly one logical keyboard and one logical mouse, and ignores
@@ -871,7 +877,8 @@ TEST_CASE(the_backend_block_leaves_the_prefix_byte_for_byte_unchanged) {
     after.service.set_backend(duo_input::protocol::InputBackend::PIO_USB, counters);
     const CdcFrame published = after.send(CdcMessageType::GET_DIAGNOSTICS);
 
-    CHECK_EQ(published.payload.size, duo_input::u1::kDiagnosticsPayloadSize);
+    CHECK_EQ(published.payload.size,
+             duo_input::u1::kBackendBlockOffset + duo_input::u1::kBackendBlockBytes + 1);
     for (std::size_t index = 0; index < prefix.size(); ++index) {
         CHECK_EQ(published.payload.data[index], prefix[index]);
     }
@@ -890,6 +897,124 @@ TEST_CASE(a_backend_nobody_published_reports_itself_as_unknown) {
     CHECK_EQ(reply.payload.data[at],
              static_cast<std::uint8_t>(duo_input::protocol::InputBackend::UNKNOWN));
     CHECK_EQ(reply.payload.data[at + 1], 0u);
+}
+
+// --------------------------------------------- what the host stack is doing
+
+// The reading that was missing when nothing enumerated.
+//
+// Every counter above is a reason a device that DID enumerate was not read.
+// None of them says anything when nothing enumerates at all, and none of them
+// distinguishes a host that never started from a host that started and saw an
+// empty bus, or from a Core 1 that stopped before it could count anything.
+// These seven fields are the only ones in the whole reply read from below the
+// registry, and they are what make those three cases three different readings.
+TEST_CASE(the_diagnostics_carry_what_the_host_stack_and_root_port_are_doing) {
+    Link link;
+    link.hello();
+
+    duo_input::u1::BackendCounters counters;
+    link.service.set_backend(duo_input::protocol::InputBackend::PIO_USB, counters);
+    duo_input::u1::HostObservation observation;
+    observation.init_flags = 0x0E;  // configured, initialized, inited; not already active
+    observation.clk_hz_at_begin = 120000000u;
+    observation.clk_hz_now = 120000000u;
+    observation.sof_frame_count = 41234u;
+    observation.root_port_state = 0x0B;  // initialized, connected, full speed
+    observation.root_port_connects = 2u;
+    observation.core1_passes = 987654u;
+    link.service.set_host_observation(observation);
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::uint8_t* p = reply.payload.data;
+    const std::size_t at =
+        duo_input::u1::kBackendBlockOffset + duo_input::u1::kBackendBlockBytes;
+
+    CHECK_EQ(p[at], static_cast<std::uint8_t>(duo_input::u1::kHostObservationBytes));
+    CHECK_EQ(p[at + 1], 0x0Eu);
+    CHECK_EQ(read_u32(p + at + 2), 120000000u);
+    CHECK_EQ(read_u32(p + at + 6), 120000000u);
+    CHECK_EQ(read_u32(p + at + 10), 41234u);
+    CHECK_EQ(p[at + 14], 0x0Bu);
+    CHECK_EQ(static_cast<std::uint16_t>(p[at + 15] | (p[at + 16] << 8)), 2u);
+    CHECK_EQ(read_u32(p + at + 17), 987654u);
+    CHECK_EQ(reply.payload.size, duo_input::u1::kDiagnosticsPayloadSize);
+}
+
+// The two clocks are the whole point of carrying both. A host brought up at
+// 125 MHz whose bus now runs at 120 MHz has PIO dividers computed for a clock
+// that no longer exists - a 4% bit-rate error against full speed's 0.25%
+// tolerance - and this is the reading that says so without a scope.
+TEST_CASE(the_two_clock_readings_are_reported_independently) {
+    Link link;
+    link.hello();
+
+    duo_input::u1::HostObservation observation;
+    observation.clk_hz_at_begin = 125000000u;
+    observation.clk_hz_now = 120000000u;
+    link.service.set_host_observation(observation);
+
+    const std::uint8_t* p = link.send(CdcMessageType::GET_DIAGNOSTICS).payload.data;
+    const std::size_t at = duo_input::u1::kBackendBlockOffset + 2;
+
+    CHECK_EQ(read_u32(p + at + 2), 125000000u);
+    CHECK_EQ(read_u32(p + at + 6), 120000000u);
+}
+
+// An image with no host stack publishes a length of zero rather than seven
+// zeroed readings of hardware it does not have - the same rule the backend
+// block's counter count already follows, for the same reason. Zero readings
+// and no readings are different facts, and a report that prints "SOF frames:
+// 0" for a board with no root port has invented a measurement.
+TEST_CASE(an_image_with_no_host_stack_publishes_an_empty_host_block) {
+    Link link;
+    link.hello();
+
+    link.service.set_backend(duo_input::protocol::InputBackend::CH375);
+    link.service.set_host_observation();
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::size_t at = duo_input::u1::kBackendBlockOffset + 2;
+
+    CHECK_EQ(reply.payload.data[at], 0u);
+    CHECK_EQ(reply.payload.size, at + 1);
+}
+
+// The same rule the backend block was appended under, checked the same way:
+// everything in front of kBackendBlockOffset is byte for byte what it was
+// before any of this existed, so a configurator that stops reading there reads
+// exactly what it always read.
+TEST_CASE(the_host_block_leaves_the_prefix_byte_for_byte_unchanged) {
+    Link before;
+    before.hello();
+    const CdcFrame plain = before.send(CdcMessageType::GET_DIAGNOSTICS);
+    std::vector<std::uint8_t> prefix(
+        plain.payload.data, plain.payload.data + duo_input::u1::kBackendBlockOffset);
+
+    Link after;
+    after.hello();
+    duo_input::u1::BackendCounters counters;
+    counters.ignored_interfaces = 9;
+    after.service.set_backend(duo_input::protocol::InputBackend::PIO_USB, counters);
+    duo_input::u1::HostObservation observation;
+    observation.init_flags = 0x01;
+    observation.sof_frame_count = 7u;
+    observation.core1_passes = 5u;
+    after.service.set_host_observation(observation);
+    const CdcFrame published = after.send(CdcMessageType::GET_DIAGNOSTICS);
+
+    CHECK_EQ(published.payload.size, duo_input::u1::kDiagnosticsPayloadSize);
+    for (std::size_t index = 0; index < prefix.size(); ++index) {
+        CHECK_EQ(published.payload.data[index], prefix[index]);
+    }
+    // And the backend block in between is untouched too: the host block was
+    // appended behind it, not folded into it.
+    const std::size_t backend_at = duo_input::u1::kBackendBlockOffset;
+    CHECK_EQ(published.payload.data[backend_at],
+             static_cast<std::uint8_t>(duo_input::protocol::InputBackend::PIO_USB));
+    CHECK_EQ(published.payload.data[backend_at + 1],
+             static_cast<std::uint8_t>(duo_input::u1::kBackendCounterCount));
+    CHECK_EQ(read_u32(published.payload.data + backend_at + 2), 9u);
 }
 
 TEST_CASE(the_diagnostics_say_whether_the_output_queue_is_overflowing_now) {

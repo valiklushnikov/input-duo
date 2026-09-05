@@ -142,6 +142,88 @@ def test_the_reason_an_interface_was_ignored_reaches_the_page(page, emulator, qt
     assert "ignored_role_already_claimed 1" in reported
 
 
+def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
+    page, emulator, qtbot
+):
+    """Driven through the Refresh button, not by setting the value.
+
+    A test that reached past the interface would pass with a completely dead
+    handler - this project has shipped exactly that mistake before. The row it
+    fills in is the one an operator reads when nothing enumerated and every
+    counter on the page is zero.
+    """
+    emulator.input_backend = 2
+    emulator.host_observation = (
+        0b1111,
+        125_000_000,
+        120_000_000,
+        880_000,
+        0b0001,
+        0,
+        1_000_000,
+    )
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.service.connect_device(emulator)
+
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.refresh_button.click()
+
+    reported = page.value("host_stack")
+    assert "Host stack was already up before Core 1: yes" in reported
+    assert "System clock when the host came up (Hz): 125000000" in reported
+    assert "System clock now (Hz): 120000000" in reported
+    assert "Host clock unchanged since bring-up: no" in reported
+    assert "Root-port frames sent: 880000" in reported
+    assert "Root port connected: no" in reported
+    assert "Input core passes: 1000000" in reported
+
+
+def test_a_healthy_host_stack_reads_as_healthy_on_the_page(page, emulator, qtbot):
+    """Every reading is shown, not only the ones that are "wrong".
+
+    "Root port connected: no" is the whole answer on a board that enumerated
+    nothing, so a row that hid the readings which happen to be false or zero
+    would hide the answer.
+    """
+    emulator.input_backend = 2
+    emulator.host_observation = (
+        0b1110,
+        120_000_000,
+        120_000_000,
+        41_234,
+        0b1011,
+        1,
+        987_654,
+    )
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.service.connect_device(emulator)
+
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.refresh_button.click()
+
+    reported = page.value("host_stack")
+    assert "Host stack was already up before Core 1: no" in reported
+    assert "Host clock unchanged since bring-up: yes" in reported
+    assert "Root port connected: yes" in reported
+    assert "Root-port attaches seen: 1" in reported
+
+
+def test_an_image_with_no_host_stack_leaves_the_row_unknown(page, emulator, qtbot):
+    """The CH375 image has no host stack to observe. Showing seven zeros for it
+    would put measurements of absent hardware on the page."""
+    emulator.input_backend = 1
+    emulator.backend_counters = ()
+    emulator.host_observation = None
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.service.connect_device(emulator)
+
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.refresh_button.click()
+
+    assert page.value("input_backend") == "CH375"
+    assert page.value("host_stack") == UNKNOWN
+
+
 def test_connecting_fills_in_what_the_device_reports(page, emulator, qtbot):
     with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
         page.service.connect_device(emulator)

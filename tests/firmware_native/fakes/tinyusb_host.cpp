@@ -6,6 +6,13 @@
 // rather than the SDK's inline register read.
 #include "hardware/timer.h"
 
+// The same two headers firmware/u1_main/pio_usb/backend.cpp includes; in this
+// build they resolve to fakes/hardware/clocks.h and fakes/pio_usb.h, whose
+// clock_get_hz(), pio_usb_host_get_frame_number() and pio_usb_root_port are
+// the settable stand-ins defined at the bottom of this file.
+#include "hardware/clocks.h"
+#include "pio_usb.h"
+
 #include <array>
 
 namespace {
@@ -40,8 +47,18 @@ std::size_t host_tasks = 0;
 std::uint32_t clock_khz = 0;
 std::uint8_t pin_dp = 0xff;
 std::uint32_t now_us = 0;
+bool host_already_active = false;
+bool host_inited = false;
+std::uint32_t system_clock_hz = 0;
+std::uint32_t sof_frames = 0;
 
 }  // namespace
+
+// The real symbol pio_usb.c defines, which backend.cpp declares extern and
+// reads its root-port bits out of. Defined here so the native build links
+// exactly the declaration the firmware build links.
+extern "C" root_port_t pio_usb_root_port[PIO_USB_ROOT_PORT_CNT];
+root_port_t pio_usb_root_port[PIO_USB_ROOT_PORT_CNT]{};
 
 namespace duo::test::tinyusb_host {
 
@@ -57,6 +74,12 @@ void reset() {
     clock_khz = 0;
     pin_dp = 0xff;
     now_us = 0;
+    host_already_active = false;
+    host_inited = false;
+    system_clock_hz = 0;
+    sof_frames = 0;
+    pio_usb_root_port[0] = root_port_t{};
+    pio_usb_root_port[1] = root_port_t{};
 }
 
 void add_hub(std::uint16_t vendor_id, std::uint16_t product_id) {
@@ -94,6 +117,22 @@ void set_now_us(std::uint32_t value) { now_us = value; }
 void set_host_initialization_result(bool configure, bool initialize) {
     configure_result = configure;
     initialize_result = initialize;
+}
+
+void set_host_already_active(bool active) { host_already_active = active; }
+
+void set_host_inited(bool inited) { host_inited = inited; }
+
+void set_system_clock_hz(std::uint32_t hz) { system_clock_hz = hz; }
+
+void set_sof_frame_count(std::uint32_t frames) { sof_frames = frames; }
+
+void set_root_port(bool initialized, bool connected, bool suspended,
+                   bool is_fullspeed) {
+    pio_usb_root_port[0].initialized = initialized;
+    pio_usb_root_port[0].connected = connected;
+    pio_usb_root_port[0].suspended = suspended;
+    pio_usb_root_port[0].is_fullspeed = is_fullspeed;
 }
 
 std::size_t receive_count() { return receive_calls_used; }
@@ -151,8 +190,20 @@ extern "C" bool tuh_hid_receive_report(std::uint8_t dev_addr,
 extern "C" bool set_sys_clock_khz(std::uint32_t requested_khz, bool required) {
     (void)required;
     clock_khz = requested_khz;
+    // The real call moves clk_sys, and the two clock fields in the diagnostics
+    // reply exist precisely to show a value captured before it against one read
+    // after it. A fake that left clock_get_hz() alone would let a test pass
+    // while the firmware reported the same number twice.
+    system_clock_hz = requested_khz * 1000u;
     return true;
 }
+
+extern "C" std::uint32_t clock_get_hz(std::uint32_t clock) {
+    (void)clock;
+    return system_clock_hz;
+}
+
+extern "C" std::uint32_t pio_usb_host_get_frame_number(void) { return sof_frames; }
 
 extern "C" bool tuh_configure(std::uint8_t rhport, std::uint8_t cfg_id,
                                 const void* config) {
@@ -166,6 +217,13 @@ extern "C" bool tuh_init(std::uint8_t rhport) {
     (void)rhport;
     return initialize_result;
 }
+
+extern "C" bool tuh_rhport_is_active(std::uint8_t rhport) {
+    (void)rhport;
+    return host_already_active;
+}
+
+extern "C" bool tuh_inited(void) { return host_inited; }
 
 extern "C" void tuh_task(void) { ++host_tasks; }
 

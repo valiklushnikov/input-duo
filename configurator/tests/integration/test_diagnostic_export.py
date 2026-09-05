@@ -384,3 +384,125 @@ def test_a_report_from_firmware_without_the_suffix_says_unknown(qtbot, emulator)
 
     assert snapshot.input_backend == UNKNOWN
     assert snapshot.input_backend_counters == {}
+
+
+# ------------------------------------- what the host stack and root port said
+
+
+def test_the_report_carries_what_the_host_stack_and_root_port_are_doing(
+    qtbot, emulator, tmp_path
+):
+    """The readings that were missing when the board enumerated nothing.
+
+    Every backend counter above is a reason a peripheral that enumerated was
+    not read. None of them says anything when nothing enumerates, so a report
+    from that board was twelve zeros and no way to tell a dead host from an
+    idle one. These are the readings from below all of it.
+    """
+    emulator.input_backend = 2
+    emulator.host_observation = (
+        0b1111,  # host was already up before the input core: the smoking gun
+        125_000_000,
+        120_000_000,
+        880_000,
+        0b0001,  # root port initialised, nothing connected
+        0,
+        1_000_000,
+    )
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    archive = build_diagnostic_zip(
+        tmp_path / "diag.zip", DiagnosticSnapshot.from_service(service)
+    )
+    report = json.loads(_members(archive)[DIAGNOSTICS_MEMBER])
+    host = report["host_stack"]
+
+    assert host["Host stack was already up before Core 1"] == "yes"
+    assert host["System clock when the host came up (Hz)"] == "125000000"
+    assert host["System clock now (Hz)"] == "120000000"
+    # Derived and shown beside the two numbers, never instead of them.
+    assert host["Host clock unchanged since bring-up"] == "no"
+    assert host["Root-port frames sent"] == "880000"
+    assert host["Root port connected"] == "no"
+    assert host["Root-port attaches seen"] == "0"
+    assert host["Input core passes"] == "1000000"
+
+
+def test_a_report_from_an_image_with_no_host_stack_invents_no_readings(
+    qtbot, emulator
+):
+    """The CH375 image has no host stack, no root port and no backend loop.
+
+    Printing "Root-port frames sent: 0" for it would put a measurement of
+    absent hardware into a report someone acts on months later - the same rule
+    the backend counters already follow.
+    """
+    emulator.input_backend = 1
+    emulator.backend_counters = ()
+    emulator.host_observation = None
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    snapshot = DiagnosticSnapshot.from_service(service)
+
+    assert snapshot.input_backend == "CH375"
+    assert snapshot.host_stack == {}
+
+
+def test_a_report_from_firmware_without_the_host_block_says_nothing_about_it(
+    qtbot, emulator
+):
+    emulator.input_backend = 2
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    snapshot = DiagnosticSnapshot.from_service(service)
+
+    assert snapshot.input_backend == "PIO_USB"
+    assert snapshot.host_stack == {}
+
+
+def test_a_broken_host_block_reads_as_broken_rather_than_as_absent(qtbot, emulator):
+    """A firmware that sent a garbled block is not one that sent none.
+
+    Both leave every reading unavailable, but only one of them is a defect
+    somebody has to chase - and a report that blanked them the same way would
+    hide it behind the blank the CH375 image legitimately leaves.
+    """
+    from duo_input.persistence.diagnostic_export import HOST_STACK_UNREADABLE
+
+    emulator.input_backend = 2
+    # A declared field length with fewer bytes than that behind it. Written
+    # over the emulator's own encoder, because the emulator is a correct
+    # device and only a broken one produces this.
+    emulator.host_observation = (0, 0, 0, 0, 0, 0, 0)
+    original = emulator._appended_diagnostics
+
+    def truncated() -> bytes:
+        return original()[:-4]
+
+    emulator._appended_diagnostics = truncated
+
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    snapshot = DiagnosticSnapshot.from_service(service)
+
+    assert list(snapshot.host_stack) == [HOST_STACK_UNREADABLE]
+    assert snapshot.host_stack[HOST_STACK_UNREADABLE].startswith("unreadable:")
+    # And everything in front of it is complete: the prefix is not lost to a
+    # garbled suffix.
+    assert snapshot.input_backend == "PIO_USB"

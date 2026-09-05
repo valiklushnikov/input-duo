@@ -176,6 +176,29 @@ duo_input::u1::BackendCounters describe_backend_counters(
     counters.callback_overflows = registry.callback_overflow_count();
     return counters;
 }
+
+/// What the host stack and its root port are doing, in the wire's own shape.
+///
+/// Read here rather than kept as a second copy for the same reason
+/// describe_role reads the registry: a copy that Core 0 refreshed on its own
+/// schedule could disagree with the thing it describes, and the whole point of
+/// these fields is that they are the readings nothing else can give.
+duo_input::u1::HostObservation describe_host_observation(
+    const duo_input::u1::pio_usb::PioUsbBackend& backend) {
+    const duo_input::u1::pio_usb::HostObservability observed = backend.observe();
+    duo_input::u1::HostObservation out;
+    // The bit positions are the same on both sides by construction - the
+    // pio_usb constants below and the wire's documented bit order are one
+    // definition each, and this is where they meet.
+    out.init_flags = observed.init_flags;
+    out.clk_hz_at_begin = observed.clk_hz_at_begin;
+    out.clk_hz_now = observed.clk_hz_now;
+    out.sof_frame_count = observed.sof_frame_count;
+    out.root_port_state = observed.root_port_state;
+    out.root_port_connects = observed.root_port_connects;
+    out.core1_passes = observed.core1_passes;
+    return out;
+}
 #endif  // DUO_INPUT_BACKEND_CH375
 
 /// Where a normalized event goes.
@@ -1336,6 +1359,13 @@ int main() {
         // below, and sending twelve zeros for them would put twelve readings
         // into a report that nothing ever measured.
         config.set_backend(duo_input::protocol::InputBackend::CH375);
+        // And no host observation: this image has no TinyUSB host stack, no
+        // Pico-PIO-USB root port and no Core 1 backend loop, so every field in
+        // that block would be a reading of hardware that is not there. The
+        // block is still sent, carrying a length of zero - which says "this
+        // firmware has the field and has nothing to put in it", a different
+        // fact from an older firmware that sends no block at all.
+        config.set_host_observation();
 #else
         {
             const auto& registry = g_pio_usb_backend.registry();
@@ -1344,6 +1374,12 @@ int main() {
                 describe_role(registry, duo_input::u1::input::DeviceKind::Mouse));
             config.set_backend(duo_input::protocol::InputBackend::PIO_USB,
                                describe_backend_counters(registry));
+            // And what is below all of it: whether the host stack started,
+            // whose clock its PIO dividers were computed against, whether the
+            // root port is being driven, and whether Core 1 is still turning.
+            // Every counter above is a reason a device that enumerated was not
+            // read; none of them says anything when nothing enumerates.
+            config.set_host_observation(describe_host_observation(g_pio_usb_backend));
         }
 #endif
 

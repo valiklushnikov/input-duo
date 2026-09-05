@@ -13,6 +13,14 @@ bool tuh_configure(uint8_t rhport, uint8_t cfg_id, const void* config);
 bool tuh_init(uint8_t rhport);
 void tuh_task(void);
 
+// Both are real TinyUSB entry points in the pinned tree
+// (.deps/tinyusb/src/host/usbh.h:141,168). tuh_rhport_is_active is the one
+// PioUsbBackend::begin() reads first, before it changes anything: it is the
+// only reading that separates a host this backend started from a host
+// something else had already started.
+bool tuh_inited(void);
+bool tuh_rhport_is_active(uint8_t rhport);
+
 #ifdef __cplusplus
 }
 #endif

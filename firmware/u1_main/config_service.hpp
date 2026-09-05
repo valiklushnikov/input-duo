@@ -183,11 +183,62 @@ inline constexpr std::size_t kBackendBlockBytes = 2 + 4 * kBackendCounterCount;
 inline constexpr std::size_t kBackendBlockOffset =
     kPeripheralBlockOffset + 2 * kPeripheralPortBytes;
 
+/// What the host stack and its raw root port are doing, below every counter.
+///
+/// The twelve counters above are all above TinyUSB's device model: they are
+/// reasons a device that enumerated was not read. None of them says anything
+/// when nothing enumerates, and none distinguishes a host that never started
+/// from a host that started and saw an empty bus - or from a Core 1 that
+/// stopped before it could count anything. Task 14 cost a whole bench session
+/// to that ambiguity. These fields resolve it, and they are the only fields in
+/// this reply read from below the registry.
+///
+/// Fixed width, and append only for the same reason everything above is.
+struct HostObservation {
+    /// tuh_rhport_is_active(1) before Core 1 touched anything (bit 0), then
+    /// tuh_configure's result (bit 1), tuh_init's result (bit 2) and
+    /// tuh_inited() after both (bit 3). Bit 0 set means something initialised
+    /// the host before Core 1 reached it, which makes bits 1-3 meaningless as
+    /// evidence - they report success for calls that did nothing.
+    std::uint8_t init_flags = 0;
+    /// clk_sys when the host stack was brought up, and clk_sys when this reply
+    /// was built. Pico-PIO-USB computes its PIO dividers once, from the first,
+    /// and the bus then runs at whatever the second makes of them.
+    std::uint32_t clk_hz_at_begin = 0;
+    std::uint32_t clk_hz_now = 0;
+    /// The root port's free-running SOF count. Zero and static means the bus
+    /// is not being driven at all; climbing with every counter above still at
+    /// zero means it is being driven and nothing on it answers.
+    std::uint32_t sof_frame_count = 0;
+    /// initialized (bit 0), connected (bit 1), suspended (bit 2) and
+    /// is_fullspeed (bit 3), read straight off the root port.
+    std::uint8_t root_port_state = 0;
+    /// Disconnected-to-connected transitions since boot: whether U1 ever saw
+    /// anything pull D+ up, independently of whether it could talk to it.
+    std::uint16_t root_port_connects = 0;
+    /// Passes of Core 1's loop. Unchanged across two reads twenty seconds
+    /// apart is this project's established proof that Core 1 stopped.
+    std::uint32_t core1_passes = 0;
+};
+
+/// The observation's own bytes on the wire, without its leading length.
+inline constexpr std::size_t kHostObservationBytes = 1 + 4 + 4 + 4 + 1 + 2 + 4;
+
+/// The appended host block: one length byte, then that many bytes.
+///
+/// The length byte is what lets a build publish none of this. It is what the
+/// backend block's count byte is for the counters, for the same reason: the
+/// CH375 image has no host stack at all, and seven zeros from it would be
+/// seven readings of something that does not exist. It is also what lets a
+/// host that does not recognise a longer block still find its end.
+inline constexpr std::size_t kHostBlockBytes = 1 + kHostObservationBytes;
+
 /// The longest a GET_DIAGNOSTICS reply can be: a backend publishing every
-/// counter. A backend publishing none sends kBackendBlockBytes - 4 *
-/// kBackendCounterCount fewer bytes, so this is a ceiling and not a length.
+/// counter and a host block with every field. A backend publishing none sends
+/// 4 * kBackendCounterCount fewer bytes and an image with no host stack sends
+/// kHostObservationBytes fewer, so this is a ceiling and not a length.
 inline constexpr std::size_t kDiagnosticsPayloadSize =
-    kBackendBlockOffset + kBackendBlockBytes;
+    kBackendBlockOffset + kBackendBlockBytes + kHostBlockBytes;
 
 static_assert(kDiagnosticsPayloadSize <= protocol::ProtocolLimits::CDC_MAX_PAYLOAD,
               "the diagnostics reply has to fit in one frame");
@@ -276,6 +327,23 @@ public:
         backend_ = backend;
         backend_counters_ = counters;
         backend_publishes_counters_ = true;
+    }
+
+    /// Publish what the host stack and its root port are doing.
+    ///
+    /// Two overloads for the same reason set_backend has two: "this image has
+    /// no host stack to observe" and "the host stack reports all zeros" are
+    /// different claims about the device, and the call site has to make one of
+    /// them on purpose. The CH375 image uses the first - it has no host stack,
+    /// no root port and no Core 1 backend loop, so every field would be an
+    /// invented reading.
+    void set_host_observation() {
+        host_observation_ = {};
+        host_publishes_observation_ = false;
+    }
+    void set_host_observation(const HostObservation& observation) {
+        host_observation_ = observation;
+        host_publishes_observation_ = true;
     }
 
     /// Which profile the device is running.
@@ -379,6 +447,9 @@ private:
     std::size_t status_payload(CdcError error, std::uint8_t* out) const;
     std::size_t config_info_payload(CdcError error, std::uint8_t* out);
     std::size_t diagnostics_payload(CdcError error, std::uint8_t* out) const;
+    /// The appended host block, written at ``out``. Returns its length, which
+    /// is one byte when this image publishes no observation.
+    std::size_t write_host_observation(std::uint8_t* out) const;
 
     storage::AbStore& store_;
     CdcSink& sink_;
@@ -452,6 +523,11 @@ private:
     protocol::InputBackend backend_ = protocol::InputBackend::UNKNOWN;
     BackendCounters backend_counters_{};
     bool backend_publishes_counters_ = false;
+    HostObservation host_observation_{};
+    /// False until the main loop publishes one. An image with no host stack
+    /// never does, and the block then carries a length of zero rather than
+    /// seven zeroed readings of hardware it does not have.
+    bool host_publishes_observation_ = false;
 
 #if DUO_SPI_DEBUG || DUO_CH375_PROBE
     // One byte short of what a CDC reply can carry, because the payload leads
