@@ -200,6 +200,23 @@ the one a `CH375` release of the same commit emits. `pico-release` remaining
 buildable is consequently a precondition for *any* release, not just a
 `CH375` one.
 
+**`build/pico-pio-usb-release/firmware/u2_endpoint/duo_u2_endpoint.uf2` is
+never a flash source.** It exists - `pico-pio-usb-release` configures and
+builds U2 like every preset does - and `tests/build/test_firmware_artifacts.py`
+requires it to exist and meet the same flash-layout contract, precisely
+because a UF2 nobody meant to ship is one someone would eventually flash by
+hand. But no code path in `tools/build_release.ps1` ever reads a U2 UF2 from
+`build/pico-pio-usb-release/` - `$u2Source` is set once, right after the
+firmware section, to the `pico-release` path, and both the assemble step and
+`-DryRun`'s resolved plan use that one value regardless of `-InputBackend`
+(`tests/build/test_build_release_plan.py` pins this: it fails if U2's source
+is ever repointed at the PIO USB toolchain's own build directory). Measured
+at commit `f1eeeae`, the two U2 binaries differ (`57d2e1be…` from
+`pico-release`, `e5d9972f…` from `pico-pio-usb-release`) despite identical
+source and an identical embedded build date - confirming the difference is
+the toolchain, as this section describes, and making it doubly important
+that only one of the two ever reaches a release folder.
+
 ### The label guard
 
 Before naming or copying either backend's U1 UF2, `tools/build_release.ps1`
@@ -212,6 +229,19 @@ symbols; a PIO USB image is the reverse. A build directory that fails this
 check - most plausibly a shared build directory reconfigured by hand, or by
 another session, between one release and the next - never reaches the copy
 step, so a PIO USB image cannot be shipped labelled CH375, or the reverse.
+
+That guard's own call sites, and the naming/sourcing decisions above them
+(which U1 name each `-InputBackend` gets, and U2 always coming from
+`pico-release`), are themselves covered:
+`powershell tools/build_release.ps1 -Version <ver> -InputBackend <backend>
+-AllowDirty -DryRun` resolves exactly that - which build directories get
+guarded and what U1/U2 are named and sourced from - without running the
+protocol check, the native/Python suites, the configurator or the installer,
+and writes it as JSON to `build/release-dry-run.json`.
+`tests/build/test_build_release_plan.py` runs it for both backends and
+asserts on the result, so deleting a guard call, swapping the two backends'
+U1 names, or repointing U2's source is caught by a test that actually
+executes this script - not only by a human reading it.
 
 ### What the release notes record
 

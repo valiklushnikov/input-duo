@@ -39,11 +39,30 @@
     from the ``pico-release`` (CH375-toolchain) build - see the "U2 is one
     artefact" note below.
 
+.PARAMETER DryRun
+    Resolve the firmware plan for -InputBackend - which build directories are
+    built, which ones the backend/label guard runs against, and the U1/U2
+    artefact names and sources - without running the protocol check, the
+    native/Python suites, the configurator or the installer. Existing
+    ``build/pico-release`` (and, for ``PIO_USB``, ``build/pico-pio-usb-release``)
+    directories are still checked and guarded for real: only the expensive,
+    non-firmware-specific steps and the cmake configure/build invocations
+    themselves are skipped. Writes the resolved plan as JSON to
+    ``build/release-dry-run.json`` and to stdout, then exits.
+
+    This exists so the naming/sourcing decisions in this script - which the
+    rest of it only exercises by actually building and packaging a whole
+    release - have something a test can invoke quickly and assert against.
+    See ``tests/build/test_build_release_plan.py``.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File tools/build_release.ps1 -Version 0.1.0-rc1
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File tools/build_release.ps1 -Version 0.1.0-rc1 -InputBackend PIO_USB
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File tools/build_release.ps1 -Version 0.1.0 -InputBackend PIO_USB -AllowDirty -DryRun
 #>
 
 [CmdletBinding()]
@@ -53,7 +72,8 @@ param(
     [string]$OutputDir,
     [switch]$AllowDirty,
     [ValidateSet('CH375', 'PIO_USB')]
-    [string]$InputBackend = 'CH375'
+    [string]$InputBackend = 'CH375',
+    [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
@@ -108,6 +128,12 @@ function Test-BackendCache([string]$BuildDir, [string]$ExpectedBackend) {
     }
 }
 
+# Every build directory this run actually passed to Invoke-BackendArtifactGuard,
+# in call order. -DryRun reports this list so a test can tell "the guard ran
+# for this directory" apart from "the naming logic merely intended it to" -
+# see the function itself, which appends before doing anything else.
+$Script:GuardCallLog = @()
+
 function Invoke-BackendArtifactGuard([string]$BuildDir) {
     # tests/build/test_firmware_artifacts.py checks the flash-layout contract;
     # tests/build/test_backend_artifacts.py is the guard that a PIO USB U1
@@ -115,6 +141,15 @@ function Invoke-BackendArtifactGuard([string]$BuildDir) {
     # CMakeCache.txt's declared backend against the symbols actually linked
     # into the ELF. Both run scoped to this one build directory, and a
     # release is never assembled from a directory that fails either.
+    #
+    # Recorded unconditionally, before anything that could throw or be
+    # skipped, so $Script:GuardCallLog reflects every directory this run
+    # actually reached this function for - see -DryRun and
+    # tests/build/test_build_release_plan.py, which mutation-verify that a
+    # deleted call site here is caught rather than silently leaving a
+    # backend unguarded.
+    $Script:GuardCallLog += $BuildDir
+
     $previous = $env:DUO_INPUT_PICO_BUILD
     $env:DUO_INPUT_PICO_BUILD = $BuildDir
     try {
@@ -192,26 +227,31 @@ finally {
 
 # --- everything that can be verified, is ------------------------------------
 
-Write-Step 'Verifying the generated protocol'
-Push-Location $RepositoryRoot
-try {
-    & $Python tools/generate_protocol.py --check
-    if ($LASTEXITCODE -ne 0) { throw 'the generated protocol is out of date' }
-
-    Write-Step 'Building and running the native tests'
-    & cmake --build build/native
-    if ($LASTEXITCODE -ne 0) { throw 'the native build failed' }
-    & ctest --test-dir build/native --output-on-failure
-    if ($LASTEXITCODE -ne 0) { throw 'the native tests failed' }
-
-    Write-Step 'Running the Python suites'
-    $env:QT_QPA_PLATFORM = 'offscreen'
-    & $Python -m pytest configurator/tests tests -q
-    if ($LASTEXITCODE -ne 0) { throw 'the Python suites failed' }
+if ($DryRun) {
+    Write-Step 'Skipping the protocol check and the native/Python suites (-DryRun)'
 }
-finally {
-    Remove-Item Env:\QT_QPA_PLATFORM -ErrorAction SilentlyContinue
-    Pop-Location
+else {
+    Write-Step 'Verifying the generated protocol'
+    Push-Location $RepositoryRoot
+    try {
+        & $Python tools/generate_protocol.py --check
+        if ($LASTEXITCODE -ne 0) { throw 'the generated protocol is out of date' }
+
+        Write-Step 'Building and running the native tests'
+        & cmake --build build/native
+        if ($LASTEXITCODE -ne 0) { throw 'the native build failed' }
+        & ctest --test-dir build/native --output-on-failure
+        if ($LASTEXITCODE -ne 0) { throw 'the native tests failed' }
+
+        Write-Step 'Running the Python suites'
+        $env:QT_QPA_PLATFORM = 'offscreen'
+        & $Python -m pytest configurator/tests tests -q
+        if ($LASTEXITCODE -ne 0) { throw 'the Python suites failed' }
+    }
+    finally {
+        Remove-Item Env:\QT_QPA_PLATFORM -ErrorAction SilentlyContinue
+        Pop-Location
+    }
 }
 
 # --- the firmware ------------------------------------------------------------
@@ -220,18 +260,29 @@ finally {
 # artefact" in docs/release/firmware-build.md for why every release, PIO_USB
 # ones included, takes its U2 from the CH375-toolchain pico-release build
 # rather than from whichever preset built U1.
+#
+# -DryRun skips the cmake configure/build calls themselves (so it needs no
+# toolchain and does not spend build time) but still runs Test-BackendCache
+# and Invoke-BackendArtifactGuard for real, against whatever is already in
+# each build directory - the point of -DryRun is to prove these call sites
+# are actually reached for the right directories, not to fake that they were.
 
 Write-Step "Building the Pico firmware (U1 backend: $InputBackend)"
 Push-Location $RepositoryRoot
 try {
-    & cmake --preset pico-release
-    if ($LASTEXITCODE -ne 0) {
-        throw 'configuring the Pico build (CH375) failed; see docs/release/firmware-build.md'
-    }
-    & cmake --build --preset pico-release --parallel
-    if ($LASTEXITCODE -ne 0) { throw 'the Pico firmware build (CH375) failed' }
-
     $ch375BuildDir = Join-Path $RepositoryRoot 'build/pico-release'
+    if ($DryRun) {
+        Write-Step 'Skipping the CH375 configure/build (-DryRun); using what is already in build/pico-release'
+    }
+    else {
+        & cmake --preset pico-release
+        if ($LASTEXITCODE -ne 0) {
+            throw 'configuring the Pico build (CH375) failed; see docs/release/firmware-build.md'
+        }
+        & cmake --build --preset pico-release --parallel
+        if ($LASTEXITCODE -ne 0) { throw 'the Pico firmware build (CH375) failed' }
+    }
+
     Test-BackendCache $ch375BuildDir 'CH375'
 
     Write-Step 'Checking the CH375 firmware meets the build and backend contract'
@@ -239,15 +290,20 @@ try {
 
     $pioBuildDir = $null
     if ($InputBackend -eq 'PIO_USB') {
-        Write-Step 'Building the Pico firmware (PIO USB)'
-        & cmake --preset pico-pio-usb-release
-        if ($LASTEXITCODE -ne 0) {
-            throw 'configuring the Pico build (PIO USB) failed; see docs/release/firmware-build.md'
-        }
-        & cmake --build --preset pico-pio-usb-release --parallel
-        if ($LASTEXITCODE -ne 0) { throw 'the Pico firmware build (PIO USB) failed' }
-
         $pioBuildDir = Join-Path $RepositoryRoot 'build/pico-pio-usb-release'
+        if ($DryRun) {
+            Write-Step 'Skipping the PIO USB configure/build (-DryRun); using what is already in build/pico-pio-usb-release'
+        }
+        else {
+            Write-Step 'Building the Pico firmware (PIO USB)'
+            & cmake --preset pico-pio-usb-release
+            if ($LASTEXITCODE -ne 0) {
+                throw 'configuring the Pico build (PIO USB) failed; see docs/release/firmware-build.md'
+            }
+            & cmake --build --preset pico-pio-usb-release --parallel
+            if ($LASTEXITCODE -ne 0) { throw 'the Pico firmware build (PIO USB) failed' }
+        }
+
         Test-BackendCache $pioBuildDir 'PIO_USB'
 
         Write-Step 'Checking the PIO USB firmware meets the build and backend contract'
@@ -256,6 +312,40 @@ try {
 }
 finally {
     Pop-Location
+}
+
+# U1 comes from whichever preset -InputBackend selected; U2 always comes from
+# the CH375-toolchain pico-release directory - see "U2 is one artefact" in
+# docs/release/firmware-build.md. Computed here, immediately after the
+# firmware section rather than only at assembly time, so -DryRun can report
+# exactly this naming/sourcing decision without running the configurator or
+# installer, and so the assemble step below has one source of truth for it
+# instead of recomputing the same branch a second time.
+if ($InputBackend -eq 'PIO_USB') {
+    $u1Source = 'build/pico-pio-usb-release/firmware/u1_main/duo_u1_main.uf2'
+    $u1Name = "duo-input-u1-pio-usb-$Version.uf2"
+}
+else {
+    $u1Source = 'build/pico-release/firmware/u1_main/duo_u1_main.uf2'
+    $u1Name = "duo-input-u1-$Version.uf2"
+}
+# Not selectable by -InputBackend, deliberately - see "U2 is one artefact".
+$u2Source = 'build/pico-release/firmware/u2_endpoint/duo_u2_endpoint.uf2'
+
+if ($DryRun) {
+    $plan = [ordered]@{
+        InputBackend     = $InputBackend
+        GuardedBuildDirs = @($Script:GuardCallLog)
+        U1Source         = $u1Source
+        U1Name           = $u1Name
+        U2Source         = $u2Source
+    }
+    $planJson = $plan | ConvertTo-Json
+    $planPath = Join-Path $RepositoryRoot 'build/release-dry-run.json'
+    Set-Content -Path $planPath -Value $planJson -Encoding utf8
+    Write-Step "Dry run: resolved release plan (also written to $planPath)"
+    Write-Host $planJson
+    return
 }
 
 # --- the configurator --------------------------------------------------------
@@ -275,21 +365,13 @@ Write-Step "Assembling $OutputDir"
 if (Test-Path $OutputDir) { Remove-Item -Recurse -Force $OutputDir }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
-# U1 comes from whichever preset -InputBackend selected; U2 always comes
-# from the CH375-toolchain pico-release directory - see "U2 is one artefact"
-# in docs/release/firmware-build.md.
-if ($InputBackend -eq 'PIO_USB') {
-    $u1Source = 'build/pico-pio-usb-release/firmware/u1_main/duo_u1_main.uf2'
-    $u1Name = "duo-input-u1-pio-usb-$Version.uf2"
-}
-else {
-    $u1Source = 'build/pico-release/firmware/u1_main/duo_u1_main.uf2'
-    $u1Name = "duo-input-u1-$Version.uf2"
-}
-
+# $u1Source, $u1Name and $u2Source were resolved right after the firmware
+# section above - the same values -DryRun reports - so there is exactly one
+# place in this script that decides U1's name/source per backend and U2's
+# (backend-independent) source, not two that could drift apart.
 $artefacts = @(
     @{ Source = $u1Source; Name = $u1Name }
-    @{ Source = "build/pico-release/firmware/u2_endpoint/duo_u2_endpoint.uf2"; Name = "duo-input-u2-$Version.uf2" }
+    @{ Source = $u2Source; Name = "duo-input-u2-$Version.uf2" }
     @{ Source = "configurator/dist/DuoInput-Setup-$Version-x64.exe"; Name = "DuoInput-Setup-$Version-x64.exe" }
 )
 
