@@ -87,9 +87,36 @@ it increments its counter and clears capture and staging state. So do `HELLO` an
 everything the question was about, and in both cases a capture left running would go on
 swallowing the operator's input until its ten-second timeout.
 
-The four groups after the five counters in `GET_DIAGNOSTICS` were appended in that order and
+The groups after the five counters in `GET_DIAGNOSTICS` were appended in that order and
 each is optional: a reply that stops after any group is still a valid reply, so a host reads
-what it recognises and leaves the rest. `dropped_commands` counts input the device produced
+what it recognises and leaves the rest. After `runtime_fault` come four more, in this order,
+each self-delimiting so the one behind it can always be found:
+
+- the **latency block** - `bucket_count:u8`, `bucket_count - 1` `u32` edges, then two streams of
+  `count:u32, max_us:u32` and `bucket_count` `u32` buckets (keyboard, then mouse). It carries its
+  own edges so a host can never disagree with the device about what a bucket means.
+- the **peripheral block** - two fixed records of
+  `attached:u8, ready:u8, kind:u8, vid:u16, pid:u16, buttons:u8, descriptor_bytes:u16, sha256:bytes[32]`,
+  the keyboard role slot then the mouse one. Both always: an empty slot is a fact about the run.
+- the **backend block** - `backend:u8, counter_count:u8`, then that many `u32` counters. The count
+  is what lets a backend publish none of them: CH375 keeps none of these host-stack figures and
+  sends a count of zero rather than twelve zeros a reader would take for measurements.
+- the **host block** - `field_bytes:u8`, then that many bytes:
+  `init_flags:u8, clk_hz_at_begin:u32, clk_hz_now:u32, sof_frame_count:u32, root_port_state:u8,
+  root_port_connects:u16, core1_passes:u32`. Its length byte plays the same role the backend
+  block's count does: an image with no host stack sends zero, which is a different fact from an
+  older firmware that sends no block at all.
+
+  `init_flags` bit 0 says the host stack was already active before the input core's own bring-up
+  ran, which makes bits 1-3 (the configure result, the init result, and `tuh_inited()` after
+  both) meaningless as evidence - they report success for calls that did nothing. The two clock
+  readings must match: the PIO dividers are computed once from the first and never recomputed, so
+  a bus brought up at one clock and running at another is off by the ratio between them.
+  `root_port_state` packs `initialized`, `connected`, `suspended` and `is_fullspeed` as bits 0-3.
+  `sof_frame_count` is raw root-port activity below the host stack: zero and static means the bus
+  is not being driven at all, climbing while every backend counter is still zero means it is being
+  driven and nothing on it answers. `core1_passes` unchanged across two reads twenty seconds apart
+  means the input core stopped. `dropped_commands` counts input the device produced
 and could not deliver - a nonzero value means what a computer is holding no longer matches
 what the operator did. `runtime_fault` says what the output runtime is doing about its queue
 at this instant: `0` no fault, `1` a queue that is refusing commands. It is not a latch. The
