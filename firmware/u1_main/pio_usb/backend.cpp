@@ -45,14 +45,19 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     // Not read for a Report's own received_us: that is the TinyUSB
     // callback's own capture time (tinyusb_host_callbacks.cpp reads it
     // directly, inside tuh_task() below), not the moment this particular
-    // pass got around to draining it. now_us is what Task 10's bounded
-    // receive-arm retry/backoff and stall-timeout detection judge every
-    // interface's deadlines against - see DeviceRegistry::retry_pending_arms.
+    // pass got around to draining it. now_us is the single clock reading
+    // Task 10's bounded receive-arm retry/backoff judges every interface's
+    // deadline against - and it is handed to BOTH halves of that mechanism:
+    // process_pending(), where a refused arm computes its next deadline, and
+    // retry_pending_arms(), which decides whether one has elapsed. There is
+    // no stall TIMEOUT to feed: a stall is recognised from a zero-length
+    // completion, not from silence, because silence is what a healthy idle
+    // keyboard produces - see DeviceRegistry::retry_pending_arms.
     if (!host_ready_) {
         return;
     }
     tuh_task();
-    registry_.process_pending();
+    registry_.process_pending(now_us);
     registry_.retry_pending_arms(now_us);
 }
 

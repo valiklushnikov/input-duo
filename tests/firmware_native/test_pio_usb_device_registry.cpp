@@ -94,7 +94,7 @@ TEST_CASE(hub_is_internal_and_downstream_mount_orders_keep_the_same_keyboard_own
         rig.device(duo::test::tinyusb_host::kFirstDownstreamAddress, 0x3434, 0xD030);
         tuh_mount_cb(duo::test::tinyusb_host::kFirstDownstreamAddress);
         rig.hid(duo::test::tinyusb_host::kFirstDownstreamAddress, 0, kProtocolKeyboard);
-        rig.registry.process_pending();
+        rig.registry.process_pending(0);
 
         const auto* keyboard = rig.registry.owner(DeviceKind::Keyboard);
         CHECK(keyboard != nullptr);
@@ -108,7 +108,7 @@ TEST_CASE(hub_is_internal_and_downstream_mount_orders_keep_the_same_keyboard_own
         rig.device(duo::test::tinyusb_host::kFirstDownstreamAddress, 0x3434, 0xD030);
         rig.hid(duo::test::tinyusb_host::kFirstDownstreamAddress, 0, kProtocolKeyboard);
         tuh_mount_cb(duo::test::tinyusb_host::kFirstDownstreamAddress);
-        rig.registry.process_pending();
+        rig.registry.process_pending(0);
 
         const auto* keyboard = rig.registry.owner(DeviceKind::Keyboard);
         CHECK(keyboard != nullptr);
@@ -123,7 +123,7 @@ TEST_CASE(keyboard_and_mouse_ownership_follows_protocol_not_hub_address_order) {
     rig.device(duo::test::tinyusb_host::kFirstDownstreamAddress + 1, 0x2222, 0x0002);
     rig.hid(duo::test::tinyusb_host::kFirstDownstreamAddress + 1, 0, kProtocolKeyboard);
     rig.hid(duo::test::tinyusb_host::kFirstDownstreamAddress, 0, kProtocolMouse);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     CHECK_EQ(rig.registry.owner(DeviceKind::Keyboard)->dev_addr,
              duo::test::tinyusb_host::kFirstDownstreamAddress + 1);
@@ -138,7 +138,7 @@ TEST_CASE(composite_receiver_instances_remain_distinct_registry_entries) {
     rig.device(3, 0x3434, 0xD030);
     rig.hid(3, 0, kProtocolMouse);
     rig.hid(3, 1, kProtocolNone);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     const auto* mouse = rig.registry.find(3, 0);
     const auto* auxiliary = rig.registry.find(3, 1);
@@ -156,7 +156,7 @@ TEST_CASE(duplicate_mount_cannot_duplicate_the_entry_or_in_flight_receive) {
     rig.device(7, 0x1234, 0x5678);
     rig.hid(7, 2, kProtocolKeyboard);
     rig.hid(7, 2, kProtocolKeyboard);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     CHECK_EQ(rig.registry.interface_count(), 1u);
     CHECK_EQ(rig.registry.duplicate_mount_count(), 1u);
@@ -170,7 +170,7 @@ TEST_CASE(mount_callback_does_not_arm_until_its_bounded_record_is_processed) {
     rig.hid(7, 2, kProtocolKeyboard);
 
     CHECK_EQ(duo::test::tinyusb_host::receive_count(7, 2), 0u);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     CHECK_EQ(duo::test::tinyusb_host::receive_count(7, 2), 1u);
     CHECK(rig.registry.find(7, 2)->report_in_flight);
 }
@@ -194,7 +194,7 @@ TEST_CASE(fixed_device_and_interface_capacity_counts_and_ignores_overflow) {
         }
     }
     rig.hid(5, 7, kProtocolNone);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     CHECK(DeviceRegistry::kDeviceCapacity >= 5u);
     CHECK(DeviceRegistry::kInterfaceCapacity >= 8u);
@@ -216,11 +216,11 @@ TEST_CASE(unmount_by_device_address_removes_every_composite_instance) {
     rig.device(6, 0x3434, 0xD030);
     rig.hid(6, 0, kProtocolMouse);
     rig.hid(6, 1, kProtocolNone);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     CHECK_EQ(rig.registry.interface_count(), 2u);
 
     tuh_umount_cb(6);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     CHECK(rig.registry.find(6, 0) == nullptr);
     CHECK(rig.registry.find(6, 1) == nullptr);
@@ -232,12 +232,12 @@ TEST_CASE(repeated_unmount_by_device_address_is_safe) {
     RegistryRig rig;
     rig.device(6, 0x3434, 0xD030);
     rig.hid(6, 0, kProtocolMouse);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     rig.drain_ready();
 
     tuh_umount_cb(6);
     tuh_hid_umount_cb(6, 0);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     SourceEvent event;
     SourceIdentity identity;
@@ -254,7 +254,7 @@ TEST_CASE(first_usable_role_owner_is_stable_and_extra_interfaces_are_diagnosed) 
     rig.device(3, 0x1000, 0x0002);
     rig.hid(2, 0, kProtocolKeyboard);
     rig.hid(3, 0, kProtocolKeyboard);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     CHECK_EQ(rig.registry.owner(DeviceKind::Keyboard)->dev_addr, 2u);
     CHECK_EQ(rig.registry.find(3, 0)->role, LogicalRole::Ignored);
@@ -265,7 +265,7 @@ TEST_CASE(accepted_report_record_is_processed_before_exactly_one_rearm) {
     RegistryRig rig;
     rig.device(2, 0x1234, 0x5678);
     rig.hid(2, 0, kProtocolKeyboard);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 1u);
 
     const std::uint8_t report[] = {0, 0, 4, 0, 0, 0, 0, 0};
@@ -273,10 +273,10 @@ TEST_CASE(accepted_report_record_is_processed_before_exactly_one_rearm) {
     CHECK_FALSE(rig.registry.find(2, 0)->report_in_flight);
     CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 1u);
 
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     CHECK(rig.registry.find(2, 0)->report_in_flight);
     CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 2u);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 2u);
 }
 
@@ -284,12 +284,12 @@ TEST_CASE(oversized_report_becomes_fault_without_truncation_or_rearm) {
     RegistryRig rig;
     rig.device(2, 0x1234, 0x5678);
     rig.hid(2, 0, kProtocolKeyboard);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     rig.drain_ready();
 
     std::array<std::uint8_t, 65> report{};
     tuh_hid_report_received_cb(2, 0, report.data(), report.size());
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     SourceEvent event;
     SourceIdentity identity;
@@ -304,7 +304,7 @@ TEST_CASE(full_callback_queue_latches_owed_fault_and_does_not_rearm) {
     RegistryRig rig;
     rig.device(2, 0x1234, 0x5678);
     rig.hid(2, 0, kProtocolKeyboard);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     rig.drain_ready();
 
     rig.device(1, 0x2109, 0x2817);
@@ -322,7 +322,7 @@ TEST_CASE(full_callback_queue_latches_owed_fault_and_does_not_rearm) {
     CHECK_EQ(rig.registry.callback_overflow_count(), 1u);
     CHECK(rig.registry.find(2, 0)->report_in_flight);
 
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 1u);
 }
 
@@ -346,7 +346,7 @@ TEST_CASE(maximum_downstream_burst_keeps_every_unmount_and_accepts_address_reuse
         rig.hid(address, 1, address == kFirstDownstreamAddress ? kProtocolMouse
                                                                 : kProtocolNone);
     }
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     for (std::uint8_t offset = 0; offset < kDownstreamCount; ++offset) {
         const std::uint8_t address = kFirstDownstreamAddress + offset;
@@ -363,14 +363,14 @@ TEST_CASE(maximum_downstream_burst_keeps_every_unmount_and_accepts_address_reuse
     }
 
     CHECK_EQ(rig.registry.callback_overflow_count(), 0u);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     CHECK_EQ(rig.registry.device_count(), 0u);
     CHECK_EQ(rig.registry.interface_count(), 0u);
 
     rig.device(kLastDownstreamAddress, 0xBEEF, 0x0002);
     tuh_mount_cb(kLastDownstreamAddress);
     rig.hid(kLastDownstreamAddress, 0, kProtocolKeyboard);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     const auto* keyboard = rig.registry.owner(DeviceKind::Keyboard);
     CHECK(keyboard != nullptr);
@@ -383,14 +383,14 @@ TEST_CASE(pending_fatal_report_blocks_duplicate_mount_from_rearming) {
     RegistryRig rig;
     rig.device(2, 0x1234, 0x5678);
     rig.hid(2, 0, kProtocolKeyboard);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 1u);
     rig.drain_ready();
 
     rig.hid(2, 0, kProtocolKeyboard);
     std::array<std::uint8_t, 65> oversized{};
     tuh_hid_report_received_cb(2, 0, oversized.data(), oversized.size());
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     SourceEvent event;
     SourceIdentity identity;
@@ -404,7 +404,7 @@ TEST_CASE(receive_arm_refusal_is_counted_once_without_in_flight_or_spin) {
     duo::test::tinyusb_host::set_receive_result(false);
     rig.device(2, 0x1234, 0x5678);
     rig.hid(2, 0, kProtocolKeyboard);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     const auto* keyboard = rig.registry.find(2, 0);
     CHECK(keyboard != nullptr);
@@ -412,7 +412,7 @@ TEST_CASE(receive_arm_refusal_is_counted_once_without_in_flight_or_spin) {
     CHECK_EQ(rig.registry.arm_failure_count(), 1u);
     CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 1u);
 
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     CHECK_EQ(rig.registry.arm_failure_count(), 1u);
     CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 1u);
 }
@@ -475,7 +475,7 @@ TEST_CASE(mount_processing_stores_vid_pid_protocol_descriptor_hash_and_neutral_l
     RegistryRig rig;
     rig.device(8, 0xABCD, 0x0123);
     rig.hid(8, 4, kProtocolKeyboard);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     const auto* entry = rig.registry.find(8, 4);
     CHECK(entry != nullptr);
@@ -499,7 +499,7 @@ TEST_CASE(hid_mount_callback_only_copies_before_core1_classifies_a_neutral_mouse
     CHECK(rig.registry.find(2, 0) == nullptr);
     CHECK_EQ(duo::test::tinyusb_host::receive_count(2, 0), 0u);
 
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     const auto* mouse = rig.registry.owner(DeviceKind::Mouse);
     CHECK(mouse != nullptr);
     if (mouse != nullptr) {
@@ -513,7 +513,7 @@ TEST_CASE(absent_descriptor_is_not_the_sha256_of_empty_and_keeps_boot_fallback_e
     RegistryRig rig;
     rig.device(2, 0xCAFE, 0x0002);
     rig.hid(2, 0, kProtocolMouse, nullptr, 0);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     const auto* mouse = rig.registry.find(2, 0);
     CHECK(mouse != nullptr);
@@ -538,7 +538,7 @@ TEST_CASE(prefix_equal_descriptor_lengths_keep_their_exact_registry_hashes) {
     rig.device(3, 0xCAFE, 0x0004);
     rig.hid(2, 0, kProtocolNone, short_descriptor, sizeof(short_descriptor));
     rig.hid(3, 0, kProtocolNone, long_descriptor, sizeof(long_descriptor));
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     const auto* short_entry = rig.registry.find(2, 0);
     const auto* long_entry = rig.registry.find(3, 0);
@@ -558,15 +558,15 @@ TEST_CASE(reconnect_clears_old_layout_vid_pid_hash_and_presence_before_reclassif
     rig.device(2, 0x1111, 0x2222);
     rig.hid(2, 0, kProtocolNone, descriptor.data(),
             static_cast<std::uint16_t>(descriptor.size()));
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     CHECK_EQ(rig.registry.find(2, 0)->identity.kind, DeviceKind::Mouse);
     CHECK(rig.registry.find(2, 0)->descriptor_present);
 
     tuh_umount_cb(2);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
     rig.device(2, 0xAAAA, 0xBBBB);
     rig.hid(2, 0, kProtocolKeyboard, nullptr, 0);
-    rig.registry.process_pending();
+    rig.registry.process_pending(0);
 
     const auto* keyboard = rig.registry.find(2, 0);
     CHECK(keyboard != nullptr);

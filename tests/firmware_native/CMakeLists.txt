@@ -744,6 +744,13 @@ add_executable(duo_pio_usb_recovery_test
     test_main.cpp
     test_pio_usb_recovery.cpp
     fakes/tinyusb_host.cpp
+    # The link to U2 and the A/B configuration store, so the brief's "loss of
+    # U2 never stops PC1 input" and "no backend failure touches flash/profile
+    # state" can be ASSERTED here rather than argued from a diff: a dead SPI
+    # link and a flash backend that counts every erase and program, live in
+    # the same process as the recovery scenarios.
+    fakes/spi_link.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/spi_master_poll.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/backend.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/device_registry.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/hid_setup.cpp

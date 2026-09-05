@@ -448,7 +448,7 @@ struct RegistryTopologyRig {
         duo::test::tinyusb_host::set_protocol(dev_addr, instance, protocol);
         tuh_hid_mount_cb(dev_addr, instance, descriptor,
                         static_cast<std::uint16_t>(descriptor_size));
-        registry.process_pending();
+        registry.process_pending(0);
         drain();
     }
 
@@ -456,7 +456,7 @@ struct RegistryTopologyRig {
                 std::size_t size, std::uint32_t captured_us) {
         duo::test::tinyusb_host::set_now_us(captured_us);
         tuh_hid_report_received_cb(dev_addr, instance, bytes, static_cast<std::uint16_t>(size));
-        registry.process_pending();
+        registry.process_pending(0);
         drain();
     }
 

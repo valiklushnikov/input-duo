@@ -71,10 +71,9 @@ public:
     //   * Ready: only Keyboard and Mouse ever produce one - Auxiliary never
     //     does, it is not a source InputPipeline is told about on its own -
     //     and a role is claimed once; role_is_owned() refuses a second
-    //     claimant, so a third Ready inside one pass has to spend a
-    //     DeviceUnmount record first to free the role again. Alternating
-    //     HidMount/DeviceUnmount across the whole 20-record budget is the
-    //     worst case and yields 10.
+    //     claimant, so a third Ready inside one pass has to spend a whole
+    //     second record freeing the role first. Two records per Ready across
+    //     the 20-record budget is the worst case and yields 10.
     //   * Fault comes out of the reserved slots, not out of these.
     //
     // Thirteen at worst against seventeen offered, so the reservation costs no
@@ -91,6 +90,20 @@ public:
     // which point it is faulted and produces nothing further. Task 10's
     // Detached releases do not draw from this queue either - see
     // kDetachQueueCapacity, a separate bounded FIFO.
+    //
+    // Re-derived AGAIN for this task's fix round, which gave latch_fault() a
+    // second job: an escalated interface now gives its role slot back (see
+    // latch_fault()'s own comment) so a replacement device can claim it,
+    // instead of holding a role nothing will ever use again. That adds a
+    // second way to free a role inside one pass - a ReportFault record, not
+    // only a DeviceUnmount - but it costs the same one extra record per
+    // freed role, so the "two records per Ready, 10 at worst" line above is
+    // unchanged; and it is additionally capped below that, because a faulted
+    // interface stays MOUNTED (only its role is released), so this route
+    // exhausts kInterfaceCapacity = 8 before it can reach 10. The detach-FIFO
+    // overflow escalation added in the same round pushes a Fault too, but
+    // kDetachQueueCapacity is now sized above the per-pass Detached ceiling,
+    // so no genuine pass can reach it at all.
     static constexpr std::size_t kEventQueueCapacity = kCallbackQueueCapacity;
     /// How many of kEventQueueCapacity are kept back for Fault: one per
     /// independently-arming role-bearing interface V1 accepts (Keyboard,
@@ -112,25 +125,48 @@ public:
 
     /// Bounded FIFO capacity for coalesced Detached releases (Task 10).
     ///
-    /// Each DeviceUnmount callback record remove_device() processes queues
-    /// at most one Detached per role slot (Keyboard, Mouse/Auxiliary) -
-    /// several interfaces on the same physical device collapse into that
-    /// one push, same as before this task. The genuine per-pass ceiling on
-    /// how many DeviceUnmount records can be MEANINGFULLY processed (one
-    /// that actually finds a mounted interface, not a no-op repeat) is the
-    /// same "alternating HidMount/DeviceUnmount across the whole 20-record
-    /// callback budget" worst case the comment above already derives for
-    /// Ready: kCallbackQueueCapacity/2 = 10 mount/unmount pairs, each
-    /// contributing at most one Detached. Sized to that ceiling, a genuine
-    /// single process_pending() pass - the only kind main.cpp's Core 1 loop
-    /// ever produces, since it drains take_event() completely before the
-    /// next tuh_task() call - can never overflow this queue. Only
-    /// withholding drains across many SEPARATE passes (exactly how this
-    /// file's other overflow paths are reached in tests) can, and that case
-    /// is counted (detach_overflow_count()), not silently lost - the same
-    /// standard this file already applies to ordinary Ready/Report/Fault
-    /// traffic.
-    static constexpr std::size_t kDetachQueueCapacity = kCallbackQueueCapacity / 2;
+    /// The first derivation of this constant said "one Detached per
+    /// meaningfully-processed DeviceUnmount, so kCallbackQueueCapacity/2 =
+    /// 10 mount/unmount pairs is the ceiling". That was wrong by a factor of
+    /// two: remove_device() queues one Detached per ROLE SLOT, not one per
+    /// call, so a composite keyboard+mouse receiver - this project's normal
+    /// hardware - yields TWO from a single DeviceUnmount record. One such
+    /// cycle costs three callback records (HidMount keyboard + HidMount
+    /// mouse + DeviceUnmount; HidMount self-creates the device through
+    /// ensure_device, so no DeviceMount record is needed) and yields two
+    /// Detached, which puts twelve against a capacity of ten inside a single
+    /// 20-record pass. Re-derived honestly, with two bounds that hold
+    /// whatever order the records arrive in:
+    ///
+    ///   * Slot bound. remove_device() pushes at most one Detached per role
+    ///     slot per call, and there are two slots (Keyboard, and Mouse
+    ///     shared with Auxiliary). So Detached <= 2 * U, where U is the
+    ///     number of DeviceUnmount records processed this pass.
+    ///   * Interface bound. Every Detached retires a distinct MOUNTED,
+    ///     role-bearing interface, and an interface is mounted either
+    ///     before the pass began or by a HidMount record inside it. So
+    ///     Detached <= S + M, where S is how many role-bearing interfaces
+    ///     were already mounted when the pass started (<= kInterfaceCapacity
+    ///     = 8, a deliberately loose bound - role_is_owned actually keeps
+    ///     far fewer than eight role-bearing at once) and M is the number of
+    ///     HidMount records processed.
+    ///
+    /// M + U <= kCallbackQueueCapacity = 20, so the worst case is
+    /// max over M+U<=20 of min(2U, 8+M) = 18 (at U=10, M=10, and again at
+    /// U=9, M=11). Eighteen fits in twenty, so the queue is sized to the
+    /// whole callback budget and a genuine single process_pending() pass -
+    /// the only kind main.cpp's Core 1 loop ever produces, since it drains
+    /// take_event() completely before the next tuh_task() call - still
+    /// cannot overflow it.
+    ///
+    /// Overflow is nevertheless reachable by withholding drains across many
+    /// SEPARATE passes (exactly how this file's other overflow paths are
+    /// reached in tests), and it is NOT merely counted: a dropped Detached
+    /// is a dropped release-all, so remove_device() escalates that interface
+    /// through latch_fault() - the same terminal release-all every other
+    /// overflow path in this file already uses - before clearing it. The
+    /// counter (detach_overflow_count()) is the diagnostic, not the remedy.
+    static constexpr std::size_t kDetachQueueCapacity = kCallbackQueueCapacity;
     /// Bounded backoff for a receive-arm refusal, and for the shared stall-
     /// signal budget (Task 10). Three attempts, each waiting longer than the
     /// last, before escalating to a logical Fault and giving up on this
@@ -198,7 +234,17 @@ public:
     /// Process every queued callback record. A Report's received_us comes
     /// from the CallbackRecord itself - captured at the callback, not here -
     /// so this takes no clock of its own to stamp anything with.
-    void process_pending();
+    ///
+    /// ``now_us`` is not a stamp: it is the single clock reading this whole
+    /// pass judges receive-arm backoff deadlines against, threaded down from
+    /// PioUsbBackend::task()'s own caller so that a deadline ARMED in this
+    /// pass and the retry_pending_arms() sweep that later CHECKS it are
+    /// measured against the same clock. An earlier revision read
+    /// time_us_32() inside arm_if_needed() instead, which was right in
+    /// production (both readings came from the same pass) and untestable
+    /// everywhere else, because a test rig feeding two independent clocks
+    /// puts every deadline in the past before it is ever checked.
+    void process_pending(std::uint32_t now_us);
     bool take_event(input::SourceEvent& event, input::SourceIdentity& identity);
 
     /// Retry any interface whose receive-arm backoff has elapsed. Called
@@ -280,7 +326,6 @@ private:
     };
 
     struct PendingEvent {
-        bool present = false;
         input::SourceEvent event{};
         input::SourceIdentity identity{};
         /// The generation of the interface this event was produced from.
@@ -316,10 +361,16 @@ private:
     /// device - would be pulled out of the Keyboard role it should still be
     /// free to earn.
     bool has_mouse_sibling(std::uint8_t dev_addr) const;
-    void arm_if_needed(Interface& interface);
+    /// Ask TinyUSB for this interface's next report, or - if it refuses -
+    /// schedule the next bounded backoff against ``now_us``. Takes the clock
+    /// rather than reading one: see process_pending().
+    void arm_if_needed(Interface& interface, std::uint32_t now_us);
+    /// Terminal release-all for one interface: queue its Fault, then hand
+    /// its role slot back so a replacement device can claim it. Idempotent -
+    /// a second call on an already-faulted interface queues nothing.
     void latch_fault(Interface& interface);
     void remove_device(std::uint8_t dev_addr);
-    void process(const CallbackRecord& record);
+    void process(const CallbackRecord& record, std::uint32_t now_us);
     /// Queue one Ready/Report/Fault SourceEvent for ``interface``'s own
     /// stream. False means kEventQueueCapacity was already full; the caller
     /// counts the overflow and decides what happens to the interface - this

@@ -439,7 +439,7 @@ TEST_CASE(a_refusal_cannot_republish_a_stale_event) {
     tuh_mount_cb(9);
     duo::test::tinyusb_host::set_protocol(9, 3, kProtocolKeyboard);
     tuh_hid_mount_cb(9, 3, nullptr, 0);
-    registry.process_pending();
+    registry.process_pending(0);
 
     SourceEvent drain;
     SourceIdentity drain_identity;
@@ -450,7 +450,7 @@ TEST_CASE(a_refusal_cannot_republish_a_stale_event) {
     constexpr std::uint32_t kCaptureUs = 0x0BADF00Du;
     duo::test::tinyusb_host::set_now_us(kCaptureUs);
     tuh_hid_report_received_cb(9, 3, stale_report, sizeof(stale_report));
-    registry.process_pending();
+    registry.process_pending(0);
 
     // Seeded with sentinel content take_event() must not leave standing.
     SourceEvent event;
@@ -543,7 +543,7 @@ TEST_CASE(a_queue_overflow_counts_and_leaves_the_source_faulted_without_rearming
     tuh_mount_cb(kKeyboardAddress);
     duo::test::tinyusb_host::set_protocol(kKeyboardAddress, kKeyboardInstance, kProtocolKeyboard);
     tuh_hid_mount_cb(kKeyboardAddress, kKeyboardInstance, nullptr, 0);
-    registry.process_pending();
+    registry.process_pending(0);
 
     SourceEvent drain;
     SourceIdentity drain_identity;
@@ -552,7 +552,7 @@ TEST_CASE(a_queue_overflow_counts_and_leaves_the_source_faulted_without_rearming
 
     for (std::size_t index = 0; index < DeviceRegistry::kEventQueueCapacity + 1; ++index) {
         tuh_hid_report_received_cb(kKeyboardAddress, kKeyboardInstance, kKeyA, sizeof(kKeyA));
-        registry.process_pending();
+        registry.process_pending(0);
     }
 
     CHECK(registry.event_overflow_count() > 0);

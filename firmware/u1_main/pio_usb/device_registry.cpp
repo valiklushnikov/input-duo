@@ -2,7 +2,6 @@
 
 #include <cstring>
 
-#include "hardware/timer.h"
 #include "pio_usb/hid_setup.hpp"
 
 extern "C" bool tuh_hid_receive_report(std::uint8_t dev_addr, std::uint8_t instance);
@@ -261,7 +260,7 @@ const DeviceRegistry::Interface* DeviceRegistry::owner(input::DeviceKind kind) c
     return nullptr;
 }
 
-void DeviceRegistry::arm_if_needed(Interface& interface) {
+void DeviceRegistry::arm_if_needed(Interface& interface, std::uint32_t now_us) {
     if (!interface.mounted || interface.fault_pending || interface.faulted ||
         interface.report_in_flight) {
         return;
@@ -287,7 +286,13 @@ void DeviceRegistry::arm_if_needed(Interface& interface) {
         return;
     }
     interface.arm_retry_pending = true;
-    interface.arm_retry_deadline_us = time_us_32() + kArmRetryBackoffUs[interface.arm_retry_count];
+    // Computed from the caller's own clock reading, not from a second
+    // time_us_32() call here: retry_pending_arms() compares this deadline
+    // against the reading PioUsbBackend::task() was handed, and two
+    // independent clocks make the guard that compares them untestable - a
+    // deadline armed on one clock and checked against the other is already
+    // in the past the first time it is looked at.
+    interface.arm_retry_deadline_us = now_us + kArmRetryBackoffUs[interface.arm_retry_count];
     ++interface.arm_retry_count;
 }
 
@@ -307,8 +312,18 @@ void DeviceRegistry::retry_pending_arms(std::uint32_t now_us) {
             interface.report_in_flight) {
             continue;
         }
-        if (interface.arm_retry_pending && now_us >= interface.arm_retry_deadline_us) {
-            arm_if_needed(interface);
+        // Wrap-safe, the same shape main.cpp's own busy-wait loops use
+        // (time_us_32() - started < for_us): time_us_32() wraps every ~71.6
+        // minutes, and a deadline computed across that wrap compares wrong
+        // under a plain >= in both directions - it either fires immediately,
+        // skipping the backoff entirely, or defers the retry by up to 71
+        // minutes, leaving the interface un-armed, un-escalated and its held
+        // keys never released. The signed difference is right either side of
+        // the wrap as long as the real interval is under ~35 minutes, which
+        // kArmRetryBackoffUs (16 ms at most) is by five orders of magnitude.
+        if (interface.arm_retry_pending &&
+            static_cast<std::int32_t>(now_us - interface.arm_retry_deadline_us) >= 0) {
+            arm_if_needed(interface, now_us);
         }
     }
 }
@@ -327,6 +342,30 @@ void DeviceRegistry::latch_fault(Interface& interface) {
         if (!push_event(interface, input::SourceEventKind::Fault, 0, nullptr, 0, 0)) {
             ++event_overflows_;
         }
+        // The release-all is now queued, so this source has been given up on -
+        // but the interface is NOT forgotten: it stays mounted until its
+        // device physically unmounts, and while it holds a role,
+        // role_is_owned() refuses that role to every replacement device. The
+        // design spec (docs/superpowers/specs/2026-09-02-pio-usb-hub-v1-design
+        // .md:239-254) requires held buttons released "before the source is
+        // forgotten"; it never mentions re-enumeration, and this project's own
+        // history records that the one wedge actually observed on this
+        // hardware - the Keychron receiver's side-button lockup - SURVIVES
+        // re-enumeration, so a bus reset from here would cure nothing while
+        // dropping this role's independently-arming sibling. Releasing the
+        // role slot is the half that matters: the user can unplug the dead
+        // device and plug in another, and the new one is granted the role
+        // instead of being ignored for ever.
+        //
+        // This cannot loop back on itself. The only place a role is granted is
+        // process()'s FRESH-HidMount branch; a HidMount naming an interface
+        // that is still mounted - which this one is - takes the
+        // duplicate-mount branch above it and never re-runs role assignment,
+        // and arm_if_needed() returns immediately on a faulted interface. So
+        // the interface that just released the role can never re-claim it and
+        // re-fault in a loop; only a genuinely new (dev_addr, instance) can
+        // take it.
+        interface.role = LogicalRole::Ignored;
     }
 }
 
@@ -336,52 +375,83 @@ void DeviceRegistry::remove_device(std::uint8_t dev_addr) {
             device = {};
         }
     }
-    // Local to this one call, not persistent registry state: several
-    // interfaces on the same physical device (the Keychron receiver's Mouse
-    // and Auxiliary channels) collapse into one Detached per role slot here,
-    // exactly as before. A PERSISTENT "already pending" guard was tried
-    // first and was wrong - it also suppressed a DIFFERENT, later device's
-    // own genuine Detached for the same role slot if an earlier one had not
-    // been drained yet, which is a real dropped release, not a harmless
-    // double-send. Draining always happens between physical teardowns in
-    // real operation (main.cpp drains take_event() completely every pass),
-    // so this per-call guard is all "collapse this device's own interfaces"
-    // ever needed.
+    // Collapse this device's interfaces into at most one Detached per role
+    // slot. The guard is local to this one call, not persistent registry
+    // state: a PERSISTENT "already pending" guard was tried first and was
+    // wrong - it also suppressed a DIFFERENT, later device's own genuine
+    // Detached for the same role slot if an earlier one had not been drained
+    // yet, which is a real dropped release, not a harmless double-send.
+    //
+    // Two passes rather than one, because the two things this decides need
+    // different interfaces of the same device. The Detached itself is built
+    // from the FIRST role-bearing interface found for the slot (any of them
+    // carries the identity that pipeline needs), but the generation retired
+    // for the slot must be the HIGHEST of them, not the first: the Keychron
+    // receiver's auxiliary channel can only mount AFTER the mouse whose slot
+    // it shares (has_mouse_sibling requires the mouse already mounted), so it
+    // always carries the higher generation, and retiring only the mouse's
+    // would let every AuxiliaryReport the auxiliary channel had queued escape
+    // pop_event()'s stale-generation filter entirely. That is harmless today
+    // only because pipeline.cpp's on_auxiliary_report gates on state the
+    // Detached ahead of it already cleared - the "coincidentally harmless"
+    // argument this file refuses to rely on for the keyboard case, and it
+    // must not rely on it here either.
     bool queued_slot[2] = {false, false};
+    PendingEvent pending_slot[2] = {};
+    std::uint32_t highest_generation[2] = {0, 0};
+    Interface* slot_interface[2] = {nullptr, nullptr};
     for (Interface& interface : interfaces_) {
-        if (!interface.mounted || interface.dev_addr != dev_addr) {
+        if (!interface.mounted || interface.dev_addr != dev_addr ||
+            interface.role == LogicalRole::Ignored) {
             continue;
         }
-        if (interface.role != LogicalRole::Ignored) {
-            const std::size_t slot = detach_slot(interface.role);
-            if (!queued_slot[slot]) {
-                queued_slot[slot] = true;
-                PendingEvent pending{};
-                pending.present = true;
-                pending.event.kind = input::SourceEventKind::Detached;
-                pending.event.source_id = interface.dev_addr;
-                pending.identity = interface.identity;
-                pending.generation = interface.generation;
-                if (push_detach(pending)) {
-                    if (interface.generation > retired_generation_[slot]) {
-                        retired_generation_[slot] = interface.generation;
-                    }
-                } else {
-                    // Only reachable by withholding take_event() drains
-                    // across many separate process_pending() passes - see
-                    // kDetachQueueCapacity. Counted, not silently lost, the
-                    // same standard this file already applies to every other
-                    // overflow path.
-                    ++detach_overflows_;
-                }
-            }
+        const std::size_t slot = detach_slot(interface.role);
+        if (!queued_slot[slot]) {
+            queued_slot[slot] = true;
+            pending_slot[slot].event.kind = input::SourceEventKind::Detached;
+            pending_slot[slot].event.source_id = interface.dev_addr;
+            pending_slot[slot].identity = interface.identity;
+            slot_interface[slot] = &interface;
         }
-        // Stop accepting reports and free layout/held state together:
-        // clearing mounted here is what makes find_mutable() refuse any
-        // report already in the callback queue for this interface once
-        // process() reaches it, and the interface's own generation is
-        // retired above before this line ever runs.
-        interface = {};
+        if (interface.generation > highest_generation[slot]) {
+            highest_generation[slot] = interface.generation;
+        }
+    }
+    for (std::size_t slot = 0; slot < 2; ++slot) {
+        if (!queued_slot[slot]) {
+            continue;
+        }
+        pending_slot[slot].generation = highest_generation[slot];
+        if (push_detach(pending_slot[slot])) {
+            if (highest_generation[slot] > retired_generation_[slot]) {
+                retired_generation_[slot] = highest_generation[slot];
+            }
+            continue;
+        }
+        // Only reachable by withholding take_event() drains across many
+        // separate process_pending() passes - see kDetachQueueCapacity, now
+        // sized above the per-pass Detached ceiling. Counted AND escalated: a
+        // Detached that does not fit is a release-all that would otherwise
+        // never be delivered, and whatever this source was holding would stay
+        // held for ever. Every other overflow path in this file escalates to
+        // latch_fault() for exactly that reason, and the central constraint -
+        // a dropped release is a release-all fault, not a recoverable report
+        // loss - leaves this one no exemption. The Fault goes to event_queue_,
+        // which reserves kFaultReservedSlots for precisely this, and carries
+        // the same identity the lost Detached would have, so it reaches the
+        // same pipeline and runs the same release_all.
+        ++detach_overflows_;
+        latch_fault(*slot_interface[slot]);
+    }
+    // Stop accepting reports and free layout/held state together: clearing
+    // mounted here is what makes find_mutable() refuse any report already in
+    // the callback queue for this interface once process() reaches it, and
+    // every generation this device carried is retired above before this line
+    // ever runs.
+    for (Interface& interface : interfaces_) {
+        if (interface.mounted && interface.dev_addr == dev_addr) {
+            interface = {};
+        }
     }
 }
 
@@ -409,7 +479,10 @@ bool DeviceRegistry::push_event(const Interface& interface, input::SourceEventKi
     //
     // The seventeen slots this leaves ordinary traffic are still far more
     // than a genuine pass can use - about thirteen at worst; the derivation
-    // is on kEventQueueCapacity in the header.
+    // is on kEventQueueCapacity in the header, where it was re-checked
+    // against this task's fix round (latch_fault() now releases the role
+    // slot, and a detach-FIFO overflow now escalates through it) - neither
+    // raises the ceiling.
     const std::size_t capacity = kind == input::SourceEventKind::Fault
                                      ? kEventQueueCapacity
                                      : kEventQueueCapacity - kFaultReservedSlots;
@@ -418,7 +491,6 @@ bool DeviceRegistry::push_event(const Interface& interface, input::SourceEventKi
     }
     const std::size_t index = (event_head_ + event_count_) % kEventQueueCapacity;
     PendingEvent& slot = event_queue_[index];
-    slot.present = true;
     slot.event = input::SourceEvent{};
     slot.event.kind = kind;
     slot.event.source_id = interface.dev_addr;
@@ -500,7 +572,7 @@ bool DeviceRegistry::pop_event(input::SourceEvent& event, input::SourceIdentity&
     return false;
 }
 
-void DeviceRegistry::process(const CallbackRecord& record) {
+void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us) {
     if (record.kind == CallbackKind::DeviceMount) {
         ensure_device(record.dev_addr, record.vendor_id, record.product_id);
         return;
@@ -516,7 +588,7 @@ void DeviceRegistry::process(const CallbackRecord& record) {
         Interface* interface = find_mutable(record.dev_addr, record.instance);
         if (interface != nullptr) {
             ++duplicate_mounts_;
-            arm_if_needed(*interface);
+            arm_if_needed(*interface, now_us);
             return;
         }
         for (Interface& candidate : interfaces_) {
@@ -611,7 +683,7 @@ void DeviceRegistry::process(const CallbackRecord& record) {
                 return;
             }
         }
-        arm_if_needed(*interface);
+        arm_if_needed(*interface, now_us);
         return;
     }
 
@@ -628,7 +700,7 @@ void DeviceRegistry::process(const CallbackRecord& record) {
         // stall the bus behind an un-drained endpoint - never turned into an
         // event, because nothing above this line would know which owner's
         // stream it belonged to.
-        arm_if_needed(*interface);
+        arm_if_needed(*interface, now_us);
         return;
     }
     if (record.size == 0) {
@@ -652,7 +724,7 @@ void DeviceRegistry::process(const CallbackRecord& record) {
             return;
         }
         ++interface->arm_retry_count;
-        arm_if_needed(*interface);
+        arm_if_needed(*interface, now_us);
         return;
     }
     // Forward progress: whatever run of arm refusals or stall signals came
@@ -673,7 +745,7 @@ void DeviceRegistry::process(const CallbackRecord& record) {
             latch_fault(*interface);
             return;
         }
-        arm_if_needed(*interface);
+        arm_if_needed(*interface, now_us);
         return;
     }
     if (!push_event(*interface, input::SourceEventKind::Report, record.instance,
@@ -687,13 +759,13 @@ void DeviceRegistry::process(const CallbackRecord& record) {
         latch_fault(*interface);
         return;
     }
-    arm_if_needed(*interface);
+    arm_if_needed(*interface, now_us);
 }
 
-void DeviceRegistry::process_pending() {
+void DeviceRegistry::process_pending(std::uint32_t now_us) {
     CallbackRecord record;
     while (pop(record)) {
-        process(record);
+        process(record, now_us);
     }
 }
 

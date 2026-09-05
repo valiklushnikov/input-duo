@@ -25,11 +25,16 @@
 //
 // The callback-facing registry is fixed-capacity. It assigns boot-protocol
 // roles, owns one receive at a time per mounted HID interface, and surfaces
-// Ready, Report and host/capture faults through take_event() in the shape
-// Ch375SourceAdapter::convert() already produces from CH375's side. Recovery
-// after a detach, a stall or a reconnect - bounded retry, generation
-// counters, ordered teardown across a whole hub - is Task 10's job, not this
-// file's.
+// Ready, Report, Detached and host/capture faults through take_event() in the
+// shape Ch375SourceAdapter::convert() already produces from CH375's side.
+//
+// Recovery after a detach, a stall or a reconnect lives in that registry -
+// bounded retry with backoff, generation counters, ordered teardown across a
+// whole hub - but this file DRIVES it: task() hands the registry the pass's
+// own clock reading and calls retry_pending_arms() every pass, right after
+// process_pending(), so a backoff armed in one pass is retried in a later one
+// without anything blocking in between. Nothing here decides what recovery
+// means; it decides when the registry gets a chance to do it.
 
 #include <atomic>
 #include <cstdint>
