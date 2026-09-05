@@ -16,9 +16,30 @@ constexpr std::uint8_t kMouse = static_cast<std::uint8_t>(hid::U1Interface::Mous
 }  // namespace
 
 void UsbService::begin() {
-    // The RP2040 has exactly one device root-hub port, and tusb_init picks it
-    // from CFG_TUSB_RHPORT0_MODE rather than making every caller name it.
-    tusb_init();
+    // Port 0, named explicitly, and the DEVICE stack only.
+    //
+    // The argument-less tusb_init() is not device-only on every build. In the
+    // pinned TinyUSB the PIO USB image uses (.deps/tinyusb, 0.18.x) it expands
+    // to tusb_rhport_init(0, NULL), and that NULL branch (src/tusb.c:61-86)
+    // brings up BOTH stacks - tud_rhport_init(TUD_OPT_RHPORT) and
+    // tuh_rhport_init(TUH_OPT_RHPORT), which is RHPort 1 whenever
+    // tusb_config.h defines CFG_TUSB_RHPORT1_MODE. That started the
+    // Pico-PIO-USB host here, on Core 0, at the default 125 MHz, before
+    // tuh_configure() had ever been called; Core 1's own tuh_init(1) then
+    // returned true without doing anything (usbh.c:364-367 short-circuits on
+    // an already-active rhport), so the SOF interrupt lived on the wrong core
+    // and every PIO divider was computed against a clock Core 1 was about to
+    // change. Naming the port and the role is what keeps the host stack
+    // entirely Core 1's - see pio_usb/backend.hpp.
+    //
+    // tud_init(rhport) is the device-only entry point in both trees this
+    // repository builds against: a real function in the CH375 image's TinyUSB
+    // 0.17 (device/usbd.h:41), where tusb_init() was already nothing but
+    // tud_init(TUD_OPT_RHPORT), and an always-inline wrapper over
+    // tud_rhport_init(rhport, {DEVICE, FULL}) in 0.18 (device/usbd.h:47-53).
+    // TUD_OPT_RHPORT is 0 in both, because CFG_TUSB_RHPORT0_MODE carries
+    // OPT_MODE_DEVICE - so the CH375 image's behaviour is unchanged.
+    tud_init(0);
 }
 
 void UsbService::task() {

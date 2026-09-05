@@ -365,3 +365,119 @@ def test_ch375_elf_contains_no_tinyusb_host_symbols():
         "CH375 ELF contains a TinyUSB host symbol - the two backends' "
         "sources are no longer isolated from each other"
     )
+
+
+# --------------------------------- the device stack must not start the host
+
+#: Every symbol whose reachability from ``UsbService::begin()`` would mean the
+#: device-stack bring-up has started the host stack again.
+#:
+#: ``tusb_rhport_init`` is the argument-less ``tusb_init()``'s only expansion
+#: (``.deps/tinyusb/src/tusb.h:142`` -> ``tusb_rhport_init(0, NULL)``), and its
+#: ``rh_init == NULL`` branch (``src/tusb.c:61-86``) calls BOTH
+#: ``tud_rhport_init`` and ``tuh_rhport_init``. ``tuh_rhport_init`` is the host
+#: bring-up itself. Either one reachable from Core 0's ``usb.begin()`` puts the
+#: Pico-PIO-USB host on the wrong core, at the wrong clock, before
+#: ``tuh_configure()`` - which is what made this board enumerate nothing.
+FORBIDDEN_FROM_USB_SERVICE_BEGIN = ("tusb_rhport_init", "tuh_rhport_init")
+
+#: What ``UsbService::begin()`` must still reach. Without this the two
+#: assertions above would also pass on a ``begin()`` that had been emptied out,
+#: which is the failure mode this whole file exists to refuse: the source-order
+#: assertion in ``test_failed_host_initialization_is_recorded_...`` above passed
+#: for weeks with the board completely dead.
+REQUIRED_FROM_USB_SERVICE_BEGIN = "tud_rhport_init"
+
+#: Instructions that transfer control to a named symbol. Restricted to real
+#: branch mnemonics rather than every ``<symbol>`` on a line: a literal pool
+#: printed with a symbolic comment is data, not an edge, and admitting it would
+#: make a "does not reach" assertion depend on the linker's constant placement.
+_BRANCH_TO_SYMBOL = re.compile(
+    r"\b(?:bl|blx|bx|b|b\.n|b\.w|bl\.w|beq|bne|bcc|bcs|bmi|bpl|bhi|bls|bge|blt|bgt|ble)"
+    r"(?:\.[nw])?\s+(?:0x)?[0-9a-fA-F]+\s+<(?P<symbol>[^>+]+)(?:\+0x[0-9a-fA-F]+)?>"
+)
+
+
+def _function_bodies(disassembly: str) -> dict[str, str]:
+    """Every function in the image, by the name objdump printed for it."""
+    bodies: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in disassembly.splitlines():
+        header = re.match(r"^[0-9a-fA-F]+ <(?P<name>.*)>:$", line)
+        if header:
+            current = bodies.setdefault(header.group("name"), [])
+            continue
+        if current is not None:
+            current.append(line)
+    return {name: "\n".join(lines) for name, lines in bodies.items()}
+
+
+def _directly_reachable(bodies: dict[str, str], root: str) -> set[str]:
+    """Every symbol reachable from ``root`` by direct branches.
+
+    Direct branches only. A call through a function pointer - TinyUSB's class
+    driver tables, for one - is not followed, so this under-approximates what
+    the image can do and therefore cannot manufacture a violation that is not
+    there. It is exactly the right instrument for this defect regardless: the
+    call it must never find is a plain ``bl``, emitted by the compiler from a
+    macro expansion in this repository's own source.
+    """
+    assert root in bodies, f"ELF disassembly has no {root}"
+    seen: set[str] = set()
+    pending = [root]
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        for match in _BRANCH_TO_SYMBOL.finditer(bodies.get(name, "")):
+            target = match.group("symbol")
+            if target not in seen:
+                pending.append(target)
+    seen.discard(root)
+    return seen
+
+
+@pio_usb_elf_required
+def test_pio_usb_elf_never_reaches_the_host_stack_from_usb_service_begin():
+    bodies = _function_bodies(_disassembly(_pio_usb_build_dir(), _pio_elf))
+    reachable = _directly_reachable(bodies, "duo_input::u1::UsbService::begin()")
+
+    for forbidden in FORBIDDEN_FROM_USB_SERVICE_BEGIN:
+        assert forbidden not in reachable, (
+            f"UsbService::begin() reaches {forbidden} in the linked PIO USB "
+            "image. Core 0 is starting the Pico-PIO-USB host stack again - "
+            "before tuh_configure(), before Core 1's set_sys_clock_khz(120000) "
+            "- and Core 1's own tuh_init(1) will silently no-op and still "
+            "report success. Bring up the device stack by naming the port and "
+            "the role (tud_init(0)), never with the argument-less tusb_init()."
+        )
+
+    assert REQUIRED_FROM_USB_SERVICE_BEGIN in reachable, (
+        f"UsbService::begin() no longer reaches {REQUIRED_FROM_USB_SERVICE_BEGIN} "
+        "in the linked PIO USB image - the device stack is not being brought "
+        "up at all, which passes the assertions above for the wrong reason"
+    )
+
+
+@ch375_elf_required
+def test_ch375_elf_still_brings_the_device_stack_up_from_usb_service_begin():
+    """The one-line fix must not have changed the CH375 image's behaviour.
+
+    The CH375 build resolves its Pico SDK from the environment and therefore
+    links that SDK's bundled TinyUSB 0.17, where ``tusb_init(void)`` was a real
+    function whose whole body is ``tud_init(TUD_OPT_RHPORT)`` (CFG_TUH_ENABLED
+    is 0 there, so the host half is not compiled at all). ``tud_init`` is a
+    real function in that tree, so ``begin()`` reaches it by name rather than
+    inlined - either spelling is fine, and what has to hold is that the device
+    stack is still started and no host symbol appears.
+    """
+    bodies = _function_bodies(_disassembly(_ch375_build_dir(), _ch375_elf))
+    reachable = _directly_reachable(bodies, "duo_input::u1::UsbService::begin()")
+
+    assert any(name in reachable for name in ("tud_init", "tud_rhport_init")), (
+        "CH375 UsbService::begin() no longer starts the device stack"
+    )
+    assert not any("tuh_" in name for name in reachable), (
+        "CH375 UsbService::begin() reaches a TinyUSB host symbol"
+    )
