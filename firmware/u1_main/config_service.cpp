@@ -476,6 +476,20 @@ std::size_t ConfigService::write_host_observation(std::uint8_t* out) const {
     at += 2;
     put_u32(out + at, host_observation_.core1_passes);
     at += 4;
+    put_u16(out + at, host_observation_.mount_events);
+    at += 2;
+    put_u16(out + at, host_observation_.umount_events);
+    at += 2;
+    put_u16(out + at, host_observation_.hid_mount_events);
+    at += 2;
+    out[at++] = host_observation_.ep_slots_opened;
+    out[at++] = host_observation_.ep_max_failed_count;
+    put_u32(out + at, host_observation_.max_pass_gap_us);
+    at += 4;
+    put_u16(out + at, host_observation_.max_sof_gap);
+    at += 2;
+    put_u16(out + at, host_observation_.root_port_resets);
+    at += 2;
     return at;
 }
 

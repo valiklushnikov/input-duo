@@ -103,7 +103,9 @@ each self-delimiting so the one behind it can always be found:
   sends a count of zero rather than twelve zeros a reader would take for measurements.
 - the **host block** - `field_bytes:u8`, then that many bytes:
   `init_flags:u8, clk_hz_at_begin:u32, clk_hz_now:u32, sof_frame_count:u32, root_port_state:u8,
-  root_port_connects:u16, core1_passes:u32`. Its length byte plays the same role the backend
+  root_port_connects:u16, core1_passes:u32, mount_events:u16, umount_events:u16,
+  hid_mount_events:u16, ep_slots_opened:u8, ep_max_failed_count:u8, max_pass_gap_us:u32,
+  max_sof_gap:u16, root_port_resets:u16`. Its length byte plays the same role the backend
   block's count does: an image with no host stack sends zero, which is a different fact from an
   older firmware that sends no block at all.
 
@@ -112,15 +114,11 @@ each self-delimiting so the one behind it can always be found:
   both) meaningless as evidence - they report success for calls that did nothing. **Bit 0 is the
   only field that separates a host started on the wrong core from a healthy one.**
 
-  `clk_hz_at_begin` is `clk_sys` as the input core found it, **before** it raised the clock, and
-  it is **not** the clock the PIO dividers were computed from. The host comes up after that
-  change, so a healthy board reports the RP2040's 125 MHz default here while its dividers are
-  built at 120 MHz: **the two differing is what health looks like.** A board with the host
-  started on the wrong core reports the same two numbers - the host came up before the input core
-  ran at all - so nothing may read a difference between them as a fault. `clk_hz_now` is the
-  divider clock whenever bit 0 is clear, because the dividers are computed once and the input
-  core brings the host up after its own clock change; with bit 0 set the host came up on a clock
-  this reply never saw, and no clock reading here says anything about the dividers.
+  `clk_hz_at_begin` keeps its historical wire name but now means `clk_sys` when Core 1 began.
+  The PIO build selects and settles 120 MHz as the first work in `main()`, before peripherals or
+  Core 1, so a current healthy image reports 120 MHz here and in `clk_hz_now`. Older valid images
+  report 125/120; readers must not turn that version-dependent pair into a fault verdict.
+  `clk_hz_now` is the divider clock whenever bit 0 is clear.
 
   `root_port_state` packs `initialized`, `connected`, `suspended` and `is_fullspeed` as bits 0-3.
   `sof_frame_count` is raw root-port activity below the host stack: zero and static means the bus
@@ -130,6 +128,13 @@ each self-delimiting so the one behind it can always be found:
   input-core pass, and an attach and detach that both fall between two passes leaves no trace -
   zero is strong evidence that nothing attached rather than proof of it. `core1_passes` unchanged
   across two reads twenty seconds apart means the input core stopped.
+
+  `mount_events`, `umount_events`, and `hid_mount_events` are saturating callback counts. The
+  endpoint fields are high-water readings from Pico-PIO-USB's fixed endpoint pool: a nonzero
+  `ep_slots_opened` proves endpoint open ran, and `ep_max_failed_count == 3` means the pinned
+  host exhausted its transaction retry limit. `max_pass_gap_us` measures blocking between input
+  passes; `max_sof_gap > 2` shows the SOF ISR was starved. `root_port_resets` is a saturating,
+  polled lower bound over connected suspended-to-running cycles.
 
   `clk_hz_now`, `sof_frame_count` and `root_port_state` are sampled once per device main-loop
   pass and held until the request arrives, so a reading can be up to one pass old - far below the

@@ -402,12 +402,20 @@ def test_the_report_carries_what_the_host_stack_and_root_port_are_doing(
     emulator.input_backend = 2
     emulator.host_observation = (
         0b1111,  # host was already up before the input core: the smoking gun
-        125_000_000,
+        120_000_000,
         120_000_000,
         880_000,
         0b0001,  # root port initialised, nothing connected
         0,
         1_000_000,
+        3,
+        1,
+        2,
+        4,
+        3,
+        450_000,
+        7,
+        2,
     )
     service = DeviceService(timeout_ms=5000)
     with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
@@ -422,31 +430,36 @@ def test_the_report_carries_what_the_host_stack_and_root_port_are_doing(
     host = report["host_stack"]
 
     assert host["Host stack was already up before Core 1"] == "yes"
-    assert host["System clock before the input core changed it (Hz)"] == "125000000"
+    assert host["System clock when the input core began (Hz)"] == "120000000"
     assert host["System clock now, and the PIO divider clock (Hz)"] == "120000000"
     assert host["Root-port frames sent"] == "880000"
     assert host["Root port connected"] == "no"
     # Named as a lower bound where it is read, not only in the firmware.
     assert host["Root-port attaches seen (lower bound)"] == "0"
     assert host["Input core passes"] == "1000000"
+    assert host["Device mount callbacks"] == "3"
+    assert host["Device unmount callbacks"] == "1"
+    assert host["HID mount callbacks"] == "2"
+    assert host["Endpoint slots opened (high-water)"] == "4"
+    assert host["Endpoint transaction failures (high-water)"] == "3"
+    assert host["Longest input-core pass gap (us)"] == "450000"
+    assert host["Largest SOF-frame jump between passes"] == "7"
+    assert host["Root-port resets seen (lower bound)"] == "2"
     # No derived clock row. There was one, it called a healthy board faulty,
     # and it separated nothing - a healthy board prints these same two numbers.
     assert not any("unchanged since bring-up" in label for label in host)
 
 
 def test_the_report_never_calls_a_healthy_clock_pair_a_fault(qtbot, emulator, tmp_path):
-    """The trap this instrumentation shipped with, guarded where it is read.
+    """The current reordered image reports the settled 120 MHz twice.
 
-    The input core samples the first clock before raising it and brings the
-    host up after, so a healthy board reports 125 MHz then 120 MHz. This is the
-    report a bench operator reads, and nothing in it may present that as a
-    fault: it is what every correct board prints, and the broken board prints
-    it too.
+    These are plain readings rather than a derived verdict so older 125/120
+    images remain readable without being accused of a clock fault.
     """
     emulator.input_backend = 2
     emulator.host_observation = (
         0b1110,  # host was NOT already up: this is the healthy board
-        125_000_000,
+        120_000_000,
         120_000_000,
         41_234,
         0b1011,
@@ -465,7 +478,7 @@ def test_the_report_never_calls_a_healthy_clock_pair_a_fault(qtbot, emulator, tm
     host = json.loads(_members(archive)[DIAGNOSTICS_MEMBER])["host_stack"]
 
     assert host["Host stack was already up before Core 1"] == "no"
-    assert host["System clock before the input core changed it (Hz)"] == "125000000"
+    assert host["System clock when the input core began (Hz)"] == "120000000"
     assert host["System clock now, and the PIO divider clock (Hz)"] == "120000000"
     # Nothing in the report says these two differing is wrong, by any wording.
     for label, value in host.items():

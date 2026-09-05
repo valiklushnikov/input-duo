@@ -5,15 +5,12 @@
 // see tusb_config.h - and this never touches tud_task(), the CDC link to the
 // configurator, or anything USB-descriptor-shaped on Core 0's side.
 //
-// It is not silent on Core 0 otherwise, though: begin() raises clk_sys to
-// 120 MHz, and on this SDK (PICO_CLOCK_ADJUST_PERI_CLOCK_WITH_SYS_CLOCK is 0
-// and nothing here overrides it) that reparents clk_peri from clk_sys onto
-// PLL_USB at 48 MHz as a side effect - clk_peri is not this class's own
-// clock, it belongs to every PL022/UART/etc. peripheral on the chip, which on
-// this board means the SPI link Core 0 uses to talk to U2. See
-// SpiMaster::refresh_baudrate() and clock_settled() below: Core 0 must not
-// run a real SPI transfer until begin() has finished, or it does so at
-// whatever SCK the stale prescalers produce against the new clock.
+// main() sets clk_sys to 120 MHz before any peripheral or Core 1 starts, in
+// the same order as Pico-PIO-USB's reference host. begin() still publishes a
+// one-way readiness barrier when the host is initialized. The Core 0 link
+// keeps using that barrier and refreshes its baud once: normally harmless,
+// because SpiMaster::begin() now ran against the final clock, and still safe
+// if startup ordering changes again later.
 //
 // This class is Core 1's only door into the host stack, the same shape
 // Ch375SourceAdapter is Core 1's only door into a CH375 channel: begin()
@@ -37,6 +34,7 @@
 // means; it decides when the registry gets a chance to do it.
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 
 #include "input/source.hpp"
@@ -59,18 +57,9 @@ namespace duo_input::u1::pio_usb {
 struct HostObservability {
     /// The four kHostInit* bits below.
     std::uint8_t init_flags = 0;
-    /// clk_sys as begin() found it, BEFORE set_sys_clock_khz(120000).
-    ///
-    /// NOT the clock the PIO dividers were computed from, and nothing may read
-    /// it as one. begin() raises the clock first and brings the host up
-    /// afterwards, so on a correct image this is 125 MHz (the RP2040 default
-    /// main() never changes) while the dividers are computed at 120 MHz. The
-    /// two differing is what a healthy board looks like.
-    ///
-    /// It is also the same 125 MHz on the broken image, where the host was
-    /// already up before Core 1 ran, so the pair has no discriminating power
-    /// of its own. What it says is narrower and still worth having: Core 1
-    /// reached set_sys_clock_khz and the clock moved.
+    /// clk_sys as begin() found it. main() has already selected and settled
+    /// the 120 MHz reference clock, so a correct image reads 120 MHz here.
+    /// The wire field keeps its historical name for append-only compatibility.
     std::uint32_t clk_hz_at_begin = 0;
     /// clk_sys on Core 0, sampled once per main-loop pass.
     ///
@@ -108,7 +97,33 @@ struct HostObservability {
     /// stopped is this counter unchanged across two reads twenty seconds
     /// apart, so it must be readable that way and must not saturate low.
     std::uint32_t core1_passes = 0;
+    /// Application device-mount callbacks since boot, regardless of whether a
+    /// callback registry was available to accept the metadata.
+    std::uint16_t mount_events = 0;
+    std::uint16_t umount_events = 0;
+    std::uint16_t hid_mount_events = 0;
+    /// Largest number of non-empty Pico-PIO-USB endpoint slots seen in a pass.
+    std::uint8_t ep_slots_opened = 0;
+    /// Largest endpoint failed_count seen in the pool.
+    std::uint8_t ep_max_failed_count = 0;
+    /// Largest unsigned interval between consecutive task() timestamps.
+    std::uint32_t max_pass_gap_us = 0;
+    /// Largest SOF-frame-number jump between consecutive task() passes.
+    std::uint16_t max_sof_gap = 0;
+    /// Completed connected suspended->running cycles observed by polling.
+    std::uint16_t root_port_resets = 0;
 };
+
+struct HostCallbackObservability {
+    std::uint16_t mount_events = 0;
+    std::uint16_t umount_events = 0;
+    std::uint16_t hid_mount_events = 0;
+};
+
+/// Fixed-width callback counters. The reset happens once, before host init;
+/// the accessor is read-only and used by Core 0's diagnostics snapshot.
+void reset_host_callback_observability() noexcept;
+HostCallbackObservability host_callback_observability() noexcept;
 
 /// tuh_rhport_is_active(1) as begin() found it, before it changed anything.
 ///
@@ -135,7 +150,7 @@ inline constexpr std::uint8_t kRootPortSuspended = 1u << 2;
 /// PIO_USB_ROOT_PORT(0)->is_fullspeed.
 inline constexpr std::uint8_t kRootPortFullSpeed = 1u << 3;
 
-/// One-way Core 1 -> Core 0 publication for the shared clock change.
+/// One-way Core 1 -> Core 0 publication for host readiness on the settled clock.
 class ClockChangeBarrier {
 public:
     void publish_settled() noexcept {
@@ -174,22 +189,21 @@ class PioUsbBackend {
 public:
     /// Bring the host stack up. Call once, from Core 1, before task().
     ///
-    /// Sets the RP2040 system clock to 120 MHz - Pico-PIO-USB's bit timing
-    /// requires it, and TinyUSB's device side on RHPort 0 does not care,
-    /// since it runs off the chip's dedicated USB PLL rather than clk_sys -
-    /// then configures Pico-PIO-USB's D+ pin as GP0 (D- is the adjacent GP1;
-    /// Pico-PIO-USB derives it from D+ itself) and calls tuh_init on RHPort
-    /// 1. clock_settled() reads true once this returns; nothing else about
-    /// this class touches Core 0, but the clock change itself does - see the
-    /// file comment above.
+    /// Waits the reference sequence's second 10 ms settling interval, then
+    /// configures Pico-PIO-USB's D+ pin as GP0 (D- is adjacent GP1) and calls
+    /// tuh_init on RHPort 1. main() has already selected and settled 120 MHz
+    /// before any peripheral started. clock_settled() reads true once this
+    /// host bring-up returns.
     void begin();
 
-    /// Whether begin() has finished changing the shared system clock.
+    /// Whether begin() has finished bringing the host up on the settled clock.
     ///
     /// Core 0 must not run a real transfer over the SPI link to U2 before
     /// this is true; see the file comment above and
-    /// SpiMaster::refresh_baudrate(). The acquire pairs with begin()'s
-    /// release publication, so observing true happens after the clock change.
+    /// SpiMaster::refresh_baudrate(). The refresh is normally a no-op now that
+    /// SpiMaster::begin() sees the final clock; retaining it and the gate keeps
+    /// future startup-order changes safe. The acquire pairs with begin()'s
+    /// release publication.
     bool clock_settled() const;
 
     /// Service the host stack for one pass. Called every time round Core 1's
@@ -232,9 +246,10 @@ public:
     /// still answer when Core 1 has stopped - which is precisely the case they
     /// exist to tell apart.
     ///
-    /// Bounded, non-allocating and non-blocking: four volatile reads and a
-    /// register read. It takes no lock, so a root-port flag can change under
-    /// it; nothing here is a decision, only a reading.
+    /// Bounded, non-allocating and non-blocking: four volatile root-port reads,
+    /// one clock/frame register read apiece, and three relaxed atomic counter
+    /// loads. It takes no lock, so a root-port flag can change under it;
+    /// nothing here is a decision, only a reading.
     HostObservability observe() const;
 
 private:
@@ -253,6 +268,17 @@ private:
     // ever reads the counter.
     std::uint16_t root_port_connects_ = 0;
     bool root_port_was_connected_ = false;
+    std::uint16_t root_port_resets_ = 0;
+    bool root_port_reset_in_progress_ = false;
+
+    std::uint8_t ep_slots_opened_ = 0;
+    std::uint8_t ep_max_failed_count_ = 0;
+    std::uint32_t max_pass_gap_us_ = 0;
+    std::uint32_t previous_pass_us_ = 0;
+    bool have_previous_pass_ = false;
+    std::uint16_t max_sof_gap_ = 0;
+    std::uint32_t previous_sof_frame_ = 0;
+    bool have_previous_sof_frame_ = false;
 
     // Incremented once per task() call, and task() is called exactly once per
     // pass of core1_entry's loop, unconditionally - ahead of the host_ready_

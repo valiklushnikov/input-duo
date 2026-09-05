@@ -20,6 +20,9 @@
 #include <cstdio>
 #include <cstring>
 
+#ifdef DUO_INPUT_BACKEND_PIO_USB
+#include "hardware/clocks.h"
+#endif
 #include "hardware/watchdog.h"
 
 #include "buttons.hpp"
@@ -197,6 +200,14 @@ duo_input::u1::HostObservation describe_host_observation(
     out.root_port_state = observed.root_port_state;
     out.root_port_connects = observed.root_port_connects;
     out.core1_passes = observed.core1_passes;
+    out.mount_events = observed.mount_events;
+    out.umount_events = observed.umount_events;
+    out.hid_mount_events = observed.hid_mount_events;
+    out.ep_slots_opened = observed.ep_slots_opened;
+    out.ep_max_failed_count = observed.ep_max_failed_count;
+    out.max_pass_gap_us = observed.max_pass_gap_us;
+    out.max_sof_gap = observed.max_sof_gap;
+    out.root_port_resets = observed.root_port_resets;
     return out;
 }
 #endif  // DUO_INPUT_BACKEND_CH375
@@ -1059,6 +1070,15 @@ namespace {
 #endif
 
 int main() {
+#ifdef DUO_INPUT_BACKEND_PIO_USB
+    // Pico-PIO-USB's reference host changes clk_sys before it starts any
+    // peripheral or the second core, then gives the PLL ten milliseconds to
+    // settle. Keep CH375 on its established startup path: it neither needs nor
+    // expects the 120 MHz PIO bit-engine clock.
+    set_sys_clock_khz(120000, true);
+    sleep_ms(10);
+#endif
+
     configure_indicator();
     configure_button(kPinSw1);
     configure_button(kPinSw2);
@@ -1227,9 +1247,11 @@ int main() {
 
 #ifdef DUO_INPUT_BACKEND_PIO_USB
     // Every run-time call which can touch SPI goes through this one gate.
-    // Before Core 1 publishes the completed clock change the action is simply
-    // skipped; on the first published pass the old prescalers are recomputed
-    // before the action. No Core 0 service waits here.
+    // The clock is already final before link.begin(), so the first baud
+    // refresh is normally a no-op. Keep the gate as a safety contract: no
+    // transfer runs until Core 1 has finished host bring-up and published it,
+    // and a future early link initialization still gets its baud restored.
+    // No Core 0 service waits here.
     duo_input::u1::pio_usb::LinkStartupGate link_startup;
     const auto with_link = [&](auto&& action) {
         return link_startup.run_if_ready(

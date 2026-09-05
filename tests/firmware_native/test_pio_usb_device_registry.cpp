@@ -506,7 +506,7 @@ TEST_CASE(backend_reports_failed_host_initialization_without_servicing_a_dead_ho
         CHECK_EQ(identity.kind, DeviceKind::Mouse);
         CHECK_FALSE(backend.take_event(event, identity));
         CHECK(backend.clock_settled());
-        CHECK_EQ(duo::test::tinyusb_host::system_clock_khz(), 120000u);
+        CHECK_EQ(duo::test::tinyusb_host::system_clock_khz(), 0u);
         CHECK_EQ(duo::test::tinyusb_host::configured_pin_dp(), 0u);
 
         backend.task(100u);
@@ -518,14 +518,14 @@ TEST_CASE(backend_reports_failed_host_initialization_without_servicing_a_dead_ho
 
 // The reading that was missing when the board enumerated nothing.
 //
-// begin() must sample tuh_rhport_is_active BEFORE it changes the clock or
-// calls anything, because that flag is the only thing that distinguishes a
+// begin() must sample tuh_rhport_is_active BEFORE it calls anything, because
+// that flag is the only thing that distinguishes a
 // host this backend started from one something else started first - after
 // which tuh_configure and tuh_init are no-ops that still return true, which is
 // exactly what they did.
 TEST_CASE(begin_reports_a_host_that_was_already_active_before_core1_reached_it) {
     duo::test::tinyusb_host::reset();
-    duo::test::tinyusb_host::set_system_clock_hz(125000000u);
+    duo::test::tinyusb_host::set_system_clock_hz(120000000u);
     duo::test::tinyusb_host::set_host_already_active(true);
     duo::test::tinyusb_host::set_host_inited(true);
     PioUsbBackend backend;
@@ -539,10 +539,9 @@ TEST_CASE(begin_reports_a_host_that_was_already_active_before_core1_reached_it) 
     CHECK((observed.init_flags & duo_input::u1::pio_usb::kHostInitConfigured) != 0);
     CHECK((observed.init_flags & duo_input::u1::pio_usb::kHostInitInitialized) != 0);
     CHECK((observed.init_flags & duo_input::u1::pio_usb::kHostInitInited) != 0);
-    // Captured before set_sys_clock_khz, not after: a divider computed at
-    // 125 MHz driving a 120 MHz bus is a 4% bit-rate error, and this pair of
-    // numbers is what proves it without a scope.
-    CHECK_EQ(observed.clk_hz_at_begin, 125000000u);
+    // The clock pair is already final on both cores. Bit 0 remains the
+    // discriminator for a host somebody started before this backend.
+    CHECK_EQ(observed.clk_hz_at_begin, 120000000u);
     CHECK_EQ(observed.clk_hz_now, 120000000u);
 }
 
@@ -556,7 +555,7 @@ TEST_CASE(begin_reports_a_host_that_was_already_active_before_core1_reached_it) 
 // there.
 TEST_CASE(begin_reports_no_already_active_host_on_a_correct_image) {
     duo::test::tinyusb_host::reset();
-    duo::test::tinyusb_host::set_system_clock_hz(125000000u);
+    duo::test::tinyusb_host::set_system_clock_hz(120000000u);
     duo::test::tinyusb_host::set_host_already_active(false);
     duo::test::tinyusb_host::set_host_inited(true);
     PioUsbBackend backend;
@@ -574,26 +573,19 @@ TEST_CASE(begin_reports_no_already_active_host_on_a_correct_image) {
 // Why clk_hz_now is the divider clock, guarded rather than asserted.
 //
 // Pico-PIO-USB computes every PIO divider from clock_get_hz(clk_sys) inside
-// pio_usb_host_init and never recomputes one. begin() raises the clock first
-// and brings the host up afterwards, so on a correct image the dividers are
-// computed from the clock the reply reports as clk_hz_now - which is what lets
-// the diagnostics say anything about divider/bus agreement at all.
-//
-// Reverse those two and the image is back to the defect this task fixed, with
-// dividers built for a clock that no longer exists. The reply cannot see the
-// ordering; this test can.
-TEST_CASE(the_host_stack_is_brought_up_after_the_system_clock_is_raised) {
+// pio_usb_host_init and never recomputes one. main() has already selected the
+// final clock before this fixture reaches begin(), so the begin and configure
+// readings must agree.
+TEST_CASE(the_host_stack_is_brought_up_on_the_clock_main_already_selected) {
     duo::test::tinyusb_host::reset();
-    duo::test::tinyusb_host::set_system_clock_hz(125000000u);
+    duo::test::tinyusb_host::set_system_clock_hz(120000000u);
     PioUsbBackend backend;
 
     backend.begin();
 
     CHECK_EQ(duo::test::tinyusb_host::clock_hz_at_configure(), 120000000u);
     CHECK_EQ(backend.observe().clk_hz_now, 120000000u);
-    // And the field named for begin()'s entry really is the clock BEFORE that
-    // change - it is not the divider clock and nothing may read it as one.
-    CHECK_EQ(backend.observe().clk_hz_at_begin, 125000000u);
+    CHECK_EQ(backend.observe().clk_hz_at_begin, 120000000u);
 }
 
 TEST_CASE(a_host_that_never_initialized_reports_it_in_the_flags) {
@@ -679,6 +671,90 @@ TEST_CASE(the_sof_frame_count_is_read_live_rather_than_cached_by_a_pass) {
     // No task() call in between: the count moved without a pass, which is the
     // case this field exists to be able to report.
     CHECK_EQ(backend.observe().core1_passes, 0u);
+}
+
+TEST_CASE(host_callbacks_count_device_mount_unmount_and_hid_mount_even_without_a_registry) {
+    duo::test::tinyusb_host::reset();
+    duo_input::u1::pio_usb::reset_host_callback_observability();
+    duo_input::u1::pio_usb::set_callback_registry(nullptr);
+
+    tuh_mount_cb(7);
+    tuh_umount_cb(7);
+    tuh_hid_mount_cb(7, 0, nullptr, 0);
+
+    const auto observed = duo_input::u1::pio_usb::host_callback_observability();
+    CHECK_EQ(observed.mount_events, 1u);
+    CHECK_EQ(observed.umount_events, 1u);
+    CHECK_EQ(observed.hid_mount_events, 1u);
+}
+
+TEST_CASE(backend_observation_surfaces_saturating_callback_counts) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+    duo_input::u1::pio_usb::set_callback_registry(nullptr);
+
+    for (std::uint32_t count = 0; count < 0x10001u; ++count) {
+        tuh_mount_cb(7);
+    }
+    tuh_umount_cb(7);
+    tuh_hid_mount_cb(7, 0, nullptr, 0);
+
+    const auto observed = backend.observe();
+    CHECK_EQ(observed.mount_events, 0xFFFFu);
+    CHECK_EQ(observed.umount_events, 1u);
+    CHECK_EQ(observed.hid_mount_events, 1u);
+}
+
+TEST_CASE(endpoint_pool_and_pass_timing_high_waters_preserve_the_worst_reading) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_sof_frame_count(100u);
+    backend.task(1000u);
+    duo::test::tinyusb_host::set_endpoint(0, 8u, 3u);
+    duo::test::tinyusb_host::set_endpoint(4, 64u, 1u);
+    duo::test::tinyusb_host::set_sof_frame_count(105u);
+    backend.task(451000u);
+
+    auto observed = backend.observe();
+    CHECK_EQ(observed.ep_slots_opened, 2u);
+    CHECK_EQ(observed.ep_max_failed_count, 3u);
+    CHECK_EQ(observed.max_pass_gap_us, 450000u);
+    CHECK_EQ(observed.max_sof_gap, 5u);
+
+    duo::test::tinyusb_host::set_endpoint(0, 0u, 0u);
+    duo::test::tinyusb_host::set_endpoint(4, 0u, 0u);
+    duo::test::tinyusb_host::set_sof_frame_count(106u);
+    backend.task(452000u);
+    observed = backend.observe();
+    CHECK_EQ(observed.ep_slots_opened, 2u);
+    CHECK_EQ(observed.ep_max_failed_count, 3u);
+    CHECK_EQ(observed.max_pass_gap_us, 450000u);
+    CHECK_EQ(observed.max_sof_gap, 5u);
+}
+
+TEST_CASE(root_port_resets_count_only_connected_suspended_cycles_and_saturate) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_root_port(true, false, true, true);
+    backend.task(1000u);
+    duo::test::tinyusb_host::set_root_port(true, true, true, true);
+    backend.task(2000u);
+    duo::test::tinyusb_host::set_root_port(true, true, false, true);
+    backend.task(3000u);
+    CHECK_EQ(backend.observe().root_port_resets, 1u);
+
+    backend.task(4000u);
+    CHECK_EQ(backend.observe().root_port_resets, 1u);
+    duo::test::tinyusb_host::set_root_port(true, true, true, true);
+    backend.task(5000u);
+    duo::test::tinyusb_host::set_root_port(true, true, false, true);
+    backend.task(6000u);
+    CHECK_EQ(backend.observe().root_port_resets, 2u);
 }
 
 TEST_CASE(mount_processing_stores_vid_pid_protocol_descriptor_hash_and_neutral_layout) {

@@ -209,7 +209,7 @@ _HOST_STACK_ROWS = (
     ("host_configured", "Host configure succeeded"),
     ("host_initialized", "Host init succeeded"),
     ("host_inited", "Host stack reports itself initialised"),
-    ("clock_hz_before_core1_change", "System clock before the input core changed it (Hz)"),
+    ("clock_hz_before_core1_change", "System clock when the input core began (Hz)"),
     # The divider clock, whenever the row above it reads no. Labelled for what
     # it is rather than for what it proves, because what it proves depends on
     # that row: with the host stack already up, the dividers were computed
@@ -222,6 +222,14 @@ _HOST_STACK_ROWS = (
     ("root_port_fullspeed", "Root port at full speed"),
     ("root_port_connects", "Root-port attaches seen (lower bound)"),
     ("core1_passes", "Input core passes"),
+    ("mount_events", "Device mount callbacks"),
+    ("umount_events", "Device unmount callbacks"),
+    ("hid_mount_events", "HID mount callbacks"),
+    ("ep_slots_opened", "Endpoint slots opened (high-water)"),
+    ("ep_max_failed_count", "Endpoint transaction failures (high-water)"),
+    ("max_pass_gap_us", "Longest input-core pass gap (us)"),
+    ("max_sof_gap", "Largest SOF-frame jump between passes"),
+    ("root_port_resets", "Root-port resets seen (lower bound)"),
 )
 
 
@@ -261,14 +269,10 @@ def _host_stack(counters: object) -> dict[str, str]:
             rows[label] = "yes" if value else "no"
         else:
             rows[label] = str(value)
-    # No derived clock row. There used to be one - "Host clock unchanged since
-    # bring-up" - and it was wrong in the worst available way: the input core
-    # samples the first clock BEFORE raising it and brings the host up AFTER,
-    # so a perfectly healthy board printed a mismatch and the row called it a
-    # fault. It also printed the same mismatch on the broken board, so it
-    # discriminated nothing while accusing everything. The two numbers are
-    # reported plainly, labelled for what they are, and the row that actually
-    # separates the two boards is "Host stack was already up before Core 1".
+    # No derived clock row. Current firmware selects 120 MHz before either
+    # peripheral or Core 1 starts, so both readings should be 120 MHz; older
+    # valid firmware reports 125/120. The plain readings preserve both facts
+    # without turning a version-dependent pair into a fault verdict.
     return rows
 
 

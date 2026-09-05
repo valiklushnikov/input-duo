@@ -308,7 +308,8 @@ _ROOT_FULLSPEED = 1 << 3
 #: The host block's fields, little-endian, behind its one-byte length:
 #: init flags, the two clock readings, the SOF count, the packed root-port
 #: state, the attach count and Core 1's pass count.
-_HOST_OBSERVATION = struct.Struct("<BIIIBHI")
+_HOST_OBSERVATION_BASE = struct.Struct("<BIIIBHI")
+_HOST_OBSERVATION_WIRE = struct.Struct("<BIIIBHIHHHBBIHH")
 
 
 @dataclass(frozen=True)
@@ -346,18 +347,14 @@ class HostObservation:
     #: The host stack reported itself initialised after those calls.
     host_inited: bool | None = None
 
-    #: The system clock U1's input core found when it started, BEFORE it raised
-    #: the clock itself. Not the clock the PIO dividers were computed from, and
-    #: nothing may report it as one: the host stack comes up after that change,
-    #: so a healthy board reads the RP2040's 125 MHz default here while its
-    #: dividers are built at 120 MHz. The two DIFFERING is what health looks
-    #: like, and a board with the defect this block was added for reads the
-    #: same 125 MHz - so this number cannot tell them apart on its own.
-    #: ``host_already_active`` is what does that.
+    #: The system clock when U1's input core began. Current PIO firmware sets
+    #: and settles 120 MHz in main() before any peripheral or Core 1 starts, so
+    #: 120 MHz here confirms the reference ordering took effect. The Python
+    #: attribute keeps the historical wire name for compatibility.
     clock_hz_before_core1_change: int | None = None
     #: The system clock now. This IS the divider clock whenever
     #: ``host_already_active`` is false, because the dividers are computed once
-    #: and the input core brings the host up after its own clock change. When
+    #: and the input core brings the host up after main()'s clock change. When
     #: ``host_already_active`` is true the host came up elsewhere, on a clock
     #: this reply never saw, and no clock reading here says anything about the
     #: dividers.
@@ -388,6 +385,14 @@ class HostObservation:
     #: seconds apart means that core stopped - which is a different fault from
     #: a silent bus and has to be told apart from one.
     core1_passes: int | None = None
+    mount_events: int | None = None
+    umount_events: int | None = None
+    hid_mount_events: int | None = None
+    ep_slots_opened: int | None = None
+    ep_max_failed_count: int | None = None
+    max_pass_gap_us: int | None = None
+    max_sof_gap: int | None = None
+    root_port_resets: int | None = None
 
 
 @dataclass(frozen=True)
@@ -850,12 +855,12 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
                 f"{len(body)} arrived"
             ),
         )
-    if declared < _HOST_OBSERVATION.size:
+    if declared < _HOST_OBSERVATION_BASE.size:
         return HostObservation(
             "unreadable",
             unreadable_reason=(
                 f"the host block declares {declared} bytes of fields, fewer "
-                f"than the {_HOST_OBSERVATION.size} this configurator reads"
+                f"than the {_HOST_OBSERVATION_BASE.size} base this configurator reads"
             ),
         )
     (
@@ -866,7 +871,25 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
         root_state,
         root_connects,
         core1_passes,
-    ) = _HOST_OBSERVATION.unpack_from(body, 0)
+    ) = _HOST_OBSERVATION_BASE.unpack_from(body, 0)
+    extension_values: list[int | None] = []
+    at = _HOST_OBSERVATION_BASE.size
+    for field in ("<H", "<H", "<H", "<B", "<B", "<I", "<H", "<H"):
+        width = struct.calcsize(field)
+        if declared == at:
+            extension_values.append(None)
+            continue
+        if declared < at + width:
+            return HostObservation(
+                "unreadable",
+                unreadable_reason=(
+                    f"the host block declares {declared} bytes of fields, which "
+                    f"cuts through a {width}-byte field beginning at byte {at}"
+                ),
+            )
+        extension_values.append(struct.unpack_from(field, body, at)[0])
+        at += width
+    extension = tuple(extension_values)
     return HostObservation(
         "reported",
         host_already_active=bool(init_flags & _HOST_ALREADY_ACTIVE),
@@ -882,6 +905,14 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
         root_port_fullspeed=bool(root_state & _ROOT_FULLSPEED),
         root_port_connects=root_connects,
         core1_passes=core1_passes,
+        mount_events=extension[0],
+        umount_events=extension[1],
+        hid_mount_events=extension[2],
+        ep_slots_opened=extension[3],
+        ep_max_failed_count=extension[4],
+        max_pass_gap_us=extension[5],
+        max_sof_gap=extension[6],
+        root_port_resets=extension[7],
     )
 
 

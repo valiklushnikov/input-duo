@@ -923,6 +923,14 @@ TEST_CASE(the_diagnostics_carry_what_the_host_stack_and_root_port_are_doing) {
     observation.root_port_state = 0x0B;  // initialized, connected, full speed
     observation.root_port_connects = 2u;
     observation.core1_passes = 987654u;
+    observation.mount_events = 3u;
+    observation.umount_events = 1u;
+    observation.hid_mount_events = 2u;
+    observation.ep_slots_opened = 4u;
+    observation.ep_max_failed_count = 3u;
+    observation.max_pass_gap_us = 450000u;
+    observation.max_sof_gap = 7u;
+    observation.root_port_resets = 2u;
     link.service.set_host_observation(observation);
 
     const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
@@ -938,6 +946,14 @@ TEST_CASE(the_diagnostics_carry_what_the_host_stack_and_root_port_are_doing) {
     CHECK_EQ(p[at + 14], 0x0Bu);
     CHECK_EQ(static_cast<std::uint16_t>(p[at + 15] | (p[at + 16] << 8)), 2u);
     CHECK_EQ(read_u32(p + at + 17), 987654u);
+    CHECK_EQ(static_cast<std::uint16_t>(p[at + 21] | (p[at + 22] << 8)), 3u);
+    CHECK_EQ(static_cast<std::uint16_t>(p[at + 23] | (p[at + 24] << 8)), 1u);
+    CHECK_EQ(static_cast<std::uint16_t>(p[at + 25] | (p[at + 26] << 8)), 2u);
+    CHECK_EQ(p[at + 27], 4u);
+    CHECK_EQ(p[at + 28], 3u);
+    CHECK_EQ(read_u32(p + at + 29), 450000u);
+    CHECK_EQ(static_cast<std::uint16_t>(p[at + 33] | (p[at + 34] << 8)), 7u);
+    CHECK_EQ(static_cast<std::uint16_t>(p[at + 35] | (p[at + 36] << 8)), 2u);
     CHECK_EQ(reply.payload.size, duo_input::u1::kDiagnosticsPayloadSize);
 }
 

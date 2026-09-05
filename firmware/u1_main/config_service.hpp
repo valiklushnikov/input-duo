@@ -201,19 +201,14 @@ struct HostObservation {
     /// the host before Core 1 reached it, which makes bits 1-3 meaningless as
     /// evidence - they report success for calls that did nothing.
     std::uint8_t init_flags = 0;
-    /// clk_sys as Core 1 found it, BEFORE it raised the clock - not the clock
-    /// the PIO dividers were computed from, and nothing may report it as one.
-    /// The host comes up after that change, so on a correct image this reads
-    /// the RP2040's 125 MHz default while the dividers are built at 120 MHz:
-    /// the two DIFFERING is what health looks like. It reads the same 125 MHz
-    /// on the broken image too, so the pair does not by itself tell them
-    /// apart - bit 0 of init_flags is what does that.
+    /// clk_sys when Core 1 began. The PIO build's main() has already selected
+    /// and settled 120 MHz before any peripheral or Core 1 starts, so a
+    /// correct reordered image reads 120 MHz here. The member's historical
+    /// name is retained because the append-only wire field cannot be renamed.
     std::uint32_t clk_hz_at_begin = 0;
     /// clk_sys on Core 0. This is the divider clock whenever bit 0 of
     /// init_flags is clear, because Pico-PIO-USB computes every divider once
-    /// and Core 1 brings the host up after its own clock change. With bit 0
-    /// set the host came up elsewhere, on a clock this reply never saw, and no
-    /// clock reading here is evidence about the dividers.
+    /// during Core 1's later host bring-up.
     std::uint32_t clk_hz_now = 0;
     /// The root port's free-running SOF count. Zero and static means the bus
     /// is not being driven at all; climbing with every counter above still at
@@ -233,10 +228,19 @@ struct HostObservation {
     /// Passes of Core 1's loop. Unchanged across two reads twenty seconds
     /// apart is this project's established proof that Core 1 stopped.
     std::uint32_t core1_passes = 0;
+    std::uint16_t mount_events = 0;
+    std::uint16_t umount_events = 0;
+    std::uint16_t hid_mount_events = 0;
+    std::uint8_t ep_slots_opened = 0;
+    std::uint8_t ep_max_failed_count = 0;
+    std::uint32_t max_pass_gap_us = 0;
+    std::uint16_t max_sof_gap = 0;
+    std::uint16_t root_port_resets = 0;
 };
 
 /// The observation's own bytes on the wire, without its leading length.
-inline constexpr std::size_t kHostObservationBytes = 1 + 4 + 4 + 4 + 1 + 2 + 4;
+inline constexpr std::size_t kHostObservationBytes =
+    1 + 4 + 4 + 4 + 1 + 2 + 4 + 2 + 2 + 2 + 1 + 1 + 4 + 2 + 2;
 
 /// The appended host block: one length byte, then that many bytes.
 ///

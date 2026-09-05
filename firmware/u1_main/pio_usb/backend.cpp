@@ -1,6 +1,7 @@
 #include "pio_usb/backend.hpp"
 
 #include "hardware/clocks.h"
+#include "pico/stdlib.h"
 #include "pio_usb.h"
 #include "tusb.h"
 
@@ -14,6 +15,7 @@
 // own and not a second copy of it that could drift. At file scope rather than
 // in an unnamed namespace: a C-linkage name cannot also have internal linkage.
 extern "C" root_port_t pio_usb_root_port[PIO_USB_ROOT_PORT_CNT];
+extern "C" endpoint_t pio_usb_ep_pool[PIO_USB_EP_POOL_CNT];
 
 namespace duo_input::u1::pio_usb {
 namespace {
@@ -33,35 +35,17 @@ void PioUsbBackend::begin() {
     if (tuh_rhport_is_active(kHostRhPort)) {
         host_init_flags_ |= kHostInitHostAlreadyActive;
     }
-    // And clk_sys as this core found it, captured before the call below moves
-    // it. NOT the clock the dividers get computed from: the host comes up at
-    // :66-68, after the change, so the divider clock is the 120 MHz that Core 0
-    // reports as clk_hz_now. On a correct image these two therefore DIFFER,
-    // and that is health rather than fault - see HostObservability's own
-    // comments, which say so at the field an operator reads.
-    //
-    // What this one is for is narrower: it says Core 1 got as far as
-    // set_sys_clock_khz and the clock moved. It cannot distinguish the broken
-    // image from the fixed one, because on the broken image the host came up
-    // on Core 0 before this core ran at all and clk_sys was still 125 MHz here
-    // too. kHostInitHostAlreadyActive is what distinguishes them.
+    // main() selected and settled 120 MHz before any peripheral or Core 1
+    // started. This reading is therefore both a proof that the reorder took
+    // effect (120 MHz, not the former 125 MHz) and the clock from which the
+    // host below computes its dividers.
     clk_hz_at_begin_ = clock_get_hz(clk_sys);
 
-    // Pico-PIO-USB bit-bangs both directions of full-speed USB out of PIO
-    // state machines clocked from clk_sys, and 120 MHz is the rate its own
-    // timing is written against. RHPort 0's device side does not move: it
-    // runs off the RP2040's dedicated 48 MHz USB PLL, which this call does
-    // not touch.
-    //
-    // clk_peri does move, though, and this class does not own it: on this
-    // SDK (PICO_CLOCK_ADJUST_PERI_CLOCK_WITH_SYS_CLOCK is 0 here, so
-    // set_sys_clock_pll takes the branch that does not keep clk_peri tied to
-    // clk_sys) this call reparents clk_peri onto PLL_USB at 48 MHz as a side
-    // effect. clock_settled() is what tells Core 0's SPI code that side
-    // effect has already happened - see backend.hpp and
-    // SpiMaster::refresh_baudrate().
-    set_sys_clock_khz(120000, true);
+    // The reference host also waits on the core that owns tuh_init. This runs
+    // once at boot, before any service loop; it is not a service-path wait.
+    sleep_ms(10);
 
+    reset_host_callback_observability();
     set_callback_registry(&registry_);
 
     pio_usb_configuration_t config = PIO_USB_DEFAULT_CONFIG;
@@ -122,6 +106,41 @@ void PioUsbBackend::task(std::uint32_t now_us) {
         ++core1_passes_;
     }
 
+    if (have_previous_pass_) {
+        const std::uint32_t gap = now_us - previous_pass_us_;
+        if (gap > max_pass_gap_us_) {
+            max_pass_gap_us_ = gap;
+        }
+    }
+    previous_pass_us_ = now_us;
+    have_previous_pass_ = true;
+
+    const std::uint32_t sof_frame = pio_usb_host_get_frame_number();
+    if (have_previous_sof_frame_) {
+        const std::uint32_t gap = sof_frame - previous_sof_frame_;
+        const std::uint16_t bounded_gap =
+            gap > 0xFFFFu ? 0xFFFFu : static_cast<std::uint16_t>(gap);
+        if (bounded_gap > max_sof_gap_) {
+            max_sof_gap_ = bounded_gap;
+        }
+    }
+    previous_sof_frame_ = sof_frame;
+    have_previous_sof_frame_ = true;
+
+    std::uint8_t slots_opened = 0;
+    for (std::size_t index = 0; index < PIO_USB_EP_POOL_CNT; ++index) {
+        const endpoint_t& endpoint = pio_usb_ep_pool[index];
+        if (endpoint.size != 0 && slots_opened != 0xFFu) {
+            ++slots_opened;
+        }
+        if (endpoint.failed_count > ep_max_failed_count_) {
+            ep_max_failed_count_ = endpoint.failed_count;
+        }
+    }
+    if (slots_opened > ep_slots_opened_) {
+        ep_slots_opened_ = slots_opened;
+    }
+
     // The attach edge. Nothing below TinyUSB reports one, so it is polled
     // here: four volatile reads a pass, no allocation and no wait. It counts
     // whether U1 ever saw the hub's D+ pull-up at all, which is a different
@@ -139,6 +158,18 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     }
     root_port_was_connected_ = connected;
 
+    const bool suspended = pio_usb_root_port[0].suspended;
+    if (!connected) {
+        root_port_reset_in_progress_ = false;
+    } else if (suspended) {
+        root_port_reset_in_progress_ = true;
+    } else if (root_port_reset_in_progress_) {
+        if (root_port_resets_ != 0xFFFFu) {
+            ++root_port_resets_;
+        }
+        root_port_reset_in_progress_ = false;
+    }
+
     if (!host_ready_) {
         return;
     }
@@ -155,6 +186,15 @@ HostObservability PioUsbBackend::observe() const {
     out.sof_frame_count = pio_usb_host_get_frame_number();
     out.root_port_connects = root_port_connects_;
     out.core1_passes = core1_passes_;
+    const HostCallbackObservability callbacks = host_callback_observability();
+    out.mount_events = callbacks.mount_events;
+    out.umount_events = callbacks.umount_events;
+    out.hid_mount_events = callbacks.hid_mount_events;
+    out.ep_slots_opened = ep_slots_opened_;
+    out.ep_max_failed_count = ep_max_failed_count_;
+    out.max_pass_gap_us = max_pass_gap_us_;
+    out.max_sof_gap = max_sof_gap_;
+    out.root_port_resets = root_port_resets_;
 
     const root_port_t& root = pio_usb_root_port[0];
     std::uint8_t state = 0;

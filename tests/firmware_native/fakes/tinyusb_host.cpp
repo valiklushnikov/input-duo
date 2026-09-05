@@ -60,6 +60,8 @@ std::uint32_t sof_frames = 0;
 // exactly the declaration the firmware build links.
 extern "C" root_port_t pio_usb_root_port[PIO_USB_ROOT_PORT_CNT];
 root_port_t pio_usb_root_port[PIO_USB_ROOT_PORT_CNT]{};
+extern "C" endpoint_t pio_usb_ep_pool[PIO_USB_EP_POOL_CNT];
+endpoint_t pio_usb_ep_pool[PIO_USB_EP_POOL_CNT]{};
 
 namespace duo::test::tinyusb_host {
 
@@ -77,11 +79,16 @@ void reset() {
     now_us = 0;
     host_already_active = false;
     host_inited = false;
-    system_clock_hz = 0;
+    // Backend fixtures begin where the real Core 1 begins: main() has already
+    // selected and settled the reference host's 120 MHz clock.
+    system_clock_hz = 120000000u;
     system_clock_hz_at_configure = 0;
     sof_frames = 0;
     pio_usb_root_port[0] = root_port_t{};
     pio_usb_root_port[1] = root_port_t{};
+    for (endpoint_t& endpoint : pio_usb_ep_pool) {
+        endpoint = endpoint_t{};
+    }
 }
 
 void add_hub(std::uint16_t vendor_id, std::uint16_t product_id) {
@@ -128,6 +135,13 @@ void set_host_inited(bool inited) { host_inited = inited; }
 void set_system_clock_hz(std::uint32_t hz) { system_clock_hz = hz; }
 
 void set_sof_frame_count(std::uint32_t frames) { sof_frames = frames; }
+
+void set_endpoint(std::size_t index, std::uint16_t size, std::uint8_t failed_count) {
+    if (index < PIO_USB_EP_POOL_CNT) {
+        pio_usb_ep_pool[index].size = size;
+        pio_usb_ep_pool[index].failed_count = failed_count;
+    }
+}
 
 std::uint32_t clock_hz_at_configure() { return system_clock_hz_at_configure; }
 

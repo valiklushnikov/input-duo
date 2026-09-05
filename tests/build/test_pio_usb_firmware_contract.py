@@ -141,13 +141,19 @@ def test_tusb_config_device_rhport_is_unconditional():
 def test_clock_handoff_is_a_release_acquire_atomic_contract():
     header = _source_text("firmware/u1_main/pio_usb/backend.hpp")
     implementation = _source_text("firmware/u1_main/pio_usb/backend.cpp")
+    main = _source_text("firmware/u1_main/main.cpp")
 
     assert "std::atomic<std::uint32_t>" in header
     assert "std::memory_order_acquire" in header
     assert "std::memory_order_release" in header
-    assert implementation.index("set_sys_clock_khz(120000, true)") < implementation.index(
-        "publish_settled()"
-    )
+    assert "set_sys_clock_khz(120000, true)" not in implementation
+    main_body = main[main.index("int main()") :]
+    clock = main_body.index("set_sys_clock_khz(120000, true)")
+    settle = main_body.index("sleep_ms(10)", clock)
+    first_peripheral = main_body.index("configure_indicator()")
+    assert clock < settle < first_peripheral
+    assert implementation.index("sleep_ms(10)") < implementation.index("tuh_configure")
+    assert implementation.index("tuh_init") < implementation.index("publish_settled()")
 
 
 def test_spi_baud_is_restored_to_the_requested_one_megahertz():
@@ -175,6 +181,25 @@ def test_every_core0_runtime_spi_transfer_uses_the_clock_startup_gate():
 
     assert guarded.count("poll(now_ms, g_outputs)") == 1
     assert guarded.count("send_release_all(now_ms)") == 2
+
+
+def test_host_observation_mapping_carries_every_appended_wire_progress_field():
+    main = _source_text("firmware/u1_main/main.cpp")
+    start = main.index("HostObservation describe_host_observation")
+    end = main.index("return out;", start)
+    mapping = main[start:end]
+
+    for field in (
+        "mount_events",
+        "umount_events",
+        "hid_mount_events",
+        "ep_slots_opened",
+        "ep_max_failed_count",
+        "max_pass_gap_us",
+        "max_sof_gap",
+        "root_port_resets",
+    ):
+        assert f"out.{field} = observed.{field};" in mapping
 
 
 def test_task6_callbacks_only_capture_records_and_never_arm_or_route():
@@ -356,6 +381,31 @@ def test_linked_baud_refresh_requests_one_megahertz():
     assert "000f4240" in refresh.lower(), (
         "refresh_baudrate does not load the literal 1,000,000 (0x000f4240)"
     )
+
+
+@pio_usb_elf_required
+def test_linked_clock_change_runs_from_main_and_never_from_backend_begin():
+    bodies = _function_bodies(_disassembly(_pio_usb_build_dir(), _pio_elf))
+    main_reachable = _directly_reachable(bodies, "main")
+    backend_reachable = _directly_reachable(
+        bodies, "duo_input::u1::pio_usb::PioUsbBackend::begin()"
+    )
+
+    # set_sys_clock_khz() is inline in this SDK; these are its validation and
+    # clock-programming calls in the linked image.
+    for callee in ("check_sys_clock_khz", "set_sys_clock_pll"):
+        assert callee in main_reachable
+        assert callee not in backend_reachable
+    assert "sleep_ms" in backend_reachable
+
+
+@ch375_elf_required
+def test_ch375_linked_main_never_runs_the_pio_usb_clock_change():
+    bodies = _function_bodies(_disassembly(_ch375_build_dir(), _ch375_elf))
+    reachable = _directly_reachable(bodies, "main")
+
+    for callee in ("check_sys_clock_khz", "set_sys_clock_pll"):
+        assert callee not in reachable
 
 
 @ch375_elf_required

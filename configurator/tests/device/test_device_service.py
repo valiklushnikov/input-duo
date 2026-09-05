@@ -1290,6 +1290,14 @@ def _host_block(
     root_state: int = 0,
     root_connects: int = 0,
     core1_passes: int = 0,
+    mount_events: int | None = None,
+    umount_events: int = 0,
+    hid_mount_events: int = 0,
+    ep_slots_opened: int = 0,
+    ep_max_failed_count: int = 0,
+    max_pass_gap_us: int = 0,
+    max_sof_gap: int = 0,
+    root_port_resets: int = 0,
 ) -> bytes:
     """The appended host suffix: one length byte, then the fields behind it."""
     import struct
@@ -1304,6 +1312,18 @@ def _host_block(
         root_connects,
         core1_passes,
     )
+    if mount_events is not None:
+        fields += struct.pack(
+            "<HHHBBIHH",
+            mount_events,
+            umount_events,
+            hid_mount_events,
+            ep_slots_opened,
+            ep_max_failed_count,
+            max_pass_gap_us,
+            max_sof_gap,
+            root_port_resets,
+        )
     return bytes((len(fields),)) + fields
 
 
@@ -1381,12 +1401,20 @@ def test_the_host_block_is_read_behind_a_backend_that_publishes_counters() -> No
         + _backend_block(2, 3, 2, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)
         + _host_block(
             init_flags=0b1110,
-            clock_at_begin=125_000_000,
+            clock_at_begin=120_000_000,
             clock_now=120_000_000,
             sof_frames=41234,
             root_state=0b1011,
             root_connects=2,
             core1_passes=987_654,
+            mount_events=3,
+            umount_events=1,
+            hid_mount_events=2,
+            ep_slots_opened=4,
+            ep_max_failed_count=3,
+            max_pass_gap_us=450_000,
+            max_sof_gap=7,
+            root_port_resets=2,
         )
     )
 
@@ -1404,10 +1432,9 @@ def test_the_host_block_is_read_behind_a_backend_that_publishes_counters() -> No
     assert observation.host_configured is True
     assert observation.host_initialized is True
     assert observation.host_inited is True
-    # What a HEALTHY board prints. The input core samples the first number
-    # before raising the clock and brings the host up after, so the two differ
-    # by construction on a correct image - see the paired test below.
-    assert observation.clock_hz_before_core1_change == 125_000_000
+    # What the reordered image prints: main selected and settled the clock
+    # before Core 1 began.
+    assert observation.clock_hz_before_core1_change == 120_000_000
     assert observation.clock_hz_now == 120_000_000
     assert observation.sof_frame_count == 41234
     assert observation.root_port_initialized is True
@@ -1416,6 +1443,14 @@ def test_the_host_block_is_read_behind_a_backend_that_publishes_counters() -> No
     assert observation.root_port_fullspeed is True
     assert observation.root_port_connects == 2
     assert observation.core1_passes == 987_654
+    assert observation.mount_events == 3
+    assert observation.umount_events == 1
+    assert observation.hid_mount_events == 2
+    assert observation.ep_slots_opened == 4
+    assert observation.ep_max_failed_count == 3
+    assert observation.max_pass_gap_us == 450_000
+    assert observation.max_sof_gap == 7
+    assert observation.root_port_resets == 2
 
 
 def test_a_host_started_on_the_wrong_core_reads_as_such() -> None:
@@ -1457,15 +1492,12 @@ def test_a_host_started_on_the_wrong_core_reads_as_such() -> None:
     assert observation.root_port_connected is False
 
 
-def test_the_clock_pair_alone_cannot_tell_a_healthy_board_from_a_broken_one() -> None:
-    """The trap this block shipped with, and the guard against it returning.
+def test_a_legacy_clock_pair_alone_does_not_override_the_host_active_bit() -> None:
+    """Older valid firmware reported 125/120, and that remains readable.
 
-    The input core samples the first clock BEFORE raising it and brings the
-    host up AFTER, so a healthy board prints 125 MHz then 120 MHz. A board with
-    the host already started on the wrong core prints the SAME two numbers -
-    the host came up before the input core ran at all, when clk_sys was still
-    125 MHz there too. Anything that reads a mismatch here as a fault accuses
-    every healthy board and clears no broken one.
+    The current image reports 120/120 after moving the clock change to main(),
+    but a reader must not reinterpret a legacy pair as a fault. Bit 0 remains
+    the only direct reading of whether another path started the host first.
 
     The two payloads below differ in exactly one bit, and it is not a clock.
     """

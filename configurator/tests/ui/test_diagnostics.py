@@ -155,12 +155,20 @@ def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
     emulator.input_backend = 2
     emulator.host_observation = (
         0b1111,
-        125_000_000,
+        120_000_000,
         120_000_000,
         880_000,
         0b0001,
         0,
         1_000_000,
+        3,
+        1,
+        2,
+        4,
+        3,
+        450_000,
+        7,
+        2,
     )
     with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
         page.service.connect_device(emulator)
@@ -170,11 +178,18 @@ def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
 
     reported = page.value("host_stack")
     assert "Host stack was already up before Core 1: yes" in reported
-    assert "System clock before the input core changed it (Hz): 125000000" in reported
+    assert "System clock when the input core began (Hz): 120000000" in reported
     assert "System clock now, and the PIO divider clock (Hz): 120000000" in reported
     assert "Root-port frames sent: 880000" in reported
     assert "Root port connected: no" in reported
     assert "Input core passes: 1000000" in reported
+    assert "Device mount callbacks: 3" in reported
+    assert "HID mount callbacks: 2" in reported
+    assert "Endpoint slots opened (high-water): 4" in reported
+    assert "Endpoint transaction failures (high-water): 3" in reported
+    assert "Longest input-core pass gap (us): 450000" in reported
+    assert "Largest SOF-frame jump between passes: 7" in reported
+    assert "Root-port resets seen (lower bound): 2" in reported
     # The page must not carry the old derived row either: it called a healthy
     # board faulty and it separated this board from a healthy one not at all.
     assert "unchanged since bring-up" not in reported
@@ -190,7 +205,7 @@ def test_a_healthy_host_stack_reads_as_healthy_on_the_page(page, emulator, qtbot
     emulator.input_backend = 2
     emulator.host_observation = (
         0b1110,
-        125_000_000,
+        120_000_000,
         120_000_000,
         41_234,
         0b1011,
@@ -205,11 +220,8 @@ def test_a_healthy_host_stack_reads_as_healthy_on_the_page(page, emulator, qtbot
 
     reported = page.value("host_stack")
     assert "Host stack was already up before Core 1: no" in reported
-    # The clock pair a healthy board actually prints. The input core samples
-    # the first before raising the clock and brings the host up after, so these
-    # two differ on every correct board - and the page says so plainly rather
-    # than calling it a mismatch.
-    assert "System clock before the input core changed it (Hz): 125000000" in reported
+    # The clock was selected and settled before Core 1 started.
+    assert "System clock when the input core began (Hz): 120000000" in reported
     assert "System clock now, and the PIO divider clock (Hz): 120000000" in reported
     assert "unchanged since bring-up" not in reported
     assert "Root port connected: yes" in reported

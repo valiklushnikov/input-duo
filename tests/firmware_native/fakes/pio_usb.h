@@ -19,6 +19,12 @@ typedef struct pio_usb_configuration {
 #define PIO_USB_DEFAULT_CONFIG pio_usb_configuration_t{}
 
 #define PIO_USB_ROOT_PORT_CNT 2
+#define PIO_USB_EP_POOL_CNT 32
+
+typedef struct {
+    volatile uint16_t size;
+    uint8_t failed_count;
+} endpoint_t;
 
 typedef struct struct_root_port_t {
     volatile bool initialized;
@@ -32,6 +38,7 @@ extern "C" {
 #endif
 
 uint32_t pio_usb_host_get_frame_number(void);
+extern endpoint_t pio_usb_ep_pool[PIO_USB_EP_POOL_CNT];
 
 #ifdef __cplusplus
 }

@@ -14,6 +14,7 @@
 // draining the callback queue, would stamp every report processed in that
 // pass with one shared, later timestamp instead of each report's own.
 
+#include <atomic>
 #include <cstdint>
 
 // Included, not extern-declared. The SDK's time_us_32() is a `static inline`
@@ -24,7 +25,7 @@
 // it already shadows hardware/clocks.h for set_sys_clock_khz.
 #include "hardware/timer.h"
 
-#include "pio_usb/device_registry.hpp"
+#include "pio_usb/backend.hpp"
 
 extern "C" bool tuh_vid_pid_get(std::uint8_t dev_addr, std::uint16_t* vendor_id,
                                 std::uint16_t* product_id);
@@ -34,16 +35,48 @@ extern "C" std::uint8_t tuh_hid_interface_protocol(std::uint8_t dev_addr,
 namespace duo_input::u1::pio_usb {
 namespace {
 DeviceRegistry* callback_registry = nullptr;
+std::atomic<std::uint32_t> mount_events{0};
+std::atomic<std::uint32_t> umount_events{0};
+std::atomic<std::uint32_t> hid_mount_events{0};
+
+void increment_saturating(std::atomic<std::uint32_t>& counter) noexcept {
+    const std::uint32_t value = counter.load(std::memory_order_relaxed);
+    if (value < 0xFFFFu) {
+        // TinyUSB invokes these callbacks on Core 1 only. Core 0 only loads;
+        // the atomic makes that concurrent snapshot defined, while the
+        // single-writer load/store keeps this operation strictly bounded.
+        counter.store(value + 1u, std::memory_order_relaxed);
+    }
 }
+}  // namespace
 
 void set_callback_registry(DeviceRegistry* registry) noexcept {
     callback_registry = registry;
+}
+
+void reset_host_callback_observability() noexcept {
+    mount_events.store(0, std::memory_order_relaxed);
+    umount_events.store(0, std::memory_order_relaxed);
+    hid_mount_events.store(0, std::memory_order_relaxed);
+}
+
+HostCallbackObservability host_callback_observability() noexcept {
+    HostCallbackObservability out;
+    out.mount_events =
+        static_cast<std::uint16_t>(mount_events.load(std::memory_order_relaxed));
+    out.umount_events =
+        static_cast<std::uint16_t>(umount_events.load(std::memory_order_relaxed));
+    out.hid_mount_events =
+        static_cast<std::uint16_t>(hid_mount_events.load(std::memory_order_relaxed));
+    return out;
 }
 }  // namespace duo_input::u1::pio_usb
 
 extern "C" {
 
 void tuh_mount_cb(std::uint8_t dev_addr) {
+    duo_input::u1::pio_usb::increment_saturating(
+        duo_input::u1::pio_usb::mount_events);
     auto* registry = duo_input::u1::pio_usb::callback_registry;
     if (registry == nullptr) {
         return;
@@ -55,6 +88,8 @@ void tuh_mount_cb(std::uint8_t dev_addr) {
 }
 
 void tuh_umount_cb(std::uint8_t dev_addr) {
+    duo_input::u1::pio_usb::increment_saturating(
+        duo_input::u1::pio_usb::umount_events);
     auto* registry = duo_input::u1::pio_usb::callback_registry;
     if (registry != nullptr) {
         registry->capture_unmount(dev_addr);
@@ -63,6 +98,8 @@ void tuh_umount_cb(std::uint8_t dev_addr) {
 
 void tuh_hid_mount_cb(std::uint8_t dev_addr, std::uint8_t instance,
                       std::uint8_t const* report_desc, std::uint16_t desc_len) {
+    duo_input::u1::pio_usb::increment_saturating(
+        duo_input::u1::pio_usb::hid_mount_events);
     auto* registry = duo_input::u1::pio_usb::callback_registry;
     if (registry == nullptr) {
         return;
