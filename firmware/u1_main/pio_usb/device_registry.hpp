@@ -25,6 +25,21 @@ enum class LogicalRole : std::uint8_t {
 class DeviceRegistry {
 public:
     static constexpr std::size_t kDownstreamDeviceCapacity = 4;
+    /// An average sizing assumption for kInterfaceCapacity below, not a
+    /// per-device cap the code enforces anywhere - interfaces_ is one flat
+    /// pool shared across every downstream device, searched by (dev_addr,
+    /// instance), with no per-device limit checked on the way in. The
+    /// Keychron M3 receiver's real topology is three interfaces on one
+    /// device - mouse (instance 0), a vendor-neutral HID interface neither
+    /// classify_hid nor is_keychron_auxiliary_interface gives a role to
+    /// (instance 1, LogicalRole::Ignored), and the auxiliary keyboard-shaped
+    /// channel (instance 2) - not two, so this constant already understates
+    /// that one device. It still costs no reachable headroom: the flat pool
+    /// is eight slots total, this receiver alone uses three of them, and V1
+    /// only ever needs one more role-bearing interface (a second keyboard, or
+    /// a lone mouse instead of this receiver) to reach its two accepted
+    /// roles - four slots against eight available, even before whatever a
+    /// fourth downstream device's own single interface would add.
     static constexpr std::size_t kInterfacesPerDownstreamDevice = 2;
     static constexpr std::size_t kDeviceCapacity = 1 + kDownstreamDeviceCapacity;
     static constexpr std::size_t kInterfaceCapacity =
@@ -181,10 +196,17 @@ private:
                           std::uint16_t product_id);
     Interface* find_mutable(std::uint8_t dev_addr, std::uint8_t instance);
     bool role_is_owned(LogicalRole role) const;
-    /// Whether some other mounted interface on ``dev_addr`` already owns the
-    /// Mouse role - the Keychron receiver's own mouse channel, which its
-    /// auxiliary channel is associated with. Without this, a lone
-    /// keyboard-shaped interface that merely happens to report this
+    /// Whether some other mounted interface on ``dev_addr`` classify_hid
+    /// found to be a mouse - the Keychron receiver's own mouse channel, which
+    /// its auxiliary channel is associated with. Read from identity.kind, not
+    /// from LogicalRole::Mouse: a competing mouse elsewhere can win
+    /// role_is_owned(Mouse) and leave this receiver's own mouse interface
+    /// LogicalRole::Ignored while classify_hid's verdict on it is still
+    /// Mouse, and gating on the role would then read as "no sibling" and let
+    /// the auxiliary channel win the Keyboard role instead - the exact
+    /// pre-task defect, just reachable through a second mouse rather than
+    /// through no mouse at all. Without this check at all (either form), a
+    /// lone keyboard-shaped interface that merely happens to report this
     /// receiver's vendor/product - no mouse sibling ever mounted on the same
     /// device - would be pulled out of the Keyboard role it should still be
     /// free to earn.

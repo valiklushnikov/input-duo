@@ -32,6 +32,7 @@ using duo_input::u1::input::InputPipeline;
 using duo_input::u1::input::SourceEvent;
 using duo_input::u1::input::SourceIdentity;
 using duo_input::u1::pio_usb::DeviceRegistry;
+using duo_input::u1::pio_usb::LogicalRole;
 using duo_input::u1::pio_usb::PioUsbBackend;
 
 namespace {
@@ -371,6 +372,112 @@ struct ThreeSourceRig {
     }
 };
 
+constexpr std::uint8_t kCompetingMouseAddress = 6;
+constexpr std::uint16_t kCompetingMouseVendorId = 0xAAAA;
+constexpr std::uint16_t kCompetingMouseProductId = 0xBBBB;
+constexpr std::uint8_t kRealKeyboardAddress = 7;
+constexpr std::uint16_t kRealKeyboardVendorId = 0xCCCC;
+constexpr std::uint16_t kRealKeyboardProductId = 0xDDDD;
+
+/// A generic boot-shaped keyboard report: Report ID 1 is an unrelated
+/// four-byte consumer collection, Report ID 2 is eight modifier bits, a
+/// reserved byte and six one-byte usage slots - bytes reused verbatim from
+/// test_pio_usb_hid_setup.cpp's report_id_keyboard(), already proven there to
+/// classify as DeviceKind::Keyboard with report_id_value 2. This is NOT a
+/// capture of the Keychron receiver's actual interface 2 - that descriptor
+/// is not present anywhere in this repository; see the fix report for why.
+std::vector<std::uint8_t> generic_keyboard_descriptor() {
+    return {
+        0x05, 0x0C, 0x85, 0x01,
+        0x09, 0x01, 0x75, 0x08, 0x95, 0x04, 0x81, 0x02,
+        0x05, 0x07, 0x85, 0x02,
+        0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x19, 0x00, 0x29, 0x65, 0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x06, 0x81, 0x00,
+    };
+}
+
+/// generic_keyboard_descriptor()'s bytes with a mouse-shaped report (reused
+/// verbatim from test_pio_usb_hid_setup.cpp's five_button_wheel_mouse())
+/// appended. classify_report_descriptor finds both a keyboard report and a
+/// mouse report in one descriptor and refuses it as
+/// ReportDescriptorRole::Ambiguous - the shape a device whose real
+/// descriptor this firmware cannot read cleanly would present. Not a claim
+/// about what the Keychron receiver's actual interface 2 contains.
+std::vector<std::uint8_t> ambiguous_descriptor() {
+    auto bytes = generic_keyboard_descriptor();
+    const std::vector<std::uint8_t> mouse = {
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00,
+        0x05, 0x09, 0x19, 0x01, 0x29, 0x05, 0x15, 0x00, 0x25, 0x01,
+        0x95, 0x05, 0x75, 0x01, 0x81, 0x02,
+        0x95, 0x01, 0x75, 0x03, 0x81, 0x03,
+        0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38,
+        0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x03, 0x81, 0x06,
+        0xC0, 0xC0,
+    };
+    bytes.insert(bytes.end(), mouse.begin(), mouse.end());
+    return bytes;
+}
+
+/// Direct DeviceRegistry access, no PioUsbBackend in between - needed because
+/// the tests below assert on which LogicalRole an interface actually won,
+/// not only on what a pipeline did with its reports. Otherwise the same
+/// shape as every other rig in this file: two pipelines, drained through
+/// PioUsbBackend::logical_port the same way main.cpp's Core 1 loop does.
+struct RegistryTopologyRig {
+    DeviceRegistry registry;
+    Recorder keyboard_recorder;
+    Recorder mouse_recorder;
+    InputPipeline keyboard_pipeline{keyboard_recorder};
+    InputPipeline mouse_pipeline{mouse_recorder};
+
+    RegistryTopologyRig() {
+        duo::test::tinyusb_host::reset();
+        duo_input::u1::pio_usb::set_callback_registry(&registry);
+    }
+
+    ~RegistryTopologyRig() { duo_input::u1::pio_usb::set_callback_registry(nullptr); }
+
+    /// Mount one HID interface and drain whatever it produced - a Ready, if
+    /// it won a role - into the pipeline that role belongs to.
+    void mount(std::uint8_t dev_addr, std::uint16_t vendor_id, std::uint16_t product_id,
+              std::uint8_t instance, std::uint8_t protocol,
+              const std::uint8_t* descriptor = nullptr, std::size_t descriptor_size = 0) {
+        duo::test::tinyusb_host::add_device(dev_addr, vendor_id, product_id);
+        duo::test::tinyusb_host::set_protocol(dev_addr, instance, protocol);
+        tuh_hid_mount_cb(dev_addr, instance, descriptor,
+                        static_cast<std::uint16_t>(descriptor_size));
+        registry.process_pending();
+        drain();
+    }
+
+    void deliver(std::uint8_t dev_addr, std::uint8_t instance, const std::uint8_t* bytes,
+                std::size_t size, std::uint32_t captured_us) {
+        duo::test::tinyusb_host::set_now_us(captured_us);
+        tuh_hid_report_received_cb(dev_addr, instance, bytes, static_cast<std::uint16_t>(size));
+        registry.process_pending();
+        drain();
+    }
+
+    void drain() {
+        SourceEvent event;
+        SourceIdentity identity;
+        while (registry.take_event(event, identity)) {
+            switch (PioUsbBackend::logical_port(identity.kind)) {
+                case 0:
+                    keyboard_pipeline.on_event(event, identity, 1);
+                    break;
+                case 1:
+                    mouse_pipeline.on_event(event, identity, 1);
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+};
+
 }  // namespace
 
 TEST_CASE(a_boot_mouse_button_press_and_release_become_mousebuttondown_and_up) {
@@ -620,4 +727,154 @@ TEST_CASE(
     CHECK_EQ(rig.keyboard_recorder.of(InputEventKind::KeyUp, 0x04), 1);
     CHECK_EQ(rig.mouse_recorder.of(InputEventKind::MouseButtonUp, 0), 1);
     CHECK_EQ(rig.mouse_recorder.of(InputEventKind::MouseButtonUp, 3), 1);
+}
+
+TEST_CASE(
+    a_competing_mouse_does_not_let_the_receivers_auxiliary_channel_win_the_keyboard_role) {
+    // has_mouse_sibling must read classify_hid's verdict (identity.kind), not
+    // LogicalRole::Mouse: a second, unrelated mouse can win
+    // role_is_owned(Mouse) first, leaving the Keychron receiver's OWN mouse
+    // interface Ignored - not because it isn't a mouse, but because V1 only
+    // accepts one. If the sibling check read the role instead, this would
+    // look like "no mouse on this device" and hand the auxiliary channel the
+    // Keyboard role - typing a phantom modifier keystroke on every
+    // side-button press and stealing the role from whatever real keyboard is
+    // also plugged in. Reachable: V1 accepts one mouse and the hub holds
+    // four downstream devices.
+    RegistryTopologyRig rig;
+
+    // The competing mouse mounts and wins the Mouse role first.
+    rig.mount(kCompetingMouseAddress, kCompetingMouseVendorId, kCompetingMouseProductId, 0,
+             kProtocolMouse);
+
+    // The Keychron receiver: its own mouse interface finds the role already
+    // taken, and its auxiliary interface must still recognise the sibling.
+    rig.mount(kKeychronAddress, kKeychronVendorId, kKeychronProductId, 0, kProtocolMouse);
+    rig.mount(kKeychronAddress, kKeychronVendorId, kKeychronProductId, 1, kProtocolKeyboard);
+
+    // A real keyboard, elsewhere, must still be free to earn the role.
+    rig.mount(kRealKeyboardAddress, kRealKeyboardVendorId, kRealKeyboardProductId, 0,
+             kProtocolKeyboard);
+
+    const auto* keychron_mouse = rig.registry.find(kKeychronAddress, 0);
+    const auto* keychron_auxiliary = rig.registry.find(kKeychronAddress, 1);
+    const auto* real_keyboard = rig.registry.find(kRealKeyboardAddress, 0);
+    CHECK(keychron_mouse != nullptr);
+    CHECK(keychron_auxiliary != nullptr);
+    CHECK(real_keyboard != nullptr);
+    if (keychron_mouse != nullptr) {
+        CHECK_EQ(keychron_mouse->role, LogicalRole::Ignored);
+    }
+    if (keychron_auxiliary != nullptr) {
+        // The core assertion: Auxiliary, never Keyboard.
+        CHECK_EQ(keychron_auxiliary->role, LogicalRole::Auxiliary);
+    }
+    if (real_keyboard != nullptr) {
+        CHECK_EQ(real_keyboard->role, LogicalRole::Keyboard);
+    }
+
+    // No phantom keystroke, no phantom button 4: the side-button trace
+    // routes to the competing mouse's own pipeline (identity.kind sends it
+    // there), whose keychron_receiver_ latch is false, so pipeline.cpp drops
+    // it silently rather than typing it or clicking anything.
+    rig.deliver(kKeychronAddress, 1, kKeychronSidePress, sizeof(kKeychronSidePress), 10);
+    CHECK_EQ(rig.mouse_recorder.count(InputEventKind::MouseButtonDown), 0);
+    CHECK_EQ(rig.keyboard_recorder.count(InputEventKind::KeyDown), 0);
+
+    // The real keyboard, elsewhere, still works - its role was not stolen.
+    rig.deliver(kRealKeyboardAddress, 0, kKeyA, sizeof(kKeyA), 20);
+    CHECK_EQ(rig.keyboard_recorder.of(InputEventKind::KeyDown, 0x04), 1);
+}
+
+TEST_CASE(an_ambiguous_descriptor_on_the_auxiliary_interface_is_ignored_not_forced_into_a_role) {
+    // What classify_hid must do if the real Keychron receiver's interface 2 -
+    // never captured in this repository, see the fix report - turns out to
+    // parse as both a keyboard and a mouse report: refuse it outright
+    // (ReportDescriptorRole::Ambiguous short-circuits classify_hid to false
+    // before is_keychron_auxiliary_interface is ever asked anything), so the
+    // interface is safely Ignored rather than guessed into either role.
+    RegistryTopologyRig rig;
+    rig.mount(kKeychronAddress, kKeychronVendorId, kKeychronProductId, 0, kProtocolMouse);
+
+    const auto descriptor = ambiguous_descriptor();
+    rig.mount(kKeychronAddress, kKeychronVendorId, kKeychronProductId, 1, kProtocolKeyboard,
+             descriptor.data(), descriptor.size());
+
+    const auto* auxiliary = rig.registry.find(kKeychronAddress, 1);
+    CHECK(auxiliary != nullptr);
+    if (auxiliary != nullptr) {
+        CHECK_EQ(auxiliary->role, LogicalRole::Ignored);
+    }
+
+    rig.deliver(kKeychronAddress, 1, kKeychronSidePress, sizeof(kKeychronSidePress), 10);
+    CHECK_EQ(rig.mouse_recorder.count(InputEventKind::MouseButtonDown), 0);
+    CHECK_EQ(rig.keyboard_recorder.count(InputEventKind::KeyDown), 0);
+}
+
+TEST_CASE(
+    the_auxiliary_association_also_applies_when_a_descriptor_not_protocol_fallback_classifies_the_interface_as_keyboard) {
+    // Every other Keychron test in this file mounts the auxiliary interface
+    // with no descriptor (nullptr, 0) and relies on classify_hid's PROTOCOL
+    // FALLBACK branch. Real TinyUSB hands tuh_hid_mount_cb a report
+    // descriptor for every HID interface, so on real hardware classify_hid
+    // takes the DESCRIPTOR branch instead - and the actual bytes of the
+    // Keychron receiver's interface 2 are not captured anywhere in this
+    // repository (see the fix report). This test cannot prove what THAT
+    // descriptor classifies as; it proves only that IF a descriptor
+    // classifies the interface as Keyboard - through the descriptor path,
+    // not the fallback - the same Auxiliary association still applies.
+    // generic_keyboard_descriptor() is an ordinary boot-shaped keyboard
+    // report, not a claim about the real device.
+    RegistryTopologyRig rig;
+    rig.mount(kKeychronAddress, kKeychronVendorId, kKeychronProductId, 0, kProtocolMouse);
+
+    const auto descriptor = generic_keyboard_descriptor();
+    // kProtocolNone here on purpose: proves the descriptor path alone -
+    // divorced from the protocol fallback every other test in this file
+    // exercises - is what produced the Keyboard verdict.
+    rig.mount(kKeychronAddress, kKeychronVendorId, kKeychronProductId, 1, kProtocolNone,
+             descriptor.data(), descriptor.size());
+
+    const auto* auxiliary = rig.registry.find(kKeychronAddress, 1);
+    CHECK(auxiliary != nullptr);
+    if (auxiliary != nullptr) {
+        CHECK_EQ(auxiliary->role, LogicalRole::Auxiliary);
+    }
+
+    rig.deliver(kKeychronAddress, 1, kKeychronSidePress, sizeof(kKeychronSidePress), 10);
+    CHECK_EQ(rig.mouse_recorder.of(InputEventKind::MouseButtonDown, 3), 1);
+}
+
+TEST_CASE(the_receivers_real_three_interface_topology_still_routes_the_side_button) {
+    // Hardware order, captured in test_hid_parser.cpp's
+    // the_first_routable_interface_identifies_the_keychron_m3_receiver: mouse
+    // at instance 0, a vendor-neutral HID interface (bInterfaceProtocol 0,
+    // no descriptor this firmware classifies - CH375 never classified it
+    // either; it only ever polled it as a raw auxiliary endpoint) at
+    // instance 1, and the keyboard-shaped side-button channel at instance 2 -
+    // not the two-interface shape (mouse=0, auxiliary=1) every other test in
+    // this file mounts for brevity.
+    RegistryTopologyRig rig;
+    rig.mount(kKeychronAddress, kKeychronVendorId, kKeychronProductId, 0, kProtocolMouse);
+    rig.mount(kKeychronAddress, kKeychronVendorId, kKeychronProductId, 1, kProtocolNone);
+    rig.mount(kKeychronAddress, kKeychronVendorId, kKeychronProductId, 2, kProtocolKeyboard);
+
+    const auto* mouse = rig.registry.find(kKeychronAddress, 0);
+    const auto* vendor = rig.registry.find(kKeychronAddress, 1);
+    const auto* auxiliary = rig.registry.find(kKeychronAddress, 2);
+    CHECK(mouse != nullptr);
+    CHECK(vendor != nullptr);
+    CHECK(auxiliary != nullptr);
+    if (mouse != nullptr) {
+        CHECK_EQ(mouse->role, LogicalRole::Mouse);
+    }
+    if (vendor != nullptr) {
+        CHECK_EQ(vendor->role, LogicalRole::Ignored);
+    }
+    if (auxiliary != nullptr) {
+        CHECK_EQ(auxiliary->role, LogicalRole::Auxiliary);
+    }
+
+    rig.deliver(kKeychronAddress, 2, kKeychronSidePress, sizeof(kKeychronSidePress), 10);
+    CHECK_EQ(rig.mouse_recorder.of(InputEventKind::MouseButtonDown, 3), 1);
 }

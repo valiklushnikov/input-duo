@@ -220,9 +220,24 @@ bool DeviceRegistry::role_is_owned(LogicalRole role) const {
 }
 
 bool DeviceRegistry::has_mouse_sibling(std::uint8_t dev_addr) const {
+    // Classified as Mouse, not granted the Mouse ROLE: a competing mouse
+    // elsewhere can win role_is_owned(Mouse) and leave this receiver's own
+    // mouse interface LogicalRole::Ignored while classify_hid's verdict on it
+    // - identity.kind - is untouched and still Mouse (process() only
+    // overwrites identity.kind for an interface this function itself has
+    // already approved as Auxiliary). Gating on the role instead would make
+    // that the exact pre-task defect return: this receiver's auxiliary
+    // channel would find no sibling, fall through to role_for_kind(Keyboard),
+    // and - since the real Mouse role is free precisely because the
+    // competing mouse is occupying it, not this receiver - win the Keyboard
+    // role and type every side-button press as a phantom modifier keystroke.
+    // Excluding Auxiliary keeps this a one-hop check: an already-approved
+    // auxiliary channel's own overridden identity.kind must never itself
+    // count as "the mouse" for some third interface on the same device.
     for (const Interface& candidate : interfaces_) {
         if (candidate.mounted && candidate.dev_addr == dev_addr &&
-            candidate.role == LogicalRole::Mouse) {
+            candidate.role != LogicalRole::Auxiliary &&
+            candidate.identity.kind == input::DeviceKind::Mouse) {
             return true;
         }
     }
@@ -301,22 +316,28 @@ void DeviceRegistry::remove_device(std::uint8_t dev_addr) {
 bool DeviceRegistry::push_event(const Interface& interface, input::SourceEventKind kind,
                                 std::uint8_t endpoint, const std::uint8_t* report,
                                 std::size_t report_size, std::uint32_t received_us) {
-    // Fault keeps the last kFaultReservedSlots for itself - one per role-owned
-    // interface V1 accepts, not one slot in total. One reserved slot only
-    // protects whichever of the keyboard and the mouse overflows first: fill
-    // to capacity-1 with ordinary traffic, fault the keyboard (its Fault
-    // spends the single reserved slot), and the mouse's next report then finds
-    // the queue full, latches its own Fault into a queue with nothing left,
-    // and loses it. That lost Fault is the mouse's whole release-all - a
-    // dropped release, which this queue exists to make impossible - and the
-    // mouse interface is faulted afterwards, so nothing will ever produce it
-    // again. Reserving one per role means every Ready/Report push here refuses
-    // two slots early and both sources' overflow Faults, each pushed straight
-    // after its own push already failed, always have room.
+    // Fault keeps the last kFaultReservedSlots for itself - one per
+    // independently-arming role-bearing interface V1 accepts (Keyboard,
+    // Mouse, and the Keychron receiver's Auxiliary channel), not one slot in
+    // total and not one slot per downstream InputPipeline. Two reserved slots
+    // are not enough for three such interfaces: fill to capacity with
+    // ordinary traffic, fault the keyboard (spends one reserved slot), fault
+    // the mouse (spends the other), and the auxiliary channel's next report
+    // then finds the queue full, latches its own Fault into a queue with
+    // nothing left, and loses it - or, in whatever order the callback queue
+    // happens to drain in, the keyboard's Fault can just as easily be the one
+    // that finds nothing left, since push_event() processes records FIFO, not
+    // grouped by which interface or pipeline they belong to. That lost Fault
+    // is a dropped release-all, which this queue exists to make impossible -
+    // and the interface is faulted afterwards, so nothing will ever produce
+    // it again. Reserving one slot per interface means every Ready/Report/
+    // AuxiliaryReport push here refuses three slots early and every source's
+    // overflow Fault, pushed straight after its own push already failed,
+    // always has room, in any arrival order.
     //
-    // The eighteen slots this leaves ordinary traffic are still far more than
-    // a genuine pass can use - about ten at worst; the derivation is on
-    // kEventQueueCapacity in the header.
+    // The seventeen slots this leaves ordinary traffic are still far more
+    // than a genuine pass can use - about thirteen at worst; the derivation
+    // is on kEventQueueCapacity in the header.
     const std::size_t capacity = kind == input::SourceEventKind::Fault
                                      ? kEventQueueCapacity
                                      : kEventQueueCapacity - kFaultReservedSlots;
@@ -408,10 +429,16 @@ void DeviceRegistry::process(const CallbackRecord& record) {
         // reports, not on shape alone, so every other composite device's
         // keyboard-shaped interface keeps the Keyboard role it would
         // otherwise earn - and further gated on this device already having a
-        // mounted Mouse-role sibling, so a lone keyboard that merely reports
-        // this vendor/product (nothing else of this receiver's shape present)
-        // is not pulled out of the Keyboard role it should still be free to
-        // earn.
+        // sibling interface classify_hid found to be a mouse (see
+        // has_mouse_sibling), so a lone keyboard that merely reports this
+        // vendor/product (nothing else of this receiver's shape present) is
+        // not pulled out of the Keyboard role it should still be free to
+        // earn. The sibling check reads identity.kind, not LogicalRole::
+        // Mouse, on purpose: a second, unrelated mouse can win
+        // role_is_owned(Mouse) and leave this receiver's own mouse interface
+        // Ignored while classify_hid still calls it a mouse, and gating on
+        // the role would misread that as "no sibling" - handing the
+        // Keyboard role to the auxiliary channel after all.
         const bool auxiliary_of_mouse =
             classified &&
             is_keychron_auxiliary_interface(record.vendor_id, record.product_id,
