@@ -259,6 +259,49 @@ TEST_CASE(first_usable_role_owner_is_stable_and_extra_interfaces_are_diagnosed) 
     CHECK_EQ(rig.registry.owner(DeviceKind::Keyboard)->dev_addr, 2u);
     CHECK_EQ(rig.registry.find(3, 0)->role, LogicalRole::Ignored);
     CHECK_EQ(rig.registry.ignored_interface_count(), 1u);
+    // V1 accepts one logical keyboard and one logical mouse, so the second
+    // keyboard is ignored deterministically - and the reason is kept apart
+    // from "this firmware could not classify it at all", because on a bench
+    // those two are a spare keyboard and a broken one.
+    CHECK_EQ(rig.registry.ignored_role_taken_count(), 1u);
+}
+
+// The other reason an interface ends up with no role: nothing here could
+// classify it. The Keychron receiver's middle interface is one of these in
+// real life, and reporting it as "the role was already taken" would send
+// somebody looking for a second mouse that does not exist.
+TEST_CASE(an_unclassifiable_interface_is_not_counted_as_a_role_collision) {
+    RegistryRig rig;
+    rig.device(2, 0x1000, 0x0001);
+    rig.hid(2, 0, kProtocolNone, nullptr, 0);
+    rig.registry.process_pending(0);
+
+    CHECK_EQ(rig.registry.find(2, 0)->role, LogicalRole::Ignored);
+    CHECK_EQ(rig.registry.ignored_interface_count(), 1u);
+    CHECK_EQ(rig.registry.ignored_role_taken_count(), 0u);
+}
+
+// A mounted interface's descriptor length is what Task 11's diagnostics put on
+// the wire beside its hash, so it has to be kept rather than recomputed from a
+// buffer the callback has already handed back.
+TEST_CASE(a_mounted_interface_remembers_how_many_descriptor_bytes_it_read) {
+    RegistryRig rig;
+    rig.device(2, 0x1000, 0x0001);
+    rig.hid(2, 0, kProtocolKeyboard);
+    rig.registry.process_pending(0);
+
+    CHECK(rig.registry.find(2, 0)->descriptor_present);
+    CHECK_EQ(rig.registry.find(2, 0)->descriptor_bytes, sizeof(kDescriptor));
+}
+
+TEST_CASE(an_interface_that_gave_up_no_descriptor_reports_no_descriptor_bytes) {
+    RegistryRig rig;
+    rig.device(2, 0x1000, 0x0001);
+    rig.hid(2, 0, kProtocolKeyboard, nullptr, 0);
+    rig.registry.process_pending(0);
+
+    CHECK_FALSE(rig.registry.find(2, 0)->descriptor_present);
+    CHECK_EQ(rig.registry.find(2, 0)->descriptor_bytes, 0u);
 }
 
 TEST_CASE(accepted_report_record_is_processed_before_exactly_one_rearm) {

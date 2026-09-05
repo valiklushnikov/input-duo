@@ -113,6 +113,69 @@ duo_input::u1::PeripheralPort describe_port(
                 sizeof(port.descriptor_hash));
     return port;
 }
+#else
+/// What one logical role slot has on it, as the host has to see it.
+///
+/// The PIO USB backend has one bus and no channels, so a "port" here is a
+/// logical role slot - the one keyboard and the one mouse V1 accepts - and the
+/// registry's own role owner is the device in it. Read straight from the
+/// registry rather than kept as a second copy that could disagree with it,
+/// exactly as the CH375 branch above reads its controller and enumeration.
+duo_input::u1::PeripheralPort describe_role(
+    const duo_input::u1::pio_usb::DeviceRegistry& registry,
+    duo_input::u1::input::DeviceKind kind) {
+    duo_input::u1::PeripheralPort port;
+    const auto* interface = registry.owner(kind);
+    if (interface == nullptr) {
+        // Nothing holds this role. That is an empty slot, reported as one -
+        // and note that an interface which mounted but was ignored (a second
+        // keyboard, or something nothing could classify) leaves the slot empty
+        // here too, which is exactly what the backend's ignored-interface
+        // counters below exist to explain.
+        return port;
+    }
+    port.attached = true;
+    // latch_fault() hands a faulted interface's role slot back, so an owner is
+    // normally a working one; the two flags are still read rather than assumed,
+    // because "attached but not reading" is the state an operator most needs
+    // named and inferring it from an absence would be the same mistake the
+    // whole reply exists to avoid.
+    port.ready = !interface->fault_pending && !interface->faulted;
+    port.kind = static_cast<std::uint8_t>(interface->identity.kind);
+    port.vendor_id = interface->identity.vendor_id;
+    port.product_id = interface->identity.product_id;
+    // Only what the device's own report descriptor declared. A boot-protocol
+    // mouse is read under an assumed layout, and reporting that assumption as
+    // the device's own declaration would put a number in a compatibility
+    // matrix that the peripheral never said - the same rule the CH375 branch
+    // above applies, for the same reason.
+    port.buttons = interface->descriptor_present
+                       ? static_cast<std::uint8_t>(interface->identity.mouse_layout.buttons.bits)
+                       : 0;
+    port.report_descriptor_bytes = interface->descriptor_bytes;
+    std::memcpy(port.descriptor_hash, interface->identity.descriptor_hash,
+                sizeof(port.descriptor_hash));
+    return port;
+}
+
+/// Every counter the registry keeps, in the fixed order the wire carries.
+duo_input::u1::BackendCounters describe_backend_counters(
+    const duo_input::u1::pio_usb::DeviceRegistry& registry) {
+    duo_input::u1::BackendCounters counters;
+    counters.ignored_interfaces = registry.ignored_interface_count();
+    counters.ignored_role_already_claimed = registry.ignored_role_taken_count();
+    counters.event_overflows = registry.event_overflow_count();
+    counters.detach_overflows = registry.detach_overflow_count();
+    counters.stale_events_discarded = registry.stale_event_discard_count();
+    counters.arm_failures = registry.arm_failure_count();
+    counters.arm_escalations = registry.arm_escalation_count();
+    counters.stall_signals = registry.stall_signal_count();
+    counters.duplicate_mounts = registry.duplicate_mount_count();
+    counters.device_overflows = registry.device_overflow_count();
+    counters.interface_overflows = registry.interface_overflow_count();
+    counters.callback_overflows = registry.callback_overflow_count();
+    return counters;
+}
 #endif  // DUO_INPUT_BACKEND_CH375
 
 /// Where a normalized event goes.
@@ -1260,17 +1323,28 @@ int main() {
         // reply is the only place anything can learn what it was - which is
         // what a compatibility matrix row needs and what nothing else can
         // supply. Both ports always: an empty port is a fact about the run.
+        //
+        // And which backend read them, published in the same pass and from the
+        // same place. A report that does not name the host stack cannot be
+        // acted on months later: the CH375 pair and the PIO USB host fail in
+        // entirely different ways, and half the counters below exist only on
+        // one of them.
 #ifdef DUO_INPUT_BACKEND_CH375
         config.set_peripherals(describe_port(g_keyboard_device, g_keyboard_setup),
                                describe_port(g_mouse_device, g_mouse_setup));
+        // No counters: the CH375 channels keep none of the host-stack figures
+        // below, and sending twelve zeros for them would put twelve readings
+        // into a report that nothing ever measured.
+        config.set_backend(duo_input::protocol::InputBackend::CH375);
 #else
-        // Reports flow through the registry now (Tasks 6-8), but wiring that
-        // into PeripheralPort - U1's backend-neutral diagnostics surface - is
-        // Task 11's job: it adds the backend identifier this reply still
-        // lacks, and reads the same registry this branch would otherwise
-        // reach into directly. Until then the honest reply is "not attached",
-        // not a guess dressed up as one.
-        config.set_peripherals(duo_input::u1::PeripheralPort{}, duo_input::u1::PeripheralPort{});
+        {
+            const auto& registry = g_pio_usb_backend.registry();
+            config.set_peripherals(
+                describe_role(registry, duo_input::u1::input::DeviceKind::Keyboard),
+                describe_role(registry, duo_input::u1::input::DeviceKind::Mouse));
+            config.set_backend(duo_input::protocol::InputBackend::PIO_USB,
+                               describe_backend_counters(registry));
+        }
 #endif
 
         show_link(link.status().answered);

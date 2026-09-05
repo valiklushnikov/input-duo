@@ -81,29 +81,34 @@ public:
     // in tests is to withhold draining across many passes, the same way Task
     // 6's callback-queue overflow tests withhold processing.
     //
-    // Re-derived for Task 10's bounded receive-arm retry/backoff and its
-    // zero-length stall-signal escalation: neither changes this ceiling.
-    // Both eventually call the same latch_fault() every other terminal path
-    // already uses, so the "at most one Fault per role-bearing interface per
-    // pass" bound above still holds - retrying or counting stall signals
-    // produces no SourceEvent at all until the interface is escalated, at
-    // which point it is faulted and produces nothing further. Task 10's
-    // Detached releases do not draw from this queue either - see
-    // kDetachQueueCapacity, a separate bounded FIFO.
+    // A NOTE ON THE FAULT HALF OF THAT BOUND, corrected here rather than left
+    // to drift: earlier revisions of this comment justified the reservation
+    // with "at most one Fault per role-bearing interface per pass", and that
+    // sentence stopped being true when latch_fault() was given a second job.
+    // An escalated interface now hands its role slot back (see latch_fault()'s
+    // own comment) so a replacement device can claim it, which makes a role
+    // RE-CLAIMABLE INSIDE ONE PASS - so one pass can produce more than one
+    // Fault per role, and counting Faults per role bounds nothing.
     //
-    // Re-derived AGAIN for this task's fix round, which gave latch_fault() a
-    // second job: an escalated interface now gives its role slot back (see
-    // latch_fault()'s own comment) so a replacement device can claim it,
-    // instead of holding a role nothing will ever use again. That adds a
-    // second way to free a role inside one pass - a ReportFault record, not
-    // only a DeviceUnmount - but it costs the same one extra record per
-    // freed role, so the "two records per Ready, 10 at worst" line above is
-    // unchanged; and it is additionally capped below that, because a faulted
-    // interface stays MOUNTED (only its role is released), so this route
-    // exhausts kInterfaceCapacity = 8 before it can reach 10. The detach-FIFO
-    // overflow escalation added in the same round pushes a Fault too, but
-    // kDetachQueueCapacity is now sized above the per-pass Detached ceiling,
-    // so no genuine pass can reach it at all.
+    // kFaultReservedSlots is still enough, by an argument that does not
+    // depend on that: every queued event, Fault included, is produced by
+    // processing exactly one CallbackRecord, and process_pending() drains at
+    // most kCallbackQueueCapacity of them per call. kEventQueueCapacity ==
+    // kCallbackQueueCapacity, so once the ordinary traffic has filled the
+    // 17 slots offered to it, at most three further records remain in the
+    // whole budget and therefore at most three further pushes of any kind can
+    // follow - which the three reserved slots hold exactly. The reservation
+    // is sized to what the record budget can still deliver after saturation,
+    // not to a per-role count.
+    //
+    // Task 10's other additions do not touch this ceiling either. Retrying a
+    // receive-arm or counting stall signals produces no SourceEvent at all
+    // until the interface is escalated, at which point it is faulted and
+    // produces nothing further; and Detached releases draw from
+    // kDetachQueueCapacity, a separate bounded FIFO, whose own overflow
+    // escalation pushes a Fault through the same record budget counted above
+    // and is in any case unreachable in a genuine pass, since that queue is
+    // now sized above the per-pass Detached ceiling.
     static constexpr std::size_t kEventQueueCapacity = kCallbackQueueCapacity;
     /// How many of kEventQueueCapacity are kept back for Fault: one per
     /// independently-arming role-bearing interface V1 accepts (Keyboard,
@@ -181,6 +186,14 @@ public:
         std::uint8_t instance = 0;
         std::uint8_t interface_protocol = 0;
         bool descriptor_present = false;
+        /// How many report-descriptor bytes this interface gave up, kept
+        /// because the diagnostics reply carries the length beside the hash
+        /// and the callback's own buffer is long gone by then. Zero whenever
+        /// descriptor_present is false - and note that a zero LENGTH and a
+        /// zero HASH mean the same thing here, no descriptor was read, which
+        /// is exactly what CH375's side already reports for a boot-protocol
+        /// device that declined to give one up.
+        std::uint16_t descriptor_bytes = 0;
         LogicalRole role = LogicalRole::Ignored;
         input::SourceIdentity identity{};
         bool report_in_flight = false;
@@ -266,6 +279,17 @@ public:
     std::uint32_t callback_overflow_count() const { return callback_overflows_; }
     std::uint32_t duplicate_mount_count() const { return duplicate_mounts_; }
     std::uint32_t ignored_interface_count() const { return ignored_interfaces_; }
+    /// How many of ignored_interface_count() were ignored only because the
+    /// logical role they wanted was already held by another interface - V1's
+    /// "exactly one keyboard and one mouse" rule, applied deterministically to
+    /// the first usable claimant.
+    ///
+    /// Kept apart from the total on purpose: the remainder is "nothing here
+    /// could classify this interface", and on a bench a spare second keyboard
+    /// and a device this firmware cannot read are entirely different problems
+    /// with entirely different fixes. A single total cannot tell them apart,
+    /// and the reply that carries it is the only outward sign of either.
+    std::uint32_t ignored_role_taken_count() const { return ignored_role_taken_; }
     std::uint32_t arm_failure_count() const { return arm_failures_; }
     /// How many Ready/Report/Fault SourceEvents could not be queued because
     /// kEventQueueCapacity was already full. Only reachable by withholding
@@ -425,6 +449,7 @@ private:
     std::uint32_t callback_overflows_ = 0;
     std::uint32_t duplicate_mounts_ = 0;
     std::uint32_t ignored_interfaces_ = 0;
+    std::uint32_t ignored_role_taken_ = 0;
     std::uint32_t arm_failures_ = 0;
     std::uint32_t event_overflows_ = 0;
     std::uint32_t arm_escalations_ = 0;

@@ -129,6 +129,23 @@ class U1Emulator(AbstractByteTransport):
         # once a pass goes by with nothing refused, which is why it is separate
         # from the cumulative count above.
         self.runtime_fault = 0
+        # Which backend read U1's own USB ports, by the protocol's own number
+        # (1 CH375, 2 PIO_USB), and its counters. ``None`` is the default and
+        # it is not a gap: it makes this emulator answer exactly the way
+        # firmware predating the appended blocks answers, which is the payload
+        # the configurator's backward-compatibility path has to keep reading.
+        # Setting it makes the reply carry the latency, peripheral and backend
+        # blocks a current U1 sends.
+        self.input_backend: int | None = None
+        #: The twelve u32 counters, in the order config_service.cpp writes them.
+        self.backend_counters: tuple[int, ...] = (0,) * 12
+        #: Two ports, each (attached, ready, kind, vid, pid, buttons,
+        #: descriptor bytes, 32-byte hash) - the shape write_peripheral() puts
+        #: on the wire.
+        self.peripheral_ports: tuple[tuple, ...] = (
+            (0, 0, 0, 0, 0, 0, 0, bytes(32)),
+            (0, 0, 0, 0, 0, 0, 0, bytes(32)),
+        )
         self._timeout_once = False
         self._disconnect_once = False
         self._bad_crc_response_once = False
@@ -580,7 +597,29 @@ class U1Emulator(AbstractByteTransport):
             + struct.pack("<BH", self.endpoint_drops, self.endpoint_release_ms)
             + struct.pack("<I", self.dropped_commands)
             + struct.pack("<B", self.runtime_fault)
+            + self._appended_diagnostics()
         )
+
+    def _appended_diagnostics(self) -> bytes:
+        """The latency, peripheral and backend blocks a current U1 appends.
+
+        Empty until ``input_backend`` is set, so by default this emulator
+        answers byte for byte the way firmware predating these blocks answers.
+        The blocks are positional, so the backend block cannot be sent without
+        the two in front of it.
+        """
+        if self.input_backend is None:
+            return b""
+        buckets = 9
+        edges = (250, 500, 1000, 2000, 5000, 10000, 20000, 50000)
+        latency = bytes((buckets,)) + b"".join(struct.pack("<I", edge) for edge in edges)
+        latency += 2 * (struct.pack("<II", 0, 0) + bytes(4 * buckets))
+        ports = b"".join(
+            struct.pack("<BBBHHBH32s", *port) for port in self.peripheral_ports
+        )
+        backend = bytes((self.input_backend, len(self.backend_counters)))
+        backend += b"".join(struct.pack("<I", value) for value in self.backend_counters)
+        return latency + ports + backend
 
     def _handle_factory_reset_arm(self, payload: bytes) -> bytes:
         if not self.physical_confirmation:

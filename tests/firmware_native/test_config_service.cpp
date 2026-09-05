@@ -632,10 +632,15 @@ TEST_CASE(diagnostics_carry_every_counter_the_host_expects) {
     const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
 
     CHECK_EQ(error_of(reply), CdcError::Ok);
-    CHECK_EQ(reply.payload.size, duo_input::u1::kDiagnosticsPayloadSize);
+    // Every fixed block, plus the appended backend block's own two-byte head.
+    // The reply is no longer one fixed length: a backend that publishes no
+    // counters sends a shorter one, and kDiagnosticsPayloadSize is the ceiling
+    // rather than the length. Both ends of that are checked here.
+    CHECK_EQ(reply.payload.size, duo_input::u1::kBackendBlockOffset + 2);
+    CHECK(reply.payload.size <= duo_input::u1::kDiagnosticsPayloadSize);
     // Appended, never rearranged: a host reading only the first 43 bytes still
     // reads exactly what it always read.
-    CHECK(duo_input::u1::kDiagnosticsPayloadSize > 43u);
+    CHECK(duo_input::u1::kBackendBlockOffset > 43u);
 }
 
 // The device's own latency, and the only latency it is in a position to know.
@@ -739,8 +744,11 @@ TEST_CASE(diagnostics_name_the_peripherals_on_the_two_ports) {
     CHECK_EQ(static_cast<std::uint16_t>(p[second + 8] | (p[second + 9] << 8)), 67u);
     CHECK_EQ(p[second + 10], 1u);
     CHECK_EQ(p[second + 41], 32u);
+    // The peripheral block still ends exactly where it always did. What
+    // follows it is the appended backend block, which no older configurator
+    // reads and which cannot move anything in front of it.
     CHECK_EQ(second + duo_input::u1::kPeripheralPortBytes,
-             duo_input::u1::kDiagnosticsPayloadSize);
+             duo_input::u1::kBackendBlockOffset);
 }
 
 TEST_CASE(an_empty_port_is_reported_as_empty_rather_than_left_out) {
@@ -759,6 +767,129 @@ TEST_CASE(an_empty_port_is_reported_as_empty_rather_than_left_out) {
 // that runs off the end without anybody noticing.
 TEST_CASE(the_diagnostics_reply_still_fits_in_one_frame) {
     CHECK(duo_input::u1::kDiagnosticsPayloadSize <= ProtocolLimits::CDC_MAX_PAYLOAD);
+}
+
+// ------------------------------------------------------- which backend spoke
+
+// U1's two input channels can be read by either backend now - the CH375 pair
+// or the single PIO USB host - and a diagnostic that does not say which one
+// produced it cannot be read six months later. The identifier goes AFTER the
+// two peripheral records, never among them.
+TEST_CASE(the_diagnostics_name_which_backend_read_the_peripherals) {
+    Link link;
+    link.hello();
+
+    link.service.set_backend(duo_input::protocol::InputBackend::CH375);
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::uint8_t* p = reply.payload.data;
+    const std::size_t at = duo_input::u1::kBackendBlockOffset;
+
+    CHECK_EQ(p[at], static_cast<std::uint8_t>(duo_input::protocol::InputBackend::CH375));
+    // The CH375 pair keeps none of the host-stack counters below, and a
+    // backend that keeps none says so with a count of zero rather than
+    // sending twelve zeros a reader would take for measurements.
+    CHECK_EQ(p[at + 1], 0u);
+    CHECK_EQ(reply.payload.size, at + 2);
+}
+
+// The counters the PIO USB host keeps, in the one fixed order the wire has.
+// Every one of them is a reason input did not arrive, and none of them has any
+// other outward sign.
+TEST_CASE(the_pio_usb_backend_publishes_its_own_counters) {
+    Link link;
+    link.hello();
+
+    duo_input::u1::BackendCounters counters;
+    counters.ignored_interfaces = 3;
+    counters.ignored_role_already_claimed = 2;
+    counters.event_overflows = 5;
+    counters.detach_overflows = 7;
+    counters.stale_events_discarded = 11;
+    counters.arm_failures = 13;
+    counters.arm_escalations = 17;
+    counters.stall_signals = 19;
+    counters.duplicate_mounts = 23;
+    counters.device_overflows = 29;
+    counters.interface_overflows = 31;
+    counters.callback_overflows = 37;
+    link.service.set_backend(duo_input::protocol::InputBackend::PIO_USB, counters);
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::uint8_t* p = reply.payload.data;
+    const std::size_t at = duo_input::u1::kBackendBlockOffset;
+
+    CHECK_EQ(p[at], static_cast<std::uint8_t>(duo_input::protocol::InputBackend::PIO_USB));
+    CHECK_EQ(p[at + 1], static_cast<std::uint8_t>(duo_input::u1::kBackendCounterCount));
+    const std::uint32_t expected[duo_input::u1::kBackendCounterCount] = {
+        3, 2, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37,
+    };
+    for (std::size_t index = 0; index < duo_input::u1::kBackendCounterCount; ++index) {
+        CHECK_EQ(read_u32(p + at + 2 + 4 * index), expected[index]);
+    }
+    CHECK_EQ(reply.payload.size, duo_input::u1::kDiagnosticsPayloadSize);
+}
+
+// V1 accepts exactly one logical keyboard and one logical mouse, and ignores
+// every further supported interface. Ignoring it silently is what makes a
+// second keyboard look like a broken one, so the reason travels in the reply:
+// how many were ignored at all, and how many of those only because the role
+// they wanted was already taken.
+TEST_CASE(an_ignored_extra_interface_says_why_it_was_ignored) {
+    Link link;
+    link.hello();
+
+    duo_input::u1::BackendCounters counters;
+    counters.ignored_interfaces = 2;
+    counters.ignored_role_already_claimed = 1;
+    link.service.set_backend(duo_input::protocol::InputBackend::PIO_USB, counters);
+
+    const std::uint8_t* p = link.send(CdcMessageType::GET_DIAGNOSTICS).payload.data;
+    const std::size_t at = duo_input::u1::kBackendBlockOffset;
+
+    CHECK_EQ(read_u32(p + at + 2), 2u);
+    // One of the two wanted a role another interface already held; the other
+    // was nothing this firmware could classify. A single total cannot tell
+    // those apart, and they are different faults on the bench.
+    CHECK_EQ(read_u32(p + at + 6), 1u);
+}
+
+// The whole point of appending: an older configurator reads the prefix it has
+// always read and never sees the suffix at all. So the prefix must be byte for
+// byte what it was before a backend was ever published.
+TEST_CASE(the_backend_block_leaves_the_prefix_byte_for_byte_unchanged) {
+    Link before;
+    before.hello();
+    const CdcFrame plain = before.send(CdcMessageType::GET_DIAGNOSTICS);
+    std::vector<std::uint8_t> prefix(
+        plain.payload.data, plain.payload.data + duo_input::u1::kBackendBlockOffset);
+
+    Link after;
+    after.hello();
+    duo_input::u1::BackendCounters counters;
+    counters.ignored_interfaces = 9;
+    after.service.set_backend(duo_input::protocol::InputBackend::PIO_USB, counters);
+    const CdcFrame published = after.send(CdcMessageType::GET_DIAGNOSTICS);
+
+    CHECK_EQ(published.payload.size, duo_input::u1::kDiagnosticsPayloadSize);
+    for (std::size_t index = 0; index < prefix.size(); ++index) {
+        CHECK_EQ(published.payload.data[index], prefix[index]);
+    }
+}
+
+// A firmware that has not been told which backend is running must not guess
+// one. Nothing above reads this as CH375 by default, because a wrong answer
+// here is worse than no answer.
+TEST_CASE(a_backend_nobody_published_reports_itself_as_unknown) {
+    Link link;
+    link.hello();
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::size_t at = duo_input::u1::kBackendBlockOffset;
+
+    CHECK_EQ(reply.payload.data[at],
+             static_cast<std::uint8_t>(duo_input::protocol::InputBackend::UNKNOWN));
+    CHECK_EQ(reply.payload.data[at + 1], 0u);
 }
 
 TEST_CASE(the_diagnostics_say_whether_the_output_queue_is_overflowing_now) {

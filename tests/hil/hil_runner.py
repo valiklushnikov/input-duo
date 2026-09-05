@@ -168,14 +168,18 @@ class PeripheralRow:
     ``reason`` is mandatory even on a pass. "It worked" is not a result anyone
     can act on six months later; "enumerated as boot keyboard, 6KRO" is.
 
-    ``role`` is what the **device** said it is - ``DescriptorSetup::kind()``,
-    read out of its own descriptor during enumeration - and never where it was
-    plugged in. ``port`` is the channel it came off, which U1's firmware calls
-    the keyboard channel and the mouse channel after the pins they use. The two
-    are independent: a mouse on the keyboard channel is an ordinary bench, and
-    a matrix that took the channel for the role would print `keyboard` beside a
-    reason reading "enumerated as mouse". Keep the channel, because a crossed
-    or dead cable is diagnosed from it; never let it name the device.
+    ``role`` is what the **device** said it is - the kind enumeration read out
+    of its own report descriptor - and never where it was plugged in. ``port``
+    is the logical role slot it arrived in: V1 accepts exactly one keyboard and
+    one mouse, and U1 has always reported these two records in that order. The
+    two fields are independent: a mouse in the keyboard slot is an ordinary
+    bench, and a matrix that took the slot for the role would print `keyboard`
+    beside a reason reading "enumerated as mouse". Keep the slot, because a
+    crossed or dead cable is diagnosed from it; never let it name the device.
+
+    The slot names are backend-neutral on purpose. They used to be "keyboard
+    channel" and "mouse channel", after the pins each CH375 used - a name the
+    PIO USB host makes wrong, since it has one bus and no channels at all.
     """
 
     port: str
@@ -215,6 +219,13 @@ class ScenarioResult:
     unmeasured: list[Unmeasured] = field(default_factory=list)
     measurements: dict[str, object] = field(default_factory=dict)
     coverage: dict[str, object] = field(default_factory=dict)
+    #: Which host stack read U1's own USB ports during this run: "CH375",
+    #: "PIO_USB", or "unknown" for firmware that named none. A report read
+    #: months later against a firmware image has to be able to say which one
+    #: produced it, and nothing else in the document can.
+    input_backend: str = "unknown"
+    #: That backend's own counters, by name, and only the ones it sent.
+    input_backend_counters: dict[str, int] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -261,6 +272,8 @@ class ScenarioResult:
             "control_link_gaps_over_50ms": gaps(
                 [sample.observed_ns for sample in self.samples]
             ),
+            "input_backend": self.input_backend,
+            "input_backend_counters": self.input_backend_counters,
             "peripherals": [asdict(row) for row in self.peripherals],
             "samples": [asdict(sample) | {"latency_ms": round(sample.latency_ms, 3)}
                         for sample in self.samples],
@@ -754,32 +767,30 @@ def evaluate(scenario: dict, now, baseline=None, elapsed_seconds: float | None =
     return checks, unmeasured
 
 
-#: What U1's firmware calls each of its two CH375 channels, after the pins each
-#: uses. A channel name says where a cable goes and nothing at all about what is
-#: on the other end of it.
-CHANNEL_NAMES = ("keyboard channel", "mouse channel")
+#: The two logical role slots U1 reports, in the order it reports them. A slot
+#: name says which of the two roles a record is about and nothing at all about
+#: what is plugged into it - see PeripheralRow.
+SLOT_NAMES = ("keyboard slot", "mouse slot")
 
 
 def peripheral_rows(now) -> list[PeripheralRow]:
     """One row per port U1 has, whether or not anything is on it.
 
     The role of each row is the device's own answer - the kind enumeration read
-    out of its descriptor - and the channel it arrived on is a separate field.
+    out of its descriptor - and the slot it arrived in is a separate field.
     """
     ports = getattr(now, "peripherals", None)
     if not ports:
         return []
     rows: list[PeripheralRow] = []
     for index, port in enumerate(ports):
-        channel = (
-            CHANNEL_NAMES[index] if index < len(CHANNEL_NAMES) else f"channel {index}"
-        )
+        slot = SLOT_NAMES[index] if index < len(SLOT_NAMES) else f"slot {index}"
         if not port.attached:
             rows.append(
                 PeripheralRow(
-                    port=channel,
-                    # Not the channel's name: an empty channel holds no device,
-                    # and naming one would be a claim about nothing.
+                    port=slot,
+                    # Not the slot's name: an empty slot holds no device, and
+                    # naming one would be a claim about nothing.
                     role="none",
                     vendor_id="",
                     product_id="",
@@ -804,7 +815,7 @@ def peripheral_rows(now) -> list[PeripheralRow]:
             reason = f"attached but never reached ready; enumeration saw it as {port.kind}"
         rows.append(
             PeripheralRow(
-                port=channel,
+                port=slot,
                 role=port.kind,
                 vendor_id=f"0x{port.vendor_id:04X}",
                 product_id=f"0x{port.product_id:04X}",
@@ -815,6 +826,19 @@ def peripheral_rows(now) -> list[PeripheralRow]:
             )
         )
     return rows
+
+
+def backend_of(now) -> tuple[str, dict[str, int]]:
+    """Which backend the device named, and the counters it published with it.
+
+    Firmware predating the appended backend block names none, and this must not
+    fill that silence in with a guess: a report claiming CH375 about a board
+    nobody asked would send its reader into the wrong half of the firmware.
+    """
+    backend = getattr(now, "backend", None)
+    if backend is None:
+        return ("unknown", {})
+    return (str(getattr(backend, "name", "unknown")), dict(backend.counters()))
 
 
 def coverage_of(scenario: dict, rows: list[PeripheralRow]) -> dict:
@@ -854,7 +878,11 @@ def _diagnostics_from_state(state: dict | None):
     """Rebuild the baseline reading from what the baseline phase wrote."""
     if state is None:
         return None, None
-    from duo_input.device.transactions import DeviceDiagnostics, LatencyHistogram
+    from duo_input.device.transactions import (
+        DeviceDiagnostics,
+        InputBackendReport,
+        LatencyHistogram,
+    )
 
     raw = state["diagnostics"]
     fields = dict(raw)
@@ -871,6 +899,12 @@ def _diagnostics_from_state(state: dict | None):
             )
         )
     fields.pop("peripherals", None)
+    # The backend block round-trips as its own mapping, for the same reason the
+    # histograms above do: asdict() flattens it to a plain dict on the way out,
+    # and a field this did not rebuild would come back as a dict pretending to
+    # be a report - readable right up to the first attribute access.
+    backend = fields.get("backend")
+    fields["backend"] = None if backend is None else InputBackendReport(**backend)
     return DeviceDiagnostics(**fields), state.get("taken_at")
 
 
@@ -906,6 +940,7 @@ def measure(scenario: dict, session, baseline=None, elapsed_seconds=None) -> Sce
     )
 
     result.peripherals = peripheral_rows(now)
+    result.input_backend, result.input_backend_counters = backend_of(now)
     result.coverage = coverage_of(scenario, result.peripherals)
     result.checks, result.unmeasured = evaluate(scenario, now, baseline, elapsed_seconds)
 

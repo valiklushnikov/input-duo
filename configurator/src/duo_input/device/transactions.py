@@ -18,7 +18,12 @@ from duo_input.domain.models import Trigger
 # side of the link through generated code. Importing it here from the emulator -
 # which is test-support, not production - is how the host and the firmware would
 # come to disagree about an error code without either of them changing.
-from duo_input.generated.protocol import CdcMessageType, ErrorCode, TriggerKind
+from duo_input.generated.protocol import (
+    CdcMessageType,
+    ErrorCode,
+    InputBackend,
+    TriggerKind,
+)
 
 _FRAME_DELIMITER = 0
 
@@ -205,6 +210,86 @@ class PeripheralPort:
     descriptor_hash: str | None
 
 
+#: Which input backend the firmware named, by the number it sent. The names are
+#: the protocol's own (protocol/schema.json input_backends), so a device and a
+#: report cannot disagree about what a number means.
+_INPUT_BACKENDS = {
+    int(InputBackend.CH375): InputBackend.CH375.name,
+    int(InputBackend.PIO_USB): InputBackend.PIO_USB.name,
+}
+
+#: The backend counters, in the fixed order the wire carries them. Append only:
+#: firmware may send fewer than this (it stops where its own list stops) or
+#: more (a later firmware appended one), and neither is an error.
+_BACKEND_COUNTER_FIELDS = (
+    "ignored_interfaces",
+    "ignored_role_already_claimed",
+    "event_overflows",
+    "detach_overflows",
+    "stale_events_discarded",
+    "arm_failures",
+    "arm_escalations",
+    "stall_signals",
+    "duplicate_mounts",
+    "device_overflows",
+    "interface_overflows",
+    "callback_overflows",
+)
+
+
+@dataclass(frozen=True)
+class InputBackendReport:
+    """Which host stack read U1's own USB ports, and what it counted.
+
+    U1's two input channels can be read by the CH375 pair or by the single PIO
+    USB host. The two fail in entirely different ways, so a diagnostic that
+    does not name the backend cannot be acted on months later.
+    """
+
+    #: ``"CH375"``, ``"PIO_USB"``, ``"unknown"`` (the firmware named a backend
+    #: this configurator does not know, or named none at all), or
+    #: ``"unreadable"`` (a block was there and did not parse). The last two are
+    #: deliberately different from ``DeviceDiagnostics.backend`` being ``None``,
+    #: which means the firmware sent no block whatsoever.
+    name: str
+    #: Why the block did not parse. Set only when ``name`` is ``"unreadable"``.
+    unreadable_reason: str | None = None
+
+    # Every counter below is a reason input did not arrive, and none of them
+    # has any other outward sign. ``None`` means this firmware did not send
+    # that counter - never that it counted zero.
+    #: Interfaces that ended up with no logical role, for any reason.
+    ignored_interfaces: int | None = None
+    #: How many of those only because the role was already held. V1 accepts one
+    #: logical keyboard and one logical mouse, so a second keyboard lands here -
+    #: a spare device on the bench. The remainder is "nothing could classify
+    #: it", which is a broken one.
+    ignored_role_already_claimed: int | None = None
+    event_overflows: int | None = None
+    detach_overflows: int | None = None
+    stale_events_discarded: int | None = None
+    arm_failures: int | None = None
+    arm_escalations: int | None = None
+    stall_signals: int | None = None
+    duplicate_mounts: int | None = None
+    device_overflows: int | None = None
+    interface_overflows: int | None = None
+    callback_overflows: int | None = None
+
+    def counters(self) -> dict[str, int]:
+        """Every counter this firmware actually sent, in wire order.
+
+        The ones it did not send are absent rather than zero: a report that
+        prints zero for a figure nothing measured is a report that invents a
+        measurement.
+        """
+        return {
+            name: value
+            for name in _BACKEND_COUNTER_FIELDS
+            if (value := getattr(self, name)) is not None
+        }
+
+
 @dataclass(frozen=True)
 class DeviceDiagnostics:
     bad_crc: int
@@ -265,6 +350,13 @@ class DeviceDiagnostics:
     # predates the block; a port with nothing on it is still a row, because an
     # empty port is a fact about the run rather than an absence to infer.
     peripherals: tuple[PeripheralPort, ...] | None = None
+
+    # Which backend read those two ports, appended after them. ``None`` when
+    # the firmware predates the block - which is a valid old payload and not a
+    # parse error; see ``_parse_backend``. A firmware that sent a block this
+    # cannot read reports ``name == "unreadable"`` instead, because a broken
+    # block and no block at all are different facts about the device.
+    backend: InputBackendReport | None = None
 
 
 @dataclass(frozen=True)
@@ -418,7 +510,8 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
     rest = tail[_DROPPED_COMMANDS.size + _RUNTIME_FAULT.size :]
     latency_bytes = _latency_block_size(rest)
     keyboard_latency, mouse_latency = _parse_latency(rest[:latency_bytes])
-    peripherals = _parse_peripherals(rest[latency_bytes:])
+    peripherals, appended = _parse_peripherals(rest[latency_bytes:])
+    backend = _parse_backend(appended)
 
     return DeviceDiagnostics(
         bad_crc,
@@ -438,6 +531,7 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
         keyboard_latency=keyboard_latency,
         mouse_latency=mouse_latency,
         peripherals=peripherals,
+        backend=backend,
     )
 
 
@@ -499,11 +593,24 @@ def _latency_block_size(rest: bytes) -> int:
     return 1 + 4 * (bucket_count - 1) + 2 * (_LATENCY_HEAD.size + 4 * bucket_count)
 
 
-def _parse_peripherals(block: bytes) -> tuple[PeripheralPort, ...] | None:
-    """Read the two peripheral ports, or report that the firmware sent none."""
+def _parse_peripherals(
+    block: bytes,
+) -> tuple[tuple[PeripheralPort, ...] | None, bytes]:
+    """Read the two peripheral ports, and hand back whatever follows them.
+
+    Returns ``(None, b"")`` when the firmware sent no peripheral block at all.
+    A block that is present but shorter than two whole records is refused
+    rather than half-read: a port assembled from the bytes that happened to
+    arrive would still answer questions, and every answer would be about a
+    device the firmware never described.
+
+    Anything beyond the two records is the appended backend block and is
+    returned untouched, so this stopped being the last block on the wire the
+    moment that one was added - which is exactly how it was designed to grow.
+    """
     if not block:
-        return None
-    if len(block) != 2 * _PERIPHERAL.size:
+        return (None, b"")
+    if len(block) < 2 * _PERIPHERAL.size:
         raise PayloadError("GET_DIAGNOSTICS peripheral block has the wrong size")
 
     ports: list[PeripheralPort] = []
@@ -530,7 +637,60 @@ def _parse_peripherals(block: bytes) -> tuple[PeripheralPort, ...] | None:
                 descriptor_hash=digest.hex() if descriptor_bytes else None,
             )
         )
-    return tuple(ports)
+    return (tuple(ports), bytes(block[2 * _PERIPHERAL.size :]))
+
+
+def _parse_backend(block: bytes) -> InputBackendReport | None:
+    """Read the appended backend block, in both compatibility directions.
+
+    ``None`` means the firmware sent no block. That is a valid older payload -
+    the block was appended after the two peripheral records precisely so that
+    firmware predating it stays readable - and refusing it would make this
+    configurator the thing that broke, over a field the device never claimed to
+    have.
+
+    A block that IS there but cannot be read is reported as ``"unreadable"``
+    rather than raised, because everything in front of it - the counters, the
+    link state, the latency, both ports - is complete and correct however
+    garbled the suffix is, and throwing all of that away would lose good
+    readings over a trailing block nobody needs. It is still not reported as
+    absent: a firmware that sent a broken block is not one that sent none, and
+    conflating them would hide the defect.
+
+    The block is: one backend identifier, one count of the u32 counters that
+    follow, then that many counters. The count is what lets a backend publish
+    none of them - CH375 keeps none of these figures, and twelve zeros would
+    read as twelve measurements - and what lets a reader find the end of a
+    block whose counter list is longer than the one it knows. Being the last
+    block, its length is checked exactly; whoever appends the next block
+    changes that the same way the peripheral block above was changed.
+    """
+    if not block:
+        return None
+    if len(block) < 2:
+        return InputBackendReport(
+            "unreadable",
+            unreadable_reason=(
+                "the backend block is one byte long: an identifier with no "
+                "count of the counters behind it"
+            ),
+        )
+    identifier, count = block[0], block[1]
+    expected = 2 + 4 * count
+    if len(block) != expected:
+        return InputBackendReport(
+            "unreadable",
+            unreadable_reason=(
+                f"the backend block claims {count} counters, which needs "
+                f"{expected} bytes, and {len(block)} arrived"
+            ),
+        )
+    values = [_U32.unpack_from(block, 2 + 4 * index)[0] for index in range(count)]
+    # Counters past the ones this configurator knows about were appended by a
+    # later firmware; reading the ones in common and ignoring the rest is the
+    # same append-only rule that lets older firmware be read here at all.
+    named = dict(zip(_BACKEND_COUNTER_FIELDS, values))
+    return InputBackendReport(_INPUT_BACKENDS.get(identifier, "unknown"), **named)
 
 
 def parse_capture_event(payload: bytes) -> Trigger:
@@ -598,6 +758,7 @@ __all__ = [
     "FailureReason",
     "FrameAssembler",
     "FrameOverflowError",
+    "InputBackendReport",
     "LatencyHistogram",
     "PeripheralPort",
     "OperationFailure",

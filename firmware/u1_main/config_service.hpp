@@ -127,8 +127,67 @@ inline constexpr std::size_t kPeripheralBlockOffset =
     43 + 1 + 4 * (diagnostics::kLatencyBucketCount - 1) +
     2 * (8 + 4 * diagnostics::kLatencyBucketCount);
 
-inline constexpr std::size_t kDiagnosticsPayloadSize =
+/// Which host stack read those ports, and what it counted while doing it.
+///
+/// U1's two input channels can be read by the CH375 pair or by the single
+/// PIO USB host, and a diagnostic that does not say which one produced it
+/// cannot be acted on months later - the two fail in entirely different ways.
+///
+/// Every counter here is a reason input did not arrive and has no other
+/// outward sign. The order is the wire order and it is APPEND ONLY: a new
+/// counter goes on the end, where a configurator that stops reading earlier
+/// still reads what it always read. Reordering these would silently
+/// re-label every reading an existing host takes.
+struct BackendCounters {
+    /// Every interface that ended up with no logical role, for any reason.
+    std::uint32_t ignored_interfaces = 0;
+    /// How many of those only because the role they wanted was already held.
+    /// V1 accepts exactly one logical keyboard and one logical mouse, so a
+    /// second keyboard lands here - which on a bench is a spare device, not
+    /// a broken one. The remainder (ignored_interfaces minus this) is
+    /// "nothing here could classify it", which is the broken one.
+    std::uint32_t ignored_role_already_claimed = 0;
+    std::uint32_t event_overflows = 0;
+    std::uint32_t detach_overflows = 0;
+    std::uint32_t stale_events_discarded = 0;
+    std::uint32_t arm_failures = 0;
+    std::uint32_t arm_escalations = 0;
+    std::uint32_t stall_signals = 0;
+    std::uint32_t duplicate_mounts = 0;
+    std::uint32_t device_overflows = 0;
+    std::uint32_t interface_overflows = 0;
+    std::uint32_t callback_overflows = 0;
+};
+
+/// How many counters BackendCounters holds, and therefore how many the wire
+/// carries. Tied to the struct rather than written down twice.
+inline constexpr std::size_t kBackendCounterCount = 12;
+static_assert(sizeof(BackendCounters) == 4 * kBackendCounterCount,
+              "every BackendCounters field is one u32 on the wire, and the "
+              "count above says how many - add a field, raise the count");
+
+/// The appended block: the backend identifier, how many counters follow, and
+/// then that many u32s.
+///
+/// The count byte is what lets a backend publish none of them. CH375 keeps no
+/// host-stack counters, and sending twelve zeros for it would put twelve
+/// readings in a report that nothing ever measured; it sends a count of zero
+/// instead, and the host reports them as unknown rather than as zero.
+inline constexpr std::size_t kBackendBlockBytes = 2 + 4 * kBackendCounterCount;
+
+/// Where the appended backend block starts.
+///
+/// Everything before this offset is exactly what it was before the block
+/// existed - same fields, same order, same numbering - so a configurator that
+/// stops reading here reads what it always read.
+inline constexpr std::size_t kBackendBlockOffset =
     kPeripheralBlockOffset + 2 * kPeripheralPortBytes;
+
+/// The longest a GET_DIAGNOSTICS reply can be: a backend publishing every
+/// counter. A backend publishing none sends kBackendBlockBytes - 4 *
+/// kBackendCounterCount fewer bytes, so this is a ceiling and not a length.
+inline constexpr std::size_t kDiagnosticsPayloadSize =
+    kBackendBlockOffset + kBackendBlockBytes;
 
 static_assert(kDiagnosticsPayloadSize <= protocol::ProtocolLimits::CDC_MAX_PAYLOAD,
               "the diagnostics reply has to fit in one frame");
@@ -201,6 +260,22 @@ public:
     void set_peripherals(const PeripheralPort& keyboard, const PeripheralPort& mouse) {
         keyboard_port_ = keyboard;
         mouse_port_ = mouse;
+    }
+
+    /// Publish which backend read those ports, and its own counters.
+    ///
+    /// Two overloads rather than a defaulted argument, because "publishes no
+    /// counters" and "publishes twelve zeros" are different claims and the
+    /// call site has to make one of them on purpose. CH375 uses the first.
+    void set_backend(protocol::InputBackend backend) {
+        backend_ = backend;
+        backend_counters_ = {};
+        backend_publishes_counters_ = false;
+    }
+    void set_backend(protocol::InputBackend backend, const BackendCounters& counters) {
+        backend_ = backend;
+        backend_counters_ = counters;
+        backend_publishes_counters_ = true;
     }
 
     /// Which profile the device is running.
@@ -371,6 +446,12 @@ private:
     diagnostics::LatencyHistogram mouse_latency_{};
     PeripheralPort keyboard_port_{};
     PeripheralPort mouse_port_{};
+    /// Unknown until the main loop says otherwise. Defaulting this to CH375
+    /// would have a PIO USB build report the wrong backend for as long as it
+    /// took the first pass to run, and a wrong answer here is worse than none.
+    protocol::InputBackend backend_ = protocol::InputBackend::UNKNOWN;
+    BackendCounters backend_counters_{};
+    bool backend_publishes_counters_ = false;
 
 #if DUO_SPI_DEBUG || DUO_CH375_PROBE
     // One byte short of what a CDC reply can carry, because the payload leads

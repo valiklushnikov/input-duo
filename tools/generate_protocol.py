@@ -91,6 +91,11 @@ def render_cpp(schema: dict[str, object]) -> str:
         ("TriggerKind", "trigger_kinds"),
         ("BindingMode", "binding_modes"),
         ("ActionKind", "action_kinds"),
+        # Which host stack read U1's own USB ports. It travels in the
+        # GET_DIAGNOSTICS reply, appended after the two peripheral records, so
+        # a report can name the backend that produced it - the CH375 pair and
+        # the PIO USB host fail in entirely different ways.
+        ("InputBackend", "input_backends"),
     ):
         lines.extend(_cpp_enum(enum_name, "std::uint8_t", _items(schema, schema_key)))
         lines.append("")
@@ -144,6 +149,7 @@ def render_python(schema: dict[str, object]) -> str:
         ("TriggerKind", "trigger_kinds"),
         ("BindingMode", "binding_modes"),
         ("ActionKind", "action_kinds"),
+        ("InputBackend", "input_backends"),
     ):
         lines.extend(_python_enum(enum_name, "IntEnum", _items(schema, schema_key)))
         lines.append("")

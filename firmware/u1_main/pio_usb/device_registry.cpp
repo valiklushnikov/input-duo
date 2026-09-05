@@ -608,6 +608,7 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
         interface->instance = record.instance;
         interface->interface_protocol = record.interface_protocol;
         interface->descriptor_present = record.payload_present;
+        interface->descriptor_bytes = record.payload_present ? record.size : 0;
         // Assigned once, here, from the registry-wide monotonic counter -
         // never on the duplicate-mount branch above, which re-arms the same
         // still-mounted interface rather than claiming a fresh one. This is
@@ -668,6 +669,14 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
         } else {
             interface->role = LogicalRole::Ignored;
             ++ignored_interfaces_;
+            if (wanted != LogicalRole::Ignored) {
+                // It was a usable keyboard or mouse; the only thing wrong with
+                // it is that V1 already has one of those. Counted apart from
+                // the unclassifiable case because a spare device and a device
+                // this firmware cannot read are different problems, and the
+                // diagnostics reply is the only outward sign of either.
+                ++ignored_role_taken_;
+            }
         }
         if (interface->role == LogicalRole::Keyboard || interface->role == LogicalRole::Mouse) {
             // Told once, before its first Report: InputPipeline::on_event

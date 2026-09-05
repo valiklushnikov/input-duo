@@ -37,6 +37,11 @@
     "UA": 3,
     "US": 1
   },
+  "input_backends": {
+    "CH375": 1,
+    "PIO_USB": 2,
+    "UNKNOWN": 0
+  },
   "trigger_kinds": {
     "KEYBOARD_USAGE": 1,
     "MOUSE_BUTTON": 2

@@ -411,6 +411,40 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
     // an older firmware produces.
     at += write_peripheral(out + at, keyboard_port_);
     at += write_peripheral(out + at, mouse_port_);
+
+    // And which backend read them, appended last for the same reason as
+    // everything above it: a host that stops at the end of the peripheral
+    // block reads exactly what it always read, field for field. The count
+    // byte says how many counters follow, so a backend that keeps none of
+    // them sends none rather than twelve zeros - and a host reading a count
+    // it does not recognise still knows where the block ends.
+    out[at++] = static_cast<std::uint8_t>(backend_);
+    if (!backend_publishes_counters_) {
+        out[at++] = 0;
+        return at;
+    }
+    out[at++] = static_cast<std::uint8_t>(kBackendCounterCount);
+    // Written out one by one, in the order BackendCounters declares them,
+    // rather than copied over the struct: the wire order is a contract and a
+    // memcpy would hand it to whatever the compiler decided about padding.
+    const std::uint32_t counters[kBackendCounterCount] = {
+        backend_counters_.ignored_interfaces,
+        backend_counters_.ignored_role_already_claimed,
+        backend_counters_.event_overflows,
+        backend_counters_.detach_overflows,
+        backend_counters_.stale_events_discarded,
+        backend_counters_.arm_failures,
+        backend_counters_.arm_escalations,
+        backend_counters_.stall_signals,
+        backend_counters_.duplicate_mounts,
+        backend_counters_.device_overflows,
+        backend_counters_.interface_overflows,
+        backend_counters_.callback_overflows,
+    };
+    for (std::size_t index = 0; index < kBackendCounterCount; ++index) {
+        put_u32(out + at, counters[index]);
+        at += 4;
+    }
     return at;
 #endif
 }

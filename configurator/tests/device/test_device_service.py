@@ -1105,3 +1105,175 @@ def test_diagnostics_without_the_endpoint_report_are_still_readable() -> None:
 
     assert counters.endpoint_answering is True
     assert counters.endpoint_drops is None
+
+
+# ----------------------------------------------- which backend read the ports
+
+
+def _backend_block(backend: int, *counters: int) -> bytes:
+    """The appended suffix: a backend identifier, a count, then the counters."""
+    import struct
+
+    return (
+        bytes((backend, len(counters)))
+        + b"".join(struct.pack("<I", value) for value in counters)
+    )
+
+
+def _both_ports() -> bytes:
+    return _peripheral_block(
+        (1, 1, 1, 0x046D, 0xC31C, 0, 0, bytes(32)),
+        (1, 1, 2, 0x3434, 0xD030, 5, 67, bytes(range(32))),
+    )
+
+
+def test_firmware_that_names_no_backend_still_parses() -> None:
+    """The compatibility direction that is easy to forget.
+
+    Firmware predating the suffix answers with the prefix alone, exactly as it
+    always did. Refusing that reply would make this configurator the thing that
+    broke, over a field the older device never claimed to have.
+    """
+    from duo_input.device.transactions import parse_diagnostics
+
+    counters = parse_diagnostics(_diagnostics_head() + _full_latency() + _both_ports())
+
+    assert counters.backend is None
+    # And everything in front of the missing suffix is read as it always was.
+    assert counters.peripherals is not None
+    assert counters.peripherals[0].vendor_id == 0x046D
+
+
+def test_the_ch375_backend_names_itself_and_publishes_no_counters() -> None:
+    """CH375 keeps none of the host-stack counters, and says so with a count of
+    zero rather than twelve zeros a reader would take for measurements."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = _diagnostics_head() + _full_latency() + _both_ports() + _backend_block(1)
+
+    backend = parse_diagnostics(payload).backend
+
+    assert backend is not None
+    assert backend.name == "CH375"
+    assert backend.ignored_interfaces is None
+
+
+def test_the_pio_usb_backend_reports_its_own_counters() -> None:
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        _diagnostics_head()
+        + _full_latency()
+        + _both_ports()
+        + _backend_block(2, 3, 2, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)
+    )
+
+    backend = parse_diagnostics(payload).backend
+
+    assert backend is not None
+    assert backend.name == "PIO_USB"
+    assert backend.ignored_interfaces == 3
+    assert backend.ignored_role_already_claimed == 2
+    assert backend.event_overflows == 5
+    assert backend.detach_overflows == 7
+    assert backend.stale_events_discarded == 11
+    assert backend.arm_failures == 13
+    assert backend.arm_escalations == 17
+    assert backend.stall_signals == 19
+    assert backend.duplicate_mounts == 23
+    assert backend.device_overflows == 29
+    assert backend.interface_overflows == 31
+    assert backend.callback_overflows == 37
+
+
+def test_an_ignored_extra_device_says_why_it_was_ignored() -> None:
+    """V1 takes one logical keyboard and one logical mouse. A second keyboard is
+    ignored deterministically, and a bench needs to tell that apart from an
+    interface nothing could classify - a spare keyboard and a broken one."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        _diagnostics_head()
+        + _full_latency()
+        + _both_ports()
+        + _backend_block(2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+
+    backend = parse_diagnostics(payload).backend
+
+    assert backend is not None
+    assert backend.ignored_interfaces == 2
+    assert backend.ignored_role_already_claimed == 1
+
+
+def test_no_device_on_either_port_still_names_the_backend() -> None:
+    """An empty port is a fact about the run. Which host looked at it is too."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        _diagnostics_head()
+        + _full_latency()
+        + _peripheral_block(
+            (0, 0, 0, 0, 0, 0, 0, bytes(32)),
+            (0, 0, 0, 0, 0, 0, 0, bytes(32)),
+        )
+        + _backend_block(2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    )
+
+    counters = parse_diagnostics(payload)
+
+    assert counters.peripherals is not None
+    assert counters.peripherals[0].kind == "none"
+    assert counters.backend is not None
+    assert counters.backend.name == "PIO_USB"
+
+
+def test_a_backend_this_configurator_does_not_know_is_not_invented() -> None:
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = _diagnostics_head() + _full_latency() + _both_ports() + _backend_block(99)
+
+    backend = parse_diagnostics(payload).backend
+
+    assert backend is not None
+    assert backend.name == "unknown"
+
+
+def test_a_malformed_backend_suffix_does_not_take_the_prefix_down() -> None:
+    """The counters, the link state and both ports in front of the suffix are
+    complete and correct however garbled the suffix is. Throwing them away
+    would lose good readings over a trailing block nobody needs to read."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    prefix = _diagnostics_head() + _full_latency() + _both_ports()
+    # A declared count of twelve with only one counter behind it.
+    truncated = parse_diagnostics(prefix + bytes((2, 12)) + struct.pack("<I", 1))
+    # A backend identifier with no count byte at all.
+    headless = parse_diagnostics(prefix + bytes((2,)))
+
+    for counters in (truncated, headless):
+        assert counters.bad_crc == 0
+        assert counters.link_frames_sent == 900
+        assert counters.peripherals is not None
+        assert counters.peripherals[1].product_id == 0xD030
+        # And the suffix is reported as unreadable rather than as absent: a
+        # firmware that sent a broken block is not a firmware that sent none.
+        assert counters.backend is not None
+        assert counters.backend.name == "unreadable"
+        assert counters.backend.unreadable_reason
+        assert counters.backend.ignored_interfaces is None
+
+
+def test_a_shorter_counter_run_than_this_configurator_knows_is_read_as_far_as_it_goes() -> None:
+    """Append-only in the other direction too: firmware publishing the first few
+    counters is read for those, and says nothing about the ones it never sent."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = _diagnostics_head() + _full_latency() + _both_ports() + _backend_block(2, 4, 3)
+
+    backend = parse_diagnostics(payload).backend
+
+    assert backend is not None
+    assert backend.ignored_interfaces == 4
+    assert backend.ignored_role_already_claimed == 3
+    assert backend.event_overflows is None

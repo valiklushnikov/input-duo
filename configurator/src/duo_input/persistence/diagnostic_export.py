@@ -33,6 +33,17 @@ UNKNOWN = "unknown"
 REDACTION = "***"
 
 
+#: What the two logical role slots are called in a report.
+#:
+#: Backend-neutral on purpose. "Keyboard channel" and "mouse channel" named a
+#: pair of CH375 pins; the PIO USB host has one bus and no channels at all, so
+#: a label built on them would be wrong on half the builds this configurator
+#: talks to. What survives both backends is the logical role V1 accepts exactly
+#: one of - a keyboard and a mouse - which is also what the wire has always
+#: ordered these two records by.
+ROLE_SLOTS = ("Keyboard", "Mouse")
+
+
 @dataclass(frozen=True)
 class PeripheralIdentity:
     """One USB device the U1 has enumerated, as it identifies itself."""
@@ -41,6 +52,12 @@ class PeripheralIdentity:
     vendor_id: str = UNKNOWN
     product_id: str = UNKNOWN
     descriptor_hash: str = UNKNOWN
+
+    def __str__(self) -> str:
+        """One line, for the page that shows these side by side."""
+        if self.vendor_id == UNKNOWN:
+            return f"{self.role}: none"
+        return f"{self.role}: {self.vendor_id}:{self.product_id}"
 
 
 @dataclass(frozen=True)
@@ -54,7 +71,16 @@ class DiagnosticSnapshot:
     chip_id: str = UNKNOWN
     reset_reason: str = UNKNOWN
     watchdog_count: str = UNKNOWN
-    ch375_state: str = UNKNOWN
+    #: Which host stack read U1's own USB ports: "CH375", "PIO_USB", or
+    #: ``unknown`` for firmware that names none. Never guessed - a report that
+    #: names the wrong backend is worse than one that names none, because the
+    #: two fail in entirely different ways and half the counters below only
+    #: exist on one of them.
+    input_backend: str = UNKNOWN
+    #: That backend's own counters, by name, and only the ones it actually
+    #: sent. Empty for a backend that publishes none and for firmware that
+    #: names no backend at all.
+    input_backend_counters: dict[str, int] = field(default_factory=dict)
     peripherals: tuple[PeripheralIdentity, ...] = ()
     advertised_capabilities: tuple[str, ...] = ()
     device_generation: str = UNKNOWN
@@ -117,6 +143,9 @@ class DiagnosticSnapshot:
             endpoint_drops=_counter(counters, "endpoint_drops"),
             endpoint_release_ms=_counter(counters, "endpoint_release_ms"),
             dropped_commands=_counter(counters, "dropped_commands"),
+            input_backend=_backend_name(counters),
+            input_backend_counters=_backend_counters(counters),
+            peripherals=_peripherals(counters),
         )
 
     def to_json(self) -> str:
@@ -139,6 +168,54 @@ def _yes_no(counters: object, field: str) -> str:
 def _counter(counters: object, name: str) -> int | str:
     value = getattr(counters, name, None)
     return UNKNOWN if value is None else int(value)
+
+
+def _backend_name(counters: object) -> str:
+    """Which backend the firmware named, or ``unknown`` if it named none.
+
+    Firmware predating the field sends no backend block at all, and this must
+    not fill that silence in with a guess: an operator reading "CH375" in a
+    report from a PIO USB board would chase the wrong half of the firmware.
+    """
+    backend = getattr(counters, "backend", None)
+    if backend is None:
+        return UNKNOWN
+    name = getattr(backend, "name", UNKNOWN)
+    return UNKNOWN if name == "unknown" else str(name)
+
+
+def _backend_counters(counters: object) -> dict[str, int]:
+    backend = getattr(counters, "backend", None)
+    if backend is None or not hasattr(backend, "counters"):
+        return {}
+    return dict(backend.counters())
+
+
+def _peripherals(counters: object) -> tuple[PeripheralIdentity, ...]:
+    """The two role slots, named by role rather than by any backend's wiring.
+
+    An empty slot is still a row: nothing on the keyboard slot is a fact about
+    the run, and a reader inferring it from a missing row would be inferring it
+    from the same absence that firmware without the block produces.
+    """
+    ports = getattr(counters, "peripherals", None)
+    if not ports:
+        return ()
+    identities: list[PeripheralIdentity] = []
+    for index, port in enumerate(ports):
+        role = ROLE_SLOTS[index] if index < len(ROLE_SLOTS) else f"Slot {index}"
+        if not getattr(port, "attached", False):
+            identities.append(PeripheralIdentity(role))
+            continue
+        identities.append(
+            PeripheralIdentity(
+                role,
+                vendor_id=f"0x{port.vendor_id:04X}",
+                product_id=f"0x{port.product_id:04X}",
+                descriptor_hash=port.descriptor_hash or UNKNOWN,
+            )
+        )
+    return tuple(identities)
 
 
 def redact(message: str, secrets: tuple[str, ...]) -> str:
@@ -197,6 +274,7 @@ def _project_file(project: object | None) -> Path:
 
 __all__ = [
     "DIAGNOSTICS_MEMBER",
+    "ROLE_SLOTS",
     "LOG_MEMBER",
     "PROJECT_MEMBER",
     "REDACTION",

@@ -65,7 +65,81 @@ def test_diagnostics_does_not_offer_a_firmware_version(page):
 def test_everything_is_unknown_without_a_device(page):
     assert page.value("protocol_version") == UNKNOWN
     assert page.value("reset_reason") == UNKNOWN
-    assert page.value("ch375_state") == UNKNOWN
+    assert page.value("input_backend") == UNKNOWN
+
+
+def test_the_page_never_names_a_backend_in_a_row_label(page):
+    """U1's two input channels can be read by either backend now, so a row
+    called "CH375 state" is a label that lies on half the builds. The backend
+    is named once, as a value, in the row that exists to report it."""
+    from PySide6.QtWidgets import QLabel
+
+    labels = [label.text() for label in page.findChildren(QLabel)]
+
+    assert not [text for text in labels if "CH375" in text]
+    with pytest.raises(KeyError):
+        page.value("ch375_state")
+
+
+def test_the_two_role_slots_read_as_keyboard_and_mouse(page, emulator, qtbot):
+    """Backend-neutral names for the two logical roles. "Keyboard channel" was
+    a CH375 pin pair; the PIO USB host has one bus and no channels at all."""
+    emulator.input_backend = 2
+    emulator.peripheral_ports = (
+        (1, 1, 1, 0x046D, 0xC31C, 0, 0, bytes(32)),
+        (0, 0, 0, 0, 0, 0, 0, bytes(32)),
+    )
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.service.connect_device(emulator)
+
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.refresh_button.click()
+
+    reported = page.value("peripherals")
+    assert "Keyboard" in reported
+    assert "Mouse" in reported
+    assert "channel" not in reported.lower()
+
+
+def test_the_backend_row_names_the_host_that_read_the_ports(page, emulator, qtbot):
+    """Driven through the Refresh button rather than by setting the value: a
+    handler this page never reaches is a handler a test must not pass over."""
+    emulator.input_backend = 2
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.service.connect_device(emulator)
+
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.refresh_button.click()
+
+    assert page.value("input_backend") == "PIO_USB"
+
+
+def test_older_firmware_that_names_no_backend_leaves_the_row_empty(page, emulator, qtbot):
+    """The emulator sends the payload older firmware sends. Nothing may invent
+    a backend for it - "unknown" is the true answer and it is not "CH375"."""
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.service.connect_device(emulator)
+
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.refresh_button.click()
+
+    assert page.value("input_backend") == UNKNOWN
+
+
+def test_the_reason_an_interface_was_ignored_reaches_the_page(page, emulator, qtbot):
+    """V1 accepts one keyboard and one mouse. The second keyboard is ignored on
+    purpose, and this row is the only place that says so."""
+    emulator.input_backend = 2
+    emulator.backend_counters = (2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.service.connect_device(emulator)
+
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.refresh_button.click()
+
+    reported = page.value("input_backend_counters")
+    assert "ignored_interfaces 2" in reported
+    assert "ignored_role_already_claimed 1" in reported
 
 
 def test_connecting_fills_in_what_the_device_reports(page, emulator, qtbot):

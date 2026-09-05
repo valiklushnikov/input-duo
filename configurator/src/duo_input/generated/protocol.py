@@ -129,6 +129,11 @@ class ActionKind(IntEnum):
     TOGGLE_KEYBOARD_ROUTE = 0x02
     TOGGLE_MOUSE_ROUTE = 0x04
 
+class InputBackend(IntEnum):
+    CH375 = 0x01
+    PIO_USB = 0x02
+    UNKNOWN = 0x00
+
 class Capability(IntFlag):
     CAPTURE = 0x20
     CONFIG_READ = 0x08

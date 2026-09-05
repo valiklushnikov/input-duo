@@ -72,7 +72,6 @@ class DiagnosticsPage(QWidget):
             (
                 ("reset_reason", QT_TRANSLATE_NOOP("DiagnosticsPage", "Reset reason")),
                 ("watchdog_count", QT_TRANSLATE_NOOP("DiagnosticsPage", "Watchdog resets")),
-                ("ch375_state", QT_TRANSLATE_NOOP("DiagnosticsPage", "CH375 state")),
                 ("endpoint_answering", QT_TRANSLATE_NOOP("DiagnosticsPage", "Second board answering")),
                 ("endpoint_usb", QT_TRANSLATE_NOOP("DiagnosticsPage", "Second board USB")),
                 ("spi_frames_sent", QT_TRANSLATE_NOOP("DiagnosticsPage", "SPI frames sent")),
@@ -100,6 +99,14 @@ class DiagnosticsPage(QWidget):
                 ("device_generation", QT_TRANSLATE_NOOP("DiagnosticsPage", "Generation on device")),
                 ("device_hash", QT_TRANSLATE_NOOP("DiagnosticsPage", "Hash on device")),
                 ("advertised_capabilities", QT_TRANSLATE_NOOP("DiagnosticsPage", "Advertised capabilities")),
+                # Backend-neutral, and named only here. "CH375 state" was a row
+                # label that is wrong on half the builds this configurator
+                # talks to; which host stack is running is a value, reported in
+                # the one place that exists to report it - never in a mapping
+                # screen, where an operator is choosing keys and the backend
+                # cannot change what any of them do.
+                ("input_backend", QT_TRANSLATE_NOOP("DiagnosticsPage", "Input backend")),
+                ("input_backend_counters", QT_TRANSLATE_NOOP("DiagnosticsPage", "Input backend counters")),
                 ("peripherals", QT_TRANSLATE_NOOP("DiagnosticsPage", "Peripherals")),
             ),
         ),
@@ -308,6 +315,15 @@ class DiagnosticsPage(QWidget):
 
 
 def _as_text(value: object) -> str:
+    if isinstance(value, dict):
+        # Only the counters that counted something. Twelve zeros in a row is
+        # noise an operator has to read past to find the one that is not zero,
+        # and a backend that publishes none of them sends an empty mapping -
+        # which is an absence, not a row of zeros.
+        counted = ", ".join(f"{name} {count}" for name, count in value.items() if count)
+        if not value:
+            return UNKNOWN
+        return counted or "none counted"
     if isinstance(value, (tuple, list)):
         return ", ".join(str(item) for item in value) if value else UNKNOWN
     return str(value)

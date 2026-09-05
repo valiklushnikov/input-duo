@@ -113,7 +113,8 @@ def test_the_archive_records_every_field_the_report_needs(tmp_path):
         "chip_id",
         "reset_reason",
         "watchdog_count",
-        "ch375_state",
+        "input_backend",
+        "input_backend_counters",
         "peripherals",
         "spi_crc_errors",
         "spi_timeouts",
@@ -131,7 +132,8 @@ def test_a_field_protocol_v1_does_not_carry_says_so(tmp_path):
 
     report = json.loads(_members(archive)[DIAGNOSTICS_MEMBER])
     assert report["reset_reason"] == UNKNOWN
-    assert report["ch375_state"] == UNKNOWN
+    assert report["input_backend"] == UNKNOWN
+    assert report["input_backend_counters"] == {}
     assert report["peripherals"] == []
 
 
@@ -179,7 +181,9 @@ def test_a_connected_device_fills_in_what_protocol_v1_reports(qtbot, emulator):
     assert snapshot.cdc_bad_crc == 0
     # Nothing in protocol v1 reports these, and the report says so.
     assert snapshot.reset_reason == UNKNOWN
-    assert snapshot.ch375_state == UNKNOWN
+    # The emulator answers the way firmware predating the suffix answers, and
+    # nothing may invent a backend for it.
+    assert snapshot.input_backend == UNKNOWN
 
 
 def test_a_disconnected_service_yields_an_all_unknown_snapshot(qtbot):
@@ -316,3 +320,67 @@ def test_a_healthy_link_reads_as_healthy(qtbot, emulator):
 
     assert snapshot.endpoint_answering == "yes"
     assert snapshot.spi_crc_errors == 0
+
+
+# ------------------------------------------------------- which backend spoke
+
+
+def test_the_report_names_the_backend_and_its_counters(qtbot, emulator):
+    """A report emailed to a stranger has to say which host stack read the
+    peripherals; the two backends fail in entirely different ways."""
+    emulator.input_backend = 2
+    emulator.backend_counters = (2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    emulator.peripheral_ports = (
+        (1, 1, 1, 0x046D, 0xC31C, 0, 0, bytes(32)),
+        (1, 1, 2, 0x3434, 0xD030, 5, 67, bytes(range(32))),
+    )
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    snapshot = DiagnosticSnapshot.from_service(service)
+
+    assert snapshot.input_backend == "PIO_USB"
+    assert snapshot.input_backend_counters["ignored_interfaces"] == 2
+    assert snapshot.input_backend_counters["ignored_role_already_claimed"] == 1
+
+
+def test_the_report_names_the_two_role_slots_neutrally(qtbot, emulator, tmp_path):
+    """"Keyboard channel" named a CH375 pin pair. The PIO USB host has one bus,
+    so the report names the logical role the slot holds and nothing else."""
+    emulator.input_backend = 2
+    emulator.peripheral_ports = (
+        (1, 1, 1, 0x046D, 0xC31C, 0, 0, bytes(32)),
+        (0, 0, 0, 0, 0, 0, 0, bytes(32)),
+    )
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    archive = build_diagnostic_zip(
+        tmp_path / "diag.zip", DiagnosticSnapshot.from_service(service)
+    )
+    report = json.loads(_members(archive)[DIAGNOSTICS_MEMBER])
+
+    assert [entry["role"] for entry in report["peripherals"]] == ["Keyboard", "Mouse"]
+    assert report["peripherals"][0]["vendor_id"] == "0x046D"
+    # Nothing was on the mouse slot, and an absence is reported as one rather
+    # than as a device with a vendor of zero.
+    assert report["peripherals"][1]["vendor_id"] == UNKNOWN
+
+
+def test_a_report_from_firmware_without_the_suffix_says_unknown(qtbot, emulator):
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    snapshot = DiagnosticSnapshot.from_service(service)
+
+    assert snapshot.input_backend == UNKNOWN
+    assert snapshot.input_backend_counters == {}

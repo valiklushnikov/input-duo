@@ -176,7 +176,7 @@ def test_a_report_records_every_sample_it_derived_from():
 
 def test_a_peripheral_row_states_a_reason_even_when_it_passed():
     row = PeripheralRow(
-        port="keyboard channel",
+        port="keyboard slot",
         role="keyboard",
         vendor_id="0x046D",
         product_id="0xC31C",
@@ -687,7 +687,7 @@ def test_each_port_becomes_a_row_naming_the_device_the_firmware_found():
     )
 
     assert [row.role for row in rows] == ["keyboard", "mouse"]
-    assert [row.port for row in rows] == ["keyboard channel", "mouse channel"]
+    assert [row.port for row in rows] == ["keyboard slot", "mouse slot"]
     assert rows[0].vendor_id == "0x046D"
     assert rows[1].buttons == 5
     assert rows[1].descriptor_hash == "ab" * 32
@@ -715,7 +715,7 @@ def test_a_row_takes_its_role_from_the_descriptor_and_not_from_the_channel():
     assert rows[1].vendor_id == "0x258A"
     # And each row still says which channel it came off, because that is how a
     # crossed cable is diagnosed - it is just never the role.
-    assert [row.port for row in rows] == ["keyboard channel", "mouse channel"]
+    assert [row.port for row in rows] == ["keyboard slot", "mouse slot"]
     for row in rows:
         assert row.role in row.reason
 
@@ -733,7 +733,7 @@ def test_an_unenumerated_port_still_reports_the_role_enumeration_saw():
     row = peripheral_rows(_diagnostics(peripherals=(_port(kind="mouse", ready=False),)))[0]
 
     assert row.role == "mouse"
-    assert row.port == "keyboard channel"
+    assert row.port == "keyboard slot"
     assert row.passed is False
 
 
@@ -745,7 +745,7 @@ def test_an_empty_port_claims_no_role_rather_than_the_channels_name():
     )[0]
 
     assert row.role == "none"
-    assert row.port == "keyboard channel"
+    assert row.port == "keyboard slot"
 
 
 def test_an_empty_port_is_a_row_that_says_so_rather_than_a_missing_row():
@@ -915,3 +915,61 @@ def test_a_report_with_no_baseline_says_its_numbers_are_since_boot():
 
     assert any("since the device booted" in note for note in result.notes)
 
+
+
+# ------------------------------------------------ which backend read the ports
+
+
+def _backend(**overrides):
+    from duo_input.device.transactions import InputBackendReport
+
+    fields = {"name": "PIO_USB"}
+    fields.update(overrides)
+    return InputBackendReport(**fields)
+
+
+def test_the_report_names_the_backend_that_read_the_peripherals():
+    """A HIL report is read months later against a firmware image. Which host
+    stack produced it is the first thing that has to be recoverable, because
+    the two fail in entirely different ways."""
+    from hil_runner import measure
+
+    result = measure(
+        _scenario(),
+        FakeSession(_diagnostics(backend=_backend(ignored_interfaces=2,
+                                                  ignored_role_already_claimed=1))),
+    )
+    document = json.loads(result.to_json())
+
+    assert document["input_backend"] == "PIO_USB"
+    assert document["input_backend_counters"]["ignored_interfaces"] == 2
+    assert document["input_backend_counters"]["ignored_role_already_claimed"] == 1
+
+
+def test_a_run_against_firmware_without_the_suffix_says_unknown():
+    """Older firmware names no backend, and the runner must not name one for
+    it - a report claiming CH375 about a board nobody asked is worse than a
+    report that says it does not know."""
+    from hil_runner import measure
+
+    result = measure(_scenario(), FakeSession(_diagnostics()))
+    document = json.loads(result.to_json())
+
+    assert document["input_backend"] == "unknown"
+    assert document["input_backend_counters"] == {}
+
+
+def test_a_baseline_reading_survives_the_round_trip_through_its_state_file(tmp_path):
+    """The baseline phase writes the reading to JSON and the measure phase reads
+    it back. A field the round trip drops is a field the comparison silently
+    stops making."""
+    from hil_runner import _diagnostics_from_state, _state_document
+
+    document = _state_document(_diagnostics(backend=_backend(arm_escalations=4)), 1.0)
+    restored, taken_at = _diagnostics_from_state({"diagnostics": document["diagnostics"],
+                                                  "taken_at": 1.0})
+
+    assert taken_at == 1.0
+    assert restored.backend is not None
+    assert restored.backend.name == "PIO_USB"
+    assert restored.backend.arm_escalations == 4

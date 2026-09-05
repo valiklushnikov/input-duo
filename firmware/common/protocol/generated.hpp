@@ -135,6 +135,12 @@ enum class ActionKind : std::uint8_t {
     TOGGLE_MOUSE_ROUTE = 0x04,
 };
 
+enum class InputBackend : std::uint8_t {
+    CH375 = 0x01,
+    PIO_USB = 0x02,
+    UNKNOWN = 0x00,
+};
+
 enum class Capability : std::uint32_t {
     CAPTURE = 0x20,
     CONFIG_READ = 0x08,

@@ -117,6 +117,16 @@ public:
     /// adapters already do by construction.
     static int logical_port(input::DeviceKind kind);
 
+    /// Read-only view of what the registry knows, for diagnostics.
+    ///
+    /// Const on purpose: the only caller is Core 0's main loop building a
+    /// GET_DIAGNOSTICS reply, and it must be able to read what is mounted
+    /// without being able to arm, fault or forget anything. The translation
+    /// into the wire's PeripheralPort shape stays in main.cpp, exactly where
+    /// the CH375 path already does it - the registry does not know what a CDC
+    /// frame is and the CDC service does not know what a TinyUSB interface is.
+    const DeviceRegistry& registry() const { return registry_; }
+
 private:
     ClockChangeBarrier clock_change_;
     DeviceRegistry registry_;

@@ -338,172 +338,181 @@
         <translation>Watchdog resets</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="75" />
         <source>CH375 state</source>
         <translation>CH375 state</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="76" />
+        <location filename="../../ui/diagnostics.py" line="75" />
         <source>Second board answering</source>
         <translation>Second board answering</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="77" />
+        <location filename="../../ui/diagnostics.py" line="76" />
         <source>Second board USB</source>
         <translation>Second board USB</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="78" />
+        <location filename="../../ui/diagnostics.py" line="77" />
         <source>SPI frames sent</source>
         <translation>SPI frames sent</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="79" />
+        <location filename="../../ui/diagnostics.py" line="78" />
         <source>SPI CRC errors</source>
         <translation>SPI CRC errors</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="80" />
+        <location filename="../../ui/diagnostics.py" line="79" />
         <source>SPI frames echoed back</source>
         <translation>SPI frames echoed back</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="81" />
+        <location filename="../../ui/diagnostics.py" line="80" />
         <source>SPI timeouts</source>
         <translation>SPI timeouts</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="82" />
+        <location filename="../../ui/diagnostics.py" line="81" />
         <source>Link drops seen by U2</source>
         <translation>Link drops seen by U2</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="83" />
+        <location filename="../../ui/diagnostics.py" line="82" />
         <source>U2 released after (ms)</source>
         <translation>U2 released after (ms)</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="84" />
+        <location filename="../../ui/diagnostics.py" line="83" />
         <source>Input commands never delivered</source>
         <translation>Input commands never delivered</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="88" />
+        <location filename="../../ui/diagnostics.py" line="87" />
         <source>CDC counters</source>
         <translation>CDC counters</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="90" />
+        <location filename="../../ui/diagnostics.py" line="89" />
         <source>Bad CRC</source>
         <translation>Bad CRC</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="91" />
+        <location filename="../../ui/diagnostics.py" line="90" />
         <source>Bad sequence</source>
         <translation>Bad sequence</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="92" />
+        <location filename="../../ui/diagnostics.py" line="91" />
         <source>Timeouts</source>
         <translation>Timeouts</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="93" />
+        <location filename="../../ui/diagnostics.py" line="92" />
         <source>Disconnects</source>
         <translation>Disconnects</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="94" />
+        <location filename="../../ui/diagnostics.py" line="93" />
         <source>Aborted writes</source>
         <translation>Aborted writes</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="98" />
+        <location filename="../../ui/diagnostics.py" line="97" />
         <source>Configuration</source>
         <translation>Configuration</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="100" />
+        <location filename="../../ui/diagnostics.py" line="99" />
         <source>Generation on device</source>
         <translation>Generation on device</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="101" />
+        <location filename="../../ui/diagnostics.py" line="100" />
         <source>Hash on device</source>
         <translation>Hash on device</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="102" />
+        <location filename="../../ui/diagnostics.py" line="101" />
         <source>Advertised capabilities</source>
         <translation>Advertised capabilities</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="103" />
+        <location filename="../../ui/diagnostics.py" line="108" />
+        <source>Input backend</source>
+        <translation>Input backend</translation>
+    </message>
+    <message>
+        <location filename="../../ui/diagnostics.py" line="109" />
+        <source>Input backend counters</source>
+        <translation>Input backend counters</translation>
+    </message>
+    <message>
+        <location filename="../../ui/diagnostics.py" line="110" />
         <source>Peripherals</source>
         <translation>Peripherals</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="123" />
+        <location filename="../../ui/diagnostics.py" line="130" />
         <source>Diagnostics</source>
         <translation>Diagnostics</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="125" />
+        <location filename="../../ui/diagnostics.py" line="132" />
         <source>What the device reports about itself, and how to send it on.</source>
         <translation>What the device reports about itself, and how to send it on.</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="196" />
+        <location filename="../../ui/diagnostics.py" line="203" />
         <source>A report never contains your macro text. Including the saved project adds that file, and everything you typed into it.</source>
         <translation>A report never contains your macro text. Including the saved project adds that file, and everything you typed into it.</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="208" />
+        <location filename="../../ui/diagnostics.py" line="215" />
         <source>Refresh</source>
         <translation>Refresh</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="209" />
+        <location filename="../../ui/diagnostics.py" line="216" />
         <source>Ask the device for its counters</source>
         <translation>Ask the device for its counters</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="212" />
+        <location filename="../../ui/diagnostics.py" line="219" />
         <source>Include the saved project</source>
         <translation>Include the saved project</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="214" />
+        <location filename="../../ui/diagnostics.py" line="221" />
         <source>Include the saved project in the report</source>
         <translation>Include the saved project in the report</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="218" />
+        <location filename="../../ui/diagnostics.py" line="225" />
         <source>Export report...</source>
         <translation>Export report...</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="219" />
+        <location filename="../../ui/diagnostics.py" line="226" />
         <source>Save a diagnostic report</source>
         <translation>Save a diagnostic report</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="296" />
+        <location filename="../../ui/diagnostics.py" line="303" />
         <source>Export diagnostic report</source>
         <translation>Export diagnostic report</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="303" />
+        <location filename="../../ui/diagnostics.py" line="310" />
         <source>Export failed</source>
         <translation>Export failed</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="306" />
+        <location filename="../../ui/diagnostics.py" line="313" />
         <source>Report saved</source>
         <translation>Report saved</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="306" />
+        <location filename="../../ui/diagnostics.py" line="313" />
         <source>Saved to {0}</source>
         <translation>Saved to {0}</translation>
     </message>
