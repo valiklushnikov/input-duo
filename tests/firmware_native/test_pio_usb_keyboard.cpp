@@ -22,6 +22,7 @@
 #include <vector>
 
 using duo::test::tinyusb_host::kProtocolKeyboard;
+using duo::test::tinyusb_host::kProtocolMouse;
 using duo::test::tinyusb_host::kProtocolNone;
 using duo_input::config::KeyboardRoute;
 using duo_input::config::MouseRoute;
@@ -48,6 +49,16 @@ constexpr std::uint8_t kKeyboardAddress = 2;
 constexpr std::uint8_t kKeyboardInstance = 0;
 constexpr std::uint16_t kVendorId = 0x1234;
 constexpr std::uint16_t kProductId = 0x5678;
+
+/// A second role-owned source on the same host. V1 accepts exactly two, and
+/// several of the requirements below - the queue's Fault reservation, the
+/// per-report capture timestamp - are only observable with both present.
+constexpr std::uint8_t kMouseAddress = 3;
+constexpr std::uint8_t kMouseInstance = 0;
+constexpr std::uint16_t kMouseProductId = 0x9ABC;
+
+/// Boot mouse: buttons byte, then X and Y. Button 0 is bit 0.
+constexpr std::uint8_t kMouseButton1Down[] = {0x01, 0x00, 0x00};
 
 /// A boot keyboard report: modifiers, reserved, six usage slots.
 constexpr std::uint8_t kKeyA[] = {0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -82,6 +93,23 @@ std::vector<std::uint8_t> nkro_bitmap_descriptor() {
         0x19, 0x04, 0x29, 0x73,
         0x15, 0x00, 0x25, 0x01,
         0x75, 0x01, 0x95, 0x70, 0x81, 0x02,
+    };
+}
+
+/// A keyboard whose descriptor declares eight modifier bits and only THREE
+/// one-byte key slots - a four-byte report - while the device goes on sending
+/// eight-byte boot-shaped reports. This is the brief's "report larger than
+/// the declared layout": longer than what the descriptor declared, but well
+/// inside kMaxSourceReportBytes, so it is not the oversized-report Fault case.
+std::vector<std::uint8_t> three_slot_keyboard_descriptor() {
+    return {
+        0x05, 0x07,
+        0x19, 0xE0, 0x29, 0xE7,
+        0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x19, 0x00, 0x29, 0x65,
+        0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x03, 0x81, 0x00,
     };
 }
 
@@ -144,7 +172,13 @@ struct KeyboardRig {
 
     /// Deliver one report and drain whatever it produces through the
     /// pipeline, exactly as main.cpp's while(take_event()) loop does.
-    void report(const std::uint8_t* bytes, std::size_t size) {
+    ///
+    /// ``captured_us`` is what the fake host's clock reads at the moment the
+    /// callback fires - the capture time the callback stamps onto the record,
+    /// deliberately unrelated to the ``now_us`` pump() hands task().
+    void report(const std::uint8_t* bytes, std::size_t size,
+                std::uint32_t captured_us = 0) {
+        duo::test::tinyusb_host::set_now_us(captured_us);
         tuh_hid_report_received_cb(kKeyboardAddress, kKeyboardInstance, bytes,
                                    static_cast<std::uint16_t>(size));
         pump();
@@ -164,6 +198,79 @@ struct KeyboardRig {
 
     std::size_t receive_count() const {
         return duo::test::tinyusb_host::receive_count(kKeyboardAddress, kKeyboardInstance);
+    }
+};
+
+/// A keyboard AND a mouse behind one backend, each with its own
+/// InputPipeline, routed by PioUsbBackend::logical_port exactly the way
+/// main.cpp's Core 1 loop routes take_event()'s output to one of its two
+/// pipelines. Both interfaces are mounted, Ready-drained and armed by the
+/// time the constructor returns.
+struct TwoSourceRig {
+    PioUsbBackend backend;
+    Recorder keyboard_recorder;
+    Recorder mouse_recorder;
+    InputPipeline keyboard_pipeline{keyboard_recorder};
+    InputPipeline mouse_pipeline{mouse_recorder};
+    std::uint32_t now_us = 1000;
+
+    TwoSourceRig() {
+        duo::test::tinyusb_host::reset();
+        backend.begin();
+
+        duo::test::tinyusb_host::add_device(kKeyboardAddress, kVendorId, kProductId);
+        tuh_mount_cb(kKeyboardAddress);
+        duo::test::tinyusb_host::set_protocol(kKeyboardAddress, kKeyboardInstance,
+                                              kProtocolKeyboard);
+        tuh_hid_mount_cb(kKeyboardAddress, kKeyboardInstance, nullptr, 0);
+
+        duo::test::tinyusb_host::add_device(kMouseAddress, kVendorId, kMouseProductId);
+        tuh_mount_cb(kMouseAddress);
+        duo::test::tinyusb_host::set_protocol(kMouseAddress, kMouseInstance, kProtocolMouse);
+        tuh_hid_mount_cb(kMouseAddress, kMouseInstance, nullptr, 0);
+
+        pump();
+    }
+
+    ~TwoSourceRig() { duo_input::u1::pio_usb::set_callback_registry(nullptr); }
+
+    /// One report callback, with the capture clock reading ``captured_us``.
+    /// No task(), no drain: several of these can share one Core 1 pass.
+    void deliver(std::uint8_t address, std::uint8_t instance, const std::uint8_t* bytes,
+                 std::size_t size, std::uint32_t captured_us) {
+        duo::test::tinyusb_host::set_now_us(captured_us);
+        tuh_hid_report_received_cb(address, instance, bytes,
+                                   static_cast<std::uint16_t>(size));
+    }
+
+    /// One Core 1 pass: task() only. Whatever it queued stays queued.
+    void task() {
+        now_us += 1000;
+        backend.task(now_us);
+    }
+
+    /// Drain every queued event into the pipeline its identity belongs to -
+    /// the loop main.cpp runs after each task().
+    void drain() {
+        SourceEvent event;
+        SourceIdentity identity;
+        while (backend.take_event(event, identity)) {
+            switch (PioUsbBackend::logical_port(identity.kind)) {
+                case 0:
+                    keyboard_pipeline.on_event(event, identity, now_us / 1000);
+                    break;
+                case 1:
+                    mouse_pipeline.on_event(event, identity, now_us / 1000);
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+    void pump() {
+        task();
+        drain();
     }
 };
 
@@ -325,10 +432,13 @@ TEST_CASE(a_refusal_cannot_republish_a_stale_event) {
     DeviceRegistry registry;
     duo_input::u1::pio_usb::set_callback_registry(&registry);
 
+    // Instance 3, not 0, on purpose: ``endpoint`` is asserted below, and an
+    // interface whose expected endpoint is zero cannot tell "copied from the
+    // record" apart from "left at the struct's default".
     duo::test::tinyusb_host::add_device(9, 0xBEEF, 0x0001);
     tuh_mount_cb(9);
-    duo::test::tinyusb_host::set_protocol(9, 0, kProtocolKeyboard);
-    tuh_hid_mount_cb(9, 0, nullptr, 0);
+    duo::test::tinyusb_host::set_protocol(9, 3, kProtocolKeyboard);
+    tuh_hid_mount_cb(9, 3, nullptr, 0);
     registry.process_pending();
 
     SourceEvent drain;
@@ -337,7 +447,9 @@ TEST_CASE(a_refusal_cannot_republish_a_stale_event) {
     }
 
     const std::uint8_t stale_report[] = {0xFF, 0xFF, 0x7A, 0x7A, 0x7A, 0x7A, 0x7A, 0x7A};
-    tuh_hid_report_received_cb(9, 0, stale_report, sizeof(stale_report));
+    constexpr std::uint32_t kCaptureUs = 0x0BADF00Du;
+    duo::test::tinyusb_host::set_now_us(kCaptureUs);
+    tuh_hid_report_received_cb(9, 3, stale_report, sizeof(stale_report));
     registry.process_pending();
 
     // Seeded with sentinel content take_event() must not leave standing.
@@ -354,6 +466,11 @@ TEST_CASE(a_refusal_cannot_republish_a_stale_event) {
     CHECK(registry.take_event(event, identity));
     CHECK_EQ(static_cast<int>(event.kind), static_cast<int>(SourceEventKind::Report));
     CHECK_EQ(event.source_id, std::uint8_t{9});
+    // The two fields the original assertion block never looked at. endpoint
+    // must be the interface's own instance, and received_us the clock read
+    // at capture - neither the 0xAB/0xAAAAAAAA sentinel nor a zero.
+    CHECK_EQ(event.endpoint, std::uint8_t{3});
+    CHECK_EQ(event.received_us, kCaptureUs);
     CHECK_EQ(event.report_size, sizeof(stale_report));
     CHECK(std::memcmp(event.report, stale_report, sizeof(stale_report)) == 0);
     // Every byte past what this report carried came from the fresh copy's
@@ -367,12 +484,57 @@ TEST_CASE(a_refusal_cannot_republish_a_stale_event) {
     duo_input::u1::pio_usb::set_callback_registry(nullptr);
 }
 
-TEST_CASE(a_queue_overflow_synthesizes_a_fault_and_counts_rather_than_losing_a_report) {
+TEST_CASE(a_queue_overflow_synthesizes_a_fault_for_every_role_owned_source) {
     // Deliberately never drained, the same way Task 6's own callback-queue
     // overflow test withholds processing to reach kCallbackQueueCapacity.
     // This is not a shape a real Core 1 pass produces - main.cpp drains
     // completely after every task() call - it exists to prove the queue's
     // own overflow path is safe when something else someday fails to drain.
+    //
+    // Both of V1's role-owned sources are present, because one is not enough
+    // to see the requirement. A queue that holds ONE slot back for Fault
+    // covers whichever source overflows first and then has nothing left for
+    // the second: that second Fault is a release-all that never reaches its
+    // InputPipeline, and the interface is faulted afterwards so nothing will
+    // ever produce it again. The reservation is one slot per role.
+    TwoSourceRig rig;
+
+    // Something genuinely held on each side, delivered and drained normally,
+    // so each pipeline really does owe a release.
+    rig.deliver(kKeyboardAddress, kKeyboardInstance, kKeyA, sizeof(kKeyA), 10);
+    rig.pump();
+    CHECK_EQ(rig.keyboard_recorder.of(InputEventKind::KeyDown, 0x04), 1);
+
+    rig.deliver(kMouseAddress, kMouseInstance, kMouseButton1Down, sizeof(kMouseButton1Down), 20);
+    rig.pump();
+    CHECK_EQ(rig.mouse_recorder.of(InputEventKind::MouseButtonDown, 0), 1);
+
+    // From here nothing drains. Each pass still processes its callback into
+    // the event queue; the queue only grows.
+    for (std::size_t index = 0; index < DeviceRegistry::kEventQueueCapacity + 2; ++index) {
+        rig.deliver(kKeyboardAddress, kKeyboardInstance, kKeyA, sizeof(kKeyA),
+                    static_cast<std::uint32_t>(100 + index));
+        rig.task();
+    }
+
+    // The keyboard has overflowed and taken one reserved slot for its Fault.
+    // The mouse now overflows too - the second source, the one a single
+    // reserved slot loses.
+    rig.deliver(kMouseAddress, kMouseInstance, kMouseButton1Down, sizeof(kMouseButton1Down), 900);
+    rig.task();
+
+    rig.drain();
+
+    // Both release-alls arrived. Neither the key nor the button is left held
+    // on a computer that has no other way to find out.
+    CHECK_EQ(rig.keyboard_recorder.of(InputEventKind::KeyUp, 0x04), 1);
+    CHECK_EQ(rig.mouse_recorder.of(InputEventKind::MouseButtonUp, 0), 1);
+}
+
+TEST_CASE(a_queue_overflow_counts_and_leaves_the_source_faulted_without_rearming) {
+    // The bookkeeping half of the same path, on the registry directly: the
+    // overflow is counted, the interface is faulted, and no receive is left
+    // in flight for a report nothing accounted for.
     duo::test::tinyusb_host::reset();
     DeviceRegistry registry;
     duo_input::u1::pio_usb::set_callback_registry(&registry);
@@ -413,6 +575,85 @@ TEST_CASE(a_queue_overflow_synthesizes_a_fault_and_counts_rather_than_losing_a_r
     }
 
     duo_input::u1::pio_usb::set_callback_registry(nullptr);
+}
+
+TEST_CASE(two_reports_captured_in_one_core1_pass_carry_their_own_timestamps) {
+    // The point of the brief's "callback capture timestamp". A pass-level
+    // clock read - one time_us_32() before tuh_task(), stamped onto every
+    // report the pass then processes - gives both of these reports the same
+    // number, and a number earlier than either report actually arrived at.
+    // Reading the clock inside tuh_hid_report_received_cb gives each report
+    // the moment it was really handed over.
+    TwoSourceRig rig;
+
+    constexpr std::uint32_t kKeyboardCaptureUs = 0x11112222u;
+    constexpr std::uint32_t kMouseCaptureUs = 0x33334444u;
+    constexpr std::uint32_t kPassUs = 0x55556666u;
+
+    // Both callbacks fire before task() - exactly what happens inside one
+    // tuh_task() call when two devices report in the same window.
+    rig.deliver(kKeyboardAddress, kKeyboardInstance, kKeyA, sizeof(kKeyA), kKeyboardCaptureUs);
+    rig.deliver(kMouseAddress, kMouseInstance, kMouseButton1Down, sizeof(kMouseButton1Down),
+                kMouseCaptureUs);
+
+    // One pass, one now_us, two reports.
+    rig.backend.task(kPassUs);
+
+    bool saw_keyboard = false;
+    bool saw_mouse = false;
+    SourceEvent event;
+    SourceIdentity identity;
+    while (rig.backend.take_event(event, identity)) {
+        if (event.kind != SourceEventKind::Report) {
+            continue;
+        }
+        if (event.source_id == kKeyboardAddress) {
+            saw_keyboard = true;
+            CHECK_EQ(event.received_us, kKeyboardCaptureUs);
+        } else if (event.source_id == kMouseAddress) {
+            saw_mouse = true;
+            CHECK_EQ(event.received_us, kMouseCaptureUs);
+        }
+    }
+    CHECK(saw_keyboard);
+    CHECK(saw_mouse);
+}
+
+TEST_CASE(a_report_longer_than_the_declared_layout_reads_only_the_declared_fields) {
+    // Not the oversized-report case above: this report is well inside
+    // kMaxSourceReportBytes and is routed as an ordinary Report. What it is
+    // longer than is the DESCRIPTOR's declared layout - three key slots in a
+    // four-byte report - and the surplus bytes carry usages that a
+    // boot-offset reading would happily press.
+    //
+    // The assertion is on the normalizer's existing behaviour, which reads
+    // exactly the fields the layout declares and never looks past them.
+    KeyboardRig rig;
+    const auto descriptor = three_slot_keyboard_descriptor();
+    rig.mount(descriptor.data(), descriptor.size(), kProtocolNone);
+
+    // Bytes 1-3 are the three declared slots. Bytes 4-7 are surplus: read at
+    // the boot layout's own offsets they would be four more pressed keys.
+    const std::uint8_t long_report[] = {0x00, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A};
+    rig.report(long_report, sizeof(long_report));
+
+    CHECK_EQ(rig.recorder.of(InputEventKind::KeyDown, 0x04), 1);
+    CHECK_EQ(rig.recorder.of(InputEventKind::KeyDown, 0x05), 1);
+    CHECK_EQ(rig.recorder.of(InputEventKind::KeyDown, 0x06), 1);
+    CHECK_EQ(rig.recorder.of(InputEventKind::KeyDown, 0x07), 0);
+    CHECK_EQ(rig.recorder.of(InputEventKind::KeyDown, 0x08), 0);
+    CHECK_EQ(rig.recorder.of(InputEventKind::KeyDown, 0x09), 0);
+    CHECK_EQ(rig.recorder.of(InputEventKind::KeyDown, 0x0A), 0);
+    CHECK_EQ(rig.recorder.count(InputEventKind::KeyDown), 3);
+
+    // And the declared fields still transition normally afterwards - the
+    // surplus is ignored, not treated as a reason to refuse the report.
+    const std::uint8_t long_release[] = {0x00, 0x00, 0x00, 0x00, 0x07, 0x08, 0x09, 0x0A};
+    rig.report(long_release, sizeof(long_release));
+    CHECK_EQ(rig.recorder.of(InputEventKind::KeyUp, 0x04), 1);
+    CHECK_EQ(rig.recorder.of(InputEventKind::KeyUp, 0x05), 1);
+    CHECK_EQ(rig.recorder.of(InputEventKind::KeyUp, 0x06), 1);
+    CHECK_EQ(rig.recorder.count(InputEventKind::KeyUp), 3);
 }
 
 namespace {

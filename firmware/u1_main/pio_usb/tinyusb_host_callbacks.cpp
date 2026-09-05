@@ -4,8 +4,25 @@
 // Each callback performs only bounded metadata lookup/copy and queueing. The
 // ordinary Core 1 pass processes those records and owns every receive arm;
 // no parser, normalizer, pipeline or route is called from this file.
+//
+// tuh_hid_report_received_cb is the one exception worth naming: it reads
+// time_us_32() before handing the report to the registry, because that is
+// the only point anywhere in this path that is actually the moment the
+// report arrived. A monotonic clock read is bounded, non-routing work - the
+// same shape as every other lookup here - not a second thing this callback
+// does. Reading it later, once Core 1's ordinary pass gets around to
+// draining the callback queue, would stamp every report processed in that
+// pass with one shared, later timestamp instead of each report's own.
 
 #include <cstdint>
+
+// Included, not extern-declared. The SDK's time_us_32() is a `static inline`
+// register read, so an extern declaration would compile here and then leave
+// the Pico link with an undefined symbol - unlike tuh_hid_receive_report and
+// friends, which are real out-of-line functions this tree does declare by
+// hand. The native test build shadows this header from fakes/, the same way
+// it already shadows hardware/clocks.h for set_sys_clock_khz.
+#include "hardware/timer.h"
 
 #include "pio_usb/device_registry.hpp"
 
@@ -70,7 +87,7 @@ void tuh_hid_report_received_cb(std::uint8_t dev_addr, std::uint8_t instance,
                                 std::uint8_t const* report, std::uint16_t len) {
     auto* registry = duo_input::u1::pio_usb::callback_registry;
     if (registry != nullptr) {
-        registry->capture_report(dev_addr, instance, report, len);
+        registry->capture_report(dev_addr, instance, report, len, time_us_32());
     }
 }
 

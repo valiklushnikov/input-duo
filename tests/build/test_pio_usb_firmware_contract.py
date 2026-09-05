@@ -321,9 +321,12 @@ def test_task6_callbacks_do_not_arm_or_route_in_the_linked_elf():
 @pio_usb_elf_required
 def test_pio_usb_elf_contains_the_bounded_registry_and_real_arm_path():
     symbols = _symbols(_pio_elf)
-    # Task 8 gives process_pending() a std::uint32_t now_us parameter, to
-    # stamp a Report SourceEvent's received_us - the mangled name grew an
-    # "m" (unsigned long, this ABI's uint32_t) argument accordingly.
+    # Matched on the un-suffixed prefix rather than a full mangled name:
+    # process_pending()'s argument list is an implementation detail that has
+    # already changed once (Task 8 added a now_us parameter, then its fix
+    # round removed it again when the capture timestamp moved into the
+    # callback record), and this assertion is about the symbol being linked
+    # in at all, not about its signature.
     assert any("DeviceRegistry15process_pendingE" in name for name in symbols)
     assert any("DeviceRegistry13arm_if_needed" in name for name in symbols)
 

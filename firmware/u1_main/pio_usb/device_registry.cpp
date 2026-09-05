@@ -110,7 +110,8 @@ bool DeviceRegistry::capture_hid_mount(std::uint8_t dev_addr, std::uint8_t insta
 
 bool DeviceRegistry::capture_report(std::uint8_t dev_addr, std::uint8_t instance,
                                     const std::uint8_t* report,
-                                    std::uint16_t report_size) {
+                                    std::uint16_t report_size,
+                                    std::uint32_t captured_us) {
     Interface* interface = find_mutable(dev_addr, instance);
     if (interface == nullptr || !interface->report_in_flight || interface->fault_pending ||
         interface->faulted) {
@@ -125,6 +126,10 @@ bool DeviceRegistry::capture_report(std::uint8_t dev_addr, std::uint8_t instance
     record.dev_addr = dev_addr;
     record.instance = instance;
     record.size = record.kind == CallbackKind::Report ? report_size : 0;
+    // Carried even on a ReportFault record: it costs nothing to keep and
+    // nothing reads it there, since a Fault SourceEvent's received_us is
+    // always zero regardless of when the oversized report arrived.
+    record.received_us = captured_us;
     if (record.size != 0) {
         record.payload_present = true;
         std::memcpy(record.payload, report, record.size);
@@ -273,14 +278,25 @@ void DeviceRegistry::remove_device(std::uint8_t dev_addr) {
 bool DeviceRegistry::push_event(const Interface& interface, input::SourceEventKind kind,
                                 std::uint8_t endpoint, const std::uint8_t* report,
                                 std::size_t report_size, std::uint32_t received_us) {
-    // Fault keeps the last slot for itself. Every Ready/Report push here
-    // refuses one slot early, so an interface's own overflow Fault - pushed
-    // straight after this same push already failed - is never the second
-    // thing a full queue makes unqueueable in the same breath. Without this,
-    // "synthesize a Fault on overflow" would drop the Fault too, exactly the
-    // owed-release loss the requirement forbids.
-    const std::size_t capacity =
-        kind == input::SourceEventKind::Fault ? kEventQueueCapacity : kEventQueueCapacity - 1;
+    // Fault keeps the last kFaultReservedSlots for itself - one per role-owned
+    // interface V1 accepts, not one slot in total. One reserved slot only
+    // protects whichever of the keyboard and the mouse overflows first: fill
+    // to capacity-1 with ordinary traffic, fault the keyboard (its Fault
+    // spends the single reserved slot), and the mouse's next report then finds
+    // the queue full, latches its own Fault into a queue with nothing left,
+    // and loses it. That lost Fault is the mouse's whole release-all - a
+    // dropped release, which this queue exists to make impossible - and the
+    // mouse interface is faulted afterwards, so nothing will ever produce it
+    // again. Reserving one per role means every Ready/Report push here refuses
+    // two slots early and both sources' overflow Faults, each pushed straight
+    // after its own push already failed, always have room.
+    //
+    // The eighteen slots this leaves ordinary traffic are still far more than
+    // a genuine pass can use - about ten at worst; the derivation is on
+    // kEventQueueCapacity in the header.
+    const std::size_t capacity = kind == input::SourceEventKind::Fault
+                                     ? kEventQueueCapacity
+                                     : kEventQueueCapacity - kFaultReservedSlots;
     if (event_count_ >= capacity) {
         return false;
     }
@@ -314,7 +330,7 @@ bool DeviceRegistry::pop_event(input::SourceEvent& event, input::SourceIdentity&
     return true;
 }
 
-void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us) {
+void DeviceRegistry::process(const CallbackRecord& record) {
     if (record.kind == CallbackKind::DeviceMount) {
         ensure_device(record.dev_addr, record.vendor_id, record.product_id);
         return;
@@ -398,7 +414,8 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
         return;
     }
     if (!push_event(*interface, input::SourceEventKind::Report, record.instance,
-                    record.payload_present ? record.payload : nullptr, record.size, now_us)) {
+                    record.payload_present ? record.payload : nullptr, record.size,
+                    record.received_us)) {
         ++event_overflows_;
         // The report that did not fit is not retried and this interface is
         // not re-armed: re-arming here would ask TinyUSB for another report
@@ -410,10 +427,10 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
     arm_if_needed(*interface);
 }
 
-void DeviceRegistry::process_pending(std::uint32_t now_us) {
+void DeviceRegistry::process_pending() {
     CallbackRecord record;
     while (pop(record)) {
-        process(record, now_us);
+        process(record);
     }
 }
 

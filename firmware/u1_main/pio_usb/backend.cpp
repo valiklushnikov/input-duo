@@ -42,11 +42,19 @@ void PioUsbBackend::begin() {
 bool PioUsbBackend::clock_settled() const { return clock_change_.settled(); }
 
 void PioUsbBackend::task(std::uint32_t now_us) {
+    // Not this call's clock to read: a Report's received_us is the TinyUSB
+    // callback's own capture time (tinyusb_host_callbacks.cpp reads it
+    // directly, inside tuh_task() below), not the moment this particular
+    // pass got around to draining it. now_us stays part of this signature
+    // because every other tick-shaped call in this codebase takes one - see
+    // Ch375Device::tick(now_us) - and a later task (stall detection, that
+    // kind of thing) is the likelier reason to want it, not this one.
+    (void)now_us;
     if (!host_ready_) {
         return;
     }
     tuh_task();
-    registry_.process_pending(now_us);
+    registry_.process_pending();
 }
 
 bool PioUsbBackend::take_event(input::SourceEvent& event, input::SourceIdentity& identity) {

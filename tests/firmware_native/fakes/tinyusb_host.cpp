@@ -1,5 +1,11 @@
 #include "fakes/tinyusb_host.hpp"
 
+// The same header firmware/u1_main/pio_usb/tinyusb_host_callbacks.cpp
+// includes; in this build it resolves to fakes/hardware/timer.h, whose
+// time_us_32() is the settable function defined at the bottom of this file
+// rather than the SDK's inline register read.
+#include "hardware/timer.h"
+
 #include <array>
 
 namespace {
@@ -33,6 +39,7 @@ bool initialize_result = true;
 std::size_t host_tasks = 0;
 std::uint32_t clock_khz = 0;
 std::uint8_t pin_dp = 0xff;
+std::uint32_t now_us = 0;
 
 }  // namespace
 
@@ -49,6 +56,7 @@ void reset() {
     host_tasks = 0;
     clock_khz = 0;
     pin_dp = 0xff;
+    now_us = 0;
 }
 
 void add_hub(std::uint16_t vendor_id, std::uint16_t product_id) {
@@ -80,6 +88,8 @@ void set_protocol(std::uint8_t dev_addr, std::uint8_t instance,
 }
 
 void set_receive_result(bool result) { receive_result = result; }
+
+void set_now_us(std::uint32_t value) { now_us = value; }
 
 void set_host_initialization_result(bool configure, bool initialize) {
     configure_result = configure;
@@ -158,3 +168,8 @@ extern "C" bool tuh_init(std::uint8_t rhport) {
 }
 
 extern "C" void tuh_task(void) { ++host_tasks; }
+
+// Deliberately not derived from host_tasks or from any per-pass counter: the
+// point of the capture timestamp is that it is read where the report arrives,
+// so the fake lets a test move it between two callbacks that share one pass.
+extern "C" std::uint32_t time_us_32(void) { return now_us; }

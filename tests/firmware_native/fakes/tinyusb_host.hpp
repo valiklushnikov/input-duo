@@ -20,6 +20,12 @@ void set_protocol(std::uint8_t dev_addr, std::uint8_t instance,
                   std::uint8_t protocol);
 void set_receive_result(bool result);
 void set_host_initialization_result(bool configure_result, bool initialize_result);
+/// What the fake's time_us_32() returns from here on - the test's own stand-in
+/// for the clock tuh_hid_report_received_cb reads at capture. It persists
+/// until changed (reset() clears it to zero), so a test can hand two reports
+/// delivered inside one Core 1 pass two different capture times and see each
+/// arrive on its own SourceEvent.
+void set_now_us(std::uint32_t value);
 
 std::size_t receive_count();
 std::size_t receive_count(std::uint8_t dev_addr, std::uint8_t instance);
