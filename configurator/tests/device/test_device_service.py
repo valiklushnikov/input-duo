@@ -1561,6 +1561,45 @@ def test_a_malformed_host_suffix_does_not_take_the_prefix_down() -> None:
         assert diagnostics.host_observation.sof_frame_count is None
 
 
+def test_every_complete_and_partial_host_append_boundary_is_classified() -> None:
+    """Each field may be absent whole, but never present by half."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    prefix = _diagnostics_head() + _full_latency() + _both_ports() + _twelve()
+    full_body = _host_block(
+        init_flags=0b1110,
+        clock_at_begin=120_000_000,
+        clock_now=120_000_000,
+        sof_frames=450,
+        root_state=0b1011,
+        root_connects=1,
+        core1_passes=99,
+        mount_events=2,
+        umount_events=3,
+        hid_mount_events=4,
+        ep_slots_opened=5,
+        ep_max_failed_count=6,
+        max_pass_gap_us=450_000,
+        max_sof_gap=450,
+        root_port_resets=7,
+        hub_mount_events=8,
+    )[1:]
+
+    complete_boundaries = (20, 22, 24, 26, 27, 28, 32, 34, 36, 38)
+    partial_boundaries = (21, 23, 25, 29, 30, 31, 33, 35, 37)
+    for boundary in complete_boundaries:
+        block = bytes((boundary,)) + full_body[:boundary]
+        observation = parse_diagnostics(prefix + block).host_observation
+        assert observation is not None
+        assert observation.state == "reported", boundary
+
+    for boundary in partial_boundaries:
+        block = bytes((boundary,)) + full_body[:boundary]
+        observation = parse_diagnostics(prefix + block).host_observation
+        assert observation is not None
+        assert observation.state == "unreadable", boundary
+
+
 def test_a_longer_host_block_than_this_configurator_knows_is_read_as_far_as_it_goes() -> None:
     """Append-only in the other direction: the length byte finds the end.
 
@@ -1572,8 +1611,27 @@ def test_a_longer_host_block_than_this_configurator_knows_is_read_as_far_as_it_g
 
     import struct
 
-    fields = struct.pack("<BIIIBHI", 0b1110, 120_000_000, 120_000_000, 9, 0b0011, 1, 42)
-    fields += struct.pack("<I", 12345)
+    fields = struct.pack(
+        "<BIIIBHIHHHBBIHHH",
+        0b1110,
+        120_000_000,
+        120_000_000,
+        9,
+        0b0011,
+        1,
+        42,
+        2,
+        3,
+        4,
+        5,
+        6,
+        450_000,
+        450,
+        7,
+        8,
+    )
+    opaque_future_tail = b"\xA5\x5A\xC3\x3C\x10\x20\x30\x40\x50"
+    fields += opaque_future_tail
     payload = (
         _diagnostics_head()
         + _full_latency()
@@ -1589,6 +1647,8 @@ def test_a_longer_host_block_than_this_configurator_knows_is_read_as_far_as_it_g
     assert observation.state == "reported"
     assert observation.sof_frame_count == 9
     assert observation.core1_passes == 42
+    assert observation.mount_events == 2
+    assert observation.hub_mount_events == 8
 
 
 def test_the_emulator_and_the_parser_agree_about_the_host_block() -> None:

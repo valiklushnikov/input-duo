@@ -20,6 +20,9 @@ using duo_input::u1::pio_usb::DeviceRegistry;
 using duo_input::u1::pio_usb::LogicalRole;
 using duo_input::u1::pio_usb::PioUsbBackend;
 
+static_assert(PioUsbBackend::observation_publication_is_always_lock_free(),
+              "cross-core host observations must use lock-free publication");
+
 namespace {
 
 constexpr std::uint8_t kDescriptor[] = {'a', 'b', 'c'};
@@ -715,24 +718,44 @@ TEST_CASE(endpoint_pool_and_pass_timing_high_waters_preserve_the_worst_reading) 
     backend.task(1000u);
     duo::test::tinyusb_host::set_endpoint(0, 8u, 3u);
     duo::test::tinyusb_host::set_endpoint(4, 64u, 1u);
-    duo::test::tinyusb_host::set_sof_frame_count(105u);
+    // tuh_task() can block during ordinary enumeration while the SOF ISR
+    // keeps advancing. A 450 ms service pause therefore produces roughly 450
+    // frames, not a tiny value and not evidence that SOF itself was starved.
+    duo::test::tinyusb_host::set_sof_frame_count(550u);
     backend.task(451000u);
 
     auto observed = backend.observe();
     CHECK_EQ(observed.ep_slots_opened, 2u);
     CHECK_EQ(observed.ep_max_failed_count, 3u);
     CHECK_EQ(observed.max_pass_gap_us, 450000u);
-    CHECK_EQ(observed.max_sof_gap, 5u);
+    CHECK_EQ(observed.max_sof_gap, 450u);
 
     duo::test::tinyusb_host::set_endpoint(0, 0u, 0u);
     duo::test::tinyusb_host::set_endpoint(4, 0u, 0u);
-    duo::test::tinyusb_host::set_sof_frame_count(106u);
+    duo::test::tinyusb_host::set_sof_frame_count(551u);
     backend.task(452000u);
     observed = backend.observe();
     CHECK_EQ(observed.ep_slots_opened, 2u);
     CHECK_EQ(observed.ep_max_failed_count, 3u);
     CHECK_EQ(observed.max_pass_gap_us, 450000u);
-    CHECK_EQ(observed.max_sof_gap, 5u);
+    CHECK_EQ(observed.max_sof_gap, 450u);
+}
+
+TEST_CASE(endpoint_pool_is_sampled_on_core1_passes_then_published_to_core0) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_endpoint(0, 8u, 3u);
+    backend.task(1000u);
+    CHECK_EQ(backend.observe().ep_max_failed_count, 3u);
+
+    // Model TinyUSB mutating its pool after the pass. observe() must read the
+    // published Core-1 high-water, not race this external mutable storage.
+    duo::test::tinyusb_host::set_endpoint(0, 8u, 9u);
+    CHECK_EQ(backend.observe().ep_max_failed_count, 3u);
+    backend.task(2000u);
+    CHECK_EQ(backend.observe().ep_max_failed_count, 9u);
 }
 
 TEST_CASE(root_port_resets_count_only_connected_suspended_cycles_and_saturate) {
@@ -755,6 +778,35 @@ TEST_CASE(root_port_resets_count_only_connected_suspended_cycles_and_saturate) {
     duo::test::tinyusb_host::set_root_port(true, true, false, true);
     backend.task(6000u);
     CHECK_EQ(backend.observe().root_port_resets, 2u);
+
+    for (std::uint32_t count = 2u; count < 0xFFFFu; ++count) {
+        duo::test::tinyusb_host::set_root_port(true, true, true, true);
+        backend.task(6001u + count * 2u);
+        duo::test::tinyusb_host::set_root_port(true, true, false, true);
+        backend.task(6002u + count * 2u);
+    }
+    CHECK_EQ(backend.observe().root_port_resets, 0xFFFFu);
+    duo::test::tinyusb_host::set_root_port(true, true, true, true);
+    backend.task(200000u);
+    duo::test::tinyusb_host::set_root_port(true, true, false, true);
+    backend.task(200001u);
+    CHECK_EQ(backend.observe().root_port_resets, 0xFFFFu);
+}
+
+TEST_CASE(sof_gap_uses_unsigned_wrap_arithmetic_and_clamps_to_the_wire_width) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_sof_frame_count(0xFFFFFFF0u);
+    backend.task(1000u);
+    duo::test::tinyusb_host::set_sof_frame_count(20u);
+    backend.task(2000u);
+    CHECK_EQ(backend.observe().max_sof_gap, 36u);
+
+    duo::test::tinyusb_host::set_sof_frame_count(70020u);
+    backend.task(3000u);
+    CHECK_EQ(backend.observe().max_sof_gap, 0xFFFFu);
 }
 
 TEST_CASE(hub_mount_edges_are_counted_even_though_tinyusb_suppresses_its_mount_callback) {

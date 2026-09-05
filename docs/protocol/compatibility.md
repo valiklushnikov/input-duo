@@ -138,7 +138,9 @@ each self-delimiting so the one behind it can always be found:
   endpoint fields are high-water readings from Pico-PIO-USB's fixed endpoint pool: a nonzero
   `ep_slots_opened` proves endpoint open ran, and `ep_max_failed_count == 3` means the pinned
   host exhausted its transaction retry limit. `max_pass_gap_us` measures blocking between input
-  passes; `max_sof_gap > 2` shows the SOF ISR was starved. `root_port_resets` is a saturating,
+  passes. `max_sof_gap` is the largest SOF-frame advance between consecutive
+  Core-1 service passes; large values can be normal while `tuh_task()` blocks
+  during enumeration and do not mean the SOF ISR was starved. `root_port_resets` is a saturating,
   polled lower bound over connected suspended-to-running cycles.
 
   `clk_hz_now`, `sof_frame_count` and `root_port_state` are sampled once per device main-loop

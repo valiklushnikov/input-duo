@@ -183,26 +183,6 @@ def test_every_core0_runtime_spi_transfer_uses_the_clock_startup_gate():
     assert guarded.count("send_release_all(now_ms)") == 2
 
 
-def test_host_observation_mapping_carries_every_appended_wire_progress_field():
-    main = _source_text("firmware/u1_main/main.cpp")
-    start = main.index("HostObservation describe_host_observation")
-    end = main.index("return out;", start)
-    mapping = main[start:end]
-
-    for field in (
-        "mount_events",
-        "umount_events",
-        "hid_mount_events",
-        "ep_slots_opened",
-        "ep_max_failed_count",
-        "max_pass_gap_us",
-        "max_sof_gap",
-        "root_port_resets",
-        "hub_mount_events",
-    ):
-        assert f"out.{field} = observed.{field};" in mapping
-
-
 def test_task6_callbacks_only_capture_records_and_never_arm_or_route():
     callbacks = _source_text("firmware/u1_main/pio_usb/tinyusb_host_callbacks.cpp")
     without_comments = re.sub(r"//.*?$|/\*.*?\*/", "", callbacks, flags=re.MULTILINE | re.DOTALL)
@@ -398,6 +378,25 @@ def test_linked_clock_change_runs_from_main_and_never_from_backend_begin():
         assert callee in main_reachable
         assert callee not in backend_reachable
     assert "sleep_ms" in backend_reachable
+
+
+@pio_usb_elf_required
+def test_linked_main_launches_the_host_core_before_starting_device_usb_and_spi():
+    """Guard the reference startup as executed, not as source spelling.
+
+    Moving either initialization call above the launch recreates the ordering
+    that failed on the bench, regardless of variable names or formatting.
+    """
+    main = _function_disassembly(
+        _disassembly(_pio_usb_build_dir(), _pio_elf), "main"
+    )
+    calls = [match.group("symbol") for match in _BRANCH_TO_SYMBOL.finditer(main)]
+
+    launch = calls.index("multicore_launch_core1")
+    device_usb = calls.index("duo_input::u1::UsbService::begin()")
+    spi = calls.index("duo_input::u1::SpiMaster::begin()")
+
+    assert launch < device_usb < spi
 
 
 @ch375_elf_required

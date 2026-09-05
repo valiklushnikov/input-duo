@@ -43,6 +43,7 @@
 #include "input/ch375_source_adapter.hpp"
 #else
 #include "pio_usb/backend.hpp"
+#include "pio_usb/host_observation_mapping.hpp"
 #endif
 #include "input/pipeline.hpp"
 #include "output_runtime.hpp"
@@ -186,31 +187,6 @@ duo_input::u1::BackendCounters describe_backend_counters(
 /// describe_role reads the registry: a copy that Core 0 refreshed on its own
 /// schedule could disagree with the thing it describes, and the whole point of
 /// these fields is that they are the readings nothing else can give.
-duo_input::u1::HostObservation describe_host_observation(
-    const duo_input::u1::pio_usb::PioUsbBackend& backend) {
-    const duo_input::u1::pio_usb::HostObservability observed = backend.observe();
-    duo_input::u1::HostObservation out;
-    // The bit positions are the same on both sides by construction - the
-    // pio_usb constants below and the wire's documented bit order are one
-    // definition each, and this is where they meet.
-    out.init_flags = observed.init_flags;
-    out.clk_hz_at_begin = observed.clk_hz_at_begin;
-    out.clk_hz_now = observed.clk_hz_now;
-    out.sof_frame_count = observed.sof_frame_count;
-    out.root_port_state = observed.root_port_state;
-    out.root_port_connects = observed.root_port_connects;
-    out.core1_passes = observed.core1_passes;
-    out.mount_events = observed.mount_events;
-    out.umount_events = observed.umount_events;
-    out.hid_mount_events = observed.hid_mount_events;
-    out.ep_slots_opened = observed.ep_slots_opened;
-    out.ep_max_failed_count = observed.ep_max_failed_count;
-    out.max_pass_gap_us = observed.max_pass_gap_us;
-    out.max_sof_gap = observed.max_sof_gap;
-    out.root_port_resets = observed.root_port_resets;
-    out.hub_mount_events = observed.hub_mount_events;
-    return out;
-}
 #endif  // DUO_INPUT_BACKEND_CH375
 
 /// Where a normalized event goes.
@@ -1239,12 +1215,22 @@ int main() {
     const std::uint8_t wire_walk = duo_input::u1::SpiMaster::wire_walk();
 #endif
 
+#ifdef DUO_INPUT_BACKEND_PIO_USB
+    // Match Pico-PIO-USB's working dual-role example all the way through the
+    // device-stack boundary: launch the core that owns the PIO host first,
+    // then initialize TinyUSB device mode on Core 0. Core 1 touches neither
+    // usb nor link, and every later Core-0 SPI transfer remains behind the
+    // host-readiness gate below, so link initialization is safe here too.
+    multicore_launch_core1(core1_entry);
     usb.begin();
     link.begin();
-
-    // Everything Core 1 reads at start-up is in place, so it can go. It tells
-    // the flash routines about itself once it can be stopped by them.
+#else
+    // Preserve the established CH375 startup sequence byte for byte in source
+    // order; it has no PIO host whose launch must precede device USB.
+    usb.begin();
+    link.begin();
     multicore_launch_core1(core1_entry);
+#endif
 
 #ifdef DUO_INPUT_BACKEND_PIO_USB
     // Every run-time call which can touch SPI goes through this one gate.
@@ -1402,7 +1388,8 @@ int main() {
             // root port is being driven, and whether Core 1 is still turning.
             // Every counter above is a reason a device that enumerated was not
             // read; none of them says anything when nothing enumerates.
-            config.set_host_observation(describe_host_observation(g_pio_usb_backend));
+            config.set_host_observation(duo_input::u1::pio_usb::to_wire_host_observation(
+                g_pio_usb_backend.observe()));
         }
 #endif
 

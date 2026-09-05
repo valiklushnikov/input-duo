@@ -228,7 +228,7 @@ _HOST_STACK_ROWS = (
     ("ep_slots_opened", "Endpoint slots opened (high-water)"),
     ("ep_max_failed_count", "Endpoint transaction failures (high-water)"),
     ("max_pass_gap_us", "Longest input-core pass gap (us)"),
-    ("max_sof_gap", "Largest SOF-frame jump between passes"),
+    ("max_sof_gap", "Largest SOF-frame advance between passes"),
     ("root_port_resets", "Root-port resets seen (lower bound)"),
     ("hub_mount_events", "Hub mounts seen (lower bound)"),
 )

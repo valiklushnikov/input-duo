@@ -36,6 +36,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 #include "input/source.hpp"
 #include "pio_usb/device_registry.hpp"
@@ -193,6 +194,24 @@ private:
 
 class PioUsbBackend {
 public:
+    using PublishedObservationWord = std::atomic<std::uint32_t>;
+
+    /// Every Core-1 diagnostic word is published through this lock-free word.
+    /// RP2040 cannot afford a hidden library lock in the host service loop.
+    static constexpr bool observation_publication_is_always_lock_free() noexcept {
+        return PublishedObservationWord::is_always_lock_free &&
+               std::is_same_v<decltype(host_init_flags_), PublishedObservationWord> &&
+               std::is_same_v<decltype(clk_hz_at_begin_), PublishedObservationWord> &&
+               std::is_same_v<decltype(root_port_connects_), PublishedObservationWord> &&
+               std::is_same_v<decltype(root_port_resets_), PublishedObservationWord> &&
+               std::is_same_v<decltype(hub_mount_events_), PublishedObservationWord> &&
+               std::is_same_v<decltype(ep_slots_opened_), PublishedObservationWord> &&
+               std::is_same_v<decltype(ep_max_failed_count_), PublishedObservationWord> &&
+               std::is_same_v<decltype(max_pass_gap_us_), PublishedObservationWord> &&
+               std::is_same_v<decltype(max_sof_gap_), PublishedObservationWord> &&
+               std::is_same_v<decltype(core1_passes_), PublishedObservationWord>;
+    }
+
     /// Bring the host stack up. Call once, from Core 1, before task().
     ///
     /// Waits the reference sequence's second 10 ms settling interval, then
@@ -263,28 +282,29 @@ private:
     DeviceRegistry registry_;
     bool host_ready_ = false;
 
-    // Written once by begin() on Core 1 and read by Core 0 afterwards, the
-    // same discipline the registry's own counters already use: plain fixed
-    // width words, published before clock_change_.publish_settled().
-    std::uint8_t host_init_flags_ = 0;
-    std::uint32_t clk_hz_at_begin_ = 0;
+    // Core 1 publishes these words and Core 0 samples them independently.
+    // Relaxed atomics are sufficient for observations: no field controls host
+    // behavior and no cross-field snapshot is claimed. Readiness has its own
+    // release/acquire barrier above.
+    PublishedObservationWord host_init_flags_{0};
+    PublishedObservationWord clk_hz_at_begin_{0};
 
     // The attach edge has to be polled - nothing below TinyUSB reports one -
     // so task() samples it every pass. Both are Core 1's alone; Core 0 only
     // ever reads the counter.
-    std::uint16_t root_port_connects_ = 0;
+    PublishedObservationWord root_port_connects_{0};
     bool root_port_was_connected_ = false;
-    std::uint16_t root_port_resets_ = 0;
+    PublishedObservationWord root_port_resets_{0};
     bool root_port_reset_in_progress_ = false;
-    std::uint16_t hub_mount_events_ = 0;
+    PublishedObservationWord hub_mount_events_{0};
     bool hub_was_mounted_ = false;
 
-    std::uint8_t ep_slots_opened_ = 0;
-    std::uint8_t ep_max_failed_count_ = 0;
-    std::uint32_t max_pass_gap_us_ = 0;
+    PublishedObservationWord ep_slots_opened_{0};
+    PublishedObservationWord ep_max_failed_count_{0};
+    PublishedObservationWord max_pass_gap_us_{0};
     std::uint32_t previous_pass_us_ = 0;
     bool have_previous_pass_ = false;
-    std::uint16_t max_sof_gap_ = 0;
+    PublishedObservationWord max_sof_gap_{0};
     std::uint32_t previous_sof_frame_ = 0;
     bool have_previous_sof_frame_ = false;
 
@@ -292,7 +312,7 @@ private:
     // pass of core1_entry's loop, unconditionally - ahead of the host_ready_
     // early return, so a backend that refused to start still proves the core
     // itself is turning.
-    std::uint32_t core1_passes_ = 0;
+    PublishedObservationWord core1_passes_{0};
 };
 
 }  // namespace duo_input::u1::pio_usb

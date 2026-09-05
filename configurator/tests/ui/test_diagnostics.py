@@ -189,7 +189,7 @@ def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
     assert "Endpoint slots opened (high-water): 4" in reported
     assert "Endpoint transaction failures (high-water): 3" in reported
     assert "Longest input-core pass gap (us): 450000" in reported
-    assert "Largest SOF-frame jump between passes: 7" in reported
+    assert "Largest SOF-frame advance between passes: 7" in reported
     assert "Root-port resets seen (lower bound): 2" in reported
     assert "Hub mounts seen (lower bound): 1" in reported
     # The page must not carry the old derived row either: it called a healthy

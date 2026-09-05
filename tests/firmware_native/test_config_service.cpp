@@ -12,6 +12,7 @@
 
 #include "config_service.hpp"
 #include "crypto/sha256.hpp"
+#include "pio_usb/host_observation_mapping.hpp"
 #include "storage/ab_store.hpp"
 #include "test_support.hpp"
 
@@ -34,6 +35,32 @@ using duo_input::u1::mapping::CaptureController;
 using duo_input::u1::mapping::CapturedTrigger;
 
 namespace {
+
+// Frozen by hand from the pre-backend GET_DIAGNOSTICS wire contract: the
+// original 43-byte status head, nine bucket marker and eight literal LE
+// bucket edges, two empty 44-byte histograms, and two empty 42-byte ports.
+// No serializer or production constant computes this expected byte string.
+static constexpr std::uint8_t kFrozenLegacyDiagnosticsPrefix[] = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0xFA, 0x00, 0x00, 0x00,
+    0xF4, 0x01, 0x00, 0x00, 0xE8, 0x03, 0x00, 0x00, 0xD0, 0x07, 0x00, 0x00, 0x88, 0x13, 0x00, 0x00,
+    0x10, 0x27, 0x00, 0x00, 0x20, 0x4E, 0x00, 0x00, 0x50, 0xC3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+static_assert(sizeof(kFrozenLegacyDiagnosticsPrefix) == 248u,
+              "the frozen prefix is the complete pre-backend payload");
 
 std::uint32_t read_u32(const std::uint8_t* at) {
     return static_cast<std::uint32_t>(at[0]) | (static_cast<std::uint32_t>(at[1]) << 8) |
@@ -864,12 +891,6 @@ TEST_CASE(an_ignored_extra_interface_says_why_it_was_ignored) {
 // always read and never sees the suffix at all. So the prefix must be byte for
 // byte what it was before a backend was ever published.
 TEST_CASE(the_backend_block_leaves_the_prefix_byte_for_byte_unchanged) {
-    Link before;
-    before.hello();
-    const CdcFrame plain = before.send(CdcMessageType::GET_DIAGNOSTICS);
-    std::vector<std::uint8_t> prefix(
-        plain.payload.data, plain.payload.data + duo_input::u1::kBackendBlockOffset);
-
     Link after;
     after.hello();
     duo_input::u1::BackendCounters counters;
@@ -879,8 +900,8 @@ TEST_CASE(the_backend_block_leaves_the_prefix_byte_for_byte_unchanged) {
 
     CHECK_EQ(published.payload.size,
              duo_input::u1::kBackendBlockOffset + duo_input::u1::kBackendBlockBytes + 1);
-    for (std::size_t index = 0; index < prefix.size(); ++index) {
-        CHECK_EQ(published.payload.data[index], prefix[index]);
+    for (std::size_t index = 0; index < sizeof(kFrozenLegacyDiagnosticsPrefix); ++index) {
+        CHECK_EQ(published.payload.data[index], kFrozenLegacyDiagnosticsPrefix[index]);
     }
 }
 
@@ -1003,12 +1024,6 @@ TEST_CASE(an_image_with_no_host_stack_publishes_an_empty_host_block) {
 // before any of this existed, so a configurator that stops reading there reads
 // exactly what it always read.
 TEST_CASE(the_host_block_leaves_the_prefix_byte_for_byte_unchanged) {
-    Link before;
-    before.hello();
-    const CdcFrame plain = before.send(CdcMessageType::GET_DIAGNOSTICS);
-    std::vector<std::uint8_t> prefix(
-        plain.payload.data, plain.payload.data + duo_input::u1::kBackendBlockOffset);
-
     Link after;
     after.hello();
     duo_input::u1::BackendCounters counters;
@@ -1022,8 +1037,8 @@ TEST_CASE(the_host_block_leaves_the_prefix_byte_for_byte_unchanged) {
     const CdcFrame published = after.send(CdcMessageType::GET_DIAGNOSTICS);
 
     CHECK_EQ(published.payload.size, duo_input::u1::kDiagnosticsPayloadSize);
-    for (std::size_t index = 0; index < prefix.size(); ++index) {
-        CHECK_EQ(published.payload.data[index], prefix[index]);
+    for (std::size_t index = 0; index < sizeof(kFrozenLegacyDiagnosticsPrefix); ++index) {
+        CHECK_EQ(published.payload.data[index], kFrozenLegacyDiagnosticsPrefix[index]);
     }
     // And the backend block in between is untouched too: the host block was
     // appended behind it, not folded into it.
@@ -1033,6 +1048,43 @@ TEST_CASE(the_host_block_leaves_the_prefix_byte_for_byte_unchanged) {
     CHECK_EQ(published.payload.data[backend_at + 1],
              static_cast<std::uint8_t>(duo_input::u1::kBackendCounterCount));
     CHECK_EQ(read_u32(published.payload.data + backend_at + 2), 9u);
+}
+
+TEST_CASE(the_real_host_mapping_reaches_the_wire_without_relabeling_or_overwrite) {
+    duo_input::u1::pio_usb::HostObservability observed;
+    observed.init_flags = 0x0Du;
+    observed.clk_hz_at_begin = 0x11223344u;
+    observed.clk_hz_now = 0x55667788u;
+    observed.sof_frame_count = 0x99AABBCCu;
+    observed.root_port_state = 0x0Bu;
+    observed.root_port_connects = 0x1234u;
+    observed.core1_passes = 0xDEADBEEFu;
+    observed.mount_events = 0x0102u;
+    observed.umount_events = 0x0304u;
+    observed.hid_mount_events = 0x0506u;
+    observed.ep_slots_opened = 0x07u;
+    observed.ep_max_failed_count = 0x08u;
+    observed.max_pass_gap_us = 0x10203040u;
+    observed.max_sof_gap = 0x1112u;
+    observed.root_port_resets = 0x1314u;
+    observed.hub_mount_events = 0x1516u;
+
+    Link link;
+    link.hello();
+    link.service.set_host_observation(
+        duo_input::u1::pio_usb::to_wire_host_observation(observed));
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::size_t at = duo_input::u1::kBackendBlockOffset + 2u;
+    const std::uint8_t expected[] = {
+        0x26, 0x0D, 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55,
+        0xCC, 0xBB, 0xAA, 0x99, 0x0B, 0x34, 0x12, 0xEF, 0xBE, 0xAD,
+        0xDE, 0x02, 0x01, 0x04, 0x03, 0x06, 0x05, 0x07, 0x08, 0x40,
+        0x30, 0x20, 0x10, 0x12, 0x11, 0x14, 0x13, 0x16, 0x15,
+    };
+    CHECK_EQ(reply.payload.size, at + sizeof(expected));
+    for (std::size_t index = 0; index < sizeof(expected); ++index) {
+        CHECK_EQ(reply.payload.data[at + index], expected[index]);
+    }
 }
 
 TEST_CASE(the_diagnostics_say_whether_the_output_queue_is_overflowing_now) {

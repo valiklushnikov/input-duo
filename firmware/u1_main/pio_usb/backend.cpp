@@ -26,6 +26,26 @@ constexpr std::uint8_t kHostRhPort = 1;
 // address and remains tied to the pinned stack's public configuration.
 constexpr std::uint8_t kHubAddress = CFG_TUH_DEVICE_MAX + 1;
 
+void publish_max(std::atomic<std::uint32_t>& destination, std::uint32_t value) noexcept {
+    const std::uint32_t previous = destination.load(std::memory_order_relaxed);
+    if (value > previous) {
+        destination.store(value, std::memory_order_relaxed);
+    }
+}
+
+void increment_saturating(std::atomic<std::uint32_t>& destination,
+                          std::uint32_t limit) noexcept {
+    const std::uint32_t previous = destination.load(std::memory_order_relaxed);
+    if (previous < limit) {
+        destination.store(previous + 1u, std::memory_order_relaxed);
+    }
+}
+
+void publish_flag(std::atomic<std::uint32_t>& destination, std::uint32_t flag) noexcept {
+    destination.store(destination.load(std::memory_order_relaxed) | flag,
+                      std::memory_order_relaxed);
+}
+
 }  // namespace
 
 void PioUsbBackend::begin() {
@@ -37,13 +57,13 @@ void PioUsbBackend::begin() {
     // tusb_init() did from Core 0, and what made a dead board indistinguishable
     // from an idle one for a whole bench session.
     if (tuh_rhport_is_active(kHostRhPort)) {
-        host_init_flags_ |= kHostInitHostAlreadyActive;
+        publish_flag(host_init_flags_, kHostInitHostAlreadyActive);
     }
     // main() selected and settled 120 MHz before any peripheral or Core 1
     // started. This reading is therefore both a proof that the reorder took
     // effect (120 MHz, not the former 125 MHz) and the clock from which the
     // host below computes its dividers.
-    clk_hz_at_begin_ = clock_get_hz(clk_sys);
+    clk_hz_at_begin_.store(clock_get_hz(clk_sys), std::memory_order_relaxed);
 
     // The reference host also waits on the core that owns tuh_init. This runs
     // once at boot, before any service loop; it is not a service-path wait.
@@ -66,13 +86,13 @@ void PioUsbBackend::begin() {
     // the first flag: a true from tuh_init on an rhport somebody else already
     // activated is not evidence that this call did anything.
     if (configured) {
-        host_init_flags_ |= kHostInitConfigured;
+        publish_flag(host_init_flags_, kHostInitConfigured);
     }
     if (initialized) {
-        host_init_flags_ |= kHostInitInitialized;
+        publish_flag(host_init_flags_, kHostInitInitialized);
     }
     if (tuh_inited()) {
-        host_init_flags_ |= kHostInitInited;
+        publish_flag(host_init_flags_, kHostInitInited);
     }
 
     // Last: the release store publishes every preceding clock/host write to
@@ -106,15 +126,11 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     // weeks, and a counter that came back to a value it already showed would
     // read as a stopped core to exactly the procedure that exists to detect
     // one.
-    if (core1_passes_ != 0xFFFFFFFFu) {
-        ++core1_passes_;
-    }
+    increment_saturating(core1_passes_, 0xFFFFFFFFu);
 
     if (have_previous_pass_) {
         const std::uint32_t gap = now_us - previous_pass_us_;
-        if (gap > max_pass_gap_us_) {
-            max_pass_gap_us_ = gap;
-        }
+        publish_max(max_pass_gap_us_, gap);
     }
     previous_pass_us_ = now_us;
     have_previous_pass_ = true;
@@ -124,9 +140,7 @@ void PioUsbBackend::task(std::uint32_t now_us) {
         const std::uint32_t gap = sof_frame - previous_sof_frame_;
         const std::uint16_t bounded_gap =
             gap > 0xFFFFu ? 0xFFFFu : static_cast<std::uint16_t>(gap);
-        if (bounded_gap > max_sof_gap_) {
-            max_sof_gap_ = bounded_gap;
-        }
+        publish_max(max_sof_gap_, bounded_gap);
     }
     previous_sof_frame_ = sof_frame;
     have_previous_sof_frame_ = true;
@@ -137,13 +151,9 @@ void PioUsbBackend::task(std::uint32_t now_us) {
         if (endpoint.size != 0 && slots_opened != 0xFFu) {
             ++slots_opened;
         }
-        if (endpoint.failed_count > ep_max_failed_count_) {
-            ep_max_failed_count_ = endpoint.failed_count;
-        }
+        publish_max(ep_max_failed_count_, endpoint.failed_count);
     }
-    if (slots_opened > ep_slots_opened_) {
-        ep_slots_opened_ = slots_opened;
-    }
+    publish_max(ep_slots_opened_, slots_opened);
 
     // The attach edge. Nothing below TinyUSB reports one, so it is polled
     // here: four volatile reads a pass, no allocation and no wait. It counts
@@ -157,8 +167,8 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     // documentation and the configurator both say so where a reader will see
     // it rather than only here.
     const bool connected = pio_usb_root_port[0].connected;
-    if (connected && !root_port_was_connected_ && root_port_connects_ != 0xFFFFu) {
-        ++root_port_connects_;
+    if (connected && !root_port_was_connected_) {
+        increment_saturating(root_port_connects_, 0xFFFFu);
     }
     root_port_was_connected_ = connected;
 
@@ -168,9 +178,7 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     } else if (suspended) {
         root_port_reset_in_progress_ = true;
     } else if (root_port_reset_in_progress_) {
-        if (root_port_resets_ != 0xFFFFu) {
-            ++root_port_resets_;
-        }
+        increment_saturating(root_port_resets_, 0xFFFFu);
         root_port_reset_in_progress_ = false;
     }
 
@@ -185,8 +193,8 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     // the root-port edge counters this is a saturating lower bound: a whole
     // mount/unmount cycle between two passes is not observable.
     const bool hub_mounted = tuh_mounted(kHubAddress);
-    if (hub_mounted && !hub_was_mounted_ && hub_mount_events_ != 0xFFFFu) {
-        ++hub_mount_events_;
+    if (hub_mounted && !hub_was_mounted_) {
+        increment_saturating(hub_mount_events_, 0xFFFFu);
     }
     hub_was_mounted_ = hub_mounted;
 
@@ -196,22 +204,28 @@ void PioUsbBackend::task(std::uint32_t now_us) {
 
 HostObservability PioUsbBackend::observe() const {
     HostObservability out;
-    out.init_flags = host_init_flags_;
-    out.clk_hz_at_begin = clk_hz_at_begin_;
+    out.init_flags = static_cast<std::uint8_t>(host_init_flags_.load(std::memory_order_relaxed));
+    out.clk_hz_at_begin = clk_hz_at_begin_.load(std::memory_order_relaxed);
     out.clk_hz_now = clock_get_hz(clk_sys);
     out.sof_frame_count = pio_usb_host_get_frame_number();
-    out.root_port_connects = root_port_connects_;
-    out.core1_passes = core1_passes_;
+    out.root_port_connects =
+        static_cast<std::uint16_t>(root_port_connects_.load(std::memory_order_relaxed));
+    out.core1_passes = core1_passes_.load(std::memory_order_relaxed);
     const HostCallbackObservability callbacks = host_callback_observability();
     out.mount_events = callbacks.mount_events;
     out.umount_events = callbacks.umount_events;
     out.hid_mount_events = callbacks.hid_mount_events;
-    out.ep_slots_opened = ep_slots_opened_;
-    out.ep_max_failed_count = ep_max_failed_count_;
-    out.max_pass_gap_us = max_pass_gap_us_;
-    out.max_sof_gap = max_sof_gap_;
-    out.root_port_resets = root_port_resets_;
-    out.hub_mount_events = hub_mount_events_;
+    out.ep_slots_opened =
+        static_cast<std::uint8_t>(ep_slots_opened_.load(std::memory_order_relaxed));
+    out.ep_max_failed_count =
+        static_cast<std::uint8_t>(ep_max_failed_count_.load(std::memory_order_relaxed));
+    out.max_pass_gap_us = max_pass_gap_us_.load(std::memory_order_relaxed);
+    out.max_sof_gap =
+        static_cast<std::uint16_t>(max_sof_gap_.load(std::memory_order_relaxed));
+    out.root_port_resets =
+        static_cast<std::uint16_t>(root_port_resets_.load(std::memory_order_relaxed));
+    out.hub_mount_events =
+        static_cast<std::uint16_t>(hub_mount_events_.load(std::memory_order_relaxed));
 
     const root_port_t& root = pio_usb_root_port[0];
     std::uint8_t state = 0;

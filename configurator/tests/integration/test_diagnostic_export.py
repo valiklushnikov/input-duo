@@ -444,7 +444,7 @@ def test_the_report_carries_what_the_host_stack_and_root_port_are_doing(
     assert host["Endpoint slots opened (high-water)"] == "4"
     assert host["Endpoint transaction failures (high-water)"] == "3"
     assert host["Longest input-core pass gap (us)"] == "450000"
-    assert host["Largest SOF-frame jump between passes"] == "7"
+    assert host["Largest SOF-frame advance between passes"] == "7"
     assert host["Root-port resets seen (lower bound)"] == "2"
     assert host["Hub mounts seen (lower bound)"] == "1"
     # No derived clock row. There was one, it called a healthy board faulty,
