@@ -418,6 +418,13 @@ TEST_CASE(receive_arm_refusal_is_counted_once_without_in_flight_or_spin) {
 }
 
 TEST_CASE(failed_host_initialization_is_observable_as_a_fault_event) {
+    // Task 10 fix: a whole-host Fault has no interface of its own, so
+    // delivering it with identity.kind left Unknown routed to neither
+    // pipeline (PioUsbBackend::logical_port(Unknown) is -1) and released
+    // nothing - harmless only as long as this could fire solely from
+    // begin(), before any device could be mounted. It is now delivered as
+    // two properly-identified Fault events, one per role slot, so both
+    // pipelines actually see it.
     for (const auto results : {std::array<bool, 2>{false, true},
                                std::array<bool, 2>{true, false}}) {
         DeviceRegistry registry;
@@ -427,7 +434,12 @@ TEST_CASE(failed_host_initialization_is_observable_as_a_fault_event) {
         SourceIdentity identity;
         CHECK(registry.take_event(event, identity));
         CHECK_EQ(event.kind, SourceEventKind::Fault);
-        CHECK_EQ(identity.kind, DeviceKind::Unknown);
+        CHECK_EQ(identity.kind, DeviceKind::Keyboard);
+
+        CHECK(registry.take_event(event, identity));
+        CHECK_EQ(event.kind, SourceEventKind::Fault);
+        CHECK_EQ(identity.kind, DeviceKind::Mouse);
+
         CHECK_FALSE(registry.take_event(event, identity));
     }
 }
@@ -445,7 +457,11 @@ TEST_CASE(backend_reports_failed_host_initialization_without_servicing_a_dead_ho
         SourceIdentity identity;
         CHECK(backend.take_event(event, identity));
         CHECK_EQ(event.kind, SourceEventKind::Fault);
-        CHECK_EQ(identity.kind, DeviceKind::Unknown);
+        CHECK_EQ(identity.kind, DeviceKind::Keyboard);
+        CHECK(backend.take_event(event, identity));
+        CHECK_EQ(event.kind, SourceEventKind::Fault);
+        CHECK_EQ(identity.kind, DeviceKind::Mouse);
+        CHECK_FALSE(backend.take_event(event, identity));
         CHECK(backend.clock_settled());
         CHECK_EQ(duo::test::tinyusb_host::system_clock_khz(), 120000u);
         CHECK_EQ(duo::test::tinyusb_host::configured_pin_dp(), 0u);
