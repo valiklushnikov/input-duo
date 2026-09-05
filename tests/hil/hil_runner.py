@@ -226,6 +226,14 @@ class ScenarioResult:
     input_backend: str = "unknown"
     #: That backend's own counters, by name, and only the ones it sent.
     input_backend_counters: dict[str, int] = field(default_factory=dict)
+    #: The scenario's own ``manual_observations``, copied in verbatim and
+    #: never decided by this file. They exist so a reader of the report sees
+    #: exactly what a rig-only run left open - each one is documentation, not
+    #: a verdict, and none of them is ever allowed to reach ``checks``: that
+    #: is what keeps "the rig measured this" and "a human would have to
+    #: assert this" from blurring into each other in the one place a reader
+    #: might mistake one for the other.
+    manual_observations: list[dict] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -274,6 +282,7 @@ class ScenarioResult:
             ),
             "input_backend": self.input_backend,
             "input_backend_counters": self.input_backend_counters,
+            "manual_observations": self.manual_observations,
             "peripherals": [asdict(row) for row in self.peripherals],
             "samples": [asdict(sample) | {"latency_ms": round(sample.latency_ms, 3)}
                         for sample in self.samples],
@@ -292,6 +301,94 @@ class ScenarioResult:
 #: file says it too, in its own terms, before anybody starts.
 REQUIRED_SCENARIO_KEYS = ("name", "description", "requires", "on_this_rig", "steps")
 
+#: A scenario document declaring ``"kind": "hardware_acceptance"`` is claiming
+#: to be executable by someone standing at a bench with no author present to
+#: ask. ``_validate_acceptance_scenario`` checks that claim; every scenario
+#: written before Task 13 carries no ``kind`` at all and is unaffected.
+ACCEPTANCE_SCENARIO_KIND = "hardware_acceptance"
+
+#: What one entry of ``manual_observations`` must state. A bare description
+#: ("check the side button") is not enough to gate on: this rig cannot decide
+#: it, so what a human would call a pass and what a human would call a
+#: failure both have to be written down before the bench session starts, not
+#: improvised there.
+REQUIRED_MANUAL_OBSERVATION_KEYS = ("item", "expected", "fail_if")
+
+
+def _validate_acceptance_scenario(document: dict, path: str | Path) -> None:
+    """The stricter shape a ``hardware_acceptance`` scenario must have.
+
+    ``load_scenario`` already requires ``requires`` (physical setup) and
+    ``steps`` (action) of every scenario. This adds the three pieces that are
+    specific to a scenario meant to gate real hardware: ``checks`` must be
+    non-empty (measurable checks), every one of them must carry a stated
+    ``failure_criteria`` entry naming what a failure looks like, every
+    ``manual_observations`` entry must state what this rig cannot infer for
+    itself, and ``record`` must name what a completed report has to state
+    alongside its checks (backend, toolchain revisions, hub model, exact
+    identity, route observations, power/RGB symptoms, test duration - see the
+    Interfaces line in the Task 13 brief).
+
+    Each failure names exactly what is missing, because the alternative - one
+    generic "scenario is invalid" - would send the next person back through
+    this whole function to find out which of five things they forgot.
+    """
+    checks = document.get("checks")
+    if not checks:
+        raise ValueError(f"{path}: hardware_acceptance scenario names no checks")
+
+    # No separate "failure_criteria is present at all" guard here on purpose:
+    # a mutation sweep found one and it was dead code. With `checks` already
+    # guaranteed non-empty above, an absent or empty `failure_criteria` always
+    # makes every name in `checks` show up in `missing_criteria` below - the
+    # two guards can never disagree, so the first one was tested by nothing
+    # its own removal could expose. See the Task 13 report for the sweep.
+    failure_criteria = document.get("failure_criteria") or {}
+    missing_criteria = sorted(set(checks) - set(failure_criteria))
+    if missing_criteria:
+        raise ValueError(
+            f"{path}: checks with no stated failure_criteria: "
+            f"{', '.join(missing_criteria)}"
+        )
+    extra_criteria = sorted(set(failure_criteria) - set(checks))
+    if extra_criteria:
+        raise ValueError(
+            f"{path}: failure_criteria for checks the scenario does not name: "
+            f"{', '.join(extra_criteria)}"
+        )
+    blank_criteria = sorted(
+        name for name, text in failure_criteria.items() if not str(text).strip()
+    )
+    if blank_criteria:
+        raise ValueError(
+            f"{path}: failure_criteria with no text: {', '.join(blank_criteria)}"
+        )
+
+    observations = document.get("manual_observations")
+    if not observations:
+        raise ValueError(
+            f"{path}: hardware_acceptance scenario states no manual_observations"
+        )
+    for index, entry in enumerate(observations):
+        missing_fields = [
+            key
+            for key in REQUIRED_MANUAL_OBSERVATION_KEYS
+            if not str(entry.get(key, "")).strip()
+        ]
+        if missing_fields:
+            raise ValueError(
+                f"{path}: manual_observations[{index}] is missing "
+                f"{', '.join(missing_fields)}"
+            )
+
+    record = document.get("record")
+    if not record:
+        raise ValueError(
+            f"{path}: hardware_acceptance scenario states no record fields"
+        )
+    if any(not str(field).strip() for field in record):
+        raise ValueError(f"{path}: record contains a blank field name")
+
 
 def load_scenario(path: str | Path) -> dict:
     """Read one scenario and refuse it if it does not say what it needs."""
@@ -304,6 +401,8 @@ def load_scenario(path: str | Path) -> dict:
     for index, step in enumerate(document["steps"]):
         if "action" not in step:
             raise ValueError(f"{path}: step {index} has no action")
+    if document.get("kind") == ACCEPTANCE_SCENARIO_KIND:
+        _validate_acceptance_scenario(document, path)
     return document
 
 
@@ -638,6 +737,137 @@ def _check_every_device_enumerated(context: _Context):
     return (all(port.ready for port in attached), "", "")
 
 
+def _backend_counter_grew(context: _Context, name: str):
+    """How much one of the backend's own counters grew since the baseline.
+
+    The backend block is nested under ``DeviceDiagnostics.backend`` rather
+    than sitting alongside ``link_crc_errors`` and the rest, so it needs its
+    own accessor - ``_counter_grew`` reads straight off ``context.now``/
+    ``context.baseline`` and would see nothing here. ``None`` here always
+    means "this firmware did not send that counter", exactly as it does for
+    the fields ``_counter_grew`` reads: never that it counted zero.
+    """
+    now_backend = getattr(context.now, "backend", None)
+    if now_backend is None:
+        return None
+    now_value = getattr(now_backend, name, None)
+    if now_value is None:
+        return None
+    baseline_backend = (
+        getattr(context.baseline, "backend", None) if context.baseline is not None else None
+    )
+    before = getattr(baseline_backend, name, None) if baseline_backend is not None else None
+    if before is None:
+        return now_value
+    return now_value - before
+
+
+def _check_endpoint_reconnect(context: _Context):
+    """The peripheral port that was detached and replugged is ready again,
+    and the backend recorded no duplicate mount doing it.
+
+    Unlike ``detach_releases_observed``, this one needs no computer watching:
+    a duplicate mount is a defect in U1's own bookkeeping of its own bus, not
+    a symptom that shows up at PC1 or PC2, so GET_DIAGNOSTICS is the whole
+    story once a baseline exists to subtract.
+    """
+    backend = getattr(context.now, "backend", None)
+    if backend is None:
+        return (
+            None,
+            "this firmware does not report backend counters",
+            "a U1 build that carries the backend block in GET_DIAGNOSTICS",
+        )
+    ports = getattr(context.now, "peripherals", None)
+    if not ports:
+        return (
+            None,
+            "this firmware does not report what is on its peripheral ports",
+            "a U1 whose GET_DIAGNOSTICS carries the peripheral block",
+        )
+    attached = [port for port in ports if port.attached]
+    if not attached:
+        return (
+            None,
+            "nothing is attached to either peripheral port",
+            "a keyboard or a mouse detached and replugged into U1 during this run",
+        )
+    if context.baseline is None:
+        return (
+            None,
+            "no baseline reading, so a counter that only climbs says nothing about this run",
+            "a --phase baseline run before the detach/replug",
+        )
+    grew = _backend_counter_grew(context, "duplicate_mounts")
+    if grew is None:
+        return (
+            None,
+            "this firmware does not report duplicate_mounts",
+            "a newer U1 build",
+        )
+    return (all(port.ready for port in attached) and grew <= 0, "", "")
+
+
+#: Backend counters whose growth during a run is itself the defect - the ones
+#: Task 11 added and the binding decision names as what "stable error
+#: counters" means for the PIO backend. ``ignored_interfaces`` and
+#: ``ignored_role_already_claimed`` are deliberately excluded: V1 accepting
+#: one keyboard and one mouse and refusing every other interface
+#: deterministically is correct behaviour with a device like the Keychron
+#: receiver attached (three interfaces, one logical keyboard and one logical
+#: mouse), not a fault, and counting it as one would fail every honest run
+#: with that receiver on the bench.
+BACKEND_ERROR_COUNTER_NAMES = (
+    "event_overflows",
+    "detach_overflows",
+    "stale_events_discarded",
+    "arm_failures",
+    "arm_escalations",
+    "duplicate_mounts",
+    "device_overflows",
+    "interface_overflows",
+    "callback_overflows",
+)
+
+
+def _check_backend_error_counters_stable(context: _Context):
+    """None of the backend's own error counters grew during this run.
+
+    Mirrors ``_check_error_counters_stable`` but reads the backend block
+    instead of ``link_crc_errors`` - deliberately: ``link_crc_errors`` grows
+    at the same rate as ``link_frames_sent`` whenever U2 is simply absent (a
+    live measurement: 7428/7428, zero echoed frames), so a check that reads
+    it as evidence of quality reads an absent U2 as a catastrophically broken
+    one. None of the names below has that failure mode - they count what the
+    backend itself refused or dropped, not the link's own silence.
+    """
+    backend = getattr(context.now, "backend", None)
+    if backend is None:
+        return (
+            None,
+            "this firmware does not report backend counters",
+            "a U1 build that carries the backend block in GET_DIAGNOSTICS",
+        )
+    if context.baseline is None:
+        return (
+            None,
+            "no baseline reading, so a counter that only climbs says nothing about this run",
+            "a --phase baseline run before the scenario began",
+        )
+    reported = [
+        name for name in BACKEND_ERROR_COUNTER_NAMES if getattr(backend, name, None) is not None
+    ]
+    if not reported:
+        return (
+            None,
+            "this backend block carries none of the counters this check watches",
+            "a U1 build whose backend block sends at least one of "
+            + ", ".join(BACKEND_ERROR_COUNTER_NAMES),
+        )
+    grew = [name for name in reported if (_backend_counter_grew(context, name) or 0) > 0]
+    return (not grew, "", "")
+
+
 #: Which checks this rig can decide, and how.
 MEASURABLE_CHECKS = {
     "keyboard_p95_within_budget": _check_keyboard_p95,
@@ -648,6 +878,14 @@ MEASURABLE_CHECKS = {
     "link_recovered": _check_link_recovered,
     "error_counters_stable": _check_error_counters_stable,
     "every_device_enumerated": _check_every_device_enumerated,
+    # Task 13: backend-aware names used by the PIO USB hardware-acceptance
+    # scenarios. "both_devices_ready" is deliberately the same decision as
+    # "every_device_enumerated" under the brief's own phrase for it; the two
+    # names are kept separate rather than renaming the older one, so that no
+    # committed scenario's meaning shifts under it.
+    "both_devices_ready": _check_every_device_enumerated,
+    "endpoint_reconnect_clean": _check_endpoint_reconnect,
+    "backend_error_counters_stable": _check_backend_error_counters_stable,
 }
 
 #: Checks nothing on this rig can decide, and exactly what each would take.
@@ -709,6 +947,11 @@ UNMEASURABLE_CHECKS = {
     "no_watchdog_reset": (
         "the reset record is counted inside the firmware and GET_DIAGNOSTICS does not carry it",
         "a U1 build that reports its reset reason and watchdog count over CDC",
+    ),
+    "detach_releases_observed": (
+        "whether a key or button held before a peripheral was detached was released can "
+        "only be seen at the computer its route pointed to",
+        NEEDS_SECOND_COMPUTER,
     ),
 }
 
@@ -943,6 +1186,10 @@ def measure(scenario: dict, session, baseline=None, elapsed_seconds=None) -> Sce
     result.input_backend, result.input_backend_counters = backend_of(now)
     result.coverage = coverage_of(scenario, result.peripherals)
     result.checks, result.unmeasured = evaluate(scenario, now, baseline, elapsed_seconds)
+    result.manual_observations = [
+        dict(entry, recorded_by="unmeasured - needs a human at the bench")
+        for entry in scenario.get("manual_observations", ())
+    ]
 
     for stream in ("keyboard", "mouse"):
         histogram = getattr(now, f"{stream}_latency", None)

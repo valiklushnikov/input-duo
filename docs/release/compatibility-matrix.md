@@ -82,9 +82,52 @@ own terms:
 | `config_power_cut` | Nothing decidable here. All four checks come back unmeasured; needs a switchable supply and a write-enabled run. |
 | `profile_power_cycle` | Nothing decidable here. All three checks come back unmeasured; needs a switchable supply and a logger at each computer. |
 | `soak_24h` | Not opened yet. `--phase baseline` starts it; a measure phase before 24 hours records every check as unmeasured. |
+| `pio_usb_hub_enumeration` | Not run. Scenario written and validated (`--validate-only`) in Task 13; needs a U1 flashed with the PIO USB backend and explicit flash approval, which Task 14 has not yet obtained. |
+| `pio_usb_hub_recovery` | Not run, same reason. |
+| `pio_usb_dual_pc_routes` | Not run, same reason. |
 
 **The MVP is not accepted on this page as it stands.** What it now holds is one
 honest run rather than an empty form.
+
+## The PIO USB backend: not yet run on hardware
+
+Task 13 wrote the three scenarios above and `docs/release/pio-usb-hardware-checklist-ru.md`,
+but wrote no hardware acceptance row: Task 14 is the one that flashes U1,
+with the user's explicit approval of the exact UF2 hash, and records what
+happens. Nothing below is a measurement - it is what Task 13's own bench
+session against the *current* CH375 U1 found while preparing those
+scenarios, recorded here because it bears directly on how the PIO run's
+results must be read once it exists.
+
+**The Keychron 2.4GHz receiver's side button is a PIO-only capability, not a
+CH375 regression to check against.** Read from the receiver's live USB
+configuration descriptor: interface 0 is a HID boot mouse (81-byte report
+descriptor, EP 0x82 IN); interface 1 is HID, no boot protocol (115-byte
+report descriptor, EP 0x84 IN + 0x05 OUT); interface 2 is a HID boot keyboard
+(164-byte report descriptor, EP 0x81 IN) carrying four top-level collections
+- Keyboard (9 bytes), Consumer, System Control, and a second Keyboard
+(21 bytes) - and the side button's report lives in the first of those, on
+interface 2. Diagnostics read from U1 running its current CH375 firmware
+with this same receiver attached show it enumerating **only** interface 0 -
+VID `0x3434`, PID `0xD030`, 5 buttons, 81-byte descriptor - with the
+keyboard-role port empty. CH375 is one device per socket and never reaches
+interface 2 on this receiver, so the side button has never worked through
+CH375 here; there is no CH375 baseline for it to regress from. When a PIO
+run records this button working, that is a new capability being measured for
+the first time, and the row must say so rather than reading as a fix for
+something that was previously broken.
+
+**A U1↔U2 link-counter caveat that applies to every PIO run recorded here as
+much as it did to the CH375 rows above:** `link_crc_errors` grows at exactly
+the same rate as `link_frames_sent` when U2 is simply absent - measured on
+this bench at 7428/7428, zero echoed frames. A row that reads those two
+counters as evidence of link quality without first confirming U2 was
+actually attached for the interval in question would record an absent U2 as
+a catastrophically broken one. `pio_usb_hub_enumeration` deliberately runs
+before U2 is connected at all, `pio_usb_hub_recovery` and
+`pio_usb_dual_pc_routes` name no check that reads either counter for exactly
+this reason - see `backend_error_counters_stable` in `tests/hil/hil_runner.py`,
+which watches the backend's own counters instead.
 
 ## Keyboards
 

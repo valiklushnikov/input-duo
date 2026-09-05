@@ -1,0 +1,102 @@
+{
+  "name": "pio_usb_dual_pc_routes",
+  "kind": "hardware_acceptance",
+  "description": "The PIO USB backend's version of route_toggle: with both PC1 and PC2 attached, drive the keyboard through all three keyboard routes (PC1, PC2, BOTH) and the mouse through both mouse routes (PC1, PC2), with the current mouse's movement, wheel and both side buttons, the current keyboard's typing and Fn+F9-F12, macros, and simultaneous keyboard-and-mouse activity through XL334P4, all exercised on the PIO backend. This is the scenario the design doc names for Task 14's dual-PC step, run after pio_usb_hub_enumeration.json and with U2/PC2 already connected.",
+  "requires": [
+    "U1 flashed with the pio-pio-usb-release image, hub, keyboard and mouse already enumerated",
+    "U2 on SPI1 and PC2 attached",
+    "PC1 and PC2 both logged in and able to show what they received",
+    "A profile on the device with a binding that reaches SET_KEYBOARD_ROUTE (PC1/PC2/BOTH) and SET_MOUSE_ROUTE (PC1/PC2), and at least one macro long enough to be observed running",
+    "The Keychron 2.4GHz receiver, if available, for the side-button check"
+  ],
+  "on_this_rig": "keyboard_p95_within_budget, mouse_p95_within_budget, no_gap_over_50ms and both_devices_ready are decided from GET_DIAGNOSTICS the same way route_toggle.json decides them - over whatever input flowed between the baseline and the measure phase, which is firmware-internal latency and not the end-to-end figure the specification names. Every question about where an event actually arrived - all_toggles_took_effect, no_misrouted_event, no_stuck_keys - needs a logger at PC1 and PC2 that this rig does not have, and stays unmeasured here for exactly the reason route_toggle.json's own on_this_rig gives. The runner performs no write_config step, so the route bindings and the macro have to already be on the device; this scenario's checks decide nothing about whether the binding itself is correct, only about latency and stalls over the traffic a human drove by hand.",
+  "steps": [
+    {"action": "connect", "note": "phase-baseline reading"},
+    {
+      "action": "for_each_keyboard_route",
+      "routes": ["PC1", "PC2", "BOTH"],
+      "steps": [
+        {"action": "set_keyboard_route", "route": "$route"},
+        {"action": "inject_and_observe", "kind": "keyboard", "event": "typing_sample", "count": 50},
+        {"action": "inject_and_observe", "kind": "keyboard", "event": "fn_f9_through_f12"},
+        {"action": "assert_events_reach_expected_computers", "route": "$route"}
+      ]
+    },
+    {
+      "action": "for_each_mouse_route",
+      "routes": ["PC1", "PC2"],
+      "steps": [
+        {"action": "set_mouse_route", "route": "$route"},
+        {"action": "inject_and_observe", "kind": "mouse", "event": "movement_sample", "count": 100},
+        {"action": "inject_and_observe", "kind": "mouse", "event": "wheel_sample", "count": 50},
+        {"action": "inject_and_observe", "kind": "mouse", "event": "side_button_1"},
+        {"action": "inject_and_observe", "kind": "mouse", "event": "side_button_2"},
+        {"action": "assert_events_reach_expected_computer", "route": "$route"}
+      ]
+    },
+    {
+      "action": "inject_and_observe",
+      "kind": "mixed",
+      "note": "keyboard and mouse driven at the same time through XL334P4, watching for either stream starving the other"
+    },
+    {
+      "action": "run_macro",
+      "id": 1
+    },
+    {"action": "assert_all_released"},
+    {"action": "get_diagnostics", "records": ["peripherals", "keyboard_latency", "mouse_latency"]}
+  ],
+  "checks": {
+    "both_devices_ready": "the keyboard slot and the mouse slot both stayed ready across every route change",
+    "keyboard_p95_within_budget": "keyboard latency p95 <= 20 ms across the whole run",
+    "mouse_p95_within_budget": "mouse latency p95 <= 20 ms across the whole run",
+    "no_gap_over_50ms": "no observed pause longer than 50 ms",
+    "all_toggles_took_effect": "every route change actually changed which computer received input",
+    "no_misrouted_event": "no injected event arrived on a computer it was not routed to",
+    "no_stuck_keys": "no key or button remained held across any route change"
+  },
+  "failure_criteria": {
+    "both_devices_ready": "either slot drops out of ready during any of the five route changes this scenario drives",
+    "keyboard_p95_within_budget": "the device's own keyboard_latency histogram reports a p95 above 20 ms for this run",
+    "mouse_p95_within_budget": "the device's own mouse_latency histogram reports a p95 above 20 ms for this run",
+    "no_gap_over_50ms": "any single sample in either histogram lands above the 50 ms bucket edge",
+    "all_toggles_took_effect": "a route was set and the far computer never saw the input move there, as observed by a human at both PC1 and PC2",
+    "no_misrouted_event": "an event injected while routed to one computer arrives at the other",
+    "no_stuck_keys": "a key or mouse button reported pressed before a route change is still reported pressed at either computer after it"
+  },
+  "manual_observations": [
+    {
+      "item": "current mouse movement, wheel, and both side buttons, on the PIO backend",
+      "expected": "movement tracks smoothly in both axes, the wheel scrolls both directions, and both side buttons produce their bound action, all on whichever computer the mouse route currently points to",
+      "fail_if": "movement stutters or drops axes, the wheel misses direction or steps, or either side button produces nothing or the wrong action"
+    },
+    {
+      "item": "current keyboard typing and Fn+F9 through Fn+F12",
+      "expected": "ordinary typing produces every character with no repeats or drops, and each of Fn+F9, Fn+F10, Fn+F11 and Fn+F12 produces its bound function on the computer the keyboard route currently points to",
+      "fail_if": "typing drops or repeats a key, or any of the four Fn combinations produces nothing or the wrong result"
+    },
+    {
+      "item": "simultaneous keyboard and mouse use through XL334P4",
+      "expected": "typing and moving the mouse at the same time shows no dropped keystrokes and no mouse stutter attributable to the other stream",
+      "fail_if": "either stream visibly starves the other under simultaneous use"
+    },
+    {
+      "item": "macros, on the PIO backend",
+      "expected": "the bound macro runs to completion and produces the same output it did under CH375, on the computer the active route points to",
+      "fail_if": "the macro stalls, produces the wrong output, or leaves a key held after it finishes"
+    },
+    {
+      "item": "all three keyboard route modes (PC1, PC2, BOTH) and both mouse route modes (PC1, PC2)",
+      "expected": "PC1 and PC2 route input to exactly the one computer named, and BOTH delivers keyboard input to both PC1 and PC2 at once, as observed at each computer directly",
+      "fail_if": "PC1 or PC2 mode leaks input to the other computer, or BOTH mode fails to deliver to one of the two"
+    }
+  ],
+  "record": [
+    "input_backend",
+    "pc1_route_observations",
+    "pc2_route_observations",
+    "keyboard_route_modes_tested",
+    "mouse_route_modes_tested",
+    "test_duration"
+  ]
+}

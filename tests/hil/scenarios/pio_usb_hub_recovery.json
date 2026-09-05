@@ -1,0 +1,129 @@
+{
+  "name": "pio_usb_hub_recovery",
+  "kind": "hardware_acceptance",
+  "description": "Everything the design doc's power-and-recovery gate names that is not a route test: every downstream hub port replugged, the hub cable itself unplugged and replugged at the TYPE-C EXP socket, U2/PC2 disconnected and reconnected, a key held through a detach, rapid mixed input straight afterward, and RGB switched on and off while watching for a brownout. If RGB operation causes a reset or an enumeration loss, that is a failed power gate by itself, independent of every other check here - a bigger PTC does not override the PC port's or the hub module's own current limit.",
+  "requires": [
+    "U1 flashed with the pio-pio-usb-release image, the hub, keyboard and mouse already enumerated (run pio_usb_hub_enumeration.json first)",
+    "U2 on SPI1, wired GP10<->GP10, GP9<->GP9, U1 GP11->U2 GP8, U2 GP11->U1 GP8, common GND, and PC2 attached to U2",
+    "A keyboard with RGB lighting that can be switched on and off from its own controls, or the current wired keyboard if it has no RGB - state which on the report either way",
+    "The Keychron 2.4GHz receiver, if available, on its own downstream port",
+    "A CDC session to U1 to run GET_DIAGNOSTICS before and after each replug (operator-supplied port; not hard-coded here)"
+  ],
+  "on_this_rig": "endpoint_reconnect_clean and backend_error_counters_stable are both decided from GET_DIAGNOSTICS alone, with a baseline taken before each replug and a reading taken after the port is ready again. detach_releases_observed needs a computer watching what a held key does when its source is unplugged, and this rig has no logger at PC1 or PC2, so it stays unmeasured here regardless of what actually happened - a human at each computer is what decides it. The RGB power gate is watched entirely by a human: nothing on U1's own diagnostics distinguishes a brownout reset from a normal boot, so a reset during this step is read from the device physically re-enumerating and from GET_DIAGNOSTICS's own uptime-since-boot resetting to near zero, not inferred from a counter. If U2 is not attached for part of this run, link_crc_errors and link_frames_sent climb together at the same rate - a live measurement on this bench read 7428/7428 with zero echoed frames - so this scenario names no check that reads those two counters as evidence of link quality; a scenario that did would read an absent U2 as a catastrophically broken one instead of as what it is.",
+  "steps": [
+    {
+      "action": "connect",
+      "note": "phase-baseline reading, taken with the hub, keyboard, mouse and U2 all already attached and settled"
+    },
+    {
+      "action": "for_each_downstream_port",
+      "steps": [
+        {"action": "detach", "note": "unplug whichever peripheral is on this port", "settle_ms": 2000},
+        {"action": "reattach", "settle_ms": 3000},
+        {"action": "assert_enumerated", "timeout_ms": 5000}
+      ]
+    },
+    {
+      "action": "unplug_hub_cable_at_type_c_exp",
+      "settle_ms": 2000
+    },
+    {
+      "action": "replug_hub_cable_at_type_c_exp",
+      "settle_ms": 5000,
+      "note": "everything behind the hub has to re-enumerate from nothing"
+    },
+    {
+      "action": "assert_enumerated",
+      "timeout_ms": 8000
+    },
+    {
+      "action": "get_diagnostics",
+      "records": ["peripherals", "backend_counters"],
+      "note": "phase-measure reading for endpoint_reconnect_clean and backend_error_counters_stable, scoped to the replugs above"
+    },
+    {
+      "action": "inject",
+      "kind": "keyboard",
+      "event": "key_a_down",
+      "note": "leave it held, then detach this peripheral - the release is only visible at the computer it was routed to"
+    },
+    {
+      "action": "detach",
+      "note": "unplug the keyboard while key_a is still held"
+    },
+    {
+      "action": "assert_release_observed_at_pc",
+      "note": "unmeasurable on this rig; recorded manually"
+    },
+    {
+      "action": "reattach",
+      "settle_ms": 3000
+    },
+    {
+      "action": "inject_and_observe",
+      "kind": "mixed",
+      "note": "rapid alternating keyboard and mouse input immediately after the reattach above, to catch a backend that reconnected but did not rearm cleanly"
+    },
+    {
+      "action": "disconnect_pc2",
+      "note": "unplug U2 from PC2 while PC1 keeps receiving input"
+    },
+    {
+      "action": "reconnect_pc2"
+    },
+    {
+      "action": "toggle_rgb_on",
+      "note": "switch the keyboard's own RGB lighting on, watching U1 and the hub for any reset or re-enumeration"
+    },
+    {
+      "action": "toggle_rgb_off"
+    }
+  ],
+  "checks": {
+    "both_devices_ready": "after every replug in this run, the keyboard slot and the mouse slot both reached ready again",
+    "endpoint_reconnect_clean": "the replugged port(s) reached ready again with no duplicate mount recorded for the reconnect",
+    "backend_error_counters_stable": "no backend error counter grew across the whole sequence of replugs",
+    "detach_releases_observed": "no key or button remained held at PC1 or PC2 after any detach in this run"
+  },
+  "failure_criteria": {
+    "both_devices_ready": "any replug in the sequence leaves a slot attached but never ready, or leaves diagnostics reporting nothing attached at all, more than 5 seconds after the physical replug",
+    "endpoint_reconnect_clean": "duplicate_mounts is higher after the replug sequence than before it, or a port that was replugged never returns to ready",
+    "backend_error_counters_stable": "any of event_overflows, detach_overflows, stale_events_discarded, arm_failures, arm_escalations, device_overflows, interface_overflows or callback_overflows is higher after the sequence than the baseline taken before it started",
+    "detach_releases_observed": "a key or button pressed before a detach is still reported as held at the computer it was routed to, at any point after the detach"
+  },
+  "manual_observations": [
+    {
+      "item": "hub cable replug at the TYPE-C EXP socket",
+      "expected": "unplugging and replugging the cable that carries the whole hub causes every downstream device to re-enumerate within a few seconds of the replug, with no key left held at either computer from before the cable was pulled",
+      "fail_if": "a downstream device fails to re-enumerate after the hub cable is restored, or a key held before the cable was pulled is still reported held at either computer afterward"
+    },
+    {
+      "item": "PC2 disconnect while PC1 remains active",
+      "expected": "unplugging U2 from PC2 leaves PC1 receiving keyboard and mouse input without interruption; reconnecting PC2 brings U2 back without needing U1 to be power-cycled",
+      "fail_if": "PC1 loses input while U2/PC2 is disconnected, or U2 does not resume answering once PC2 is reconnected"
+    },
+    {
+      "item": "detach while a key is held",
+      "expected": "unplugging the keyboard mid-press releases the held key at the computer it was routed to, within roughly the same order of magnitude as U2's own 100 ms link-loss release budget - this rig cannot time it, but a human watching the far computer can see whether it happens at all",
+      "fail_if": "the key stays reported as held at the far computer any length of time after the physical unplug"
+    },
+    {
+      "item": "Keychron 2.4GHz receiver replug, if available",
+      "expected": "unplugging and replugging the receiver re-establishes both its keyboard-role and mouse-role ports, including the side button on interface 2, without needing U1 to be restarted",
+      "fail_if": "the receiver comes back missing the keyboard role, missing the side button's report, or claiming a role it did not have before the replug"
+    },
+    {
+      "item": "RGB power gate - keyboard RGB lighting switched on and off",
+      "expected": "no reset, brownout or loss of enumeration on U1, the hub, or any attached peripheral while RGB is on, at any brightness the keyboard's own controls reach",
+      "fail_if": "U1, the hub, or a peripheral resets, browns out or drops off the bus while RGB is enabled - this is a failed power gate on its own, independent of every other check in this scenario, and the first response is to reduce peripheral power or move to a powered-hub revision, not to enlarge the PTC"
+    }
+  ],
+  "record": [
+    "input_backend",
+    "hub_model",
+    "detach_release_observed_pc1",
+    "detach_release_observed_pc2",
+    "power_rgb_symptom",
+    "test_duration"
+  ]
+}

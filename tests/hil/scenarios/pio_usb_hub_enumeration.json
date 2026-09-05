@@ -1,0 +1,79 @@
+{
+  "name": "pio_usb_hub_enumeration",
+  "kind": "hardware_acceptance",
+  "description": "The first thing run after U1 boots on the PIO USB backend with only PC1 attached: the hub, the keyboard and the mouse all enumerate through U1's single PIO USB host on GP0 (D+) and GP1 (D-), one logical keyboard and one logical mouse are claimed, and any other interface on the bus - including a Keychron 2.4GHz receiver's own second, non-boot interface - is ignored deterministically and the reason is visible in diagnostics. This is Task 14's very first hardware step: LEDs count only as power evidence, this scenario and a human at the bench are what prove function.",
+  "requires": [
+    "U1 flashed with the pio-pio-usb-release image, booted with only PC1 attached (no U2, per Task 14's own first step)",
+    "The bench USB hub wired to U1's TYPE-C EXP socket per docs/superpowers/specs/2026-09-02-pio-usb-hub-v1-design.md (PC1 VBUS through the 1.1 A PTC to 5V_HUB, GP0/GP1 through the 22 ohm resistors)",
+    "The current wired keyboard and the current wired mouse, each on its own downstream hub port",
+    "The Keychron 2.4GHz receiver (VID 0x3434, PID 0xD030), on its own downstream hub port, if available on the bench",
+    "A CDC session to U1's configuration port to run GET_DIAGNOSTICS (the operator supplies the port; none is hard-coded here - the bench currently exposes COM18, but that number is not this scenario's to assume)",
+    "tools/dump_usb_descriptors.py or Device Manager, to read the hub's and the receiver's own descriptors independently of U1's report"
+  ],
+  "on_this_rig": "This scenario is decided entirely from GET_DIAGNOSTICS and needs no second computer, unlike route_toggle or link_fault. both_devices_ready and backend_error_counters_stable are both measurable the moment a baseline is taken before the hub is connected and a reading taken after the keyboard and mouse have settled. The Keychron receiver's own topology - one HID boot mouse interface, one non-boot 33-byte interface, one HID boot keyboard interface carrying four collections including the one with the side button's 9-byte report - was read from its live USB configuration descriptor and from Windows' HID API, not assumed; ignored_interfaces on this receiver should read 1 (its own interface 1, the 33-byte non-boot block), never 0 and never 2. Which downstream port each device landed on, and whether the receiver's third interface is genuinely absent from the CH375 record it used to run under, are manual observations - this rig has no way to see a physical port number or to compare against a build it is not running.",
+  "steps": [
+    {
+      "action": "connect",
+      "note": "open the U1 CDC port with power already applied and the hub, keyboard and mouse already attached; this is the phase-baseline reading, taken before anything is unplugged and replugged for this run"
+    },
+    {
+      "action": "get_diagnostics",
+      "records": ["input_backend", "peripherals", "backend_counters"],
+      "note": "confirm input_backend reads PIO_USB before trusting anything else on this page - see docs/release/compatibility-matrix.md, 'A report claiming CH375 about a board nobody asked'"
+    },
+    {
+      "action": "inspect_hub_enumeration",
+      "note": "with a host OS attached to PC1 independently of U1 (or tools/dump_usb_descriptors.py against the hub itself), confirm the hub itself enumerates and every downstream port with a device on it shows that device"
+    },
+    {
+      "action": "record_identity",
+      "role": "keyboard",
+      "fields": ["vendor_id", "product_id", "descriptor_hash", "buttons"]
+    },
+    {
+      "action": "record_identity",
+      "role": "mouse",
+      "fields": ["vendor_id", "product_id", "descriptor_hash", "buttons"]
+    },
+    {
+      "action": "assert_enumerated",
+      "timeout_ms": 5000,
+      "note": "both slots must reach ready without a replug; the hub may finish enumerating before or after either peripheral, per the design doc"
+    },
+    {
+      "action": "get_diagnostics",
+      "records": ["backend_counters"],
+      "note": "phase-measure reading; subtract from the baseline to decide backend_error_counters_stable"
+    }
+  ],
+  "checks": {
+    "both_devices_ready": "the keyboard slot and the mouse slot both reached the ready state through the PIO USB host, with no replug needed",
+    "backend_error_counters_stable": "none of the backend's own error counters (event/detach/interface/device/callback overflows, stale events discarded, arm failures, arm escalations, duplicate mounts) grew while the hub, keyboard and mouse enumerated"
+  },
+  "failure_criteria": {
+    "both_devices_ready": "GET_DIAGNOSTICS still shows either slot attached but not ready, or shows neither slot attached at all, more than 5 seconds after the hub itself finished enumerating (watched independently, since U1's own clock proves nothing about when the hub was actually done)",
+    "backend_error_counters_stable": "any counter in the set is higher after enumeration than the baseline taken with nothing yet attached - most tellingly duplicate_mounts, interface_overflows or device_overflows climbing on a bench with exactly a hub, one keyboard and one mouse behind it"
+  },
+  "manual_observations": [
+    {
+      "item": "every downstream port on the hub, tried with the keyboard and then the mouse",
+      "expected": "a device plugged into any downstream port enumerates within a few seconds, in any port order, and the same device works identically in every other downstream port it is tried in",
+      "fail_if": "one or more downstream ports never bring up a device that enumerates correctly in another port on the same hub"
+    },
+    {
+      "item": "Keychron 2.4GHz receiver (VID 0x3434, PID 0xD030), if available on the bench",
+      "expected": "GET_DIAGNOSTICS shows one keyboard-role port and one mouse-role port sourced from this one receiver, ignored_interfaces accounts for exactly its own interface 1 (the 33-byte HID block, neither boot mouse nor boot keyboard), and the keyboard-role port's descriptor is consistent with interface 2 (164 bytes, four collections, the one carrying the side button's 9-byte report) - this receiver never reached that interface under CH375, so seeing it claimed here is a new PIO-only capability being recorded for the first time, not a regression check against anything CH375 ever did",
+      "fail_if": "the receiver claims the wrong role in either slot, ignored_interfaces does not read exactly 1 for it, or the keyboard slot never appears at all even though the receiver is powered and paired"
+    }
+  ],
+  "record": [
+    "input_backend",
+    "pico_sdk_revision",
+    "tinyusb_revision",
+    "pico_pio_usb_revision",
+    "hub_model",
+    "keyboard_vendor_id_product_id_descriptor_hash",
+    "mouse_vendor_id_product_id_descriptor_hash",
+    "test_duration"
+  ]
+}
