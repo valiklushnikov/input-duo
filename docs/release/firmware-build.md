@@ -155,6 +155,72 @@ Pico SDK, TinyUSB and Pico-PIO-USB are all permissively licensed (BSD-3-Clause,
 MIT and MIT respectively). See `docs/release/third-party-licenses.md` for what
 that means for anything actually shipped.
 
+## Packaging a release
+
+`tools/build_release.ps1` assembles one release folder from these presets,
+plus the configurator and installer. It takes `-InputBackend CH375` (the
+default) or `-InputBackend PIO_USB`:
+
+```bat
+powershell -ExecutionPolicy Bypass -File tools/build_release.ps1 -Version 0.1.0-rc1
+powershell -ExecutionPolicy Bypass -File tools/build_release.ps1 -Version 0.1.0-rc1 -InputBackend PIO_USB
+```
+
+A `CH375` release builds only `pico-release` and names its U1 image
+`duo-input-u1-<version>.uf2`. A `PIO_USB` release additionally builds
+`pico-pio-usb-release` and names *that* preset's U1 image
+`duo-input-u1-pio-usb-<version>.uf2` - the two names cannot collide in one
+output folder, so a release directory that somehow contained both backends'
+U1 images would still be unambiguous about which is which.
+
+### U2 is one artefact
+
+U2's own sources (`firmware/u2_endpoint/`) do not depend on
+`DUO_INPUT_BACKEND` at all - it is built identically either way. What
+differs is the *toolchain*: `pico-release` builds it against Pico SDK 2.1.0
+and `pico-pio-usb-release` builds it against the pinned 2.3.0 in `.deps/`,
+because that preset points `PICO_SDK_PATH` at the PIO USB toolchain for
+*everything* it configures, U2 included (`cmake/pio_usb_toolchain_lock.cmake`).
+Task 5 of this migration measured the result: two U2 UF2s with different
+hashes at the same commit, from no code difference at all.
+
+That is not a difference a release is allowed to expose. Shipping
+`duo-input-u2-<version>.uf2` as two different binaries under one version
+number - which one a customer got depending on which preset happened to
+build last - is exactly the kind of ambiguity a version number exists to
+rule out, and nothing about U2 (no CH375 chips, no PIO pins, no
+`DUO_INPUT_BACKEND`) justifies it varying with U1's backend choice.
+
+So `tools/build_release.ps1` always takes U2 from the `pico-release`
+(CH375-toolchain, Pico SDK 2.1.0) build, regardless of `-InputBackend`. A
+`PIO_USB` release therefore builds *both* presets - `pico-release` for U2 (and
+for U1, on the `CH375` path), `pico-pio-usb-release` for U1 only, on the
+`PIO_USB` path - and still emits exactly one U2 artefact, byte-identical to
+the one a `CH375` release of the same commit emits. `pico-release` remaining
+buildable is consequently a precondition for *any* release, not just a
+`CH375` one.
+
+### The label guard
+
+Before naming or copying either backend's U1 UF2, `tools/build_release.ps1`
+runs `tests/build/test_backend_artifacts.py` scoped to the one build
+directory it just built (via `DUO_INPUT_PICO_BUILD`). That file cross-checks
+the build directory's declared backend (`CMakeCache.txt`) against what the
+linked ELF's symbol table actually contains - a CH375 image must link
+`Ch375Device::tick` and must not link TinyUSB's host task or HID-receive
+symbols; a PIO USB image is the reverse. A build directory that fails this
+check - most plausibly a shared build directory reconfigured by hand, or by
+another session, between one release and the next - never reaches the copy
+step, so a PIO USB image cannot be shipped labelled CH375, or the reverse.
+
+### What the release notes record
+
+Every release's `RELEASE-NOTES.md` states which backend U1 was built with. A
+`PIO_USB` release additionally records all three pinned toolchain revisions
+(read from `cmake/pio_usb_toolchain_lock.cmake`, so the notes cannot drift
+from what configuration actually verified), and states that U2 came from the
+CH375 toolchain regardless.
+
 ## The target board
 
 `PICO_BOARD` is `waveshare_rp2040_zero`. It is an RP2040 with 2 MB of flash,

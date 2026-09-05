@@ -135,6 +135,24 @@ def _u1_elf() -> Path:
     return _build_dir() / "firmware" / "u1_main" / "duo_u1_main.elf"
 
 
+def _declared_backend() -> str | None:
+    """What CMakeCache.txt says DUO_INPUT_BACKEND is, or None if unreadable.
+
+    Both ``pico-release`` and ``pico-pio-usb-release`` land a
+    ``duo_u1_main.elf`` at this same relative path, and they link different
+    input paths into it - see ``tests/build/test_backend_artifacts.py`` for
+    the guard that checks a build directory's declared backend against what
+    its ELF actually links. This file only needs to know which real-input
+    assertion applies below.
+    """
+    cache_path = _build_dir() / "CMakeCache.txt"
+    if not cache_path.is_file():
+        return None
+    cache = cache_path.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r"^DUO_INPUT_BACKEND:STRING=(.+)$", cache, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
 @pytest.mark.skipif(not _u1_elf().is_file(), reason="no U1 ELF in this build")
 def test_a_release_image_cannot_generate_its_own_input():
     """The synthetic input generator must be compiled out, not merely idle.
@@ -157,12 +175,19 @@ def test_a_release_image_cannot_generate_its_own_input():
 
 @pytest.mark.skipif(not _u1_elf().is_file(), reason="no U1 ELF in this build")
 def test_a_release_image_contains_the_real_peripheral_input_path():
-    """Release must read CH375 reports and feed them into the input pipeline.
+    """Release must read real peripheral reports and feed the input pipeline.
 
     Bring-up diagnostics may be compiled out, but the product's only physical
     input path may not disappear with them.  Inspect the linked image rather
     than the source: a misplaced preprocessor guard still looks plausible in
     ``main.cpp`` while producing a Core 1 loop that can never receive input.
+
+    Which real-input symbols are the right ones to demand depends on which
+    backend this build directory is configured for - CH375 reads a chip over
+    SPI, PIO USB runs a TinyUSB host - so the declared backend (read the same
+    way ``tests/build/test_backend_artifacts.py`` does, from CMakeCache.txt)
+    selects which of the two this test requires. Either way,
+    ``InputPipeline::on_event`` must be present: both backends feed it.
     """
     import sys
 
@@ -170,13 +195,26 @@ def test_a_release_image_contains_the_real_peripheral_input_path():
     from dump_usb_descriptors import Elf32
 
     symbols = Elf32(_u1_elf().read_bytes()).symbols()
+    backend = _declared_backend()
 
-    assert any("Ch375Device4tick" in name for name in symbols), (
-        "release ELF does not contain Ch375Device::tick"
-    )
     assert any("InputPipeline8on_event" in name for name in symbols), (
         "release ELF does not contain InputPipeline::on_event"
     )
+
+    if backend == "PIO_USB":
+        assert any("tuh_task" in name for name in symbols), (
+            "release ELF is configured for PIO_USB but contains no tuh_task"
+        )
+        assert any("tuh_hid_receive_report" in name for name in symbols), (
+            "release ELF is configured for PIO_USB but contains no "
+            "tuh_hid_receive_report"
+        )
+    else:
+        # CH375, or an older build directory with no DUO_INPUT_BACKEND at
+        # all - the only backend that predates this cache variable.
+        assert any("Ch375Device4tick" in name for name in symbols), (
+            "release ELF does not contain Ch375Device::tick"
+        )
 
 
 # ------------------------------------- what a release has to be able to redo

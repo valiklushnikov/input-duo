@@ -22,11 +22,21 @@ which permits shipping installers built with it, including commercially.
 
 ## Firmware build toolchain
 
+`tools/build_release.ps1 -InputBackend` picks U1's backend for one release;
+CH375 is the default until a later task's hardware acceptance decides
+otherwise. U2 is not selectable - every release, whichever U1 backend it
+carries, ships the U2 built from the CH375-toolchain `pico-release`
+directory (Pico SDK 2.1.0). See "U2 is one artefact" in
+`docs/release/firmware-build.md` for why: U2's own source is identical
+either way, and shipping two different U2 binaries under one version,
+distinguished only by which U1 backend a customer happened to pick, is
+exactly the ambiguity this file's table exists to avoid.
+
 | Component | Revision pinned | Licence | Status |
 |---|---|---|---|
-| Raspberry Pi Pico SDK | 2.1.0 (CH375 build, environment-provided) / `98a542c1a62fb549ffb5d66a3e5892b06276b670` (PIO USB build, `.deps/`) | BSD-3-Clause | Compiled into every shipped U1/U2 UF2. |
-| TinyUSB | CH375 build: whatever revision Pico SDK 2.1.0's own `lib/tinyusb` submodule pins / PIO USB build: `86ad6e56c1700e85f1c5678607a762cfe3aa2f47` (`.deps/`, overrides the SDK's submodule via `PICO_TINYUSB_PATH`) | MIT | Compiled into every shipped U1/U2 UF2 (device stack; host stack additionally, once the PIO USB backend ships). |
-| Pico-PIO-USB | `3c1eec341a5232640e4c00628b889b641af34b28` (`.deps/`) | MIT | Pinned for the PIO USB backend build; **not yet linked into any shipped UF2** - its firmware sources arrive in a later task of the migration (`docs/superpowers/plans/2026-09-03-pio-usb-hub-v1-implementation.md`). This row will move to "shipped" alongside that task, or be removed if the migration lands the PIO USB backend without it. |
+| Raspberry Pi Pico SDK | 2.1.0 (CH375 build and every shipped U2, environment-provided `PICO_SDK_PATH`) / `98a542c1a62fb549ffb5d66a3e5892b06276b670` (PIO USB U1 build only, `.deps/`) | BSD-3-Clause | 2.1.0 is compiled into every shipped U1 and U2 UF2. The `.deps/` revision is compiled into a shipped U1 only for a `-InputBackend PIO_USB` release, and never into U2. |
+| TinyUSB | CH375 build and every U2: whatever revision Pico SDK 2.1.0's own `lib/tinyusb` submodule pins / PIO USB U1 build: `86ad6e56c1700e85f1c5678607a762cfe3aa2f47` (`.deps/`, overrides the SDK's submodule via `PICO_TINYUSB_PATH`) | MIT | Device stack compiled into every shipped U1/U2 UF2. The `.deps/` revision's host stack is additionally compiled into a shipped U1 only for a `-InputBackend PIO_USB` release. |
+| Pico-PIO-USB | `3c1eec341a5232640e4c00628b889b641af34b28` (`.deps/`) | MIT | Compiled into a shipped U1 UF2 only for a `-InputBackend PIO_USB` release (`tools/build_release.ps1`); never into U2, and not present at all in a default `CH375` release. |
 
 All three are source-form, permissively licensed and statically linked into
 firmware, not into the configurator installer this file otherwise describes -
@@ -36,7 +46,8 @@ UF2 files travel in the same release folder the installer ships in (see
 not stop at the installer's own directory.
 
 See `docs/release/firmware-build.md` for how the PIO USB toolchain revisions
-are pinned, cloned and verified.
+are pinned, cloned and verified, and for the artefact names each backend
+produces.
 
 ## Qt for Python licensing route
 

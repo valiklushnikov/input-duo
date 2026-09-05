@@ -25,8 +25,25 @@
     Build from a dirty tree anyway. The release notes then say so, in the
     artefacts themselves. For local experiments only.
 
+.PARAMETER InputBackend
+    Which U1 USB host path this release's U1 image is built with: CH375 (the
+    two CH375 chips, current shipping hardware) or PIO_USB (the native
+    Pico-PIO-USB/TinyUSB host). Defaults to CH375 - PIO_USB does not become
+    the default until a later task's hardware acceptance decides it should.
+
+    U1's artefact name and source build directory both follow this
+    parameter: CH375 builds ``pico-release`` and names the image
+    ``duo-input-u1-<version>.uf2``; PIO_USB additionally builds
+    ``pico-pio-usb-release`` and names its image
+    ``duo-input-u1-pio-usb-<version>.uf2``. Either way, U2 is always taken
+    from the ``pico-release`` (CH375-toolchain) build - see the "U2 is one
+    artefact" note below.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File tools/build_release.ps1 -Version 0.1.0-rc1
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File tools/build_release.ps1 -Version 0.1.0-rc1 -InputBackend PIO_USB
 #>
 
 [CmdletBinding()]
@@ -34,7 +51,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
     [string]$OutputDir,
-    [switch]$AllowDirty
+    [switch]$AllowDirty,
+    [ValidateSet('CH375', 'PIO_USB')]
+    [string]$InputBackend = 'CH375'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -66,6 +85,77 @@ function Get-ProjectPython {
     return 'python'
 }
 $Python = Get-ProjectPython
+
+function Test-BackendCache([string]$BuildDir, [string]$ExpectedBackend) {
+    # A preset hard-codes DUO_INPUT_BACKEND, so this should always agree -
+    # except a shared build directory can be reconfigured by hand, or by
+    # another session, between one run of this script and the next. That is
+    # exactly the mislabelling this function exists to catch before it ever
+    # reaches an artefact name.
+    $cachePath = Join-Path $BuildDir 'CMakeCache.txt'
+    if (-not (Test-Path $cachePath)) {
+        throw "no CMakeCache.txt in $BuildDir; the configure step did not run or failed silently"
+    }
+    $match = Select-String -Path $cachePath -Pattern '^DUO_INPUT_BACKEND:STRING=(.+)$'
+    if (-not $match) {
+        throw "DUO_INPUT_BACKEND is absent from $cachePath"
+    }
+    $actual = $match.Matches[0].Groups[1].Value.Trim()
+    if ($actual -ne $ExpectedBackend) {
+        throw ("$BuildDir is configured for DUO_INPUT_BACKEND='$actual', not the " +
+               "requested '$ExpectedBackend' - refusing to build a release from a " +
+               'stale or hand-reconfigured build directory')
+    }
+}
+
+function Invoke-BackendArtifactGuard([string]$BuildDir) {
+    # tests/build/test_firmware_artifacts.py checks the flash-layout contract;
+    # tests/build/test_backend_artifacts.py is the guard that a PIO USB U1
+    # image cannot be labelled CH375 or vice versa - it cross-checks
+    # CMakeCache.txt's declared backend against the symbols actually linked
+    # into the ELF. Both run scoped to this one build directory, and a
+    # release is never assembled from a directory that fails either.
+    $previous = $env:DUO_INPUT_PICO_BUILD
+    $env:DUO_INPUT_PICO_BUILD = $BuildDir
+    try {
+        & $Python -m pytest tests/build/test_firmware_artifacts.py tests/build/test_backend_artifacts.py -q
+        if ($LASTEXITCODE -ne 0) {
+            throw "the firmware in $BuildDir does not meet the build/backend contract"
+        }
+    }
+    finally {
+        if ($null -eq $previous) {
+            Remove-Item Env:\DUO_INPUT_PICO_BUILD -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:DUO_INPUT_PICO_BUILD = $previous
+        }
+    }
+}
+
+function Get-PioUsbToolchainRevisions {
+    # cmake/pio_usb_toolchain_lock.cmake is the single source of truth for
+    # these three revisions (see that file's own header comment); reading
+    # them out of it here, rather than repeating the hashes in this script,
+    # is what keeps the release notes from drifting out of sync with what
+    # configuration actually pins and verifies.
+    $lockFile = Join-Path $RepositoryRoot 'cmake/pio_usb_toolchain_lock.cmake'
+    $text = Get-Content -Raw $lockFile
+    $revisions = [ordered]@{}
+    foreach ($pair in @(
+            @{ Label = 'Pico SDK'; Var = 'DUO_PIO_USB_PICO_SDK_REVISION' }
+            @{ Label = 'TinyUSB'; Var = 'DUO_PIO_USB_TINYUSB_REVISION' }
+            @{ Label = 'Pico-PIO-USB'; Var = 'DUO_PIO_USB_PICO_PIO_USB_REVISION' }
+        )) {
+        if ($text -match "set\($($pair.Var)\s+`"([0-9a-f]{40})`"\)") {
+            $revisions[$pair.Label] = $Matches[1]
+        }
+        else {
+            throw "could not find $($pair.Var) in $lockFile"
+        }
+    }
+    return $revisions
+}
 
 # --- one version, and it has to look like one --------------------------------
 
@@ -125,20 +215,44 @@ finally {
 }
 
 # --- the firmware ------------------------------------------------------------
+#
+# U1's backend is selectable (-InputBackend); U2 is not - see "U2 is one
+# artefact" in docs/release/firmware-build.md for why every release, PIO_USB
+# ones included, takes its U2 from the CH375-toolchain pico-release build
+# rather than from whichever preset built U1.
 
-Write-Step 'Building the Pico firmware'
+Write-Step "Building the Pico firmware (U1 backend: $InputBackend)"
 Push-Location $RepositoryRoot
 try {
     & cmake --preset pico-release
     if ($LASTEXITCODE -ne 0) {
-        throw 'configuring the Pico build failed; see docs/release/firmware-build.md'
+        throw 'configuring the Pico build (CH375) failed; see docs/release/firmware-build.md'
     }
     & cmake --build --preset pico-release --parallel
-    if ($LASTEXITCODE -ne 0) { throw 'the Pico firmware build failed' }
+    if ($LASTEXITCODE -ne 0) { throw 'the Pico firmware build (CH375) failed' }
 
-    Write-Step 'Checking the firmware fits below the configuration slots'
-    & $Python -m pytest tests/build/test_firmware_artifacts.py -q
-    if ($LASTEXITCODE -ne 0) { throw 'the firmware images do not meet the build contract' }
+    $ch375BuildDir = Join-Path $RepositoryRoot 'build/pico-release'
+    Test-BackendCache $ch375BuildDir 'CH375'
+
+    Write-Step 'Checking the CH375 firmware meets the build and backend contract'
+    Invoke-BackendArtifactGuard $ch375BuildDir
+
+    $pioBuildDir = $null
+    if ($InputBackend -eq 'PIO_USB') {
+        Write-Step 'Building the Pico firmware (PIO USB)'
+        & cmake --preset pico-pio-usb-release
+        if ($LASTEXITCODE -ne 0) {
+            throw 'configuring the Pico build (PIO USB) failed; see docs/release/firmware-build.md'
+        }
+        & cmake --build --preset pico-pio-usb-release --parallel
+        if ($LASTEXITCODE -ne 0) { throw 'the Pico firmware build (PIO USB) failed' }
+
+        $pioBuildDir = Join-Path $RepositoryRoot 'build/pico-pio-usb-release'
+        Test-BackendCache $pioBuildDir 'PIO_USB'
+
+        Write-Step 'Checking the PIO USB firmware meets the build and backend contract'
+        Invoke-BackendArtifactGuard $pioBuildDir
+    }
 }
 finally {
     Pop-Location
@@ -161,8 +275,20 @@ Write-Step "Assembling $OutputDir"
 if (Test-Path $OutputDir) { Remove-Item -Recurse -Force $OutputDir }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
+# U1 comes from whichever preset -InputBackend selected; U2 always comes
+# from the CH375-toolchain pico-release directory - see "U2 is one artefact"
+# in docs/release/firmware-build.md.
+if ($InputBackend -eq 'PIO_USB') {
+    $u1Source = 'build/pico-pio-usb-release/firmware/u1_main/duo_u1_main.uf2'
+    $u1Name = "duo-input-u1-pio-usb-$Version.uf2"
+}
+else {
+    $u1Source = 'build/pico-release/firmware/u1_main/duo_u1_main.uf2'
+    $u1Name = "duo-input-u1-$Version.uf2"
+}
+
 $artefacts = @(
-    @{ Source = "build/pico-release/firmware/u1_main/duo_u1_main.uf2"; Name = "duo-input-u1-$Version.uf2" }
+    @{ Source = $u1Source; Name = $u1Name }
     @{ Source = "build/pico-release/firmware/u2_endpoint/duo_u2_endpoint.uf2"; Name = "duo-input-u2-$Version.uf2" }
     @{ Source = "configurator/dist/DuoInput-Setup-$Version-x64.exe"; Name = "DuoInput-Setup-$Version-x64.exe" }
 )
@@ -189,12 +315,38 @@ Write-Utf8NoBom (Join-Path $OutputDir 'SHA256SUMS.txt') $lines
 
 # --- notes -------------------------------------------------------------------
 
+$firmwareNotes = if ($InputBackend -eq 'PIO_USB') {
+    $revisions = Get-PioUsbToolchainRevisions
+    @"
+- U1 backend: ``PIO_USB`` (native Pico-PIO-USB/TinyUSB host on Core 1)
+- PIO USB toolchain (pinned by ``cmake/pio_usb_toolchain_lock.cmake``):
+  - Pico SDK: ``$($revisions['Pico SDK'])``
+  - TinyUSB: ``$($revisions['TinyUSB'])``
+  - Pico-PIO-USB: ``$($revisions['Pico-PIO-USB'])``
+- U2 endpoint: built from the CH375-toolchain ``pico-release`` directory
+  (Pico SDK 2.1.0), not from the PIO USB toolchain above - U2's source is
+  identical either way, and shipping one U2 binary regardless of which U1
+  backend a release contains is a deliberate choice; see "U2 is one
+  artefact" in ``docs/release/firmware-build.md``.
+"@
+}
+else {
+    @"
+- U1 backend: ``CH375`` (the two CH375 USB host chips)
+- Toolchain: Pico SDK 2.1.0 (``PICO_SDK_PATH``, environment-provided)
+"@
+}
+
 $notes = @"
 # Duo Input $Version
 
 - Commit: ``$commit`` on ``$branch``
 - Built: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')
 - Working tree: $(if ($dirty) { 'DIRTY - these artefacts match no commit' } else { 'clean' })
+
+## Firmware
+
+$firmwareNotes
 
 ## Artefacts
 
@@ -206,6 +358,10 @@ Verify with ``SHA256SUMS.txt``.
 - Generated protocol identifiers match ``protocol/schema.json``.
 - Native firmware tests and the fuzz corpus smoke tests pass.
 - The configurator suite passes, including the dist contract over the built folder.
+- The U1 image actually links the backend this file says it does, not just
+  the one it was asked to build - ``tests/build/test_backend_artifacts.py``
+  cross-checks the build directory's declared backend against the linked
+  ELF's symbols before this script names or copies the artefact.
 
 ## What is not
 
