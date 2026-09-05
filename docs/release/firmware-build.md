@@ -251,6 +251,23 @@ Every release's `RELEASE-NOTES.md` states which backend U1 was built with. A
 from what configuration actually verified), and states that U2 came from the
 CH375 toolchain regardless.
 
+### The Python suite actually covers this directory
+
+`python -m pytest configurator/tests tests -q` - the command this section's
+own guard, `test_backend_artifacts.py`, and every other file under
+`tests/build/` are meant to be exercised by, and the one
+`tools/build_release.ps1`'s "Running the Python suites" step runs verbatim -
+depends on `pytest.ini` at the repository root. Without it, pytest resolves
+that command's configuration to `configurator/pyproject.toml` instead (the
+nearer of the two ini files to the command's first argument), whose default
+`norecursedirs` excludes any directory named `build` - `tests/build/`
+included, indistinguishably from the compiled `build/` tree at the
+repository root. `pytest.ini` drops `build` from `norecursedirs` and instead
+ignores the repository-root `build/` and `dist/` trees by path
+(`--ignore=build --ignore=dist`), which is the distinction
+`norecursedirs`'s name-only matching cannot make. See that file's own
+comments for the full account, including how this was found.
+
 ## The target board
 
 `PICO_BOARD` is `waveshare_rp2040_zero`. It is an RP2040 with 2 MB of flash,
