@@ -1562,7 +1562,12 @@ def test_record_identity_fields_are_filled_in_when_that_role_enumerated():
         FakeSession(
             _diagnostics(
                 peripherals=(
-                    _port(kind="keyboard", vendor_id=0x1234, product_id=0x5678),
+                    _port(
+                        kind="keyboard",
+                        vendor_id=0x1234,
+                        product_id=0x5678,
+                        descriptor_hash="a1b2c3d4",
+                    ),
                 )
             )
         ),
@@ -1570,8 +1575,32 @@ def test_record_identity_fields_are_filled_in_when_that_role_enumerated():
     document = json.loads(result.to_json())
 
     value = document["record"]["keyboard_vendor_id_product_id_descriptor_hash"]
-    assert "0x1234" in value
-    assert "0x5678" in value
+    assert value == "0x1234 0x5678 a1b2c3d4"
+
+
+def test_record_identity_field_is_unmeasured_without_a_descriptor_hash():
+    # Removing the descriptor hash must never leave an apparent exact identity
+    # made from only VID/PID; the report must state that this rig did not measure it.
+    scenario = _acceptance_scenario(
+        record=["keyboard_vendor_id_product_id_descriptor_hash"]
+    )
+
+    result = measure(
+        scenario,
+        FakeSession(
+            _diagnostics(
+                peripherals=(
+                    _port(kind="keyboard", vendor_id=0x1234, product_id=0x5678),
+                )
+            )
+        ),
+    )
+    document = json.loads(result.to_json())
+
+    assert (
+        document["record"]["keyboard_vendor_id_product_id_descriptor_hash"]
+        == UNMEASURED_RECORD_VALUE
+    )
 
 
 # ---------------------------------------- Important 8: kind is not the only gate

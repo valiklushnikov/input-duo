@@ -1367,8 +1367,13 @@ def _record_field_value(name: str, result: ScenarioResult, elapsed_seconds) -> o
     ):
         role = name.split("_", 1)[0]
         for row in result.peripherals:
-            if row.role == role and row.passed:
-                return f"{row.vendor_id} {row.product_id} {row.descriptor_hash}"
+            identity = (row.vendor_id, row.product_id, row.descriptor_hash)
+            if (
+                row.role == role
+                and row.passed
+                and all(isinstance(value, str) and value.strip() for value in identity)
+            ):
+                return " ".join(identity)
         return UNMEASURED_RECORD_VALUE
     return UNMEASURED_RECORD_VALUE
 
