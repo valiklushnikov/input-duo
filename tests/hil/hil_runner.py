@@ -34,7 +34,8 @@ finished later.
 
 Exit codes: 0 every check measured and passed, 1 something measured failed,
 2 no hardware, 3 everything measured passed but some checks could not be
-measured on this rig.
+measured on this rig, 4 the scenario file itself is invalid (including under
+--validate-only, which prints the reason to stderr rather than a traceback).
 """
 
 from __future__ import annotations
@@ -234,6 +235,14 @@ class ScenarioResult:
     #: assert this" from blurring into each other in the one place a reader
     #: might mistake one for the other.
     manual_observations: list[dict] = field(default_factory=list)
+    #: Every field the scenario's own ``record`` list names, populated from
+    #: whatever this rig actually knows and marked ``"unmeasured - needs a
+    #: human at the bench"`` for the rest - never simply absent. Fix round 1
+    #: found `record` validated as a non-empty list and then never surfaced:
+    #: a scenario could name "hub_model" and a report would carry no trace of
+    #: whether anyone ever wrote it down, which is the exact omission-reads-
+    #: as-forgotten failure mode the brief names for `checks`.
+    record: dict[str, object] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -283,6 +292,7 @@ class ScenarioResult:
             "input_backend": self.input_backend,
             "input_backend_counters": self.input_backend_counters,
             "manual_observations": self.manual_observations,
+            "record": self.record,
             "peripherals": [asdict(row) for row in self.peripherals],
             "samples": [asdict(sample) | {"latency_ms": round(sample.latency_ms, 3)}
                         for sample in self.samples],
@@ -307,12 +317,42 @@ REQUIRED_SCENARIO_KEYS = ("name", "description", "requires", "on_this_rig", "ste
 #: written before Task 13 carries no ``kind`` at all and is unaffected.
 ACCEPTANCE_SCENARIO_KIND = "hardware_acceptance"
 
+#: Checks introduced for PIO USB hardware acceptance specifically. A scenario
+#: naming any of these is claiming the hardware_acceptance shape whether or
+#: not it spelled ``kind`` right - fix round 1 found that a scenario could
+#: name these checks with ``kind`` omitted, mis-cased or misspelled and get
+#: none of ``_validate_acceptance_scenario``'s guarantees while still reading,
+#: on a skim, like a scenario that had them. Dispatching on the check names as
+#: well as on ``kind`` closes that: a typo or omission next to one of these is
+#: now itself a load-time refusal, not a silent downgrade to the loose shape.
+ACCEPTANCE_FAMILY_CHECK_NAMES = frozenset(
+    {
+        "both_devices_ready",
+        "endpoint_reconnect_clean",
+        "backend_error_counters_stable",
+        "detach_releases_observed",
+    }
+)
+
 #: What one entry of ``manual_observations`` must state. A bare description
 #: ("check the side button") is not enough to gate on: this rig cannot decide
 #: it, so what a human would call a pass and what a human would call a
 #: failure both have to be written down before the bench session starts, not
 #: improvised there.
 REQUIRED_MANUAL_OBSERVATION_KEYS = ("item", "expected", "fail_if")
+
+
+def _non_blank_str(value: object) -> bool:
+    """True only for an actual, non-blank string.
+
+    Fix round 1 found that ``str(value).strip()`` accepts anything -
+    ``None`` reads as the four characters ``"None"``, ``[]`` reads as
+    ``"[]"``, ``0`` reads as ``"0"`` - so a scenario stating
+    ``"expected": null`` or ``"fail_if": []`` validated clean. A criterion or
+    an observation field has to actually be text, not merely stringify to
+    something non-empty.
+    """
+    return isinstance(value, str) and bool(value.strip())
 
 
 def _validate_acceptance_scenario(document: dict, path: str | Path) -> None:
@@ -344,6 +384,8 @@ def _validate_acceptance_scenario(document: dict, path: str | Path) -> None:
     # two guards can never disagree, so the first one was tested by nothing
     # its own removal could expose. See the Task 13 report for the sweep.
     failure_criteria = document.get("failure_criteria") or {}
+    if not isinstance(failure_criteria, dict):
+        raise ValueError(f"{path}: failure_criteria must be an object, not {failure_criteria!r}")
     missing_criteria = sorted(set(checks) - set(failure_criteria))
     if missing_criteria:
         raise ValueError(
@@ -357,7 +399,7 @@ def _validate_acceptance_scenario(document: dict, path: str | Path) -> None:
             f"{', '.join(extra_criteria)}"
         )
     blank_criteria = sorted(
-        name for name, text in failure_criteria.items() if not str(text).strip()
+        name for name, text in failure_criteria.items() if not _non_blank_str(text)
     )
     if blank_criteria:
         raise ValueError(
@@ -369,11 +411,22 @@ def _validate_acceptance_scenario(document: dict, path: str | Path) -> None:
         raise ValueError(
             f"{path}: hardware_acceptance scenario states no manual_observations"
         )
+    if not isinstance(observations, list):
+        raise ValueError(
+            f"{path}: manual_observations must be a list of entries, not "
+            f"{type(observations).__name__}"
+        )
     for index, entry in enumerate(observations):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"{path}: manual_observations[{index}] must be an object with "
+                f"{', '.join(REQUIRED_MANUAL_OBSERVATION_KEYS)}, not "
+                f"{type(entry).__name__}"
+            )
         missing_fields = [
             key
             for key in REQUIRED_MANUAL_OBSERVATION_KEYS
-            if not str(entry.get(key, "")).strip()
+            if not _non_blank_str(entry.get(key))
         ]
         if missing_fields:
             raise ValueError(
@@ -386,8 +439,30 @@ def _validate_acceptance_scenario(document: dict, path: str | Path) -> None:
         raise ValueError(
             f"{path}: hardware_acceptance scenario states no record fields"
         )
-    if any(not str(field).strip() for field in record):
+    if not isinstance(record, list):
+        raise ValueError(
+            f"{path}: record must be a list of field names, not {type(record).__name__}"
+        )
+    if any(not _non_blank_str(name) for name in record):
         raise ValueError(f"{path}: record contains a blank field name")
+
+
+def _validate_steps(steps: list, path: str | Path, where: str = "top level") -> None:
+    """Every step names an action - including one nested inside another
+    step's own ``steps`` list (``for_each_keyboard_route``,
+    ``for_each_downstream_port``, ``repeat`` and the rest all carry one).
+
+    Fix round 1 found that the original guard walked only the top level, so
+    an action-less step one level down loaded clean. This recurses into every
+    ``steps`` list it finds, however deep, rather than trusting depth to stay
+    at one.
+    """
+    for index, step in enumerate(steps):
+        if "action" not in step:
+            raise ValueError(f"{path}: step {index} ({where}) has no action")
+        nested = step.get("steps")
+        if isinstance(nested, list):
+            _validate_steps(nested, path, where=f"nested in step {index} ({where})")
 
 
 def load_scenario(path: str | Path) -> dict:
@@ -398,9 +473,15 @@ def load_scenario(path: str | Path) -> dict:
         raise ValueError(f"{path}: scenario is missing {', '.join(missing)}")
     if not document["steps"]:
         raise ValueError(f"{path}: scenario has no steps")
-    for index, step in enumerate(document["steps"]):
-        if "action" not in step:
-            raise ValueError(f"{path}: step {index} has no action")
+    _validate_steps(document["steps"], path)
+    acceptance_checks = sorted(
+        set(document.get("checks", {}) or {}) & ACCEPTANCE_FAMILY_CHECK_NAMES
+    )
+    if acceptance_checks and document.get("kind") != ACCEPTANCE_SCENARIO_KIND:
+        raise ValueError(
+            f"{path}: names hardware-acceptance check(s) {', '.join(acceptance_checks)} "
+            f"but kind is {document.get('kind')!r}, not {ACCEPTANCE_SCENARIO_KIND!r}"
+        )
     if document.get("kind") == ACCEPTANCE_SCENARIO_KIND:
         _validate_acceptance_scenario(document, path)
     return document
@@ -737,6 +818,50 @@ def _check_every_device_enumerated(context: _Context):
     return (all(port.ready for port in attached), "", "")
 
 
+def _check_both_devices_ready(context: _Context):
+    """A keyboard-role port and a mouse-role port are each attached and ready.
+
+    Deliberately **not** ``_check_every_device_enumerated``'s decision, which
+    is "every *attached* port is ready" - correct for that check's own name,
+    and exactly wrong for this one. Fix round 1 measured it: with the mouse
+    simply unplugged, the alias read ``{'both_devices_ready': True}`` on a
+    bench with no mouse, and that was the reading the enumeration scenario -
+    Task 14's very first hardware step - would have been accepted on. Role is
+    read from the device's own descriptor (``PeripheralPort.kind``), never
+    from which physical slot a port arrived in.
+    """
+    ports = getattr(context.now, "peripherals", None)
+    if ports is None:
+        return (
+            None,
+            "this firmware does not report what is on its peripheral ports",
+            "a U1 whose GET_DIAGNOSTICS carries the peripheral block",
+        )
+    by_role: dict[str, list] = {"keyboard": [], "mouse": []}
+    for port in ports:
+        if port.attached and port.kind in by_role:
+            by_role[port.kind].append(port)
+    missing_roles = [role for role in ("keyboard", "mouse") if not by_role[role]]
+    if missing_roles:
+        attached_roles = [role for role in ("keyboard", "mouse") if by_role[role]]
+        return (
+            None,
+            (
+                "only " + " and ".join(attached_roles) + " is attached"
+                if attached_roles
+                else "neither a keyboard-role nor a mouse-role port is attached"
+            )
+            + f"; {' and '.join(missing_roles)} still has to reach this rig before "
+            "both devices being ready is decidable",
+            "a keyboard and a mouse both plugged into U1 at the same time",
+        )
+    return (
+        all(port.ready for role in ("keyboard", "mouse") for port in by_role[role]),
+        "",
+        "",
+    )
+
+
 def _backend_counter_grew(context: _Context, name: str):
     """How much one of the backend's own counters grew since the baseline.
 
@@ -760,6 +885,23 @@ def _backend_counter_grew(context: _Context, name: str):
     if before is None:
         return now_value
     return now_value - before
+
+
+def _backend_counters_reset(context: _Context, names) -> bool:
+    """True if any named backend counter reads lower now than at the
+    baseline - the signature of the device having restarted in between.
+
+    Every counter these checks watch only ever climbs while the firmware
+    keeps running, so a negative difference is not "nothing grew"; it is a
+    reset that zeroed the very things being watched. Fix round 1 measured
+    the consequence of not checking this: a baseline of
+    ``event_overflows=9, arm_failures=4, duplicate_mounts=7`` against a
+    post-reset reading of all zeros produced
+    ``backend_error_counters_stable: True`` and ``endpoint_reconnect_clean:
+    True`` - both checks reading the exact brownout-reset event
+    ``pio_usb_hub_recovery``'s RGB gate exists to catch as a clean pass.
+    """
+    return any((_backend_counter_grew(context, name) or 0) < 0 for name in names)
 
 
 def _check_endpoint_reconnect(context: _Context):
@@ -805,7 +947,17 @@ def _check_endpoint_reconnect(context: _Context):
             "this firmware does not report duplicate_mounts",
             "a newer U1 build",
         )
-    return (all(port.ready for port in attached) and grew <= 0, "", "")
+    if grew < 0:
+        return (
+            None,
+            "duplicate_mounts is lower now than at the baseline, which only "
+            "happens if the device restarted between the two readings - a "
+            "reset zeroes exactly the counter this check watches, and reading "
+            "that as nothing having grown would call the reset itself clean",
+            "a U1 that did not reset between the baseline and this reading, or "
+            "a fresh baseline taken right after the reset",
+        )
+    return (all(port.ready for port in attached) and grew == 0, "", "")
 
 
 #: Backend counters whose growth during a run is itself the defect - the ones
@@ -864,6 +1016,17 @@ def _check_backend_error_counters_stable(context: _Context):
             "a U1 build whose backend block sends at least one of "
             + ", ".join(BACKEND_ERROR_COUNTER_NAMES),
         )
+    if _backend_counters_reset(context, reported):
+        return (
+            None,
+            "at least one backend counter reads lower now than at the baseline, "
+            "which only happens if the device restarted between the two "
+            "readings - a reset zeroes exactly the counters this check "
+            "watches, and reading that as nothing having grown would call the "
+            "reset itself a pass",
+            "a U1 that did not reset between the baseline and this reading, or "
+            "a fresh baseline taken right after the reset",
+        )
     grew = [name for name in reported if (_backend_counter_grew(context, name) or 0) > 0]
     return (not grew, "", "")
 
@@ -879,11 +1042,10 @@ MEASURABLE_CHECKS = {
     "error_counters_stable": _check_error_counters_stable,
     "every_device_enumerated": _check_every_device_enumerated,
     # Task 13: backend-aware names used by the PIO USB hardware-acceptance
-    # scenarios. "both_devices_ready" is deliberately the same decision as
-    # "every_device_enumerated" under the brief's own phrase for it; the two
-    # names are kept separate rather than renaming the older one, so that no
-    # committed scenario's meaning shifts under it.
-    "both_devices_ready": _check_every_device_enumerated,
+    # scenarios. "both_devices_ready" is its own decision, not an alias for
+    # "every_device_enumerated" - see _check_both_devices_ready's docstring
+    # for why the two must never share one function.
+    "both_devices_ready": _check_both_devices_ready,
     "endpoint_reconnect_clean": _check_endpoint_reconnect,
     "backend_error_counters_stable": _check_backend_error_counters_stable,
 }
@@ -1169,6 +1331,48 @@ def _state_document(diagnostics, taken_at: float) -> dict:
     return {"taken_at": taken_at, "diagnostics": raw}
 
 
+#: What a `record` field reads when nothing on this rig can answer it -
+#: toolchain revisions, hub model, and every human route/detach/RGB
+#: observation the brief's Interfaces line names. Present in the report as
+#: this string, never absent from it: an absent key reads as forgotten, a
+#: present key marked unmeasured reads as a field someone has to fill in.
+UNMEASURED_RECORD_VALUE = "unmeasured - needs a human at the bench"
+
+
+def _record_field_value(name: str, result: ScenarioResult, elapsed_seconds) -> object:
+    """What this rig itself can say about one of the scenario's declared
+    ``record`` fields, or the explicit marker that it cannot.
+
+    Only a handful of the fields a hardware-acceptance report has to state
+    are ever visible to a CDC session with U1: which backend answered, how
+    long the baseline-to-measure interval ran, and the identity of whichever
+    peripheral actually enumerated. Everything else - Pico SDK/TinyUSB/
+    Pico-PIO-USB revisions, hub model, PC1/PC2 route observations, detach-
+    release observations, power/RGB symptoms - exists only in a human's own
+    account of the bench session, and is named here as unmeasured rather
+    than left for `to_json()` to simply not mention.
+    """
+    if name == "input_backend":
+        return result.input_backend
+    if name == "test_duration":
+        if elapsed_seconds is not None:
+            return f"{elapsed_seconds:.1f} s (baseline to this reading)"
+        return (
+            "unmeasured - no --phase baseline run was taken to time this "
+            "reading against"
+        )
+    if name in (
+        "keyboard_vendor_id_product_id_descriptor_hash",
+        "mouse_vendor_id_product_id_descriptor_hash",
+    ):
+        role = name.split("_", 1)[0]
+        for row in result.peripherals:
+            if row.role == role and row.passed:
+                return f"{row.vendor_id} {row.product_id} {row.descriptor_hash}"
+        return UNMEASURED_RECORD_VALUE
+    return UNMEASURED_RECORD_VALUE
+
+
 def measure(scenario: dict, session, baseline=None, elapsed_seconds=None) -> ScenarioResult:
     """Read the device and decide what the scenario asks, against a fake or a board."""
     result = ScenarioResult(
@@ -1190,6 +1394,10 @@ def measure(scenario: dict, session, baseline=None, elapsed_seconds=None) -> Sce
         dict(entry, recorded_by="unmeasured - needs a human at the bench")
         for entry in scenario.get("manual_observations", ())
     ]
+    result.record = {
+        name: _record_field_value(name, result, elapsed_seconds)
+        for name in scenario.get("record", ())
+    }
 
     for stream in ("keyboard", "mouse"):
         histogram = getattr(now, f"{stream}_latency", None)
@@ -1275,6 +1483,7 @@ EXIT_PASSED = 0
 EXIT_FAILED = 1
 EXIT_NO_HARDWARE = 2
 EXIT_PARTIAL = 3
+EXIT_INVALID_SCENARIO = 4
 
 
 def exit_code(result: ScenarioResult) -> int:
@@ -1310,7 +1519,18 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
 
     if arguments.validate_only:
-        scenario = load_scenario(arguments.scenario)
+        try:
+            scenario = load_scenario(arguments.scenario)
+        except ValueError as error:
+            # Fix round 1 measured this: an invalid scenario made
+            # --validate-only exit with an uncaught traceback rather than the
+            # clean rejection every other malformed input in this file gets.
+            # A traceback is not more informative than the message the
+            # validator already wrote - it is noise ahead of the same
+            # sentence, and it panics an automation that just wanted a
+            # nonzero exit code.
+            print(f"invalid scenario: {error}", file=sys.stderr)
+            return EXIT_INVALID_SCENARIO
         print(f"{scenario['name']}: {len(scenario['steps'])} steps, valid")
         return EXIT_PASSED
 
@@ -1324,6 +1544,9 @@ def main(argv: list[str] | None = None) -> int:
     except HardwareRequired as error:
         print(f"hardware required: {error}", file=sys.stderr)
         return EXIT_NO_HARDWARE
+    except ValueError as error:
+        print(f"invalid scenario: {error}", file=sys.stderr)
+        return EXIT_INVALID_SCENARIO
 
     if arguments.output:
         arguments.output.parent.mkdir(parents=True, exist_ok=True)

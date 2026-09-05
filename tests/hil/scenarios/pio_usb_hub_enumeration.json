@@ -4,26 +4,37 @@
   "description": "The first thing run after U1 boots on the PIO USB backend with only PC1 attached: the hub, the keyboard and the mouse all enumerate through U1's single PIO USB host on GP0 (D+) and GP1 (D-), one logical keyboard and one logical mouse are claimed, and any other interface on the bus - including a Keychron 2.4GHz receiver's own second, non-boot interface - is ignored deterministically and the reason is visible in diagnostics. This is Task 14's very first hardware step: LEDs count only as power evidence, this scenario and a human at the bench are what prove function.",
   "requires": [
     "U1 flashed with the pio-pio-usb-release image, booted with only PC1 attached (no U2, per Task 14's own first step)",
-    "The bench USB hub wired to U1's TYPE-C EXP socket per docs/superpowers/specs/2026-09-02-pio-usb-hub-v1-design.md (PC1 VBUS through the 1.1 A PTC to 5V_HUB, GP0/GP1 through the 22 ohm resistors)",
-    "The current wired keyboard and the current wired mouse, each on its own downstream hub port",
-    "The Keychron 2.4GHz receiver (VID 0x3434, PID 0xD030), on its own downstream hub port, if available on the bench",
-    "A CDC session to U1's configuration port to run GET_DIAGNOSTICS (the operator supplies the port; none is hard-coded here - the bench currently exposes COM18, but that number is not this scenario's to assume)",
-    "tools/dump_usb_descriptors.py or Device Manager, to read the hub's and the receiver's own descriptors independently of U1's report"
+    "The bench USB hub wired to U1's TYPE-C EXP socket per docs/superpowers/specs/2026-09-02-pio-usb-hub-v1-design.md (PC1 VBUS through the 1.1 A PTC to 5V_HUB, GP0/GP1 through the 22 ohm resistors) - already connected, with nothing yet plugged into any of its downstream ports",
+    "The current wired keyboard and the current wired mouse, kept unplugged from the hub until the baseline reading is taken",
+    "The Keychron 2.4GHz receiver (VID 0x3434, PID 0xD030), on its own downstream hub port, if available on the bench - also kept unplugged until its own step below",
+    "A CDC session to U1's configuration port to run GET_DIAGNOSTICS (the operator supplies the port; none is hard-coded here - the bench currently exposes COM18, but that number is not this scenario's to assume)"
   ],
-  "on_this_rig": "This scenario is decided entirely from GET_DIAGNOSTICS and needs no second computer, unlike route_toggle or link_fault. both_devices_ready and backend_error_counters_stable are both measurable the moment a baseline is taken before the hub is connected and a reading taken after the keyboard and mouse have settled. The Keychron receiver's own topology - one HID boot mouse interface, one non-boot 33-byte interface, one HID boot keyboard interface carrying four collections including the one with the side button's 9-byte report - was read from its live USB configuration descriptor and from Windows' HID API, not assumed; ignored_interfaces on this receiver should read 1 (its own interface 1, the 33-byte non-boot block), never 0 and never 2. Which downstream port each device landed on, and whether the receiver's third interface is genuinely absent from the CH375 record it used to run under, are manual observations - this rig has no way to see a physical port number or to compare against a build it is not running.",
+  "on_this_rig": "This scenario is decided entirely from GET_DIAGNOSTICS and needs no second computer, unlike route_toggle or link_fault. The baseline reading (--phase baseline) is taken with the hub already wired to U1 but nothing yet plugged into any of its downstream ports - not after the keyboard and mouse are already attached, which would put the very enumeration this scenario exists to gate before the window either check can see. both_devices_ready and backend_error_counters_stable are both decided from that baseline against a --phase measure reading taken after the keyboard and mouse have enumerated and settled. Nothing here is watched independently of U1: PC1 supplies only VBUS to the hub through the PTC (see the design doc's power path), and the hub's D+/D- lines go to U1's own GP0/GP1, not to PC1 - so PC1 has no data path to the hub at all, and a step asking to confirm enumeration 'independently of U1' would be asking for an observation this wiring makes impossible without re-cabling the hub to a PC first. Hub enumeration is confirmed through U1's own diagnostics plus what a human can see physically (hub and device LEDs, and each downstream port actually bringing a device up - see manual_observations). The Keychron receiver's own topology - one HID boot mouse interface (81 bytes), one non-boot interface (115-byte report descriptor, an 8C-page HID block, neither boot mouse nor boot keyboard), one HID boot keyboard interface (164 bytes) carrying four collections including the one with the side button's 9-byte report - was read from its live USB configuration descriptor and from Windows' HID API, not assumed. ignored_interfaces is a single count over the whole bus, not a per-device figure, so this scenario reads it as a *delta* caused specifically by plugging the receiver in, taken against its own mini-baseline immediately before that step - never as an absolute value, which the wired keyboard's own extra interfaces (if it has any) could already have pushed above zero before the receiver was ever involved. Which downstream port each device landed on is a manual observation - this rig has no way to see a physical port number.",
   "steps": [
     {
       "action": "connect",
-      "note": "open the U1 CDC port with power already applied and the hub, keyboard and mouse already attached; this is the phase-baseline reading, taken before anything is unplugged and replugged for this run"
+      "note": "open the U1 CDC port with the hub already wired to U1 and powered, but with nothing plugged into any of its downstream ports yet"
     },
     {
       "action": "get_diagnostics",
       "records": ["input_backend", "peripherals", "backend_counters"],
-      "note": "confirm input_backend reads PIO_USB before trusting anything else on this page - see docs/release/compatibility-matrix.md, 'A report claiming CH375 about a board nobody asked'"
+      "note": "phase-baseline reading, taken with the hub empty; confirm input_backend reads PIO_USB before trusting anything else on this page - see docs/release/compatibility-matrix.md, 'A report claiming CH375 about a board nobody asked'"
+    },
+    {
+      "action": "attach",
+      "role": "keyboard",
+      "settle_ms": 3000,
+      "note": "plug the current wired keyboard into a downstream hub port"
+    },
+    {
+      "action": "attach",
+      "role": "mouse",
+      "settle_ms": 3000,
+      "note": "plug the current wired mouse into a downstream hub port"
     },
     {
       "action": "inspect_hub_enumeration",
-      "note": "with a host OS attached to PC1 independently of U1 (or tools/dump_usb_descriptors.py against the hub itself), confirm the hub itself enumerates and every downstream port with a device on it shows that device"
+      "note": "through U1's own diagnostics and physical observation only (see on_this_rig for why nothing here can be watched independently of U1): confirm every downstream port with a device on it shows that device, both visually (hub/device LEDs, if present) and in GET_DIAGNOSTICS"
     },
     {
       "action": "record_identity",
@@ -43,7 +54,23 @@
     {
       "action": "get_diagnostics",
       "records": ["backend_counters"],
-      "note": "phase-measure reading; subtract from the baseline to decide backend_error_counters_stable"
+      "note": "phase-measure reading; subtract from the baseline to decide backend_error_counters_stable and both_devices_ready"
+    },
+    {
+      "action": "get_diagnostics",
+      "records": ["backend_counters"],
+      "note": "if the Keychron receiver is available: take this second, local baseline immediately before plugging it in - not the scenario's own phase-baseline above, which is too far back to isolate the receiver's own contribution to ignored_interfaces from the wired keyboard's"
+    },
+    {
+      "action": "attach",
+      "role": "keychron_receiver",
+      "settle_ms": 3000,
+      "note": "plug the Keychron receiver into its own downstream hub port, if available on the bench"
+    },
+    {
+      "action": "get_diagnostics",
+      "records": ["peripherals", "backend_counters"],
+      "note": "confirm ignored_interfaces grew by exactly 1 relative to the local baseline immediately above, not relative to any earlier reading"
     }
   ],
   "checks": {
@@ -51,8 +78,8 @@
     "backend_error_counters_stable": "none of the backend's own error counters (event/detach/interface/device/callback overflows, stale events discarded, arm failures, arm escalations, duplicate mounts) grew while the hub, keyboard and mouse enumerated"
   },
   "failure_criteria": {
-    "both_devices_ready": "GET_DIAGNOSTICS still shows either slot attached but not ready, or shows neither slot attached at all, more than 5 seconds after the hub itself finished enumerating (watched independently, since U1's own clock proves nothing about when the hub was actually done)",
-    "backend_error_counters_stable": "any counter in the set is higher after enumeration than the baseline taken with nothing yet attached - most tellingly duplicate_mounts, interface_overflows or device_overflows climbing on a bench with exactly a hub, one keyboard and one mouse behind it"
+    "both_devices_ready": "GET_DIAGNOSTICS still shows either slot attached but not ready, or shows neither slot attached at all, more than 5 seconds after the keyboard and mouse were both physically plugged into the hub",
+    "backend_error_counters_stable": "any counter in the set is higher after the keyboard and mouse enumerate than the baseline taken with the hub empty - most tellingly duplicate_mounts, interface_overflows or device_overflows climbing on a bench with exactly a hub, one keyboard and one mouse behind it"
   },
   "manual_observations": [
     {
@@ -62,8 +89,8 @@
     },
     {
       "item": "Keychron 2.4GHz receiver (VID 0x3434, PID 0xD030), if available on the bench",
-      "expected": "GET_DIAGNOSTICS shows one keyboard-role port and one mouse-role port sourced from this one receiver, ignored_interfaces accounts for exactly its own interface 1 (the 33-byte HID block, neither boot mouse nor boot keyboard), and the keyboard-role port's descriptor is consistent with interface 2 (164 bytes, four collections, the one carrying the side button's 9-byte report) - this receiver never reached that interface under CH375, so seeing it claimed here is a new PIO-only capability being recorded for the first time, not a regression check against anything CH375 ever did",
-      "fail_if": "the receiver claims the wrong role in either slot, ignored_interfaces does not read exactly 1 for it, or the keyboard slot never appears at all even though the receiver is powered and paired"
+      "expected": "GET_DIAGNOSTICS shows one keyboard-role port and one mouse-role port sourced from this one receiver, the bus-wide ignored_interfaces counter grew by exactly 1 relative to the local baseline taken immediately before the receiver was plugged in (its own interface 1, the 115-byte HID block, neither boot mouse nor boot keyboard), and the keyboard-role port's descriptor is consistent with interface 2 (164 bytes, four collections, the one carrying the side button's 9-byte report) - this receiver never reached that interface under CH375, so seeing it claimed here is a new PIO-only capability being recorded for the first time, not a regression check against anything CH375 ever did. ignored_interfaces is a single count over the whole bus, so its value before this step depends on what else is attached (the wired keyboard's own extra interfaces, if it has any, already contribute to it) - only the growth caused by this specific step is evidence about the receiver.",
+      "fail_if": "the receiver claims the wrong role in either slot, ignored_interfaces does not grow by exactly 1 when the receiver is plugged in, or the keyboard slot never appears at all even though the receiver is powered and paired"
     }
   ],
   "record": [

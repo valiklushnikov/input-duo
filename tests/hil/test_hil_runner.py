@@ -17,11 +17,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from hil_runner import (  # noqa: E402
     ACCEPTANCE_SCENARIO_KIND,
+    EXIT_INVALID_SCENARIO,
+    EXIT_PASSED,
     INPUT_P95_BUDGET_MS,
     MAX_ACCEPTABLE_GAP_MS,
     MEASURABLE_CHECKS,
     U2_RELEASE_BUDGET_MS,
     UNMEASURABLE_CHECKS,
+    UNMEASURED_RECORD_VALUE,
     HardwareRequired,
     PeripheralRow,
     Sample,
@@ -33,6 +36,7 @@ from hil_runner import (  # noqa: E402
     gaps,
     latency_report,
     load_scenario,
+    main,
     measure,
     percentile,
     peripheral_rows,
@@ -1164,12 +1168,15 @@ def test_a_blank_record_field_is_refused(tmp_path):
         load_scenario(path)
 
 
+#: Fix round 1: this used to hard-code the three current file names, so a
+#: fourth ``pio_usb_*.json`` scenario added later would not be covered by
+#: this test at all. Globbing means a new file is in scope the moment it is
+#: committed, with no second commit needed to add it to a list here.
 @pytest.mark.parametrize(
-    "name",
-    ("pio_usb_hub_enumeration", "pio_usb_hub_recovery", "pio_usb_dual_pc_routes"),
+    "path", sorted((SCENARIOS).glob("pio_usb_*.json")), ids=lambda path: path.stem
 )
-def test_every_pio_acceptance_scenario_is_hardware_acceptance_shaped(name):
-    scenario = load_scenario(SCENARIOS / f"{name}.json")
+def test_every_pio_acceptance_scenario_is_hardware_acceptance_shaped(path):
+    scenario = load_scenario(path)
 
     assert scenario["kind"] == ACCEPTANCE_SCENARIO_KIND
     assert scenario["failure_criteria"]
@@ -1355,3 +1362,413 @@ def test_the_new_pio_checks_are_all_accounted_for():
         "detach_releases_observed",
     ):
         assert name in MEASURABLE_CHECKS or name in UNMEASURABLE_CHECKS
+
+
+# ============================================================================
+# Task 13 fix round 1
+# ============================================================================
+
+
+# --------------------------------------------------- Critical 1: both_devices_ready
+
+
+def test_both_devices_ready_is_unmeasured_when_the_mouse_was_never_attached():
+    # The reviewer's exact repro: MOUSE ABSENT used to read
+    # {'both_devices_ready': True} because the old alias only ever asked
+    # "is every *attached* port ready", and an absent mouse is not an
+    # attached-but-unready one - it is simply not in the `attached` list at
+    # all, so `all(...)` over zero mouse rows was vacuously true.
+    checks, unmeasured = evaluate(
+        _scenario(checks={"both_devices_ready": ""}),
+        _diagnostics(
+            peripherals=(
+                _port(kind="keyboard"),
+                _port(kind="mouse", attached=False, ready=False),
+            )
+        ),
+    )
+
+    assert checks == {}
+    assert unmeasured[0].check == "both_devices_ready"
+    assert "mouse" in unmeasured[0].reason
+
+
+def test_both_devices_ready_is_unmeasured_when_the_keyboard_was_never_attached():
+    checks, unmeasured = evaluate(
+        _scenario(checks={"both_devices_ready": ""}),
+        _diagnostics(
+            peripherals=(
+                _port(kind="keyboard", attached=False, ready=False),
+                _port(kind="mouse"),
+            )
+        ),
+    )
+
+    assert checks == {}
+    assert "keyboard" in unmeasured[0].reason
+
+
+def test_both_devices_ready_is_unmeasured_when_nothing_is_attached_at_all():
+    checks, unmeasured = evaluate(
+        _scenario(checks={"both_devices_ready": ""}),
+        _diagnostics(
+            peripherals=(
+                _port(kind="none", attached=False, ready=False),
+                _port(kind="none", attached=False, ready=False),
+            )
+        ),
+    )
+
+    assert checks == {}
+    assert "neither" in unmeasured[0].reason
+
+
+def test_both_devices_ready_passes_only_when_both_roles_are_attached_and_ready():
+    checks, _ = evaluate(
+        _scenario(checks={"both_devices_ready": ""}),
+        _diagnostics(peripherals=(_port(kind="keyboard"), _port(kind="mouse"))),
+    )
+
+    assert checks == {"both_devices_ready": True}
+
+
+def test_both_devices_ready_fails_when_both_are_attached_but_one_is_not_ready():
+    checks, _ = evaluate(
+        _scenario(checks={"both_devices_ready": ""}),
+        _diagnostics(
+            peripherals=(_port(kind="keyboard"), _port(kind="mouse", ready=False))
+        ),
+    )
+
+    assert checks == {"both_devices_ready": False}
+
+
+def test_both_devices_ready_reads_role_from_the_descriptor_not_the_slot():
+    # A mouse plugged into the physical "keyboard" channel still counts as
+    # the mouse - the same guarantee peripheral_rows already gives readers of
+    # the report, now also given to this check's own decision.
+    checks, _ = evaluate(
+        _scenario(checks={"both_devices_ready": ""}),
+        _diagnostics(peripherals=(_port(kind="mouse"), _port(kind="keyboard"))),
+    )
+
+    assert checks == {"both_devices_ready": True}
+
+
+# ------------------------------------------- Important 3: resets read as stable
+
+
+def test_backend_error_counters_stable_is_unmeasured_across_a_device_reset():
+    # The reviewer's exact repro: a baseline of event_overflows=9,
+    # arm_failures=4, duplicate_mounts=7 against an all-zero post-reset
+    # reading used to read {'backend_error_counters_stable': True} - the
+    # exact brownout-reset event pio_usb_hub_recovery's RGB gate exists to
+    # catch, reported as a clean pass.
+    checks, unmeasured = evaluate(
+        _scenario(checks={"backend_error_counters_stable": ""}),
+        _diagnostics(
+            backend=_backend(event_overflows=0, arm_failures=0, duplicate_mounts=0)
+        ),
+        baseline=_diagnostics(
+            backend=_backend(event_overflows=9, arm_failures=4, duplicate_mounts=7)
+        ),
+    )
+
+    assert checks == {}
+    assert unmeasured[0].check == "backend_error_counters_stable"
+    assert "restart" in unmeasured[0].reason
+
+
+def test_endpoint_reconnect_clean_is_unmeasured_across_a_device_reset():
+    checks, unmeasured = evaluate(
+        _scenario(checks={"endpoint_reconnect_clean": ""}),
+        _diagnostics(peripherals=(_port(),), backend=_backend(duplicate_mounts=0)),
+        baseline=_diagnostics(backend=_backend(duplicate_mounts=7)),
+    )
+
+    assert checks == {}
+    assert unmeasured[0].check == "endpoint_reconnect_clean"
+    assert "restart" in unmeasured[0].reason
+
+
+def test_backend_error_counters_stable_still_passes_on_an_honest_zero_growth_run():
+    # The fix must not turn "nothing grew, nothing reset" into unmeasured too.
+    checks, _ = evaluate(
+        _scenario(checks={"backend_error_counters_stable": ""}),
+        _diagnostics(backend=_backend(event_overflows=9, arm_failures=4)),
+        baseline=_diagnostics(backend=_backend(event_overflows=9, arm_failures=4)),
+    )
+
+    assert checks == {"backend_error_counters_stable": True}
+
+
+def test_endpoint_reconnect_clean_still_passes_on_an_honest_zero_growth_run():
+    checks, _ = evaluate(
+        _scenario(checks={"endpoint_reconnect_clean": ""}),
+        _diagnostics(peripherals=(_port(),), backend=_backend(duplicate_mounts=2)),
+        baseline=_diagnostics(backend=_backend(duplicate_mounts=2)),
+    )
+
+    assert checks == {"endpoint_reconnect_clean": True}
+
+
+# ------------------------------------------------- Important 7: record surfaced
+
+
+def test_the_report_surfaces_every_declared_record_field():
+    scenario = _acceptance_scenario(
+        record=["input_backend", "hub_model", "test_duration"]
+    )
+
+    result = measure(
+        scenario,
+        FakeSession(
+            _diagnostics(peripherals=(_port(kind="keyboard"), _port(kind="mouse")))
+        ),
+    )
+    document = json.loads(result.to_json())
+
+    # Present and filled in where the rig can know the answer...
+    assert document["record"]["input_backend"] == "unknown"
+    # ...present and explicitly unmeasured, never simply absent, everywhere
+    # else - the same omission-reads-as-forgotten failure mode `checks` is
+    # already protected against.
+    assert document["record"]["hub_model"] == UNMEASURED_RECORD_VALUE
+    assert "unmeasured" in document["record"]["test_duration"]
+    assert set(document["record"]) == {"input_backend", "hub_model", "test_duration"}
+
+
+def test_record_test_duration_is_filled_in_when_a_baseline_was_taken():
+    scenario = _acceptance_scenario(record=["test_duration"])
+
+    result = measure(
+        scenario,
+        FakeSession(_diagnostics(peripherals=(_port(),))),
+        elapsed_seconds=125.4,
+    )
+    document = json.loads(result.to_json())
+
+    assert "125.4" in document["record"]["test_duration"]
+    assert "unmeasured" not in document["record"]["test_duration"]
+
+
+def test_record_identity_fields_are_filled_in_when_that_role_enumerated():
+    scenario = _acceptance_scenario(
+        record=["keyboard_vendor_id_product_id_descriptor_hash"]
+    )
+
+    result = measure(
+        scenario,
+        FakeSession(
+            _diagnostics(
+                peripherals=(
+                    _port(kind="keyboard", vendor_id=0x1234, product_id=0x5678),
+                )
+            )
+        ),
+    )
+    document = json.loads(result.to_json())
+
+    value = document["record"]["keyboard_vendor_id_product_id_descriptor_hash"]
+    assert "0x1234" in value
+    assert "0x5678" in value
+
+
+# ---------------------------------------- Important 8: kind is not the only gate
+
+
+def test_a_scenario_naming_a_hardware_acceptance_check_without_kind_is_refused(
+    tmp_path,
+):
+    document = {
+        "name": "x",
+        "description": "",
+        "requires": ["a U1"],
+        "on_this_rig": "...",
+        "steps": [{"action": "connect"}],
+        "checks": {"both_devices_ready": ""},
+        # kind is entirely absent, unlike every other rejection test above.
+    }
+    path = _write_scenario(tmp_path, document)
+
+    with pytest.raises(ValueError, match="both_devices_ready"):
+        load_scenario(path)
+
+
+def test_a_scenario_naming_a_hardware_acceptance_check_with_the_wrong_kind_string_is_refused(
+    tmp_path,
+):
+    document = _acceptance_scenario(kind="hardware-acceptance")  # hyphen, not underscore
+    path = _write_scenario(tmp_path, document)
+
+    with pytest.raises(ValueError, match="hardware-acceptance"):
+        load_scenario(path)
+
+
+def test_a_scenario_with_only_ordinary_checks_and_no_kind_is_unaffected():
+    # The six pre-Task-13 scenarios name none of the four hardware-acceptance
+    # check names, so this new gate must leave them exactly alone.
+    for name in ("peripherals", "route_toggle", "link_fault", "config_power_cut",
+                 "profile_power_cycle", "soak_24h"):
+        load_scenario(SCENARIOS / f"{name}.json")  # must not raise
+
+
+# --------------------------------------------- Smaller fixes: type confusion
+
+def test_a_null_failure_criterion_is_refused(tmp_path):
+    document = _acceptance_scenario(failure_criteria={"both_devices_ready": None})
+    path = _write_scenario(tmp_path, document)
+
+    with pytest.raises(ValueError, match="no text"):
+        load_scenario(path)
+
+
+def test_a_list_valued_manual_observation_field_is_refused(tmp_path):
+    entry = {
+        "item": "mouse wheel",
+        "expected": None,
+        "fail_if": ["not", "text"],
+    }
+    document = _acceptance_scenario(manual_observations=[entry])
+    path = _write_scenario(tmp_path, document)
+
+    with pytest.raises(ValueError, match="expected|fail_if"):
+        load_scenario(path)
+
+
+def test_a_bare_string_record_is_refused_rather_than_iterated_as_characters(tmp_path):
+    document = _acceptance_scenario(record="input_backend")
+    path = _write_scenario(tmp_path, document)
+
+    with pytest.raises(ValueError, match="record"):
+        load_scenario(path)
+
+
+def test_a_zero_valued_record_field_is_refused(tmp_path):
+    document = _acceptance_scenario(record=["input_backend", 0])
+    path = _write_scenario(tmp_path, document)
+
+    with pytest.raises(ValueError, match="record"):
+        load_scenario(path)
+
+
+def test_manual_observations_as_a_dict_is_refused_cleanly_not_with_an_attributeerror(
+    tmp_path,
+):
+    # A dict is truthy and iterable, so this exercises the list-type guard
+    # directly - reviewer's exact repro (enumerate() over a dict yields its
+    # *keys*, each a plain string, and calling .get() on a string is where
+    # the AttributeError this fix removes used to come from).
+    document = _acceptance_scenario(
+        manual_observations={"item": "x", "expected": "y", "fail_if": "z"}
+    )
+    path = _write_scenario(tmp_path, document)
+
+    with pytest.raises(ValueError, match="manual_observations"):
+        load_scenario(path)
+
+
+def test_manual_observations_as_a_non_iterable_value_is_refused_cleanly(tmp_path):
+    # Not the same case as the dict test above: a dict is iterable, so with
+    # the list-type guard removed, enumerate() over it still reaches the
+    # entry-type guard a few lines down (each key is a string, not a dict)
+    # and gets caught there instead - the two tests turned out not to
+    # discriminate the same guard. A plain int is not iterable at all:
+    # enumerate(42) raises TypeError before the loop body ever runs, so
+    # nothing downstream can catch it - only the list-type guard itself can.
+    document = _acceptance_scenario(manual_observations=42)
+    path = _write_scenario(tmp_path, document)
+
+    with pytest.raises(ValueError, match="manual_observations"):
+        load_scenario(path)
+
+
+def test_a_manual_observation_entry_that_is_a_string_is_refused_cleanly(tmp_path):
+    document = _acceptance_scenario(manual_observations=["just some text"])
+    path = _write_scenario(tmp_path, document)
+
+    with pytest.raises(ValueError, match=r"manual_observations\[0\]"):
+        load_scenario(path)
+
+
+# ------------------------------------------ Smaller fix: nested steps unchecked
+
+
+def test_a_step_nested_inside_a_for_each_block_without_an_action_is_refused(tmp_path):
+    document = {
+        "name": "x",
+        "description": "",
+        "requires": ["a U1"],
+        "on_this_rig": "...",
+        "steps": [
+            {
+                "action": "for_each_downstream_port",
+                "steps": [
+                    {"note": "forgot the action key"},
+                ],
+            }
+        ],
+    }
+    path = _write_scenario(tmp_path, document)
+
+    with pytest.raises(ValueError):
+        load_scenario(path)
+
+
+def test_a_step_nested_two_levels_deep_without_an_action_is_refused(tmp_path):
+    document = {
+        "name": "x",
+        "description": "",
+        "requires": ["a U1"],
+        "on_this_rig": "...",
+        "steps": [
+            {
+                "action": "outer",
+                "steps": [
+                    {
+                        "action": "inner",
+                        "steps": [{"note": "still no action, two levels down"}],
+                    }
+                ],
+            }
+        ],
+    }
+    path = _write_scenario(tmp_path, document)
+
+    with pytest.raises(ValueError):
+        load_scenario(path)
+
+
+def test_every_new_scenarios_nested_steps_all_name_an_action():
+    # Positive companion to the two tests above: the three files this task
+    # actually ships must themselves pass the recursive check, not just fail
+    # it on purpose-built bad input.
+    for path in sorted(SCENARIOS.glob("pio_usb_*.json")):
+        load_scenario(path)  # must not raise
+
+
+# --------------------------------------------- Smaller fix: --validate-only exit
+
+
+def test_validate_only_on_an_invalid_scenario_exits_cleanly_not_with_a_traceback(
+    tmp_path, capsys
+):
+    path = tmp_path / "broken.json"
+    path.write_text(json.dumps({"name": "x", "steps": []}), encoding="utf-8")
+
+    code = main([str(path), "--validate-only"])
+
+    assert code == EXIT_INVALID_SCENARIO
+    captured = capsys.readouterr()
+    assert "invalid scenario" in captured.err
+    # No Python traceback reached stderr - if load_scenario's ValueError had
+    # propagated uncaught, pytest would have reported this test as an error
+    # rather than a pass, so the assertion above is the real proof; this one
+    # additionally pins the exact wording an operator running this by hand
+    # would see.
+
+
+def test_validate_only_on_a_valid_scenario_still_exits_zero():
+    code = main([str(SCENARIOS / "pio_usb_hub_enumeration.json"), "--validate-only"])
+
+    assert code == EXIT_PASSED
