@@ -546,6 +546,14 @@ TEST_CASE(begin_reports_a_host_that_was_already_active_before_core1_reached_it) 
     CHECK_EQ(observed.clk_hz_now, 120000000u);
 }
 
+// The ordering the whole smoking gun rests on: the flag must be sampled BEFORE
+// this backend brings the host up, not after.
+//
+// The fake's tuh_init sets the active flag the way usbh.c:415 does, so a sample
+// moved to after the bring-up reads set here and fails this case. Sampling
+// after would make bit 0 read 1 on a CORRECT image, which is worse than not
+// reporting it at all: it sends an operator chasing a regression that is not
+// there.
 TEST_CASE(begin_reports_no_already_active_host_on_a_correct_image) {
     duo::test::tinyusb_host::reset();
     duo::test::tinyusb_host::set_system_clock_hz(125000000u);
@@ -558,6 +566,34 @@ TEST_CASE(begin_reports_no_already_active_host_on_a_correct_image) {
 
     CHECK_EQ(observed.init_flags & duo_input::u1::pio_usb::kHostInitHostAlreadyActive, 0u);
     CHECK((observed.init_flags & duo_input::u1::pio_usb::kHostInitInited) != 0);
+    // The bring-up really did happen, so "not already active" is a reading
+    // taken before it rather than a reading of a backend that did nothing.
+    CHECK(duo::test::tinyusb_host::host_already_active_now());
+}
+
+// Why clk_hz_now is the divider clock, guarded rather than asserted.
+//
+// Pico-PIO-USB computes every PIO divider from clock_get_hz(clk_sys) inside
+// pio_usb_host_init and never recomputes one. begin() raises the clock first
+// and brings the host up afterwards, so on a correct image the dividers are
+// computed from the clock the reply reports as clk_hz_now - which is what lets
+// the diagnostics say anything about divider/bus agreement at all.
+//
+// Reverse those two and the image is back to the defect this task fixed, with
+// dividers built for a clock that no longer exists. The reply cannot see the
+// ordering; this test can.
+TEST_CASE(the_host_stack_is_brought_up_after_the_system_clock_is_raised) {
+    duo::test::tinyusb_host::reset();
+    duo::test::tinyusb_host::set_system_clock_hz(125000000u);
+    PioUsbBackend backend;
+
+    backend.begin();
+
+    CHECK_EQ(duo::test::tinyusb_host::clock_hz_at_configure(), 120000000u);
+    CHECK_EQ(backend.observe().clk_hz_now, 120000000u);
+    // And the field named for begin()'s entry really is the clock BEFORE that
+    // change - it is not the divider clock and nothing may read it as one.
+    CHECK_EQ(backend.observe().clk_hz_at_begin, 125000000u);
 }
 
 TEST_CASE(a_host_that_never_initialized_reports_it_in_the_flags) {

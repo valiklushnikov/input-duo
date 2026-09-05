@@ -33,11 +33,18 @@ void PioUsbBackend::begin() {
     if (tuh_rhport_is_active(kHostRhPort)) {
         host_init_flags_ |= kHostInitHostAlreadyActive;
     }
-    // And the clock the PIO dividers would be computed from if the host were
-    // brought up now, captured before the call below moves it. Pico-PIO-USB
-    // computes its dividers once and never recomputes them, so this number and
-    // the one Core 0 samples at reply time are what say whether the bus is
-    // being driven at the rate its dividers were built for.
+    // And clk_sys as this core found it, captured before the call below moves
+    // it. NOT the clock the dividers get computed from: the host comes up at
+    // :66-68, after the change, so the divider clock is the 120 MHz that Core 0
+    // reports as clk_hz_now. On a correct image these two therefore DIFFER,
+    // and that is health rather than fault - see HostObservability's own
+    // comments, which say so at the field an operator reads.
+    //
+    // What this one is for is narrower: it says Core 1 got as far as
+    // set_sys_clock_khz and the clock moved. It cannot distinguish the broken
+    // image from the fixed one, because on the broken image the host came up
+    // on Core 0 before this core ran at all and clk_sys was still 125 MHz here
+    // too. kHostInitHostAlreadyActive is what distinguishes them.
     clk_hz_at_begin_ = clock_get_hz(clk_sys);
 
     // Pico-PIO-USB bit-bangs both directions of full-speed USB out of PIO
@@ -120,6 +127,12 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     // whether U1 ever saw the hub's D+ pull-up at all, which is a different
     // question from whether anything on the bus ever answered - and on this
     // defect the two had different answers.
+    //
+    // Polled, so the count is a LOWER BOUND: an attach and detach that both
+    // fall between two passes leaves no trace. This loop turns far faster than
+    // USB debounce, so it is a small bound - but it is a bound, and the wire
+    // documentation and the configurator both say so where a reader will see
+    // it rather than only here.
     const bool connected = pio_usb_root_port[0].connected;
     if (connected && !root_port_was_connected_ && root_port_connects_ != 0xFFFFu) {
         ++root_port_connects_;

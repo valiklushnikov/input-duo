@@ -109,14 +109,31 @@ each self-delimiting so the one behind it can always be found:
 
   `init_flags` bit 0 says the host stack was already active before the input core's own bring-up
   ran, which makes bits 1-3 (the configure result, the init result, and `tuh_inited()` after
-  both) meaningless as evidence - they report success for calls that did nothing. The two clock
-  readings must match: the PIO dividers are computed once from the first and never recomputed, so
-  a bus brought up at one clock and running at another is off by the ratio between them.
+  both) meaningless as evidence - they report success for calls that did nothing. **Bit 0 is the
+  only field that separates a host started on the wrong core from a healthy one.**
+
+  `clk_hz_at_begin` is `clk_sys` as the input core found it, **before** it raised the clock, and
+  it is **not** the clock the PIO dividers were computed from. The host comes up after that
+  change, so a healthy board reports the RP2040's 125 MHz default here while its dividers are
+  built at 120 MHz: **the two differing is what health looks like.** A board with the host
+  started on the wrong core reports the same two numbers - the host came up before the input core
+  ran at all - so nothing may read a difference between them as a fault. `clk_hz_now` is the
+  divider clock whenever bit 0 is clear, because the dividers are computed once and the input
+  core brings the host up after its own clock change; with bit 0 set the host came up on a clock
+  this reply never saw, and no clock reading here says anything about the dividers.
+
   `root_port_state` packs `initialized`, `connected`, `suspended` and `is_fullspeed` as bits 0-3.
   `sof_frame_count` is raw root-port activity below the host stack: zero and static means the bus
   is not being driven at all, climbing while every backend counter is still zero means it is being
-  driven and nothing on it answers. `core1_passes` unchanged across two reads twenty seconds apart
-  means the input core stopped. `dropped_commands` counts input the device produced
+  driven and nothing on it answers. `root_port_connects` is a **lower bound**, not a total:
+  nothing below the host stack reports an attach edge, so the device polls the line once per
+  input-core pass, and an attach and detach that both fall between two passes leaves no trace -
+  zero is strong evidence that nothing attached rather than proof of it. `core1_passes` unchanged
+  across two reads twenty seconds apart means the input core stopped.
+
+  `clk_hz_now`, `sof_frame_count` and `root_port_state` are sampled once per device main-loop
+  pass and held until the request arrives, so a reading can be up to one pass old - far below the
+  second that the "read it twice" procedures need. `dropped_commands` counts input the device produced
 and could not deliver - a nonzero value means what a computer is holding no longer matches
 what the operator did. `runtime_fault` says what the output runtime is doing about its queue
 at this instant: `0` no fault, `1` a queue that is refusing commands. It is not a latch. The

@@ -1362,7 +1362,7 @@ def test_an_image_with_no_host_stack_reports_none_rather_than_zeros() -> None:
     assert observation.state == "none"
     assert observation.sof_frame_count is None
     assert observation.core1_passes is None
-    assert observation.clocks_agree is None
+    assert observation.clock_hz_now is None
 
 
 def test_the_host_block_is_read_behind_a_backend_that_publishes_counters() -> None:
@@ -1381,7 +1381,7 @@ def test_the_host_block_is_read_behind_a_backend_that_publishes_counters() -> No
         + _backend_block(2, 3, 2, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)
         + _host_block(
             init_flags=0b1110,
-            clock_at_begin=120_000_000,
+            clock_at_begin=125_000_000,
             clock_now=120_000_000,
             sof_frames=41234,
             root_state=0b1011,
@@ -1404,9 +1404,11 @@ def test_the_host_block_is_read_behind_a_backend_that_publishes_counters() -> No
     assert observation.host_configured is True
     assert observation.host_initialized is True
     assert observation.host_inited is True
-    assert observation.clock_hz_at_begin == 120_000_000
+    # What a HEALTHY board prints. The input core samples the first number
+    # before raising the clock and brings the host up after, so the two differ
+    # by construction on a correct image - see the paired test below.
+    assert observation.clock_hz_before_core1_change == 125_000_000
     assert observation.clock_hz_now == 120_000_000
-    assert observation.clocks_agree is True
     assert observation.sof_frame_count == 41234
     assert observation.root_port_initialized is True
     assert observation.root_port_connected is True
@@ -1422,8 +1424,9 @@ def test_a_host_started_on_the_wrong_core_reads_as_such() -> None:
     Bit 0 set says the host stack was already up before the input core reached
     its own bring-up. The three bits behind it still say "healthy", because the
     calls they report really did return true - on an rhport somebody else had
-    already activated. The two clock readings then disagree, which is the
-    arithmetic proof that the PIO dividers no longer match the bus.
+    already activated. Bit 0 is the ONLY field that separates this board from a
+    healthy one; see the test below, which is what stops anything from being
+    built on the clock pair again.
     """
     from duo_input.device.transactions import parse_diagnostics
 
@@ -1447,13 +1450,52 @@ def test_a_host_started_on_the_wrong_core_reads_as_such() -> None:
     assert observation is not None
     assert observation.host_already_active is True
     assert observation.host_inited is True
-    assert observation.clock_hz_at_begin == 125_000_000
-    assert observation.clock_hz_now == 120_000_000
-    assert observation.clocks_agree is False
     # Frames are being emitted and nothing is attached: the bus is being driven
-    # at the wrong rate, which is a different fault from a bus nobody drives.
+    # and nothing on it answers, which is a different fault from a bus nobody
+    # drives.
     assert observation.sof_frame_count == 880_000
     assert observation.root_port_connected is False
+
+
+def test_the_clock_pair_alone_cannot_tell_a_healthy_board_from_a_broken_one() -> None:
+    """The trap this block shipped with, and the guard against it returning.
+
+    The input core samples the first clock BEFORE raising it and brings the
+    host up AFTER, so a healthy board prints 125 MHz then 120 MHz. A board with
+    the host already started on the wrong core prints the SAME two numbers -
+    the host came up before the input core ran at all, when clk_sys was still
+    125 MHz there too. Anything that reads a mismatch here as a fault accuses
+    every healthy board and clears no broken one.
+
+    The two payloads below differ in exactly one bit, and it is not a clock.
+    """
+    from duo_input.device.transactions import parse_diagnostics
+
+    def observation(init_flags: int):
+        payload = (
+            _diagnostics_head()
+            + _full_latency()
+            + _both_ports()
+            + _twelve()
+            + _host_block(
+                init_flags=init_flags,
+                clock_at_begin=125_000_000,
+                clock_now=120_000_000,
+            )
+        )
+        return parse_diagnostics(payload).host_observation
+
+    healthy = observation(0b1110)
+    broken = observation(0b1111)
+
+    assert healthy is not None and broken is not None
+    assert healthy.clock_hz_before_core1_change == broken.clock_hz_before_core1_change
+    assert healthy.clock_hz_now == broken.clock_hz_now
+    assert healthy.host_already_active is False
+    assert broken.host_already_active is True
+    # And nothing derived from the pair is offered for either of them, because
+    # any such reading would have to be wrong about one of the two.
+    assert not hasattr(healthy, "clocks_agree")
 
 
 def test_a_malformed_host_suffix_does_not_take_the_prefix_down() -> None:

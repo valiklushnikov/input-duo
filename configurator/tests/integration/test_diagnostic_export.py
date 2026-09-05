@@ -422,14 +422,56 @@ def test_the_report_carries_what_the_host_stack_and_root_port_are_doing(
     host = report["host_stack"]
 
     assert host["Host stack was already up before Core 1"] == "yes"
-    assert host["System clock when the host came up (Hz)"] == "125000000"
-    assert host["System clock now (Hz)"] == "120000000"
-    # Derived and shown beside the two numbers, never instead of them.
-    assert host["Host clock unchanged since bring-up"] == "no"
+    assert host["System clock before the input core changed it (Hz)"] == "125000000"
+    assert host["System clock now, and the PIO divider clock (Hz)"] == "120000000"
     assert host["Root-port frames sent"] == "880000"
     assert host["Root port connected"] == "no"
-    assert host["Root-port attaches seen"] == "0"
+    # Named as a lower bound where it is read, not only in the firmware.
+    assert host["Root-port attaches seen (lower bound)"] == "0"
     assert host["Input core passes"] == "1000000"
+    # No derived clock row. There was one, it called a healthy board faulty,
+    # and it separated nothing - a healthy board prints these same two numbers.
+    assert not any("unchanged since bring-up" in label for label in host)
+
+
+def test_the_report_never_calls_a_healthy_clock_pair_a_fault(qtbot, emulator, tmp_path):
+    """The trap this instrumentation shipped with, guarded where it is read.
+
+    The input core samples the first clock before raising it and brings the
+    host up after, so a healthy board reports 125 MHz then 120 MHz. This is the
+    report a bench operator reads, and nothing in it may present that as a
+    fault: it is what every correct board prints, and the broken board prints
+    it too.
+    """
+    emulator.input_backend = 2
+    emulator.host_observation = (
+        0b1110,  # host was NOT already up: this is the healthy board
+        125_000_000,
+        120_000_000,
+        41_234,
+        0b1011,
+        1,
+        987_654,
+    )
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    archive = build_diagnostic_zip(
+        tmp_path / "diag.zip", DiagnosticSnapshot.from_service(service)
+    )
+    host = json.loads(_members(archive)[DIAGNOSTICS_MEMBER])["host_stack"]
+
+    assert host["Host stack was already up before Core 1"] == "no"
+    assert host["System clock before the input core changed it (Hz)"] == "125000000"
+    assert host["System clock now, and the PIO divider clock (Hz)"] == "120000000"
+    # Nothing in the report says these two differing is wrong, by any wording.
+    for label, value in host.items():
+        assert "fault" not in label.lower()
+        assert "mismatch" not in f"{label} {value}".lower()
+    assert not any("unchanged since bring-up" in label for label in host)
 
 
 def test_a_report_from_an_image_with_no_host_stack_invents_no_readings(

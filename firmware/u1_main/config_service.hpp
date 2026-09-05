@@ -201,10 +201,19 @@ struct HostObservation {
     /// the host before Core 1 reached it, which makes bits 1-3 meaningless as
     /// evidence - they report success for calls that did nothing.
     std::uint8_t init_flags = 0;
-    /// clk_sys when the host stack was brought up, and clk_sys when this reply
-    /// was built. Pico-PIO-USB computes its PIO dividers once, from the first,
-    /// and the bus then runs at whatever the second makes of them.
+    /// clk_sys as Core 1 found it, BEFORE it raised the clock - not the clock
+    /// the PIO dividers were computed from, and nothing may report it as one.
+    /// The host comes up after that change, so on a correct image this reads
+    /// the RP2040's 125 MHz default while the dividers are built at 120 MHz:
+    /// the two DIFFERING is what health looks like. It reads the same 125 MHz
+    /// on the broken image too, so the pair does not by itself tell them
+    /// apart - bit 0 of init_flags is what does that.
     std::uint32_t clk_hz_at_begin = 0;
+    /// clk_sys on Core 0. This is the divider clock whenever bit 0 of
+    /// init_flags is clear, because Pico-PIO-USB computes every divider once
+    /// and Core 1 brings the host up after its own clock change. With bit 0
+    /// set the host came up elsewhere, on a clock this reply never saw, and no
+    /// clock reading here is evidence about the dividers.
     std::uint32_t clk_hz_now = 0;
     /// The root port's free-running SOF count. Zero and static means the bus
     /// is not being driven at all; climbing with every counter above still at
@@ -215,6 +224,11 @@ struct HostObservation {
     std::uint8_t root_port_state = 0;
     /// Disconnected-to-connected transitions since boot: whether U1 ever saw
     /// anything pull D+ up, independently of whether it could talk to it.
+    ///
+    /// A LOWER BOUND. Nothing below TinyUSB reports an attach edge, so Core 1
+    /// polls the level once a pass; an attach and detach that both fall
+    /// between two passes is not counted. Zero is strong evidence that nothing
+    /// ever attached, not proof of it.
     std::uint16_t root_port_connects = 0;
     /// Passes of Core 1's loop. Unchanged across two reads twenty seconds
     /// apart is this project's established proof that Core 1 stopped.

@@ -26,6 +26,10 @@ void set_host_initialization_result(bool configure_result, bool initialize_resul
 /// PioUsbBackend::begin() initialised the host first, after which
 /// tuh_configure and tuh_init are no-ops that still return true. A test that
 /// sets this is reproducing that board, not a hypothetical one.
+///
+/// tuh_init() in this fake SETS it, the way usbh.c:415 does, so a sample taken
+/// after the bring-up reads true and a sample taken before it does not. That
+/// is what makes the ordering testable rather than merely commented.
 void set_host_already_active(bool active);
 /// What tuh_inited() reports after begin()'s calls.
 void set_host_inited(bool inited);
@@ -51,6 +55,13 @@ std::size_t receive_count();
 std::size_t receive_count(std::uint8_t dev_addr, std::uint8_t instance);
 std::size_t host_task_count();
 std::uint32_t system_clock_khz();
+/// clock_get_hz(clk_sys) as it stood when tuh_configure() was called - the
+/// clock the real Pico-PIO-USB would compute every PIO divider from.
+std::uint32_t clock_hz_at_configure();
+/// What tuh_rhport_is_active() would report right now, so a test can tell a
+/// backend that sampled before bringing the host up from one that never
+/// brought it up at all.
+bool host_already_active_now();
 std::uint8_t configured_pin_dp();
 
 }  // namespace duo::test::tinyusb_host

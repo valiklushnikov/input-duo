@@ -50,6 +50,7 @@ std::uint32_t now_us = 0;
 bool host_already_active = false;
 bool host_inited = false;
 std::uint32_t system_clock_hz = 0;
+std::uint32_t system_clock_hz_at_configure = 0;
 std::uint32_t sof_frames = 0;
 
 }  // namespace
@@ -77,6 +78,7 @@ void reset() {
     host_already_active = false;
     host_inited = false;
     system_clock_hz = 0;
+    system_clock_hz_at_configure = 0;
     sof_frames = 0;
     pio_usb_root_port[0] = root_port_t{};
     pio_usb_root_port[1] = root_port_t{};
@@ -126,6 +128,10 @@ void set_host_inited(bool inited) { host_inited = inited; }
 void set_system_clock_hz(std::uint32_t hz) { system_clock_hz = hz; }
 
 void set_sof_frame_count(std::uint32_t frames) { sof_frames = frames; }
+
+std::uint32_t clock_hz_at_configure() { return system_clock_hz_at_configure; }
+
+bool host_already_active_now() { return host_already_active; }
 
 void set_root_port(bool initialized, bool connected, bool suspended,
                    bool is_fullspeed) {
@@ -210,11 +216,27 @@ extern "C" bool tuh_configure(std::uint8_t rhport, std::uint8_t cfg_id,
     (void)rhport;
     (void)cfg_id;
     pin_dp = *static_cast<const std::uint8_t*>(config);
+    // The clock the real hcd_configure/hcd_init pair would compute every PIO
+    // divider from. Recorded here so a test can assert the host is brought up
+    // AFTER the system clock moves, rather than leaving that ordering to a
+    // comment - it is the whole reason clk_hz_now is the divider clock.
+    system_clock_hz_at_configure = system_clock_hz;
     return configure_result;
 }
 
 extern "C" bool tuh_init(std::uint8_t rhport) {
     (void)rhport;
+    // Faithful to .deps/tinyusb/src/host/usbh.c:415: tuh_rhport_init sets
+    // _usbh_controller = rhport once it is past the already-active check, and
+    // it does so BEFORE hcd_init and regardless of whether hcd_init then
+    // fails. So after any tuh_init that got that far, tuh_rhport_is_active()
+    // reads true.
+    //
+    // Without this the fake could not tell "sampled before tuh_init" from
+    // "sampled after" - and that ordering is the entire smoking gun. A sample
+    // taken after this call reads 1 on a CORRECT image, which would send an
+    // operator chasing a regression that is not there.
+    host_already_active = true;
     return initialize_result;
 }
 

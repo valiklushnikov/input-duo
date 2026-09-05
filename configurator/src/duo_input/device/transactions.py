@@ -346,11 +346,21 @@ class HostObservation:
     #: The host stack reported itself initialised after those calls.
     host_inited: bool | None = None
 
-    #: The system clock the host stack's PIO dividers were computed from, and
-    #: the system clock now. They must match: the dividers are computed once
-    #: and never recomputed, so a bus brought up at 125 MHz and running at
-    #: 120 MHz is off by 4% against full-speed USB's 0.25% tolerance.
-    clock_hz_at_begin: int | None = None
+    #: The system clock U1's input core found when it started, BEFORE it raised
+    #: the clock itself. Not the clock the PIO dividers were computed from, and
+    #: nothing may report it as one: the host stack comes up after that change,
+    #: so a healthy board reads the RP2040's 125 MHz default here while its
+    #: dividers are built at 120 MHz. The two DIFFERING is what health looks
+    #: like, and a board with the defect this block was added for reads the
+    #: same 125 MHz - so this number cannot tell them apart on its own.
+    #: ``host_already_active`` is what does that.
+    clock_hz_before_core1_change: int | None = None
+    #: The system clock now. This IS the divider clock whenever
+    #: ``host_already_active`` is false, because the dividers are computed once
+    #: and the input core brings the host up after its own clock change. When
+    #: ``host_already_active`` is true the host came up elsewhere, on a clock
+    #: this reply never saw, and no clock reading here says anything about the
+    #: dividers.
     clock_hz_now: int | None = None
 
     #: The root port's free-running frame counter. Zero and static means the
@@ -367,23 +377,17 @@ class HostObservation:
     #: Disconnected-to-connected transitions since the device booted: whether
     #: U1 ever saw anything attach at all, independently of whether it could
     #: then talk to it.
+    #:
+    #: A LOWER BOUND, not a total. Nothing below the host stack reports an
+    #: attach edge, so the device polls the line once per input-core pass; an
+    #: attach and detach that both fall between two passes leaves no trace.
+    #: Zero is strong evidence that nothing ever attached, not proof of it.
     root_port_connects: int | None = None
 
     #: Passes of U1's input core loop. Unchanged across two reads twenty
     #: seconds apart means that core stopped - which is a different fault from
     #: a silent bus and has to be told apart from one.
     core1_passes: int | None = None
-
-    @property
-    def clocks_agree(self) -> bool | None:
-        """Whether the bus is running at the rate its dividers were built for.
-
-        ``None`` when either reading is absent. This is a derived reading and
-        never a substitute for the two numbers: a report shows both.
-        """
-        if self.clock_hz_at_begin is None or self.clock_hz_now is None:
-            return None
-        return self.clock_hz_at_begin == self.clock_hz_now
 
 
 @dataclass(frozen=True)
@@ -869,7 +873,7 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
         host_configured=bool(init_flags & _HOST_CONFIGURED),
         host_initialized=bool(init_flags & _HOST_INITIALIZED),
         host_inited=bool(init_flags & _HOST_INITED),
-        clock_hz_at_begin=clock_at_begin,
+        clock_hz_before_core1_change=clock_at_begin,
         clock_hz_now=clock_now,
         sof_frame_count=sof_frames,
         root_port_initialized=bool(root_state & _ROOT_INITIALIZED),

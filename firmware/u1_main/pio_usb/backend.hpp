@@ -59,29 +59,50 @@ namespace duo_input::u1::pio_usb {
 struct HostObservability {
     /// The four kHostInit* bits below.
     std::uint8_t init_flags = 0;
-    /// clk_sys as begin() found it, before set_sys_clock_khz(120000).
+    /// clk_sys as begin() found it, BEFORE set_sys_clock_khz(120000).
     ///
-    /// Pico-PIO-USB computes every PIO divider once, from clk_sys, and never
-    /// recomputes one. Read against clk_hz_now this settles arithmetically -
-    /// with no scope on GP0/GP1 - whether the bus is being driven at the rate
-    /// the dividers were built for.
+    /// NOT the clock the PIO dividers were computed from, and nothing may read
+    /// it as one. begin() raises the clock first and brings the host up
+    /// afterwards, so on a correct image this is 125 MHz (the RP2040 default
+    /// main() never changes) while the dividers are computed at 120 MHz. The
+    /// two differing is what a healthy board looks like.
+    ///
+    /// It is also the same 125 MHz on the broken image, where the host was
+    /// already up before Core 1 ran, so the pair has no discriminating power
+    /// of its own. What it says is narrower and still worth having: Core 1
+    /// reached set_sys_clock_khz and the clock moved.
     std::uint32_t clk_hz_at_begin = 0;
-    /// clk_sys when the reply was built, sampled on Core 0.
+    /// clk_sys on Core 0, sampled once per main-loop pass.
+    ///
+    /// THIS is the divider clock when kHostInitHostAlreadyActive is clear:
+    /// Pico-PIO-USB computes every divider once inside pio_usb_host_init and
+    /// never recomputes one, and begin() calls tuh_init after its own clock
+    /// change - an ordering
+    /// tests/firmware_native/test_pio_usb_device_registry.cpp guards rather
+    /// than leaves to this comment. When that bit is SET the host came up
+    /// somewhere else, on a clock this reply never saw, and no clock reading
+    /// here is evidence about the dividers.
     std::uint32_t clk_hz_now = 0;
     /// pio_usb_host_get_frame_number(): the free-running SOF count.
     ///
     /// Below TinyUSB and below the registry. Read twice a second apart it
     /// says whether U1 is driving the bus at all, and at what rate. Sampled
-    /// live on Core 0, deliberately: a frozen core1_passes beside a climbing
-    /// frame count is a Core 1 that died under a host that did not.
+    /// on Core 0 rather than cached by a Core 1 pass, deliberately: a frozen
+    /// core1_passes beside a climbing frame count is a Core 1 that died under
+    /// a host that did not.
     std::uint32_t sof_frame_count = 0;
-    /// The four kRootPort* bits below, sampled live.
+    /// The four kRootPort* bits below, sampled on Core 0.
     std::uint8_t root_port_state = 0;
     /// How many times the root port has gone from disconnected to connected.
     ///
     /// Whether U1 ever saw the hub's D+ pull-up, independently of whether any
     /// transaction on it ever succeeded. Saturates rather than wrapping: a
     /// count that rolled over to zero would read as "never attached".
+    ///
+    /// A LOWER BOUND, not a total. Nothing below TinyUSB reports an attach
+    /// edge, so task() polls the level once a pass; an attach and detach that
+    /// both fall between two passes is not counted. Zero here is therefore
+    /// strong evidence that nothing attached and not proof of it.
     std::uint16_t root_port_connects = 0;
     /// Passes of Core 1's loop. This project's established proof that Core 1
     /// stopped is this counter unchanged across two reads twenty seconds
@@ -199,12 +220,17 @@ public:
 
     /// What the host stack and the raw root port are doing right now.
     ///
-    /// Called from Core 0 while it builds a GET_DIAGNOSTICS reply, for the
-    /// same reason registry() is: the reply must be able to read this core's
-    /// state without being able to change any of it. The live halves
-    /// (clk_sys, the SOF count, the root port's own flags) are sampled here
-    /// rather than cached by task(), so they still answer when Core 1 has
-    /// stopped - which is precisely the case they exist to tell apart.
+    /// Called from Core 0's main loop, once a pass, for the same reason
+    /// registry() is read there: the reply must be able to read this core's
+    /// state without being able to change any of it. The result is handed to
+    /// ConfigService and held until a GET_DIAGNOSTICS arrives, so a reading
+    /// can be up to one Core 0 pass old - which is far below the second the
+    /// "read it twice" procedures need, and does not affect either of them.
+    ///
+    /// The live halves (clk_sys, the SOF count, the root port's own flags) are
+    /// sampled HERE, on Core 0, rather than cached by Core 1's task(), so they
+    /// still answer when Core 1 has stopped - which is precisely the case they
+    /// exist to tell apart.
     ///
     /// Bounded, non-allocating and non-blocking: four volatile reads and a
     /// register read. It takes no lock, so a root-port flag can change under
