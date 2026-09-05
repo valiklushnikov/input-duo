@@ -239,11 +239,56 @@ struct HostObservation {
     /// Configured-hub transitions, polled because TinyUSB excludes hubs from
     /// its application mount callback. A saturating lower bound.
     std::uint16_t hub_mount_events = 0;
+
+    // The six readings from inside the window where enumeration stops. Every
+    // field above says whether the host started and whether anything attached;
+    // by the time a board reaches this window both are yes.
+
+    /// Whose endpoint sits in each of the first four host endpoint-pool slots,
+    /// one byte per slot, slot 0 in the low byte: device address in bits 7-5,
+    /// an OPEN bit in bit 4, direction (1 = IN) in bit 3 and endpoint number
+    /// in bits 2-0. A byte of zero means the slot is closed.
+    ///
+    /// The open bit is load-bearing. The endpoint this field exists to find is
+    /// address 0's control endpoint, whose address, direction and number are
+    /// all zero; without that bit it would encode as zero and read as an empty
+    /// slot. LIVE, not a high-water mark - ep_slots_opened above is the
+    /// high-water count, and the pair says both how far enumeration ever got
+    /// and where it stands now.
+    std::uint32_t ep_slot_map = 0;
+    /// Every event U1's host stack has queued since boot: accepted attaches in
+    /// bits 0-7, removals in bits 8-15, completed transfers in bits 16-31,
+    /// each saturating. Two attaches means a device behind the hub was seen as
+    /// well as the hub itself. An event the host stack's own queue dropped is
+    /// not counted here, by construction.
+    std::uint32_t host_event_counts = 0;
+    /// How far each device address got, sticky: for address a in 1..5, bit
+    /// (a-1) says it reached the configured state and bit 8+(a-1) says its
+    /// device descriptor was read. Addresses 1-4 are devices; 5 is the hub.
+    /// All-zero for an address nothing was ever plugged into is NORMAL.
+    std::uint32_t enum_progress_mask = 0;
+    /// Input-core passes that blocked for more than 20 ms, saturating.
+    ///
+    /// NOT a fault reading. A healthy board produces several: the host stack
+    /// blocks for 50+450 ms enumerating the root port and another 450 ms for
+    /// each device behind a hub. Zero would mean no enumeration was ever
+    /// attempted.
+    std::uint32_t long_pass_count = 0;
+    /// The total of those blocked passes in whole milliseconds, saturating.
+    /// Roughly 500 ms per root enumeration and 450 ms per hub-side one, so a
+    /// number near a second beside a count of two is what a board that started
+    /// enumerating one device behind a hub is expected to show.
+    std::uint32_t long_pass_total_ms = 0;
+    /// The lowest stack pointer the input core was ever seen at while the host
+    /// stack was queueing an event. ZERO MEANS NO SAMPLE - no host event has
+    /// ever been queued - and is not a stack that reached address zero.
+    std::uint32_t core1_min_sp = 0;
 };
 
 /// The observation's own bytes on the wire, without its leading length.
 inline constexpr std::size_t kHostObservationBytes =
-    1 + 4 + 4 + 4 + 1 + 2 + 4 + 2 + 2 + 2 + 1 + 1 + 4 + 2 + 2 + 2;
+    1 + 4 + 4 + 4 + 1 + 2 + 4 + 2 + 2 + 2 + 1 + 1 + 4 + 2 + 2 + 2 + 4 + 4 + 4 +
+    4 + 4 + 4;
 
 /// The appended host block: one length byte, then that many bytes.
 ///

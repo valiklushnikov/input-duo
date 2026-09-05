@@ -309,7 +309,26 @@ _ROOT_FULLSPEED = 1 << 3
 #: init flags, the two clock readings, the SOF count, the packed root-port
 #: state, the attach count and Core 1's pass count.
 _HOST_OBSERVATION_BASE = struct.Struct("<BIIIBHI")
-_HOST_OBSERVATION_WIRE = struct.Struct("<BIIIBHIHHHBBIHHH")
+_HOST_OBSERVATION_WIRE = struct.Struct("<BIIIBHIHHHBBIHHHIIIIII")
+
+#: Bit positions inside the host block's ``ep_slot_map`` byte, in the
+#: firmware's order (firmware/u1_main/pio_usb/backend.hpp kEpSlot*).
+EP_SLOT_ENDPOINT_MASK = 0x07
+EP_SLOT_DIRECTION_IN = 1 << 3
+EP_SLOT_OPEN = 1 << 4
+EP_SLOT_ADDRESS_SHIFT = 5
+EP_SLOT_ADDRESS_MASK = 0x07
+#: How many pool slots ``ep_slot_map`` describes, one byte each.
+EP_SLOT_COUNT = 4
+
+#: Shifts inside the host block's packed ``host_event_counts`` word.
+HOST_EVENT_REMOVE_SHIFT = 8
+HOST_EVENT_XFER_SHIFT = 16
+
+#: ``enum_progress_mask``: bit ``a - 1`` is configured, bit ``8 + a - 1`` says
+#: the device descriptor was read. Addresses 1-4 are devices; 5 is the hub.
+ENUM_DESCRIPTOR_SHIFT = 8
+ENUM_HIGHEST_ADDRESS = 5
 
 
 @dataclass(frozen=True)
@@ -397,6 +416,39 @@ class HostObservation:
     #: application mount callback, so the device polls tuh_mounted() instead.
     #: This is a saturating lower bound.
     hub_mount_events: int | None = None
+
+    #: Whose endpoint sits in each of the first four host endpoint-pool slots,
+    #: one byte per slot with slot 0 in the low byte: device address in bits
+    #: 7-5, an OPEN bit in bit 4, direction (1 = IN) in bit 3 and endpoint
+    #: number in bits 2-0. A byte of zero means the slot is closed.
+    #:
+    #: The open bit matters: address 0's control endpoint has address,
+    #: direction and endpoint number all zero, and without it that endpoint
+    #: would read as an empty slot. A LIVE reading, not a high-water mark -
+    #: ``ep_slots_opened`` above is the high-water count.
+    ep_slot_map: int | None = None
+    #: Every event the device's host stack has queued since boot: accepted
+    #: attaches in bits 0-7, removals in bits 8-15, completed transfers in
+    #: bits 16-31, each saturating. An event the host stack's own queue
+    #: dropped never reaches this counter, by construction.
+    host_event_counts: int | None = None
+    #: How far each device address got, sticky. For address ``a`` in 1..5, bit
+    #: ``a - 1`` says it reached the configured state and bit ``8 + a - 1``
+    #: says its device descriptor was read. All-zero for an address nothing
+    #: was plugged into is NORMAL.
+    enum_progress_mask: int | None = None
+    #: Input-core passes that blocked for more than 20 ms, saturating.
+    #:
+    #: NOT a fault reading. A healthy board produces several: enumerating the
+    #: root port blocks for about half a second and each device behind a hub
+    #: for another 450 ms. Zero would mean no enumeration was ever attempted.
+    long_pass_count: int | None = None
+    #: The total of those blocked passes in whole milliseconds, saturating.
+    long_pass_total_ms: int | None = None
+    #: The lowest stack pointer the input core was seen at while its host
+    #: stack was queueing an event. ZERO MEANS NO SAMPLE - no host event has
+    #: ever been queued - and is not a stack that reached address zero.
+    core1_min_sp: int | None = None
 
 
 @dataclass(frozen=True)
@@ -878,7 +930,23 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
     ) = _HOST_OBSERVATION_BASE.unpack_from(body, 0)
     extension_values: list[int | None] = []
     at = _HOST_OBSERVATION_BASE.size
-    for field in ("<H", "<H", "<H", "<B", "<B", "<I", "<H", "<H", "<H"):
+    for field in (
+        "<H",
+        "<H",
+        "<H",
+        "<B",
+        "<B",
+        "<I",
+        "<H",
+        "<H",
+        "<H",
+        "<I",
+        "<I",
+        "<I",
+        "<I",
+        "<I",
+        "<I",
+    ):
         width = struct.calcsize(field)
         if declared == at:
             extension_values.append(None)
@@ -918,6 +986,12 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
         max_sof_gap=extension[6],
         root_port_resets=extension[7],
         hub_mount_events=extension[8],
+        ep_slot_map=extension[9],
+        host_event_counts=extension[10],
+        enum_progress_mask=extension[11],
+        long_pass_count=extension[12],
+        long_pass_total_ms=extension[13],
+        core1_min_sp=extension[14],
     )
 
 

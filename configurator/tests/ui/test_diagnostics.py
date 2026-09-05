@@ -170,6 +170,12 @@ def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
         7,
         2,
         1,
+        0x0010B9B0,
+        0x00290102,
+        0x00001010,
+        2,
+        950,
+        0x20040A40,
     )
     with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
         page.service.connect_device(emulator)
@@ -192,6 +198,29 @@ def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
     assert "Largest SOF-frame advance between passes: 7" in reported
     assert "Root-port resets seen (lower bound): 2" in reported
     assert "Hub mounts seen (lower bound): 1" in reported
+    # The five-statement-window readings reach the page decoded, not packed.
+    assert (
+        "Endpoint slot map, live (pool slots 0-3): slot0 dev5 ep0 out "
+        "| slot1 dev5 ep1 in | slot2 dev0 ep0 out | slot3 closed" in reported
+    )
+    assert (
+        "Host events queued since boot: attach 2 | remove 1 "
+        "| transfer completions 41" in reported
+    )
+    assert (
+        "Enumeration reached, by address (1-4 devices, 5 hub): dev1 nothing "
+        "| dev2 nothing | dev3 nothing | dev4 nothing | dev5 configured+descriptor"
+        in reported
+    )
+    assert "Input-core passes blocked over 20 ms (some are normal): 2" in reported
+    assert (
+        "Time in passes blocked over 20 ms (ms; ~500 per enumeration is normal): 950"
+        in reported
+    )
+    assert (
+        "Deepest input-core stack pointer (0 = no host event was ever queued): "
+        "0x20040A40" in reported
+    )
     # The page must not carry the old derived row either: it called a healthy
     # board faulty and it separated this board from a healthy one not at all.
     assert "unchanged since bring-up" not in reported

@@ -492,6 +492,18 @@ std::size_t ConfigService::write_host_observation(std::uint8_t* out) const {
     at += 2;
     put_u16(out + at, host_observation_.hub_mount_events);
     at += 2;
+    put_u32(out + at, host_observation_.ep_slot_map);
+    at += 4;
+    put_u32(out + at, host_observation_.host_event_counts);
+    at += 4;
+    put_u32(out + at, host_observation_.enum_progress_mask);
+    at += 4;
+    put_u32(out + at, host_observation_.long_pass_count);
+    at += 4;
+    put_u32(out + at, host_observation_.long_pass_total_ms);
+    at += 4;
+    put_u32(out + at, host_observation_.core1_min_sp);
+    at += 4;
     return at;
 }
 

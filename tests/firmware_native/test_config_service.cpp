@@ -953,6 +953,12 @@ TEST_CASE(the_diagnostics_carry_what_the_host_stack_and_root_port_are_doing) {
     observation.max_sof_gap = 7u;
     observation.root_port_resets = 2u;
     observation.hub_mount_events = 1u;
+    observation.ep_slot_map = 0x0010B9B0u;
+    observation.host_event_counts = 0x00290102u;
+    observation.enum_progress_mask = 0x00001010u;
+    observation.long_pass_count = 2u;
+    observation.long_pass_total_ms = 950u;
+    observation.core1_min_sp = 0x20040A40u;
     link.service.set_host_observation(observation);
 
     const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
@@ -977,6 +983,16 @@ TEST_CASE(the_diagnostics_carry_what_the_host_stack_and_root_port_are_doing) {
     CHECK_EQ(static_cast<std::uint16_t>(p[at + 33] | (p[at + 34] << 8)), 7u);
     CHECK_EQ(static_cast<std::uint16_t>(p[at + 35] | (p[at + 36] << 8)), 2u);
     CHECK_EQ(static_cast<std::uint16_t>(p[at + 37] | (p[at + 38] << 8)), 1u);
+    // The round-4 window fields, appended behind hub_mount_events and nowhere
+    // else: which pool slot holds whose endpoint, how many events the host
+    // stack ever queued, how far each address got, the measured blocking
+    // budget, and how deep Core 1's stack went while it was all running.
+    CHECK_EQ(read_u32(p + at + 39), 0x0010B9B0u);
+    CHECK_EQ(read_u32(p + at + 43), 0x00290102u);
+    CHECK_EQ(read_u32(p + at + 47), 0x00001010u);
+    CHECK_EQ(read_u32(p + at + 51), 2u);
+    CHECK_EQ(read_u32(p + at + 55), 950u);
+    CHECK_EQ(read_u32(p + at + 59), 0x20040A40u);
     CHECK_EQ(reply.payload.size, duo_input::u1::kDiagnosticsPayloadSize);
 }
 
@@ -1068,6 +1084,12 @@ TEST_CASE(the_real_host_mapping_reaches_the_wire_without_relabeling_or_overwrite
     observed.max_sof_gap = 0x1112u;
     observed.root_port_resets = 0x1314u;
     observed.hub_mount_events = 0x1516u;
+    observed.ep_slot_map = 0x21222324u;
+    observed.host_event_counts = 0x25262728u;
+    observed.enum_progress_mask = 0x292A2B2Cu;
+    observed.long_pass_count = 0x2D2E2F30u;
+    observed.long_pass_total_ms = 0x31323334u;
+    observed.core1_min_sp = 0x35363738u;
 
     Link link;
     link.hello();
@@ -1076,10 +1098,13 @@ TEST_CASE(the_real_host_mapping_reaches_the_wire_without_relabeling_or_overwrite
     const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
     const std::size_t at = duo_input::u1::kBackendBlockOffset + 2u;
     const std::uint8_t expected[] = {
-        0x26, 0x0D, 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55,
+        0x3E, 0x0D, 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55,
         0xCC, 0xBB, 0xAA, 0x99, 0x0B, 0x34, 0x12, 0xEF, 0xBE, 0xAD,
         0xDE, 0x02, 0x01, 0x04, 0x03, 0x06, 0x05, 0x07, 0x08, 0x40,
-        0x30, 0x20, 0x10, 0x12, 0x11, 0x14, 0x13, 0x16, 0x15,
+        0x30, 0x20, 0x10, 0x12, 0x11, 0x14, 0x13, 0x16, 0x15, 0x24,
+        0x23, 0x22, 0x21, 0x28, 0x27, 0x26, 0x25, 0x2C, 0x2B, 0x2A,
+        0x29, 0x30, 0x2F, 0x2E, 0x2D, 0x34, 0x33, 0x32, 0x31, 0x38,
+        0x37, 0x36, 0x35,
     };
     CHECK_EQ(reply.payload.size, at + sizeof(expected));
     for (std::size_t index = 0; index < sizeof(expected); ++index) {

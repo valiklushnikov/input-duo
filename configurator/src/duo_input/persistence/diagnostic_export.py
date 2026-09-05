@@ -19,6 +19,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from duo_input import __version__
+# For the host block's own bit layout. Imported from the module that reads the
+# wire rather than restated here: two copies of a bit position are two chances
+# for the report to decode a reading into a different device than the one the
+# firmware named.
+from duo_input.device import transactions
 from duo_input.generated.protocol import Capability
 
 #: Names inside the archive. They are identifiers, not localised labels.
@@ -234,6 +239,120 @@ _HOST_STACK_ROWS = (
 )
 
 
+#: The readings from inside the window where enumeration stops, in the order a
+#: person works through them: whose endpoints are open, what the host stack
+#: saw, how far each address got, what it spent the time on, and how close the
+#: input core's stack came to the bottom while all of it ran.
+#:
+#: Separate from the table above because every one of these is a packed word.
+#: A row that printed ``ep_slot_map: 2964492288`` would be a reading nobody
+#: takes correctly at a bench, and a bench trip is what this costs.
+#:
+#: Two of the labels carry a caveat, and they carry it because the label is
+#: what reaches the exported report and the page while a docstring reaches
+#: nobody. Blocked passes are what a HEALTHY enumeration produces, and a zero
+#: stack pointer is a sample that was never taken rather than a stack that
+#: reached address zero.
+_HOST_STACK_PACKED_ROWS = (
+    ("ep_slot_map", "Endpoint slot map, live (pool slots 0-3)"),
+    ("host_event_counts", "Host events queued since boot"),
+    ("enum_progress_mask", "Enumeration reached, by address (1-4 devices, 5 hub)"),
+    ("long_pass_count", "Input-core passes blocked over 20 ms (some are normal)"),
+    (
+        "long_pass_total_ms",
+        "Time in passes blocked over 20 ms (ms; ~500 per enumeration is normal)",
+    ),
+    (
+        "core1_min_sp",
+        "Deepest input-core stack pointer (0 = no host event was ever queued)",
+    ),
+)
+
+
+def host_stack_field_names() -> set[str]:
+    """Every host-block reading this module turns into a row.
+
+    Exists so a test can compare it against the parser's own field list. A
+    reading that reaches the wire and the parser but no row is a reading nobody
+    ever sees, and that failure mode costs a bench trip rather than a test run.
+    """
+    return {name for name, _ in _HOST_STACK_ROWS} | {
+        name for name, _ in _HOST_STACK_PACKED_ROWS
+    }
+
+
+def _endpoint_slot_map(value: int) -> str:
+    """The four pool slots, named rather than packed.
+
+    The whole enumeration analysis turns on which device owns the third open
+    slot, so this says ``dev0 ep0 out`` where the wire says ``0x10``.
+    """
+    parts: list[str] = []
+    for slot in range(transactions.EP_SLOT_COUNT):
+        byte = (value >> (8 * slot)) & 0xFF
+        if not byte & transactions.EP_SLOT_OPEN:
+            parts.append(f"slot{slot} closed")
+            continue
+        address = (
+            byte >> transactions.EP_SLOT_ADDRESS_SHIFT
+        ) & transactions.EP_SLOT_ADDRESS_MASK
+        number = byte & transactions.EP_SLOT_ENDPOINT_MASK
+        direction = "in" if byte & transactions.EP_SLOT_DIRECTION_IN else "out"
+        parts.append(f"slot{slot} dev{address} ep{number} {direction}")
+    return " | ".join(parts)
+
+
+def _host_event_counts(value: int) -> str:
+    attach = value & 0xFF
+    remove = (value >> transactions.HOST_EVENT_REMOVE_SHIFT) & 0xFF
+    transfers = (value >> transactions.HOST_EVENT_XFER_SHIFT) & 0xFFFF
+    return f"attach {attach} | remove {remove} | transfer completions {transfers}"
+
+
+def _enum_progress(value: int) -> str:
+    """What each device address reached, spelled out for every address.
+
+    Every address is listed, including the ones that reached nothing: on a
+    board where enumeration stopped, "dev1 nothing" through "dev4 nothing" is
+    the answer, and a row that showed only the addresses that got somewhere
+    would have hidden it behind an absence.
+    """
+    parts: list[str] = []
+    for address in range(1, transactions.ENUM_HIGHEST_ADDRESS + 1):
+        bit = address - 1
+        configured = bool(value & (1 << bit))
+        descriptor = bool(value & (1 << (bit + transactions.ENUM_DESCRIPTOR_SHIFT)))
+        if configured and descriptor:
+            reached = "configured+descriptor"
+        elif configured:
+            reached = "configured"
+        elif descriptor:
+            reached = "descriptor"
+        else:
+            reached = "nothing"
+        parts.append(f"dev{address} {reached}")
+    return " | ".join(parts)
+
+
+def _stack_pointer(value: int) -> str:
+    """Hex, because a stack pointer is an address and gets compared to one.
+
+    Zero stays plain zero: it is this field's "never sampled", and dressing it
+    up as ``0x00000000`` would make it look like an address that was reached.
+    """
+    return "0" if value == 0 else f"0x{value:08X}"
+
+
+#: How each packed reading is rendered. Anything without an entry here is
+#: rendered as its plain decimal value.
+_HOST_STACK_FORMATTERS = {
+    "ep_slot_map": _endpoint_slot_map,
+    "host_event_counts": _host_event_counts,
+    "enum_progress_mask": _enum_progress,
+    "core1_min_sp": _stack_pointer,
+}
+
+
 #: The row a broken host block gets instead of readings.
 HOST_STACK_UNREADABLE = "Host stack readings"
 
@@ -262,14 +381,15 @@ def _host_stack(counters: object) -> dict[str, str]:
     if state != "reported":
         return {}
     rows: dict[str, str] = {}
-    for name, label in _HOST_STACK_ROWS:
+    for name, label in _HOST_STACK_ROWS + _HOST_STACK_PACKED_ROWS:
         value = getattr(observation, name, None)
         if value is None:
             continue
         if isinstance(value, bool):
             rows[label] = "yes" if value else "no"
         else:
-            rows[label] = str(value)
+            formatter = _HOST_STACK_FORMATTERS.get(name)
+            rows[label] = formatter(value) if formatter else str(value)
     # No derived clock row. Current firmware selects 120 MHz before either
     # peripheral or Core 1 starts, so both readings should be 120 MHz; older
     # valid firmware reports 125/120. The plain readings preserve both facts

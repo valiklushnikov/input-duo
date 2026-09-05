@@ -27,6 +27,7 @@ if(DUO_INPUT_BACKEND STREQUAL "CH375")
 else()
     list(APPEND _duo_u1_sources
         pio_usb/backend.cpp
+        pio_usb/core1_stack_pointer.cpp
         pio_usb/device_registry.cpp
         pio_usb/hid_setup.cpp
         pio_usb/tinyusb_host_callbacks.cpp

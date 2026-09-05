@@ -90,6 +90,18 @@ class _Diagnostics:
     aborted_staging: int = 0
 
 
+#: Every host-block shape write_host_observation() has shipped, keyed by how
+#: many values it carries. The block's leading length byte is what makes an
+#: older shape a valid payload rather than a broken one, so the emulator has to
+#: be able to speak all of them: 7 values is the original 20-byte block, 16 is
+#: the 38-byte one, and 22 is the current 62-byte one.
+_HOST_OBSERVATION_LAYOUTS = {
+    7: "<BIIIBHI",
+    16: "<BIIIBHIHHHBBIHHH",
+    22: "<BIIIBHIHHHBBIHHHIIIIII",
+}
+
+
 class U1Emulator(AbstractByteTransport):
     """In-memory U1 endpoint using the production CDC codec and config decoder."""
 
@@ -147,12 +159,16 @@ class U1Emulator(AbstractByteTransport):
             (0, 0, 0, 0, 0, 0, 0, bytes(32)),
         )
         #: What the host stack and its root port are doing, in the shape
-        #: write_host_observation() puts on the wire: (init flags, clk_sys when
+        #: write_host_observation() puts on the wire. Any of the lengths in
+        #: _HOST_OBSERVATION_LAYOUTS is accepted, so a test can build the
+        #: payload an older firmware sent as well as the current one: (init flags, clk_sys when
         #: Core 1 began, clk_sys now, SOF frames, packed root-port state,
         #: attach count, input-core passes, device mount/unmount/HID mount
         #: counts, endpoint-slot/failure high-waters, maximum pass/SOF gaps,
-        #: root-port resets and configured-hub mount edges). ``None`` means
-        #: this image has no
+        #: root-port resets and configured-hub mount edges, then the endpoint
+        #: slot map, the packed host event counts, the enumeration progress
+        #: mask, the blocked-pass count and total, and the deepest input-core
+        #: stack pointer). ``None`` means this image has no
         #: host stack to observe and sends a length of zero - which is what the
         #: real CH375 image does, and a different fact from an older firmware
         #: that sends no host block at all.
@@ -636,7 +652,13 @@ class U1Emulator(AbstractByteTransport):
         if self.host_observation is None:
             host = bytes((0,))
         else:
-            layout = "<BIIIBHI" if len(self.host_observation) == 7 else "<BIIIBHIHHHBBIHHH"
+            # Keyed by how many values were handed over, so every append-only
+            # shape this firmware line has shipped stays speakable here: the
+            # emulator is the reference payload both the parser and the
+            # firmware are written against, and one frozen at the previous
+            # shape would let every test above pass while nothing carried the
+            # newest fields.
+            layout = _HOST_OBSERVATION_LAYOUTS[len(self.host_observation)]
             fields = struct.pack(layout, *self.host_observation)
             host = bytes((len(fields),)) + fields
         return latency + ports + backend + host

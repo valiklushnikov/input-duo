@@ -105,7 +105,9 @@ each self-delimiting so the one behind it can always be found:
   `init_flags:u8, clk_hz_at_begin:u32, clk_hz_now:u32, sof_frame_count:u32, root_port_state:u8,
   root_port_connects:u16, core1_passes:u32, mount_events:u16, umount_events:u16,
   hid_mount_events:u16, ep_slots_opened:u8, ep_max_failed_count:u8, max_pass_gap_us:u32,
-  max_sof_gap:u16, root_port_resets:u16, hub_mount_events:u16`. Its length byte plays the same
+  max_sof_gap:u16, root_port_resets:u16, hub_mount_events:u16, ep_slot_map:u32,
+  host_event_counts:u32, enum_progress_mask:u32, long_pass_count:u32,
+  long_pass_total_ms:u32, core1_min_sp:u32`. Its length byte plays the same
   role the backend
   block's count does: an image with no host stack sends zero, which is a different fact from an
   older firmware that sends no block at all.
@@ -142,6 +144,48 @@ each self-delimiting so the one behind it can always be found:
   Core-1 service passes; large values can be normal while `tuh_task()` blocks
   during enumeration and do not mean the SOF ISR was starved. `root_port_resets` is a saturating,
   polled lower bound over connected suspended-to-running cycles.
+
+  The last six fields read inside the window where enumeration stops. Everything in front of
+  them says whether the host stack started and whether anything ever attached; by the time a
+  board reaches this window both answers are yes, and none of the fields above can say which
+  step stopped it.
+
+  `ep_slot_map` packs one byte per host endpoint-pool slot 0-3, slot 0 in the LOW byte: device
+  address in bits 7-5, an **open** bit in bit 4, direction (1 = IN) in bit 3 and endpoint number
+  in bits 2-0. A byte of zero means the slot is closed. The open bit is load-bearing rather than
+  decorative: the endpoint this field exists to find is device address 0's control endpoint,
+  whose address, direction and endpoint number are all zero, and without that bit it would
+  encode as zero and read as an empty slot. The map is a **live** reading and follows the pool
+  back down when an endpoint closes; `ep_slots_opened` above it stays the high-water count, so
+  the pair says both how far enumeration ever got and where it stands now.
+
+  `host_event_counts` packs every event the device's host stack has queued since boot: accepted
+  attaches in bits 0-7, removals in bits 8-15 and completed transfers in bits 16-31, each
+  saturating. Two attaches means a device behind the hub was accepted as well as the hub itself.
+  An event the host stack's own queue **dropped** is not counted, by construction - the count is
+  what the stack accepted, not what the hardware raised.
+
+  `enum_progress_mask` says how far each device address got and is **sticky**, so an address that
+  reached a state for one service pass and lost it before the request arrived is still reported.
+  For address `a` in 1..5, bit `a - 1` says it reached the configured state and bit `8 + a - 1`
+  says its device descriptor was read - which is true only once the address has been assigned.
+  Addresses 1-4 are devices; 5 is the hub. An address nothing was plugged into reads as zero in
+  both halves, and that is NORMAL.
+
+  `long_pass_count` and `long_pass_total_ms` are the input core's blocking budget: passes that
+  blocked for more than 20 ms, and the sum of those gaps in whole milliseconds, both saturating.
+  **Neither is a fault reading.** A healthy board produces several: the host stack blocks inside
+  its service call for about 500 ms enumerating the root port and another 450 ms for each device
+  behind a hub, so a count of two totalling roughly 950 ms is what a board that started
+  enumerating one device behind a hub is expected to show. Zero would mean no enumeration was
+  ever attempted.
+
+  `core1_min_sp` is the lowest stack pointer the input core was ever seen at while its host stack
+  was queueing an event. **Zero means no sample was ever taken** - no host event has been queued
+  - and is not a stack that reached address zero. On the shipping RP2040 image the input core's
+  stack runs from `__StackOneBottom` to `__StackOneTop`, 2 KB placed at a fixed address by the
+  linker script, and a reading below that bottom is an overflow. The exact addresses come from
+  the linked image rather than from this document.
 
   `clk_hz_now`, `sof_frame_count` and `root_port_state` are sampled once per device main-loop
   pass and held until the request arrives, so a reading can be up to one pass old - far below the

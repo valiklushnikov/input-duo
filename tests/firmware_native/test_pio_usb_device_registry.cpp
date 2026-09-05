@@ -840,6 +840,270 @@ TEST_CASE(hub_mount_edges_are_counted_even_though_tinyusb_suppresses_its_mount_c
     CHECK_EQ(backend.observe().hub_mount_events, 0xFFFFu);
 }
 
+// ------------------------------- inside the five-statement enumeration window
+//
+// Everything above this line reports whether the host stack started and
+// whether anything ever attached. The board this round was built for is past
+// both: the hub configures, a downstream attach is accepted, and TinyUSB then
+// stops inside process_enumeration without a retry, without a failed
+// transaction and without a log line. The fields below are the readings that
+// say WHICH of the ranked causes that is. None of them steers anything.
+
+// F1. Whose endpoints are open, slot by slot.
+//
+// ep_slots_opened is a COUNT and a high-water mark: it cannot say whose
+// endpoints they are, and "a configured hub occupies exactly two pool slots,
+// so a third slot is a downstream device" was a source derivation and never a
+// reading. This is the reading.
+//
+// One byte per pool slot 0-3, slot 0 in the low byte, and the open bit is what
+// keeps a closed slot distinguishable: the endpoint this field exists to find
+// is device address 0's control endpoint, whose address, direction and
+// endpoint number are all zero. Without the open bit it would encode to 0x00
+// and read as an empty slot - the exact reading it has to contradict.
+TEST_CASE(ep_slot_map_names_the_device_and_endpoint_behind_each_of_the_first_four_slots) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    // A configured hub: its control endpoint, then its interrupt-IN status
+    // pipe. Then the downstream device's address-0 control endpoint.
+    duo::test::tinyusb_host::set_endpoint_identity(0, 8u, 5u, 0x00u);
+    duo::test::tinyusb_host::set_endpoint_identity(1, 1u, 5u, 0x81u);
+    duo::test::tinyusb_host::set_endpoint_identity(2, 8u, 0u, 0x00u);
+    backend.task(1000u);
+
+    const std::uint32_t map = backend.observe().ep_slot_map;
+    CHECK_EQ(map & 0xFFu, 0xB0u);          // address 5, open, OUT, endpoint 0
+    CHECK_EQ((map >> 8) & 0xFFu, 0xB9u);   // address 5, open, IN, endpoint 1
+    // The whole point: an open slot for address 0 endpoint 0 is NOT zero.
+    CHECK_EQ((map >> 16) & 0xFFu, 0x10u);
+    CHECK_EQ((map >> 24) & 0xFFu, 0x00u);  // slot 3 closed
+}
+
+TEST_CASE(a_closed_endpoint_slot_reads_as_zero_and_the_map_is_live_not_a_high_water) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_endpoint_identity(0, 8u, 5u, 0x00u);
+    duo::test::tinyusb_host::set_endpoint_identity(1, 64u, 2u, 0x81u);
+    backend.task(1000u);
+    CHECK_EQ(backend.observe().ep_slot_map & 0xFFFFu, 0x59B0u);
+
+    // The slot count above it is a high-water mark and stays at two; the map
+    // is a live reading and follows the pool down. Both facts are needed: the
+    // count says how far enumeration ever got, the map says where it is now.
+    duo::test::tinyusb_host::set_endpoint_identity(1, 0u, 0u, 0x00u);
+    backend.task(2000u);
+    const auto observed = backend.observe();
+    CHECK_EQ(observed.ep_slot_map & 0xFFFFu, 0x00B0u);
+    CHECK_EQ(observed.ep_slots_opened, 2u);
+}
+
+// F2. Every event the host stack ever queued, counted where TinyUSB queues it.
+//
+// tuh_event_hook_cb is weak in usbh.c and queue_event() calls it for every
+// event. Two attaches prove a downstream device was seen; one attach beside a
+// configured hub says the hub never raised a port change. The completion count
+// says how many control stages finished, which is how far along the chain the
+// last successful transfer was.
+TEST_CASE(host_event_counts_pack_attach_remove_and_transfer_completions) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    tuh_event_hook_cb(1, 0u, true);   // root attach, from the SOF ISR
+    tuh_event_hook_cb(1, 2u, true);   // a control stage completed
+    tuh_event_hook_cb(1, 2u, true);
+    tuh_event_hook_cb(1, 0u, false);  // the downstream attach, from hub.c
+    tuh_event_hook_cb(1, 1u, false);
+    tuh_event_hook_cb(1, 3u, false);  // USBH_EVENT_FUNC_CALL: not an HCD event
+
+    const std::uint32_t counts = backend.observe().host_event_counts;
+    CHECK_EQ(counts & 0xFFu, 2u);
+    CHECK_EQ((counts >> 8) & 0xFFu, 1u);
+    CHECK_EQ((counts >> 16) & 0xFFFFu, 2u);
+}
+
+// The hook is called from BOTH contexts on Core 1 - hub.c queues its port
+// events with in_isr false from inside tuh_task(), hcd_pio_usb.c queues
+// attach, remove and completion with in_isr true from the SOF alarm - and
+// RP2040 has no atomic read-modify-write. A single shared counter would lose
+// an increment whenever the ISR landed inside the other context's
+// load-modify-store, and losing one is the difference between "one attach" and
+// "two attaches", which is the whole reading. Each context therefore owns its
+// own word and observe() adds them.
+TEST_CASE(host_event_counts_keep_a_separate_word_per_calling_context) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    for (std::uint32_t count = 0; count < 200u; ++count) {
+        tuh_event_hook_cb(1, 0u, false);
+    }
+    for (std::uint32_t count = 0; count < 200u; ++count) {
+        tuh_event_hook_cb(1, 0u, true);
+    }
+
+    // 400 attaches. One shared 0xFF-saturating word would have stopped at 255
+    // too, so the reading that proves the split is the pair below it: each
+    // context reached 200 on its own before the sum clamped.
+    CHECK_EQ(backend.observe().host_event_counts & 0xFFu, 0xFFu);
+    CHECK_EQ(duo_input::u1::pio_usb::host_callback_observability().attach_events_from_isr,
+             200u);
+    CHECK_EQ(duo_input::u1::pio_usb::host_callback_observability().attach_events_from_task,
+             200u);
+}
+
+TEST_CASE(host_event_counts_saturate_rather_than_wrapping_back_through_zero) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    for (std::uint32_t count = 0; count < 0x10001u; ++count) {
+        tuh_event_hook_cb(1, 2u, true);
+    }
+    for (std::uint32_t count = 0; count < 0x101u; ++count) {
+        tuh_event_hook_cb(1, 1u, true);
+    }
+
+    const std::uint32_t counts = backend.observe().host_event_counts;
+    CHECK_EQ((counts >> 16) & 0xFFFFu, 0xFFFFu);
+    CHECK_EQ((counts >> 8) & 0xFFu, 0xFFu);
+    CHECK_EQ(counts & 0xFFu, 0u);
+}
+
+// F3. How far each address got, through TinyUSB's public API only.
+//
+// Bit (a-1) is tuh_mounted(a) - SET_CONFIGURATION was ACKed. Bit 8+(a-1) is
+// tuh_vid_pid_get(a), which is true only once the device is addressed AND its
+// full device descriptor has been read. Never addressed and addressed-but-not
+// configured are different failures, and this is what tells them apart.
+TEST_CASE(enum_progress_mask_separates_a_configured_address_from_an_addressed_one) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_hub_mounted(true);
+    duo::test::tinyusb_host::add_hub(0x2109, 0x2817);
+    duo::test::tinyusb_host::add_device(2, 0x046D, 0xC077);
+    backend.task(1000u);
+
+    const std::uint32_t mask = backend.observe().enum_progress_mask;
+    CHECK_EQ(mask & (1u << 4), 1u << 4);        // address 5 configured
+    CHECK_EQ(mask & (1u << 12), 1u << 12);      // address 5 descriptor read
+    CHECK_EQ(mask & (1u << 1), 0u);             // address 2 never configured
+    CHECK_EQ(mask & (1u << 9), 1u << 9);        // address 2 descriptor read
+    CHECK_EQ(mask & (1u << 0), 0u);
+    CHECK_EQ(mask & (1u << 8), 0u);
+}
+
+TEST_CASE(enum_progress_mask_is_sticky_so_a_transient_address_is_never_lost) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::add_device(3, 0x1234, 0x5678);
+    duo::test::tinyusb_host::set_device_mounted(3, true);
+    backend.task(1000u);
+    CHECK_EQ(backend.observe().enum_progress_mask & 0x0404u, 0x0404u);
+
+    // TinyUSB forgets the device. The mask must not: an address that was
+    // configured once is a fact about the run, and a reading taken a pass
+    // later would have missed it.
+    duo::test::tinyusb_host::forget_devices();
+    backend.task(2000u);
+    CHECK_EQ(backend.observe().enum_progress_mask & 0x0404u, 0x0404u);
+}
+
+// F4/F5. The blocking budget, measured instead of inferred.
+//
+// The round-3 diagnosis derived "one 500 ms root enumeration plus one 450 ms
+// hub-branch debounce" from a pass rate assumed constant. These two fields
+// measure it: (2, 950) is that pair, (4, 800) is a root enumeration plus three
+// 100 ms retries, (1, 500) says enumeration never left the root port.
+TEST_CASE(long_passes_count_only_gaps_over_twenty_milliseconds_and_sum_them) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    backend.task(0u);
+    backend.task(20000u);           // exactly 20 ms: not over the threshold
+    backend.task(40001u);           // 20.001 ms: over it
+    backend.task(540709u);          // 500.708 ms
+    backend.task(990209u);          // 449.5 ms
+
+    const auto observed = backend.observe();
+    CHECK_EQ(observed.long_pass_count, 3u);
+    // 20 + 500 + 449 ms, each truncated to whole milliseconds.
+    CHECK_EQ(observed.long_pass_total_ms, 20u + 500u + 449u);
+    CHECK_EQ(observed.max_pass_gap_us, 500708u);
+}
+
+TEST_CASE(long_pass_totals_saturate_rather_than_wrapping) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    std::uint32_t now = 0;
+    backend.task(now);
+    // Each pass adds a little over four million milliseconds; 1024 of them
+    // cannot fit in a u32 and must clamp rather than roll over to a small
+    // number that reads as a healthy board.
+    for (std::uint32_t pass = 0; pass < 1024u; ++pass) {
+        now += 0xFFFFFFFFu;
+        backend.task(now);
+    }
+    const auto observed = backend.observe();
+    CHECK_EQ(observed.long_pass_count, 1024u);
+    CHECK_EQ(observed.long_pass_total_ms, 0xFFFFFFFFu);
+}
+
+// F6. How close Core 1's 2 KB stack came to overflowing while TinyUSB's whole
+// enumeration ran on it. Sampled inside the event hook because that is the
+// deepest point in tuh_task()'s call chain this firmware can reach without
+// patching TinyUSB.
+TEST_CASE(core1_min_sp_keeps_the_deepest_stack_pointer_any_host_event_saw) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    // Zero is not a stack pointer. It is this field's "no host event has been
+    // queued yet", and it must not read as an overflow.
+    CHECK_EQ(backend.observe().core1_min_sp, 0u);
+
+    duo::test::tinyusb_host::set_stack_pointer(0x20040F00u);
+    tuh_event_hook_cb(1, 2u, true);
+    CHECK_EQ(backend.observe().core1_min_sp, 0x20040F00u);
+
+    duo::test::tinyusb_host::set_stack_pointer(0x20040A40u);
+    tuh_event_hook_cb(1, 0u, false);
+    CHECK_EQ(backend.observe().core1_min_sp, 0x20040A40u);
+
+    // A later, shallower sample must not raise it: the minimum is the whole
+    // reading, and a raised one would hide the overflow it exists to find.
+    duo::test::tinyusb_host::set_stack_pointer(0x20040FF0u);
+    tuh_event_hook_cb(1, 2u, true);
+    CHECK_EQ(backend.observe().core1_min_sp, 0x20040A40u);
+}
+
+TEST_CASE(core1_min_sp_takes_the_deeper_of_the_two_calling_contexts) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    // Thread context goes deepest, then the ISR reports a shallower one. A
+    // single shared word could lose the deeper sample to an interrupted
+    // load-modify-store, and losing it reads as more headroom than existed.
+    duo::test::tinyusb_host::set_stack_pointer(0x20040820u);
+    tuh_event_hook_cb(1, 0u, false);
+    duo::test::tinyusb_host::set_stack_pointer(0x20040EE0u);
+    tuh_event_hook_cb(1, 2u, true);
+
+    CHECK_EQ(backend.observe().core1_min_sp, 0x20040820u);
+}
+
 TEST_CASE(mount_processing_stores_vid_pid_protocol_descriptor_hash_and_neutral_layout) {
     RegistryRig rig;
     rig.device(8, 0xABCD, 0x0123);

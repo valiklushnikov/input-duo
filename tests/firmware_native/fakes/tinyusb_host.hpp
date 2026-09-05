@@ -44,7 +44,26 @@ void set_sof_frame_count(std::uint32_t frames);
 /// Populate one Pico-PIO-USB endpoint-pool entry with the two fields the
 /// backend samples for its bounded wire-progress high-water marks.
 void set_endpoint(std::size_t index, std::uint16_t size, std::uint8_t failed_count);
+/// Populate one endpoint-pool entry with the identity ep_slot_map encodes.
+///
+/// ``ep_num`` carries the direction bit exactly as the library stores it, so a
+/// test writes 0x81 for interrupt-IN endpoint 1 and 0x00 for a control
+/// endpoint - including the address-0 control endpoint, whose address,
+/// direction and number are all zero and which is the case the open bit
+/// exists for.
+void set_endpoint_identity(std::size_t index, std::uint16_t size,
+                           std::uint8_t dev_addr, std::uint8_t ep_num);
 void set_hub_mounted(bool mounted);
+/// What tuh_mounted() reports for one downstream address.
+void set_device_mounted(std::uint8_t dev_addr, bool mounted);
+/// Drop every device the fake knows, without touching anything else.
+///
+/// Models TinyUSB forgetting an address between two passes, which is what the
+/// sticky half of enum_progress_mask has to survive.
+void forget_devices();
+/// What __get_MSP() returns from here on - this build's stand-in for Core 1's
+/// stack pointer at the moment a host event is queued.
+void set_stack_pointer(std::uint32_t value);
 /// The four root-port flags PioUsbBackend::observe() packs into one byte.
 void set_root_port(bool initialized, bool connected, bool suspended,
                    bool is_fullspeed);
@@ -79,5 +98,12 @@ void tuh_hid_mount_cb(std::uint8_t dev_addr, std::uint8_t instance,
 void tuh_hid_umount_cb(std::uint8_t dev_addr, std::uint8_t instance);
 void tuh_hid_report_received_cb(std::uint8_t dev_addr, std::uint8_t instance,
                                 std::uint8_t const* report, std::uint16_t len);
+
+/// TinyUSB's weak host event hook, which the firmware under test defines.
+///
+/// Declared beside the other firmware-owned callbacks because a test drives it
+/// the same way: usbh.c's queue_event() calls it for every event the host
+/// stack queues, with in_isr saying which of Core 1's two contexts it is in.
+void tuh_event_hook_cb(std::uint8_t rhport, std::uint32_t eventid, bool in_isr);
 
 }  // extern "C"

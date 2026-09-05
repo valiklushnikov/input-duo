@@ -119,12 +119,69 @@ struct HostObservability {
     /// A separate lower-bound counter is necessary because TinyUSB
     /// deliberately does not call tuh_mount_cb for hub addresses.
     std::uint16_t hub_mount_events = 0;
+
+    // The six fields below read inside the window where enumeration stops.
+    // Everything above them says whether the host started and whether anything
+    // attached; by the time a board reaches this window both are yes, and none
+    // of the counters above can say which statement stopped it.
+
+    /// Whose endpoint is in each of the first four Pico-PIO-USB pool slots,
+    /// one byte per slot, slot 0 in the low byte. See the kEpSlot* constants.
+    ///
+    /// LIVE, not a high-water mark: it follows the pool down when an endpoint
+    /// closes. ep_slots_opened above is the high-water count, so the pair says
+    /// both how far enumeration ever got and where it is now.
+    std::uint32_t ep_slot_map = 0;
+    /// Every event the host stack has queued, packed: attach in bits 0-7,
+    /// remove in bits 8-15, transfer-completion in bits 16-31, each saturating.
+    ///
+    /// Read through TinyUSB's weak tuh_event_hook_cb, which queue_event()
+    /// calls for every event, so this counts what the host stack itself saw
+    /// rather than what any callback above it was told. An event DROPPED by a
+    /// full queue is not counted: queue_event calls the hook only after
+    /// osal_queue_send succeeds.
+    std::uint32_t host_event_counts = 0;
+    /// How far each device address got, sticky. For address a in 1..5, bit
+    /// (a-1) is tuh_mounted(a) and bit 8+(a-1) is tuh_vid_pid_get(a) - which
+    /// is true only once the address is assigned AND the device descriptor has
+    /// been read. Addresses 1-4 are devices; 5 is the hub.
+    std::uint32_t enum_progress_mask = 0;
+    /// Core 1 passes whose gap exceeded kLongPassThresholdUs, saturating.
+    ///
+    /// A healthy board produces some of these: TinyUSB's enumeration blocks
+    /// inside tuh_task() for 50+450 ms on the root port and 450 ms behind a
+    /// hub. Zero here would mean no enumeration was ever attempted.
+    std::uint32_t long_pass_count = 0;
+    /// The sum of those gaps in whole milliseconds, saturating. Together with
+    /// long_pass_count this is the blocking budget measured rather than
+    /// inferred from an assumed-constant pass rate.
+    std::uint32_t long_pass_total_ms = 0;
+    /// The lowest __get_MSP() any host event ever saw, or 0 if no host event
+    /// has been queued yet. Core 1's stack runs from __StackOneBottom to
+    /// __StackOneTop; a reading below the bottom is an overflow, and 0 is NOT
+    /// one - it means the sample was never taken.
+    std::uint32_t core1_min_sp = 0;
 };
 
 struct HostCallbackObservability {
     std::uint16_t mount_events = 0;
     std::uint16_t umount_events = 0;
     std::uint16_t hid_mount_events = 0;
+    /// HostObservability::host_event_counts, already packed and saturated.
+    std::uint32_t host_event_counts = 0;
+    /// HostObservability::core1_min_sp; 0 means no host event has run the hook.
+    std::uint32_t core1_min_sp = 0;
+    /// The two halves of the attach total, before they are added.
+    ///
+    /// Exposed because the split is the correctness argument, not a detail:
+    /// TinyUSB queues attach events from BOTH of Core 1's contexts - hub.c
+    /// with in_isr false from inside tuh_task(), hcd_pio_usb.c with in_isr
+    /// true from the SOF alarm - and RP2040 has no atomic read-modify-write,
+    /// so one shared counter would silently lose an increment whenever the ISR
+    /// landed inside the other context's load-modify-store. Losing one is the
+    /// difference between one attach and two, which is the whole reading.
+    std::uint32_t attach_events_from_isr = 0;
+    std::uint32_t attach_events_from_task = 0;
 };
 
 /// Fixed-width callback counters. The reset happens once, before host init;
@@ -147,6 +204,40 @@ inline constexpr std::uint8_t kHostInitConfigured = 1u << 1;
 inline constexpr std::uint8_t kHostInitInitialized = 1u << 2;
 /// tuh_inited() after both calls.
 inline constexpr std::uint8_t kHostInitInited = 1u << 3;
+
+/// ep_slot_map's byte, per Pico-PIO-USB endpoint-pool slot.
+///
+/// The open bit is not decoration. The endpoint this field exists to find is
+/// device address 0's control endpoint, opened by ENUM_ADDR0_DEVICE_DESC: its
+/// address, its direction and its endpoint number are all zero, so without a
+/// separate open bit it would encode to 0x00 and read as an empty slot - the
+/// exact reading it has to contradict. Three address bits are enough because
+/// the pinned configuration allots addresses 0 through CFG_TUH_DEVICE_MAX +
+/// CFG_TUH_HUB, and backend.cpp static-asserts that this stays true.
+inline constexpr std::uint8_t kEpSlotEndpointMask = 0x07u;
+inline constexpr std::uint8_t kEpSlotDirectionIn = 1u << 3;
+inline constexpr std::uint8_t kEpSlotOpen = 1u << 4;
+inline constexpr int kEpSlotAddressShift = 5;
+inline constexpr std::uint8_t kEpSlotAddressMask = 0x07u;
+/// How many pool slots ep_slot_map has room for, one byte each.
+inline constexpr std::size_t kEpSlotMapSlots = 4;
+
+/// host_event_counts' three packed fields.
+inline constexpr int kHostEventRemoveShift = 8;
+inline constexpr int kHostEventXferShift = 16;
+inline constexpr std::uint32_t kHostEventAttachLimit = 0xFFu;
+inline constexpr std::uint32_t kHostEventRemoveLimit = 0xFFu;
+inline constexpr std::uint32_t kHostEventXferLimit = 0xFFFFu;
+
+/// enum_progress_mask: bit (a-1) is configured, bit 8+(a-1) is descriptor-read.
+inline constexpr int kEnumDescriptorShift = 8;
+
+/// What counts as a blocked Core 1 pass, in microseconds.
+///
+/// 20 ms is far above this loop's ordinary tens of microseconds and far below
+/// every blocking wait TinyUSB's enumeration performs (the shortest is 50 ms),
+/// so nothing ordinary is counted and nothing that matters is missed.
+inline constexpr std::uint32_t kLongPassThresholdUs = 20000u;
 
 /// PIO_USB_ROOT_PORT(0)->initialized.
 inline constexpr std::uint8_t kRootPortInitialized = 1u << 0;
@@ -205,6 +296,10 @@ public:
                std::is_same_v<decltype(root_port_connects_), PublishedObservationWord> &&
                std::is_same_v<decltype(root_port_resets_), PublishedObservationWord> &&
                std::is_same_v<decltype(hub_mount_events_), PublishedObservationWord> &&
+               std::is_same_v<decltype(ep_slot_map_), PublishedObservationWord> &&
+               std::is_same_v<decltype(enum_progress_mask_), PublishedObservationWord> &&
+               std::is_same_v<decltype(long_pass_count_), PublishedObservationWord> &&
+               std::is_same_v<decltype(long_pass_total_ms_), PublishedObservationWord> &&
                std::is_same_v<decltype(ep_slots_opened_), PublishedObservationWord> &&
                std::is_same_v<decltype(ep_max_failed_count_), PublishedObservationWord> &&
                std::is_same_v<decltype(max_pass_gap_us_), PublishedObservationWord> &&
@@ -299,6 +394,15 @@ private:
     PublishedObservationWord hub_mount_events_{0};
     bool hub_was_mounted_ = false;
 
+    // Live per-slot identity beside the high-water count. Both come from the
+    // one pool scan task() already performs; neither reads the pool from
+    // Core 0, which must never touch library-owned mutable storage.
+    PublishedObservationWord ep_slot_map_{0};
+    // Sticky, so an address that reached a state for one pass and lost it
+    // before the next GET_DIAGNOSTICS is still a fact about the run.
+    PublishedObservationWord enum_progress_mask_{0};
+    PublishedObservationWord long_pass_count_{0};
+    PublishedObservationWord long_pass_total_ms_{0};
     PublishedObservationWord ep_slots_opened_{0};
     PublishedObservationWord ep_max_failed_count_{0};
     PublishedObservationWord max_pass_gap_us_{0};

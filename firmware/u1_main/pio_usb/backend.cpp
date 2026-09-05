@@ -25,6 +25,18 @@ constexpr std::uint8_t kHostRhPort = 1;
 // range. CFG_TUH_HUB is one in this image, so this is the sole root hub's
 // address and remains tied to the pinned stack's public configuration.
 constexpr std::uint8_t kHubAddress = CFG_TUH_DEVICE_MAX + 1;
+// The highest address TinyUSB's pinned configuration can assign. ep_slot_map
+// keeps only three bits for an address, and enum_progress_mask only eight bits
+// per half, so both would start lying if this configuration grew. A compile
+// error is the right way to find that out.
+constexpr std::uint8_t kHighestAddress = CFG_TUH_DEVICE_MAX + CFG_TUH_HUB;
+static_assert(kHighestAddress <= kEpSlotAddressMask,
+              "ep_slot_map keeps three bits for a device address - raising "
+              "CFG_TUH_DEVICE_MAX or CFG_TUH_HUB needs a wider field, not a "
+              "wider mask");
+static_assert(kHighestAddress <= kEnumDescriptorShift,
+              "enum_progress_mask keeps one bit per address in each half - "
+              "raising CFG_TUH_DEVICE_MAX or CFG_TUH_HUB needs a wider field");
 
 void publish_max(std::atomic<std::uint32_t>& destination, std::uint32_t value) noexcept {
     const std::uint32_t previous = destination.load(std::memory_order_relaxed);
@@ -44,6 +56,35 @@ void increment_saturating(std::atomic<std::uint32_t>& destination,
 void publish_flag(std::atomic<std::uint32_t>& destination, std::uint32_t flag) noexcept {
     destination.store(destination.load(std::memory_order_relaxed) | flag,
                       std::memory_order_relaxed);
+}
+
+void add_saturating(std::atomic<std::uint32_t>& destination,
+                    std::uint32_t addend) noexcept {
+    const std::uint32_t previous = destination.load(std::memory_order_relaxed);
+    // Clamps rather than wrapping, for the reason every other counter here
+    // does: a total that rolled over to a small number would read as a board
+    // that barely blocked at all, which is the opposite of what it measured.
+    const std::uint32_t remaining = 0xFFFFFFFFu - previous;
+    destination.store(addend > remaining ? 0xFFFFFFFFu : previous + addend,
+                      std::memory_order_relaxed);
+}
+
+/// One ep_slot_map byte for one pool entry. Zero means the slot is closed.
+std::uint8_t encode_endpoint_slot(const endpoint_t& endpoint) noexcept {
+    if (endpoint.size == 0) {
+        // Pico-PIO-USB uses size as its validity flag; see
+        // pio_usb_host_endpoint_open and pio_usb_host_close_device.
+        return 0;
+    }
+    const std::uint8_t address = static_cast<std::uint8_t>(endpoint.dev_addr);
+    const std::uint8_t number = static_cast<std::uint8_t>(endpoint.ep_num);
+    std::uint8_t encoded = kEpSlotOpen;
+    encoded = static_cast<std::uint8_t>(
+        encoded | ((address & kEpSlotAddressMask) << kEpSlotAddressShift));
+    if ((number & 0x80u) != 0) {
+        encoded = static_cast<std::uint8_t>(encoded | kEpSlotDirectionIn);
+    }
+    return static_cast<std::uint8_t>(encoded | (number & kEpSlotEndpointMask));
 }
 
 }  // namespace
@@ -131,6 +172,15 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     if (have_previous_pass_) {
         const std::uint32_t gap = now_us - previous_pass_us_;
         publish_max(max_pass_gap_us_, gap);
+        // The blocking budget, measured. max_pass_gap_us above keeps only the
+        // single worst pass, which cannot tell one 500 ms root enumeration
+        // from a 500 ms root enumeration followed by a 450 ms hub-branch
+        // debounce - and separating exactly those two was the soft step in the
+        // analysis this image exists to settle.
+        if (gap > kLongPassThresholdUs) {
+            increment_saturating(long_pass_count_, 0xFFFFFFFFu);
+            add_saturating(long_pass_total_ms_, gap / 1000u);
+        }
     }
     previous_pass_us_ = now_us;
     have_previous_pass_ = true;
@@ -146,14 +196,27 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     have_previous_sof_frame_ = true;
 
     std::uint8_t slots_opened = 0;
+    std::uint32_t slot_map = 0;
     for (std::size_t index = 0; index < PIO_USB_EP_POOL_CNT; ++index) {
         const endpoint_t& endpoint = pio_usb_ep_pool[index];
         if (endpoint.size != 0 && slots_opened != 0xFFu) {
             ++slots_opened;
         }
+        // The same scan, one more reading out of it: WHOSE endpoint each of
+        // the first four slots holds. The count above says how many; only this
+        // says whether the third one belongs to a device behind the hub, which
+        // is the claim the whole enumeration analysis rests on.
+        if (index < kEpSlotMapSlots) {
+            slot_map |= static_cast<std::uint32_t>(encode_endpoint_slot(endpoint))
+                        << (8u * index);
+        }
         publish_max(ep_max_failed_count_, endpoint.failed_count);
     }
     publish_max(ep_slots_opened_, slots_opened);
+    // Stored, not maxed: this one is a live map and has to be able to go back
+    // down when an endpoint closes. ep_slots_opened beside it stays the
+    // high-water count, so the pair says both how far it went and where it is.
+    ep_slot_map_.store(slot_map, std::memory_order_relaxed);
 
     // The attach edge. Nothing below TinyUSB reports one, so it is polled
     // here: four volatile reads a pass, no allocation and no wait. It counts
@@ -198,6 +261,29 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     }
     hub_was_mounted_ = hub_mounted;
 
+    // How far each address got, through TinyUSB's public API only and without
+    // reading one byte of its internal device table from this core or any
+    // other. tuh_mounted() is dev->configured; tuh_vid_pid_get() is true only
+    // once the address is assigned AND the device descriptor has been read, so
+    // the two halves separate "never addressed" from "addressed, then stopped
+    // in the configuration phase" - which is precisely the distinction the
+    // ranked causes turn on. Neither call mutates anything.
+    std::uint32_t progress = 0;
+    for (std::uint8_t address = 1; address <= kHighestAddress; ++address) {
+        const std::uint8_t bit = static_cast<std::uint8_t>(address - 1);
+        if (tuh_mounted(address)) {
+            progress |= 1u << bit;
+        }
+        std::uint16_t vendor_id = 0;
+        std::uint16_t product_id = 0;
+        if (tuh_vid_pid_get(address, &vendor_id, &product_id)) {
+            progress |= 1u << (bit + kEnumDescriptorShift);
+        }
+    }
+    // OR-accumulated: an address that reached a state for one pass and lost it
+    // before the next GET_DIAGNOSTICS still happened.
+    publish_flag(enum_progress_mask_, progress);
+
     registry_.process_pending(now_us);
     registry_.retry_pending_arms(now_us);
 }
@@ -226,6 +312,12 @@ HostObservability PioUsbBackend::observe() const {
         static_cast<std::uint16_t>(root_port_resets_.load(std::memory_order_relaxed));
     out.hub_mount_events =
         static_cast<std::uint16_t>(hub_mount_events_.load(std::memory_order_relaxed));
+    out.ep_slot_map = ep_slot_map_.load(std::memory_order_relaxed);
+    out.host_event_counts = callbacks.host_event_counts;
+    out.enum_progress_mask = enum_progress_mask_.load(std::memory_order_relaxed);
+    out.long_pass_count = long_pass_count_.load(std::memory_order_relaxed);
+    out.long_pass_total_ms = long_pass_total_ms_.load(std::memory_order_relaxed);
+    out.core1_min_sp = callbacks.core1_min_sp;
 
     const root_port_t& root = pio_usb_root_port[0];
     std::uint8_t state = 0;

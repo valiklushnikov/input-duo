@@ -27,6 +27,12 @@ inline HostObservation to_wire_host_observation(const HostObservability& observe
     out.max_sof_gap = observed.max_sof_gap;
     out.root_port_resets = observed.root_port_resets;
     out.hub_mount_events = observed.hub_mount_events;
+    out.ep_slot_map = observed.ep_slot_map;
+    out.host_event_counts = observed.host_event_counts;
+    out.enum_progress_mask = observed.enum_progress_mask;
+    out.long_pass_count = observed.long_pass_count;
+    out.long_pass_total_ms = observed.long_pass_total_ms;
+    out.core1_min_sp = observed.core1_min_sp;
     return out;
 }
 

@@ -22,6 +22,12 @@ typedef struct pio_usb_configuration {
 #define PIO_USB_EP_POOL_CNT 32
 
 typedef struct {
+    // dev_addr and ep_num are the library's own names and volatility for the
+    // two fields ep_slot_map encodes; ep_num carries the direction bit,
+    // because pio_usb_ll_configure_endpoint assigns it bEndpointAddress
+    // verbatim (pio_usb.c:465).
+    volatile uint8_t dev_addr;
+    volatile uint8_t ep_num;
     volatile uint16_t size;
     uint8_t failed_count;
 } endpoint_t;

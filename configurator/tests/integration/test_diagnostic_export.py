@@ -563,3 +563,148 @@ def test_a_broken_host_block_reads_as_broken_rather_than_as_absent(qtbot, emulat
     # And everything in front of it is complete: the prefix is not lost to a
     # garbled suffix.
     assert snapshot.input_backend == "PIO_USB"
+
+
+# ----------------------------- the five-statement window, decoded for a person
+
+
+#: The board round 4 was built to read: hub configured, one downstream device
+#: enumerating, stopped before the configuration-descriptor parse.
+WEDGED_MID_ENUMERATION = (
+    0b1110,
+    120_000_000,
+    120_000_000,
+    63_706,
+    0b1011,
+    1,
+    1_628_416,
+    0,  # mount_events: TinyUSB suppresses these for hubs
+    0,
+    0,
+    3,  # ep_slots_opened
+    0,  # ep_max_failed_count: nothing on the wire ever failed
+    500_708,
+    450,
+    1,
+    1,  # hub_mount_events
+    0x0010B9B0,  # slot0 dev5 ep0 out, slot1 dev5 ep1 in, slot2 dev0 ep0 out
+    0x00290102,  # attach 2, remove 1, 41 transfer completions
+    0x00001010,  # address 5 configured and descriptor read
+    2,
+    950,
+    0x20040A40,
+)
+
+
+def _host_rows(qtbot, tmp_path, observation, name="window"):
+    # Its own emulator each time: a DeviceService connects once, and two
+    # readings of two different boards is exactly what these cases compare.
+    emulator = U1Emulator()
+    emulator.install_active(compile_project_to_binary(default_project()))
+    emulator.input_backend = 2
+    emulator.host_observation = observation
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+    archive = build_diagnostic_zip(
+        tmp_path / f"{name}.zip", DiagnosticSnapshot.from_service(service)
+    )
+    return json.loads(_members(archive)[DIAGNOSTICS_MEMBER])["host_stack"]
+
+
+def test_the_report_decodes_the_endpoint_slot_map_into_addresses(qtbot, tmp_path):
+    """A packed u32 is not a reading anybody takes correctly at a bench.
+
+    The whole round-3 diagnosis turned on "a configured hub occupies two pool
+    slots, so a third is a downstream device" - a derivation from source, never
+    a measurement. This row is the measurement, and it has to name the device
+    behind each slot rather than hand the operator four bytes to decode.
+    """
+    host = _host_rows(qtbot, tmp_path, WEDGED_MID_ENUMERATION)
+
+    slots = host["Endpoint slot map, live (pool slots 0-3)"]
+    assert slots == (
+        "slot0 dev5 ep0 out | slot1 dev5 ep1 in | slot2 dev0 ep0 out | slot3 closed"
+    )
+
+
+def test_the_report_decodes_the_host_event_counts_and_the_progress_mask(
+    qtbot, tmp_path
+):
+    """Two attaches is the whole answer, and it must be legible as "two"."""
+    host = _host_rows(qtbot, tmp_path, WEDGED_MID_ENUMERATION)
+
+    assert host["Host events queued since boot"] == (
+        "attach 2 | remove 1 | transfer completions 41"
+    )
+    assert host["Enumeration reached, by address (1-4 devices, 5 hub)"] == (
+        "dev1 nothing | dev2 nothing | dev3 nothing | dev4 nothing "
+        "| dev5 configured+descriptor"
+    )
+
+
+def test_the_report_says_that_blocked_passes_are_normal_where_it_reports_them(
+    qtbot, tmp_path
+):
+    """A healthy enumeration blocks for half a second, twice.
+
+    A row that only said "passes blocked over 20 ms: 2" would send an operator
+    hunting a stall that every working board also produces. The label carries
+    the caveat, because the label is what reaches the report and the page.
+    """
+    host = _host_rows(qtbot, tmp_path, WEDGED_MID_ENUMERATION)
+
+    assert host["Input-core passes blocked over 20 ms (some are normal)"] == "2"
+    assert (
+        host["Time in passes blocked over 20 ms (ms; ~500 per enumeration is normal)"]
+        == "950"
+    )
+
+
+def test_the_report_says_a_zero_stack_reading_means_no_host_event_yet(
+    qtbot, tmp_path
+):
+    """Zero is not an overflowed stack, and the label has to say so.
+
+    The stack pointer is sampled inside the host event hook. On a board where
+    the host stack never queued an event the hook never ran, and the field
+    reports zero - which read as "the stack pointer reached address 0" would be
+    the most alarming possible misreading of a board that is merely idle.
+    """
+    host = _host_rows(qtbot, tmp_path, WEDGED_MID_ENUMERATION)
+    assert (
+        host["Deepest input-core stack pointer (0 = no host event was ever queued)"]
+        == "0x20040A40"
+    )
+
+    never_ran = tuple(WEDGED_MID_ENUMERATION[:-1]) + (0,)
+    idle = _host_rows(qtbot, tmp_path, never_ran, name="idle")
+    assert (
+        idle["Deepest input-core stack pointer (0 = no host event was ever queued)"]
+        == "0"
+    )
+
+
+def test_every_host_block_field_the_parser_reads_reaches_the_report(qtbot, tmp_path):
+    """A field on the wire and nowhere in the report is a field nobody reads.
+
+    Guards the mistake that costs a bench trip rather than a test run: adding a
+    reading to the firmware, the wire and the parser, and forgetting the one
+    place an operator actually looks.
+    """
+    import dataclasses
+
+    from duo_input.device.transactions import HostObservation
+    from duo_input.persistence.diagnostic_export import host_stack_field_names
+
+    on_the_wire = {
+        field.name
+        for field in dataclasses.fields(HostObservation)
+        if field.name not in ("state", "unreadable_reason")
+    }
+    assert host_stack_field_names() == on_the_wire
+
+    host = _host_rows(qtbot, tmp_path, WEDGED_MID_ENUMERATION)
+    assert len(host) == len(on_the_wire)

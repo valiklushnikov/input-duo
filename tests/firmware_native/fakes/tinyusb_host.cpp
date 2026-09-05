@@ -53,6 +53,8 @@ std::uint32_t system_clock_hz = 0;
 std::uint32_t system_clock_hz_at_configure = 0;
 std::uint32_t sof_frames = 0;
 bool hub_mounted = false;
+std::array<bool, 16> device_mounted{};
+std::uint32_t stack_pointer = 0;
 
 }  // namespace
 
@@ -86,6 +88,8 @@ void reset() {
     system_clock_hz_at_configure = 0;
     sof_frames = 0;
     hub_mounted = false;
+    device_mounted = {};
+    stack_pointer = 0;
     pio_usb_root_port[0] = root_port_t{};
     pio_usb_root_port[1] = root_port_t{};
     for (endpoint_t& endpoint : pio_usb_ep_pool) {
@@ -145,7 +149,26 @@ void set_endpoint(std::size_t index, std::uint16_t size, std::uint8_t failed_cou
     }
 }
 
+void set_endpoint_identity(std::size_t index, std::uint16_t size,
+                           std::uint8_t dev_addr, std::uint8_t ep_num) {
+    if (index < PIO_USB_EP_POOL_CNT) {
+        pio_usb_ep_pool[index].size = size;
+        pio_usb_ep_pool[index].dev_addr = dev_addr;
+        pio_usb_ep_pool[index].ep_num = ep_num;
+    }
+}
+
 void set_hub_mounted(bool mounted) { hub_mounted = mounted; }
+
+void set_device_mounted(std::uint8_t dev_addr, bool mounted) {
+    if (dev_addr < device_mounted.size()) {
+        device_mounted[dev_addr] = mounted;
+    }
+}
+
+void forget_devices() { devices = {}; }
+
+void set_stack_pointer(std::uint32_t value) { stack_pointer = value; }
 
 std::uint32_t clock_hz_at_configure() { return system_clock_hz_at_configure; }
 
@@ -266,8 +289,16 @@ extern "C" bool tuh_rhport_is_active(std::uint8_t rhport) {
 extern "C" bool tuh_inited(void) { return host_inited; }
 
 extern "C" bool tuh_mounted(std::uint8_t dev_addr) {
-    return dev_addr == duo::test::tinyusb_host::kHubAddress && hub_mounted;
+    if (dev_addr == duo::test::tinyusb_host::kHubAddress) {
+        return hub_mounted;
+    }
+    return dev_addr < device_mounted.size() && device_mounted[dev_addr];
 }
+
+// firmware/u1_main/pio_usb/core1_stack_pointer.cpp is the shipping definition
+// and reads MSP; here it is the value a test last set, so a case can put
+// Core 1's stack wherever it needs it without an ARM core to read one from.
+extern "C" std::uint32_t duo_core1_stack_pointer(void) { return stack_pointer; }
 
 extern "C" void tuh_task(void) { ++host_tasks; }
 

@@ -1299,6 +1299,12 @@ def _host_block(
     max_sof_gap: int = 0,
     root_port_resets: int = 0,
     hub_mount_events: int | None = None,
+    ep_slot_map: int | None = None,
+    host_event_counts: int = 0,
+    enum_progress_mask: int = 0,
+    long_pass_count: int = 0,
+    long_pass_total_ms: int = 0,
+    core1_min_sp: int = 0,
 ) -> bytes:
     """The appended host suffix: one length byte, then the fields behind it."""
     import struct
@@ -1327,6 +1333,16 @@ def _host_block(
         )
         if hub_mount_events is not None:
             fields += struct.pack("<H", hub_mount_events)
+            if ep_slot_map is not None:
+                fields += struct.pack(
+                    "<IIIIII",
+                    ep_slot_map,
+                    host_event_counts,
+                    enum_progress_mask,
+                    long_pass_count,
+                    long_pass_total_ms,
+                    core1_min_sp,
+                )
     return bytes((len(fields),)) + fields
 
 
@@ -1419,6 +1435,12 @@ def test_the_host_block_is_read_behind_a_backend_that_publishes_counters() -> No
             max_sof_gap=7,
             root_port_resets=2,
             hub_mount_events=1,
+            ep_slot_map=0x0010B9B0,
+            host_event_counts=0x00290102,
+            enum_progress_mask=0x00001010,
+            long_pass_count=2,
+            long_pass_total_ms=950,
+            core1_min_sp=0x20040A40,
         )
     )
 
@@ -1456,6 +1478,14 @@ def test_the_host_block_is_read_behind_a_backend_that_publishes_counters() -> No
     assert observation.max_sof_gap == 7
     assert observation.root_port_resets == 2
     assert observation.hub_mount_events == 1
+    # The round-4 window fields. Raw here; the export decodes them, because a
+    # packed u32 is not something anybody reads correctly at a bench.
+    assert observation.ep_slot_map == 0x0010B9B0
+    assert observation.host_event_counts == 0x00290102
+    assert observation.enum_progress_mask == 0x00001010
+    assert observation.long_pass_count == 2
+    assert observation.long_pass_total_ms == 950
+    assert observation.core1_min_sp == 0x20040A40
 
 
 def test_a_host_started_on_the_wrong_core_reads_as_such() -> None:
@@ -1583,10 +1613,22 @@ def test_every_complete_and_partial_host_append_boundary_is_classified() -> None
         max_sof_gap=450,
         root_port_resets=7,
         hub_mount_events=8,
+        ep_slot_map=0x0010B9B0,
+        host_event_counts=0x00290102,
+        enum_progress_mask=0x00001010,
+        long_pass_count=2,
+        long_pass_total_ms=950,
+        core1_min_sp=0x20040A40,
     )[1:]
 
-    complete_boundaries = (20, 22, 24, 26, 27, 28, 32, 34, 36, 38)
-    partial_boundaries = (21, 23, 25, 29, 30, 31, 33, 35, 37)
+    complete_boundaries = (
+        20, 22, 24, 26, 27, 28, 32, 34, 36, 38, 42, 46, 50, 54, 58, 62,
+    )
+    partial_boundaries = (
+        21, 23, 25, 29, 30, 31, 33, 35, 37,
+        39, 40, 41, 43, 44, 45, 47, 48, 49,
+        51, 52, 53, 55, 56, 57, 59, 60, 61,
+    )
     for boundary in complete_boundaries:
         block = bytes((boundary,)) + full_body[:boundary]
         observation = parse_diagnostics(prefix + block).host_observation
@@ -1612,7 +1654,7 @@ def test_a_longer_host_block_than_this_configurator_knows_is_read_as_far_as_it_g
     import struct
 
     fields = struct.pack(
-        "<BIIIBHIHHHBBIHHH",
+        "<BIIIBHIHHHBBIHHHIIIIII",
         0b1110,
         120_000_000,
         120_000_000,
@@ -1629,6 +1671,12 @@ def test_a_longer_host_block_than_this_configurator_knows_is_read_as_far_as_it_g
         450,
         7,
         8,
+        0x0010B9B0,
+        0x00290102,
+        0x00001010,
+        2,
+        950,
+        0x20040A40,
     )
     opaque_future_tail = b"\xA5\x5A\xC3\x3C\x10\x20\x30\x40\x50"
     fields += opaque_future_tail
@@ -1649,6 +1697,8 @@ def test_a_longer_host_block_than_this_configurator_knows_is_read_as_far_as_it_g
     assert observation.core1_passes == 42
     assert observation.mount_events == 2
     assert observation.hub_mount_events == 8
+    assert observation.ep_slot_map == 0x0010B9B0
+    assert observation.core1_min_sp == 0x20040A40
 
 
 def test_the_emulator_and_the_parser_agree_about_the_host_block() -> None:
@@ -1677,3 +1727,54 @@ def test_the_emulator_and_the_parser_agree_about_the_host_block() -> None:
     empty = parse_diagnostics(emulator._handle_get_diagnostics(b"")).host_observation
     assert empty is not None
     assert empty.state == "none"
+
+
+def test_the_emulator_can_speak_the_whole_current_host_block() -> None:
+    """The emulator is the reference payload, so it has to reach the last field.
+
+    An emulator frozen at the sixteen-value shape would let every configurator
+    test above pass while the six fields this round exists for were never
+    carried by anything the parser was pointed at.
+    """
+    from duo_input.device.emulator import U1Emulator
+    from duo_input.device.transactions import parse_diagnostics
+
+    emulator = U1Emulator()
+    emulator.input_backend = 2
+    emulator.host_observation = (
+        0b1110,
+        120_000_000,
+        120_000_000,
+        63_706,
+        0b1011,
+        1,
+        1_628_416,
+        0,
+        0,
+        0,
+        3,
+        0,
+        500_708,
+        450,
+        1,
+        1,
+        0x0010B9B0,
+        0x00290102,
+        0x00001010,
+        2,
+        950,
+        0x20040A40,
+    )
+
+    observation = parse_diagnostics(
+        emulator._handle_get_diagnostics(b"")
+    ).host_observation
+
+    assert observation is not None
+    assert observation.state == "reported"
+    assert observation.ep_slot_map == 0x0010B9B0
+    assert observation.host_event_counts == 0x00290102
+    assert observation.enum_progress_mask == 0x00001010
+    assert observation.long_pass_count == 2
+    assert observation.long_pass_total_ms == 950
+    assert observation.core1_min_sp == 0x20040A40
