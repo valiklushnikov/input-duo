@@ -20,8 +20,21 @@ LogicalRole role_for_kind(input::DeviceKind kind) {
 }
 
 std::size_t detach_slot(LogicalRole role) {
+    // Auxiliary shares Mouse's slot deliberately: both are the same physical
+    // device's interfaces and target the same InputPipeline instance, so
+    // remove_device()'s "first one claims the slot" guard below already
+    // collapses their teardown into the single Detached that pipeline needs -
+    // never two, which would double-run its release-all harmlessly but is
+    // not what a single detach is.
     return role == LogicalRole::Keyboard ? 0u : 1u;
 }
+
+/// The fixed "endpoint" value input/pipeline.cpp's on_auxiliary_report
+/// requires of a Keychron side-button report. Not this interface's own
+/// TinyUSB instance number - enumeration order does not guarantee that is 1 -
+/// but the same constant the CH375 quirk this replaces used for the same
+/// physical channel (interface 2, endpoint 1 on that transport).
+constexpr std::uint8_t kKeychronAuxiliaryEndpoint = 1;
 
 }  // namespace
 
@@ -206,6 +219,16 @@ bool DeviceRegistry::role_is_owned(LogicalRole role) const {
     return false;
 }
 
+bool DeviceRegistry::has_mouse_sibling(std::uint8_t dev_addr) const {
+    for (const Interface& candidate : interfaces_) {
+        if (candidate.mounted && candidate.dev_addr == dev_addr &&
+            candidate.role == LogicalRole::Mouse) {
+            return true;
+        }
+    }
+    return false;
+}
+
 const DeviceRegistry::Interface* DeviceRegistry::owner(input::DeviceKind kind) const {
     const LogicalRole role = kind == input::DeviceKind::Keyboard
                                  ? LogicalRole::Keyboard
@@ -374,19 +397,54 @@ void DeviceRegistry::process(const CallbackRecord& record) {
         interface->identity.vendor_id = record.vendor_id;
         interface->identity.product_id = record.product_id;
 
-        const LogicalRole wanted =
-            classified ? role_for_kind(interface->identity.kind) : LogicalRole::Ignored;
-        if (wanted != LogicalRole::Ignored && !role_is_owned(wanted)) {
+        // The Keychron M3 receiver's side button is emitted by a second
+        // interface shaped like a keyboard - never a real keyboard. Granting
+        // it the Keyboard role would read its side-button reports at boot
+        // offsets and invent a modifier keystroke on every press; associating
+        // it with the mouse's own channel instead means its bytes only ever
+        // reach InputPipeline's report-shape check (pipeline.cpp's
+        // keychron_side_state), which still refuses everything but the exact
+        // side-button trace. Gated on the exact vendor/product this receiver
+        // reports, not on shape alone, so every other composite device's
+        // keyboard-shaped interface keeps the Keyboard role it would
+        // otherwise earn - and further gated on this device already having a
+        // mounted Mouse-role sibling, so a lone keyboard that merely reports
+        // this vendor/product (nothing else of this receiver's shape present)
+        // is not pulled out of the Keyboard role it should still be free to
+        // earn.
+        const bool auxiliary_of_mouse =
+            classified &&
+            is_keychron_auxiliary_interface(record.vendor_id, record.product_id,
+                                            interface->identity.kind) &&
+            has_mouse_sibling(record.dev_addr);
+        LogicalRole wanted = LogicalRole::Ignored;
+        if (auxiliary_of_mouse) {
+            // Transport association only: the neutral identity says Mouse so
+            // this reaches the same InputPipeline instance the receiver's own
+            // mouse interface does. Its keyboard-shaped layout fields are
+            // left as classify_hid set them but are never read - AuxiliaryReport
+            // is handled from the raw bytes, not through a layout.
+            interface->identity.kind = input::DeviceKind::Mouse;
+        } else if (classified) {
+            wanted = role_for_kind(interface->identity.kind);
+        }
+
+        if (auxiliary_of_mouse) {
+            interface->role = LogicalRole::Auxiliary;
+        } else if (wanted != LogicalRole::Ignored && !role_is_owned(wanted)) {
             interface->role = wanted;
         } else {
             interface->role = LogicalRole::Ignored;
             ++ignored_interfaces_;
         }
-        if (interface->role != LogicalRole::Ignored) {
+        if (interface->role == LogicalRole::Keyboard || interface->role == LogicalRole::Mouse) {
             // Told once, before its first Report: InputPipeline::on_event
             // reads Ready to learn what this source is and which layout to
             // read its reports through, and a Report ahead of that would be
             // read under whatever the pipeline was left holding from before.
+            // Auxiliary never reaches here - it is not a source the pipeline
+            // is separately told about, only a second channel of the Mouse
+            // one already was.
             if (!push_event(*interface, input::SourceEventKind::Ready, 0, nullptr, 0, 0)) {
                 ++event_overflows_;
                 latch_fault(*interface);
@@ -410,6 +468,23 @@ void DeviceRegistry::process(const CallbackRecord& record) {
         // stall the bus behind an un-drained endpoint - never turned into an
         // event, because nothing above this line would know which owner's
         // stream it belonged to.
+        arm_if_needed(*interface);
+        return;
+    }
+    if (interface->role == LogicalRole::Auxiliary) {
+        // The Keychron receiver's side-button channel. AuxiliaryReport, not
+        // Report - InputPipeline reads this from raw bytes through its own
+        // shape check, never through a keyboard or mouse layout - and the
+        // fixed endpoint that check requires, not this interface's own
+        // instance number.
+        if (!push_event(*interface, input::SourceEventKind::AuxiliaryReport,
+                        kKeychronAuxiliaryEndpoint,
+                        record.payload_present ? record.payload : nullptr, record.size,
+                        record.received_us)) {
+            ++event_overflows_;
+            latch_fault(*interface);
+            return;
+        }
         arm_if_needed(*interface);
         return;
     }
