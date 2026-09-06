@@ -1,7 +1,7 @@
 # PIO USB reference-first rebuild
 
 **Date:** 2026-09-06  
-**Status:** Approved for implementation  
+**Status:** Approved for implementation
 **Target branch:** `feature/pio-usb-host-hub-v1`
 **Approved plan:** `docs/superpowers/plans/2026-09-06-pio-usb-reference-first-rebuild.md`
 
