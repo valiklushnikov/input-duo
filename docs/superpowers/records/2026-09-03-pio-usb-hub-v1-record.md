@@ -1166,3 +1166,68 @@ all. That row is unsatisfiable by construction: it asks the reference to report
 something the protocol it speaks does not carry. The defect is in the plan's
 acceptance criteria, not in the firmware or the hardware, and the row is moved
 to Task 3 where descriptor parsing makes it meaningful.
+
+## Reference-first rebuild, Task 2 Step 7 — hardware gate PASSED (2026-09-06)
+
+Image `13e6dd78092d6f384d89d19d7c3b498ae57832969120db6b3e63f92802a72c09`
+(103424 bytes), clean tree at `3508f88`. The callbacks now copy bounded records
+and re-arm; Core 1 moves at most one record per `tuh_task()` into a trace queue
+and Core 0 formats and prints it.
+
+### Mount and simultaneous load
+
+All five interfaces mount, and the descriptors the callbacks captured are
+visible for the first time:
+
+```
+MOUNT a=1 i=0 len=81  05 01 09 02 A1 01 85 03
+MOUNT a=1 i=1 len=115 05 8C 09 01 A1 01 85 B1
+MOUNT a=1 i=2 len=164 05 01 09 06 A1 01 85 01
+MOUNT a=2 i=3 len=0
+MOUNT a=2 i=4 len=0
+```
+
+`len=0` for address 2 is not a fault: that receiver's Report Descriptor fetch
+fails, and it mounts through the `hid_host.c` fix recorded above, which is
+exactly what makes those interfaces exist at all. The three descriptors from
+address 1 all begin `... 85 xx` - a Report ID item - which is independent
+confirmation of the report-ID finding recorded in the wheel section.
+
+35 s of deliberately rapid simultaneous typing and mouse movement:
+
+| | |
+| --- | --- |
+| trace lines | 14827 |
+| REPORT | 14822 (about 420/s) |
+| **OVERFLOW** | **0** |
+| lines outside the trace format | 0 |
+
+### Replug
+
+Two complete detach and reattach cycles of the address 1 receiver, with no
+power cycle:
+
+```
+UMOUNT a=1 i=0 / i=1 / i=2   ->   MOUNT a=1 i=0 len=81, i=1 len=115, i=2 len=164
+UMOUNT a=1 i=0 / i=1 / i=2   ->   MOUNT a=1 i=0 len=81, i=1 len=115, i=2 len=164
+```
+
+9996 reports after the last reattach, 15814 in the run, and again zero
+overflows. The address 2 receiver was not replugged - its dongle is not
+physically reachable - so that row stays untested here as it did in Task 1.
+
+### A gap found while running this gate, and closed
+
+The first candidate
+(`9acf32f983f5cdc99b14a9552f5fefac930ecb730f0996c868151c0e63e2a6ab`) passed
+every visible row while leaving the gate's own criterion uncheckable: the plan
+requires `reference_overflows()` to remain zero, and nothing printed it. A
+counter nobody reads cannot fail a gate. The drain now turns a change in that
+count into an ordinary `OVERFLOW` trace entry carrying how many records were
+lost, and if even that entry cannot be queued it is retried rather than
+forgotten. A contract test asserts the drain looks at the count and emits the
+entry, so the criterion cannot silently become unobservable again.
+
+Verification alongside: 44 native tests (18 of them new, with the queue's bounds
+and the lifecycle assertions mutation-verified), 117 build tests, all three Pico
+presets.
