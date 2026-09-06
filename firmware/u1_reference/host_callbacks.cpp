@@ -164,10 +164,10 @@ void reference_print_one_trace(void) {
     tud_cdc_write_flush();
 }
 
-void reference_print_one_descriptor_diagnostic(void) {
+bool reference_print_one_descriptor_diagnostic(void) {
     ReferenceDescriptorDiagnostic entry{};
     if (!reference_descriptor_diagnostic_peek(entry)) {
-        return;
+        return false;
     }
 
     char line[96];
@@ -200,15 +200,16 @@ void reference_print_one_descriptor_diagnostic(void) {
         line[written++] = '\n';
     }
     if (tud_cdc_write_available() < static_cast<uint32_t>(written)) {
-        return;
+        return true;
     }
     if (tud_cdc_write(line, static_cast<uint32_t>(written)) !=
         static_cast<uint32_t>(written)) {
-        return;
+        return true;
     }
     ReferenceDescriptorDiagnostic consumed{};
     reference_descriptor_diagnostic_take(consumed);
     tud_cdc_write_flush();
+    return true;
 }
 
 }  // extern "C"

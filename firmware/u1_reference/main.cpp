@@ -34,7 +34,7 @@
 #include "tusb.h"
 
 extern "C" void reference_print_one_trace();
-extern "C" void reference_print_one_descriptor_diagnostic();
+extern "C" bool reference_print_one_descriptor_diagnostic();
 extern "C" void reference_drain_one_callback();
 
 #include "callback_queue.hpp"
@@ -307,8 +307,12 @@ int main() {
 
     while (true) {
         g_usb.task();
-        reference_print_one_descriptor_diagnostic();
-        reference_print_one_trace();
+        // A pending descriptor measurement owns CDC until it is completely
+        // queued. REPORT traces are best-effort; letting one consume the last
+        // bytes of CDC space would starve this one-shot diagnostic forever.
+        if (!reference_print_one_descriptor_diagnostic()) {
+            reference_print_one_trace();
+        }
 
         const std::uint32_t millis = now_ms();
         g_outputs.drain(millis, time_us_32());
