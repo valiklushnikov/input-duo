@@ -593,6 +593,8 @@ WEDGED_MID_ENUMERATION = (
     2,
     950,
     0x20040A40,
+    0x00270101,  # slots 0/1 idle; slot2 active SETUP host-out
+    41,  # current total is 41 too: no completion after downstream attach
 )
 
 
@@ -645,6 +647,43 @@ def test_the_report_decodes_the_host_event_counts_and_the_progress_mask(
     )
 
 
+def test_the_report_decodes_live_endpoint_transfer_state(qtbot, tmp_path):
+    """The next bench read must distinguish an idle open slot from SETUP."""
+    host = _host_rows(qtbot, tmp_path, WEDGED_MID_ENUMERATION)
+
+    assert host["Endpoint transfer state, live (pool slots 0-3)"] == (
+        "slot0 open idle | slot1 open idle | "
+        "slot2 open active SETUP host-out | slot3 closed"
+    )
+
+
+def test_endpoint_transfer_state_names_every_live_flag(qtbot, tmp_path):
+    observation = list(WEDGED_MID_ENUMERATION)
+    # slot0 closed; slot1 open idle behind PRE; slot2 active host-IN DATA1 with
+    # PRE/stall/abort; slot3 active host-OUT DATA0.
+    observation[22] = 0x07DB1100
+    host = _host_rows(qtbot, tmp_path, tuple(observation), name="all-xfer-flags")
+
+    assert host["Endpoint transfer state, live (pool slots 0-3)"] == (
+        "slot0 closed | slot1 open idle PRE | "
+        "slot2 open active DATA1 host-in PRE stalled aborted | "
+        "slot3 open active DATA0 host-out"
+    )
+
+
+def test_the_report_names_the_attach_snapshot_as_a_delta_baseline(qtbot, tmp_path):
+    """The number is a baseline, not a second cumulative completion count."""
+    host = _host_rows(qtbot, tmp_path, WEDGED_MID_ENUMERATION)
+
+    assert (
+        host[
+            "Transfer completions when latest attach was queued "
+            "(subtract from current total)"
+        ]
+        == "41"
+    )
+
+
 def test_the_report_says_that_blocked_passes_are_normal_where_it_reports_them(
     qtbot, tmp_path
 ):
@@ -679,7 +718,9 @@ def test_the_report_says_a_zero_stack_reading_means_no_host_event_yet(
         == "0x20040A40"
     )
 
-    never_ran = tuple(WEDGED_MID_ENUMERATION[:-1]) + (0,)
+    never_ran_values = list(WEDGED_MID_ENUMERATION)
+    never_ran_values[21] = 0
+    never_ran = tuple(never_ran_values)
     idle = _host_rows(qtbot, tmp_path, never_ran, name="idle")
     assert (
         idle["Deepest input-core stack pointer (0 = no host event was ever queued)"]

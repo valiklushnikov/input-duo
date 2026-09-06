@@ -120,7 +120,7 @@ struct HostObservability {
     /// deliberately does not call tuh_mount_cb for hub addresses.
     std::uint16_t hub_mount_events = 0;
 
-    // The six fields below read inside the window where enumeration stops.
+    // The eight fields below read inside the window where enumeration stops.
     // Everything above them says whether the host started and whether anything
     // attached; by the time a board reaches this window both are yes, and none
     // of the counters above can say which statement stopped it.
@@ -161,6 +161,19 @@ struct HostObservability {
     /// __StackOneTop; a reading below the bottom is an overflow, and 0 is NOT
     /// one - it means the sample was never taken.
     std::uint32_t core1_min_sp = 0;
+    /// Live transfer state for the same four pool slots as ep_slot_map, one
+    /// byte per slot with slot 0 in the low byte. See kEpXfer* below.
+    ///
+    /// Unlike ep_slots_opened this is not sticky: an active bit clears as soon
+    /// as Pico-PIO-USB completes the transfer. That is what separates an open
+    /// but idle address-0 endpoint from a SETUP or later control stage that is
+    /// still being retried.
+    std::uint32_t ep_transfer_flags = 0;
+    /// The saturated transfer-completion total when the latest attach event
+    /// was queued. Subtract it from host_event_counts' current completion
+    /// total to count stages completed after that attach without knowing how
+    /// many hub-control transfers preceded it.
+    std::uint32_t xfer_completions_at_attach = 0;
 };
 
 struct HostCallbackObservability {
@@ -171,6 +184,8 @@ struct HostCallbackObservability {
     std::uint32_t host_event_counts = 0;
     /// HostObservability::core1_min_sp; 0 means no host event has run the hook.
     std::uint32_t core1_min_sp = 0;
+    /// HostObservability::xfer_completions_at_attach.
+    std::uint32_t xfer_completions_at_attach = 0;
     /// The two halves of the attach total, before they are added.
     ///
     /// Exposed because the split is the correctness argument, not a detail:
@@ -221,6 +236,21 @@ inline constexpr int kEpSlotAddressShift = 5;
 inline constexpr std::uint8_t kEpSlotAddressMask = 0x07u;
 /// How many pool slots ep_slot_map has room for, one byte each.
 inline constexpr std::size_t kEpSlotMapSlots = 4;
+
+/// ep_transfer_flags' byte, per Pico-PIO-USB endpoint-pool slot.
+///
+/// Open is independent of active so address 0's all-zero endpoint identity
+/// cannot disappear into the closed value. Direction and DATA/SETUP describe
+/// a transfer only while kEpXferHasTransfer is set; PRE is an endpoint route
+/// property, while stalled/aborted are the library's live flags.
+inline constexpr std::uint8_t kEpXferOpen = 1u << 0;
+inline constexpr std::uint8_t kEpXferHasTransfer = 1u << 1;
+inline constexpr std::uint8_t kEpXferHostOut = 1u << 2;
+inline constexpr std::uint8_t kEpXferData1 = 1u << 3;
+inline constexpr std::uint8_t kEpXferNeedPre = 1u << 4;
+inline constexpr std::uint8_t kEpXferSetupStaged = 1u << 5;
+inline constexpr std::uint8_t kEpXferStalled = 1u << 6;
+inline constexpr std::uint8_t kEpXferAborted = 1u << 7;
 
 /// host_event_counts' three packed fields.
 inline constexpr int kHostEventRemoveShift = 8;
@@ -297,6 +327,7 @@ public:
                std::is_same_v<decltype(root_port_resets_), PublishedObservationWord> &&
                std::is_same_v<decltype(hub_mount_events_), PublishedObservationWord> &&
                std::is_same_v<decltype(ep_slot_map_), PublishedObservationWord> &&
+               std::is_same_v<decltype(ep_transfer_flags_), PublishedObservationWord> &&
                std::is_same_v<decltype(enum_progress_mask_), PublishedObservationWord> &&
                std::is_same_v<decltype(long_pass_count_), PublishedObservationWord> &&
                std::is_same_v<decltype(long_pass_total_ms_), PublishedObservationWord> &&
@@ -398,6 +429,7 @@ private:
     // one pool scan task() already performs; neither reads the pool from
     // Core 0, which must never touch library-owned mutable storage.
     PublishedObservationWord ep_slot_map_{0};
+    PublishedObservationWord ep_transfer_flags_{0};
     // Sticky, so an address that reached a state for one pass and lost it
     // before the next GET_DIAGNOSTICS is still a fact about the run.
     PublishedObservationWord enum_progress_mask_{0};

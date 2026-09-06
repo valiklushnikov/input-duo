@@ -107,7 +107,8 @@ each self-delimiting so the one behind it can always be found:
   hid_mount_events:u16, ep_slots_opened:u8, ep_max_failed_count:u8, max_pass_gap_us:u32,
   max_sof_gap:u16, root_port_resets:u16, hub_mount_events:u16, ep_slot_map:u32,
   host_event_counts:u32, enum_progress_mask:u32, long_pass_count:u32,
-  long_pass_total_ms:u32, core1_min_sp:u32`. Its length byte plays the same
+  long_pass_total_ms:u32, core1_min_sp:u32, ep_transfer_flags:u32,
+  xfer_completions_at_attach:u32`. Its length byte plays the same
   role the backend
   block's count does: an image with no host stack sends zero, which is a different fact from an
   older firmware that sends no block at all.
@@ -145,7 +146,7 @@ each self-delimiting so the one behind it can always be found:
   during enumeration and do not mean the SOF ISR was starved. `root_port_resets` is a saturating,
   polled lower bound over connected suspended-to-running cycles.
 
-  The last six fields read inside the window where enumeration stops. Everything in front of
+  The last eight fields read inside the window where enumeration stops. Everything in front of
   them says whether the host stack started and whether anything ever attached; by the time a
   board reaches this window both answers are yes, and none of the fields above can say which
   step stopped it.
@@ -186,6 +187,57 @@ each self-delimiting so the one behind it can always be found:
   stack runs from `__StackOneBottom` to `__StackOneTop`, 2 KB placed at a fixed address by the
   linker script, and a reading below that bottom is an overflow. The exact addresses come from
   the linked image rather than from this document.
+
+  `ep_transfer_flags` is a **live**, non-sticky byte per endpoint-pool slot 0-3, slot 0 in the
+  LOW byte. Bit 0 is open; bit 1 is `has_transfer`; while bit 1 is set, bit 2 means host-OUT
+  (clear means host-IN), bit 3 means DATA1 (clear means DATA0), and bit 5 means the distinct
+  SETUP PID rather than either data toggle. Bit 4 is `need_pre`, bit 6 is the library's live
+  `stalled` flag, and bit 7 is its live `transfer_aborted` flag. A closed slot is zero. Direction
+  and PID are deliberately suppressed when the endpoint is idle because Pico-PIO-USB retains the
+  preceding stage in those fields after completion; `need_pre`, stalled and aborted remain true
+  live endpoint properties.
+
+  Because this reading is live, take it TWICE, twenty seconds apart, like every other
+  procedure in this file. A single `active` sample can be the ordinary instant between a
+  transfer being queued and the next SOF servicing it; the same `active` sample twice is a
+  transfer that is not progressing. Which of the two it is matters: a SETUP the device refuses
+  cannot stay staged, because the library errors it out after three consecutive frames and
+  `ep_max_failed_count` rises to 3 - so `active SETUP` on both reads beside
+  `ep_max_failed_count == 0` means the endpoint was never serviced at all rather than serviced
+  and refused. A DATA or status stage is different: a NAK is retried for ever and never touches
+  `failed_count`, so `active DATA1` twice beside a zero failure count is a device that is
+  answering the token and refusing the data.
+
+  `xfer_completions_at_attach` snapshots the saturated transfer-completion total at the latest
+  accepted attach event. Subtract it from bits 16-31 of `host_event_counts` to get completions
+  queued **after that attach**, cancelling every hub-control transfer before it. Both values
+  saturate at 65535, so a current total of 65535 makes the delta unavailable. With two accepted
+  attaches, the latest is the downstream device; with no accepted attach, the zero snapshot is
+  not a baseline.
+
+  For the stable wedge this pair was added to decide (`attach 2`, `enum_progress_mask` showing
+  `dev5 configured+descriptor` and `dev1`-`dev4` `nothing`, and `ep_slot_map` slot 2 reading
+  `dev0 ep0 out`), the next read is interpreted without arithmetic as follows.
+
+  The completion delta is bits 16-31 of `host_event_counts` MINUS `xfer_completions_at_attach`.
+  **Five of it is fixed and belongs to the hub, not the device**: after the host stack accepts a
+  port-attach it issues `GET_PORT_STATUS` (three completions) and `CLEAR_FEATURE(C_PORT_RESET)`
+  (two), and only then the first request the downstream device itself ever sees. So a delta of 5
+  means that first request produced nothing. Every transfer BEFORE the attach - including one
+  `SET_FEATURE(PORT_POWER)` per hub port - cancels out, which is why this reading needs to know
+  nothing about the hub in front of it. `PRE` may be present in every slot-2 pattern below and
+  only says the downstream device is low speed.
+
+  | Slot-2 transfer state | Completion delta | Meaning |
+  |---|---:|---|
+  | `open idle` | 5 | The first request to address 0 was never placed on the wire: `tuh_descriptor_get_device()` returned false before `hcd_setup_send`. |
+  | `open active SETUP host-out` | 5 | The SETUP was accepted by the endpoint layer and is still staged. On one read this can be the instant before the next SOF; on two reads twenty seconds apart, with `ep_max_failed_count` still 0, the endpoint is never being serviced. |
+  | `open active DATA1 host-in` | 6 | The SETUP completed; the eight-byte device-descriptor DATA-IN stage is outstanding. |
+  | `open active DATA1 host-out` | 7 | The SETUP and the DATA-IN stage completed; the zero-length status-OUT stage is outstanding. |
+  | `open idle` | 8 or more | The whole three-stage request completed and the stop is further along; read `enum_progress_mask` and `ep_max_failed_count` instead. |
+
+  A delta of 5 or more with slot 2 CLOSED, or `ep_slot_map` showing an address other than `dev0`
+  in it, means the board is no longer in this state at all and the table does not apply.
 
   `clk_hz_now`, `sof_frame_count` and `root_port_state` are sampled once per device main-loop
   pass and held until the request arrives, so a reading can be up to one pass old - far below the

@@ -33,6 +33,8 @@ inline HostObservation to_wire_host_observation(const HostObservability& observe
     out.long_pass_count = observed.long_pass_count;
     out.long_pass_total_ms = observed.long_pass_total_ms;
     out.core1_min_sp = observed.core1_min_sp;
+    out.ep_transfer_flags = observed.ep_transfer_flags;
+    out.xfer_completions_at_attach = observed.xfer_completions_at_attach;
     return out;
 }
 

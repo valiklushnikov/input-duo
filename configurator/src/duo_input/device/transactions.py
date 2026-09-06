@@ -308,8 +308,15 @@ _ROOT_FULLSPEED = 1 << 3
 #: The host block's fields, little-endian, behind its one-byte length:
 #: init flags, the two clock readings, the SOF count, the packed root-port
 #: state, the attach count and Core 1's pass count.
+#:
+#: Only the BASE is a struct. Everything appended behind it is read one field
+#: at a time by ``_parse_host_observation`` so that a firmware which stops
+#: partway through - the whole point of the length byte - is still readable.
+#: A whole-block struct used to sit here beside this one and was never used by
+#: anything; a round-5 mutation sweep shortened it by a field and the entire
+#: configurator suite still passed, which is what a constant that guards
+#: nothing looks like. It was deleted rather than given a test.
 _HOST_OBSERVATION_BASE = struct.Struct("<BIIIBHI")
-_HOST_OBSERVATION_WIRE = struct.Struct("<BIIIBHIHHHBBIHHHIIIIII")
 
 #: Bit positions inside the host block's ``ep_slot_map`` byte, in the
 #: firmware's order (firmware/u1_main/pio_usb/backend.hpp kEpSlot*).
@@ -320,6 +327,17 @@ EP_SLOT_ADDRESS_SHIFT = 5
 EP_SLOT_ADDRESS_MASK = 0x07
 #: How many pool slots ``ep_slot_map`` describes, one byte each.
 EP_SLOT_COUNT = 4
+
+#: Bits in each byte of ``ep_transfer_flags``. Direction and PID describe the
+#: active transfer only when EP_XFER_HAS_TRANSFER is set.
+EP_XFER_OPEN = 1 << 0
+EP_XFER_HAS_TRANSFER = 1 << 1
+EP_XFER_HOST_OUT = 1 << 2
+EP_XFER_DATA1 = 1 << 3
+EP_XFER_NEED_PRE = 1 << 4
+EP_XFER_SETUP_STAGED = 1 << 5
+EP_XFER_STALLED = 1 << 6
+EP_XFER_ABORTED = 1 << 7
 
 #: Shifts inside the host block's packed ``host_event_counts`` word.
 HOST_EVENT_REMOVE_SHIFT = 8
@@ -449,6 +467,16 @@ class HostObservation:
     #: stack was queueing an event. ZERO MEANS NO SAMPLE - no host event has
     #: ever been queued - and is not a stack that reached address zero.
     core1_min_sp: int | None = None
+    #: Live Pico-PIO-USB transfer state for pool slots 0-3, one byte per
+    #: slot, slot 0 in the low byte. ``EP_XFER_OPEN`` distinguishes an idle
+    #: address-0 endpoint from a closed slot; ``EP_XFER_HAS_TRANSFER`` then
+    #: says whether SETUP/DATA/status is still outstanding.
+    ep_transfer_flags: int | None = None
+    #: Saturated transfer-completion total at the latest accepted attach.
+    #: Subtract from ``host_event_counts`` bits 16-31 to count control stages
+    #: completed after that attach. At saturation, the delta is no longer
+    #: informative.
+    xfer_completions_at_attach: int | None = None
 
 
 @dataclass(frozen=True)
@@ -946,6 +974,8 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
         "<I",
         "<I",
         "<I",
+        "<I",
+        "<I",
     ):
         width = struct.calcsize(field)
         if declared == at:
@@ -992,6 +1022,8 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
         long_pass_count=extension[12],
         long_pass_total_ms=extension[13],
         core1_min_sp=extension[14],
+        ep_transfer_flags=extension[15],
+        xfer_completions_at_attach=extension[16],
     )
 
 

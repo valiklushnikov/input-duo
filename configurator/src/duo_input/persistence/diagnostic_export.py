@@ -266,6 +266,11 @@ _HOST_STACK_PACKED_ROWS = (
         "core1_min_sp",
         "Deepest input-core stack pointer (0 = no host event was ever queued)",
     ),
+    ("ep_transfer_flags", "Endpoint transfer state, live (pool slots 0-3)"),
+    (
+        "xfer_completions_at_attach",
+        "Transfer completions when latest attach was queued (subtract from current total)",
+    ),
 )
 
 
@@ -309,6 +314,38 @@ def _host_event_counts(value: int) -> str:
     return f"attach {attach} | remove {remove} | transfer completions {transfers}"
 
 
+def _endpoint_transfer_flags(value: int) -> str:
+    """Decode whether each pool slot is idle or carrying a control stage."""
+    parts: list[str] = []
+    for slot in range(transactions.EP_SLOT_COUNT):
+        byte = (value >> (8 * slot)) & 0xFF
+        if not byte & transactions.EP_XFER_OPEN:
+            parts.append(f"slot{slot} closed")
+            continue
+
+        state = [f"slot{slot} open"]
+        active = bool(byte & transactions.EP_XFER_HAS_TRANSFER)
+        state.append("active" if active else "idle")
+        if active:
+            if byte & transactions.EP_XFER_SETUP_STAGED:
+                state.append("SETUP")
+            elif byte & transactions.EP_XFER_DATA1:
+                state.append("DATA1")
+            else:
+                state.append("DATA0")
+            state.append(
+                "host-out" if byte & transactions.EP_XFER_HOST_OUT else "host-in"
+            )
+        if byte & transactions.EP_XFER_NEED_PRE:
+            state.append("PRE")
+        if byte & transactions.EP_XFER_STALLED:
+            state.append("stalled")
+        if byte & transactions.EP_XFER_ABORTED:
+            state.append("aborted")
+        parts.append(" ".join(state))
+    return " | ".join(parts)
+
+
 def _enum_progress(value: int) -> str:
     """What each device address reached, spelled out for every address.
 
@@ -350,6 +387,7 @@ _HOST_STACK_FORMATTERS = {
     "host_event_counts": _host_event_counts,
     "enum_progress_mask": _enum_progress,
     "core1_min_sp": _stack_pointer,
+    "ep_transfer_flags": _endpoint_transfer_flags,
 }
 
 

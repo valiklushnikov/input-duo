@@ -17,6 +17,14 @@ using duo_input::u1::input::SourceEvent;
 using duo_input::u1::input::SourceEventKind;
 using duo_input::u1::input::SourceIdentity;
 using duo_input::u1::pio_usb::DeviceRegistry;
+using duo_input::u1::pio_usb::kEpXferAborted;
+using duo_input::u1::pio_usb::kEpXferData1;
+using duo_input::u1::pio_usb::kEpXferHasTransfer;
+using duo_input::u1::pio_usb::kEpXferHostOut;
+using duo_input::u1::pio_usb::kEpXferNeedPre;
+using duo_input::u1::pio_usb::kEpXferOpen;
+using duo_input::u1::pio_usb::kEpXferSetupStaged;
+using duo_input::u1::pio_usb::kEpXferStalled;
 using duo_input::u1::pio_usb::LogicalRole;
 using duo_input::u1::pio_usb::PioUsbBackend;
 
@@ -1102,6 +1110,180 @@ TEST_CASE(core1_min_sp_takes_the_deeper_of_the_two_calling_contexts) {
     tuh_event_hook_cb(1, 2u, true);
 
     CHECK_EQ(backend.observe().core1_min_sp, 0x20040820u);
+}
+
+// F7. Whether a transfer is OUTSTANDING on each of the first four pool slots.
+//
+// ep_slot_map says WHOSE endpoint is in a slot; it cannot say whether anything
+// was ever placed on the wire through it. Those are the two readings the round-5
+// analysis has to tell apart at address 0: an endpoint that TinyUSB opened and
+// then never sent a SETUP through looks identical, in every field shipped so
+// far, to one carrying a control transfer that the device stopped answering.
+// Pico-PIO-USB retries a NAK for ever without ever touching failed_count, so
+// ep_max_failed_count stays 0 in both cases too.
+TEST_CASE(ep_transfer_flags_say_whether_a_transfer_is_outstanding_in_each_slot) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    // A configured hub, both of whose endpoints are idle, and behind it the
+    // address-0 control endpoint carrying the zero-length OUT status stage of
+    // a control transfer that never completed.
+    duo::test::tinyusb_host::set_endpoint_identity(0, 8u, 5u, 0x00u);
+    duo::test::tinyusb_host::set_endpoint_identity(1, 1u, 5u, 0x81u);
+    duo::test::tinyusb_host::set_endpoint_identity(2, 8u, 0u, 0x00u);
+
+    duo::test::tinyusb_host::EndpointTransfer status_out;
+    status_out.has_transfer = true;
+    status_out.is_tx = true;
+    status_out.data_id = 1u;  // data and status stages always carry DATA1
+    status_out.need_pre = true;  // a low-speed device behind the hub
+    duo::test::tinyusb_host::set_endpoint_transfer(2, status_out);
+    backend.task(1000u);
+
+    const std::uint32_t flags = backend.observe().ep_transfer_flags;
+    CHECK_EQ(flags & 0xFFu, kEpXferOpen);
+    CHECK_EQ((flags >> 8) & 0xFFu, kEpXferOpen);
+    CHECK_EQ((flags >> 16) & 0xFFu,
+             static_cast<std::uint8_t>(kEpXferOpen | kEpXferHasTransfer |
+                                       kEpXferHostOut | kEpXferData1 |
+                                       kEpXferNeedPre));
+    CHECK_EQ((flags >> 24) & 0xFFu, 0u);  // slot 3 closed
+}
+
+// The other half of the same question, and the reading that says the SETUP was
+// never placed on the wire: an open address-0 control endpoint with NO transfer
+// on it. Without the open bit this byte would be zero and indistinguishable
+// from a closed slot - the same trap ep_slot_map's open bit exists for.
+TEST_CASE(an_open_endpoint_with_no_transfer_is_not_the_same_reading_as_a_closed_one) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_endpoint_identity(2, 8u, 0u, 0x00u);
+    backend.task(1000u);
+    CHECK_EQ((backend.observe().ep_transfer_flags >> 16) & 0xFFu, kEpXferOpen);
+    CHECK_EQ((backend.observe().ep_transfer_flags >> 24) & 0xFFu, 0u);
+}
+
+TEST_CASE(ep_transfer_flags_stage_a_setup_packet_distinctly_from_a_data_toggle) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_endpoint_identity(0, 8u, 0u, 0x00u);
+    duo::test::tinyusb_host::EndpointTransfer setup;
+    setup.has_transfer = true;
+    setup.is_tx = true;
+    // pio_usb_host_send_setup stores the SETUP PID in data_id rather than a
+    // toggle, so a staged SETUP must not read as DATA0.
+    setup.data_id = USB_PID_SETUP;
+    duo::test::tinyusb_host::set_endpoint_transfer(0, setup);
+    backend.task(1000u);
+
+    CHECK_EQ(backend.observe().ep_transfer_flags & 0xFFu,
+             static_cast<std::uint8_t>(kEpXferOpen | kEpXferHasTransfer |
+                                       kEpXferHostOut | kEpXferSetupStaged));
+}
+
+TEST_CASE(ep_transfer_flags_are_live_and_follow_a_transfer_that_completes) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_endpoint_identity(0, 8u, 5u, 0x00u);
+    duo::test::tinyusb_host::EndpointTransfer running;
+    running.has_transfer = true;
+    running.is_tx = true;
+    running.data_id = 1u;
+    duo::test::tinyusb_host::set_endpoint_transfer(0, running);
+    backend.task(1000u);
+    CHECK_EQ(backend.observe().ep_transfer_flags & 0xFFu,
+             static_cast<std::uint8_t>(kEpXferOpen | kEpXferHasTransfer |
+                                       kEpXferHostOut | kEpXferData1));
+
+    // The transfer completes. Pico-PIO-USB clears has_transfer and LEAVES
+    // is_tx and data_id holding the stage that just finished, so those two are
+    // reported only while a transfer is outstanding - otherwise an idle
+    // endpoint would read as one still carrying its last stage, which is the
+    // exact confusion this field exists to remove.
+    //
+    // A high-water reading would say "a transfer was outstanding once", which
+    // every healthy board would also say. Only a live one can report a WEDGE.
+    running.has_transfer = false;
+    duo::test::tinyusb_host::set_endpoint_transfer(0, running);
+    backend.task(2000u);
+    CHECK_EQ(backend.observe().ep_transfer_flags & 0xFFu, kEpXferOpen);
+}
+
+TEST_CASE(ep_transfer_flags_preserve_live_pre_stall_and_abort_state) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_endpoint_identity(0, 8u, 0u, 0x00u);
+    duo::test::tinyusb_host::EndpointTransfer state;
+    state.need_pre = true;
+    state.stalled = true;
+    state.transfer_aborted = true;
+    duo::test::tinyusb_host::set_endpoint_transfer(0, state);
+    backend.task(1000u);
+
+    CHECK_EQ(backend.observe().ep_transfer_flags & 0xFFu,
+             static_cast<std::uint8_t>(kEpXferOpen | kEpXferNeedPre |
+                                       kEpXferStalled | kEpXferAborted));
+}
+
+// F8. The transfer-completion total at the moment the host stack queued its
+// most recent attach.
+//
+// Subtracting it from the completion count in host_event_counts gives how many
+// control stages finished AFTER that attach - which is the one measurement that
+// needs to know nothing about the hub in front of it. Every count before the
+// attach, including the SET_FEATURE(PORT_POWER) per port, cancels out.
+TEST_CASE(xfer_completions_at_attach_snapshot_the_total_when_an_attach_is_queued) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    // Nothing has attached yet, so there is nothing to subtract from.
+    CHECK_EQ(backend.observe().xfer_completions_at_attach, 0u);
+
+    tuh_event_hook_cb(1, 0u, true);   // the root attach: the hub
+    for (int stage = 0; stage < 16; ++stage) {
+        tuh_event_hook_cb(1, 2u, true);
+    }
+    CHECK_EQ(backend.observe().xfer_completions_at_attach, 0u);
+
+    tuh_event_hook_cb(1, 0u, false);  // the downstream attach, queued by hub.c
+    CHECK_EQ(backend.observe().xfer_completions_at_attach, 16u);
+
+    // Five more completions carry the chain from that attach to the first
+    // request the downstream device itself ever sees.
+    for (int stage = 0; stage < 5; ++stage) {
+        tuh_event_hook_cb(1, 2u, false);
+    }
+    const auto observed = backend.observe();
+    CHECK_EQ((observed.host_event_counts >> 16) & 0xFFFFu, 21u);
+    CHECK_EQ(observed.xfer_completions_at_attach, 16u);
+}
+
+TEST_CASE(xfer_completions_at_attach_count_both_contexts_and_follow_the_latest_attach) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    // One completion from each of Core 1's two contexts before the attach: the
+    // snapshot has to be the sum, not one context's word, or it would read
+    // low and make the enumeration look further along than it is.
+    tuh_event_hook_cb(1, 2u, true);
+    tuh_event_hook_cb(1, 2u, false);
+    tuh_event_hook_cb(1, 0u, true);
+    CHECK_EQ(backend.observe().xfer_completions_at_attach, 2u);
+
+    tuh_event_hook_cb(1, 2u, true);
+    tuh_event_hook_cb(1, 0u, false);
+    CHECK_EQ(backend.observe().xfer_completions_at_attach, 3u);
 }
 
 TEST_CASE(mount_processing_stores_vid_pid_protocol_descriptor_hash_and_neutral_layout) {

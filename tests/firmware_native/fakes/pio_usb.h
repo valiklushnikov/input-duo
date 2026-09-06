@@ -20,15 +20,21 @@ typedef struct pio_usb_configuration {
 
 #define PIO_USB_ROOT_PORT_CNT 2
 #define PIO_USB_EP_POOL_CNT 32
+#define USB_PID_SETUP 0x2d
 
 typedef struct {
-    // dev_addr and ep_num are the library's own names and volatility for the
-    // two fields ep_slot_map encodes; ep_num carries the direction bit,
-    // because pio_usb_ll_configure_endpoint assigns it bEndpointAddress
-    // verbatim (pio_usb.c:465).
+    // These are the library's own field names and volatility for everything
+    // backend.cpp samples.  Physical layout is deliberately irrelevant in a
+    // native build; the linked-image contract exercises the real endpoint_t.
     volatile uint8_t dev_addr;
     volatile uint8_t ep_num;
     volatile uint16_t size;
+    bool need_pre;
+    bool is_tx;
+    volatile uint8_t data_id;
+    volatile bool stalled;
+    volatile bool has_transfer;
+    volatile bool transfer_aborted;
     uint8_t failed_count;
 } endpoint_t;
 

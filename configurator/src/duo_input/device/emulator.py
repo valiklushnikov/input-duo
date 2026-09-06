@@ -94,11 +94,13 @@ class _Diagnostics:
 #: many values it carries. The block's leading length byte is what makes an
 #: older shape a valid payload rather than a broken one, so the emulator has to
 #: be able to speak all of them: 7 values is the original 20-byte block, 16 is
-#: the 38-byte one, and 22 is the current 62-byte one.
+#: the 38-byte one, 22 is the prior 62-byte one, and 24 is the current
+#: 70-byte one.
 _HOST_OBSERVATION_LAYOUTS = {
     7: "<BIIIBHI",
     16: "<BIIIBHIHHHBBIHHH",
     22: "<BIIIBHIHHHBBIHHHIIIIII",
+    24: "<BIIIBHIHHHBBIHHHIIIIIIII",
 }
 
 
@@ -168,7 +170,8 @@ class U1Emulator(AbstractByteTransport):
         #: root-port resets and configured-hub mount edges, then the endpoint
         #: slot map, the packed host event counts, the enumeration progress
         #: mask, the blocked-pass count and total, and the deepest input-core
-        #: stack pointer). ``None`` means this image has no
+        #: stack pointer, live endpoint-transfer flags and the completion
+        #: total captured at the latest attach). ``None`` means this image has no
         #: host stack to observe and sends a length of zero - which is what the
         #: real CH375 image does, and a different fact from an older firmware
         #: that sends no host block at all.

@@ -75,6 +75,11 @@ constexpr std::size_t kContexts = 2;
 std::atomic<std::uint32_t> attach_events[kContexts];
 std::atomic<std::uint32_t> remove_events[kContexts];
 std::atomic<std::uint32_t> xfer_events[kContexts];
+// The completion total captured by the latest attach in each context. Each
+// word has the same single writer as the counter beside it; the public value
+// takes their maximum because the completion total never decreases, so the
+// later attach necessarily has the greater (or saturated-equal) snapshot.
+std::atomic<std::uint32_t> xfer_completions_at_attach[kContexts];
 // The deepest stack pointer each context saw. Split for the same reason, and
 // it matters more here: a lost sample makes the minimum read HIGHER, which is
 // the direction that hides an overflow.
@@ -102,6 +107,12 @@ std::uint32_t add_clamped(std::uint32_t left, std::uint32_t right,
                           std::uint32_t limit) noexcept {
     const std::uint32_t total = left + right;
     return total > limit ? limit : total;
+}
+
+std::uint32_t xfer_event_total() noexcept {
+    return add_clamped(xfer_events[0].load(std::memory_order_relaxed),
+                       xfer_events[1].load(std::memory_order_relaxed),
+                       kHostEventXferLimit);
 }
 
 /// The deeper of two stack readings, where zero means "never sampled".
@@ -133,6 +144,7 @@ void reset_host_callback_observability() noexcept {
         attach_events[context].store(0, std::memory_order_relaxed);
         remove_events[context].store(0, std::memory_order_relaxed);
         xfer_events[context].store(0, std::memory_order_relaxed);
+        xfer_completions_at_attach[context].store(0, std::memory_order_relaxed);
         min_stack_pointer[context].store(0, std::memory_order_relaxed);
     }
 }
@@ -154,14 +166,17 @@ HostCallbackObservability host_callback_observability() noexcept {
         add_clamped(remove_events[0].load(std::memory_order_relaxed),
                     remove_events[1].load(std::memory_order_relaxed),
                     kHostEventRemoveLimit);
-    const std::uint32_t xfer =
-        add_clamped(xfer_events[0].load(std::memory_order_relaxed),
-                    xfer_events[1].load(std::memory_order_relaxed),
-                    kHostEventXferLimit);
+    const std::uint32_t xfer = xfer_event_total();
     out.host_event_counts = attach | (remove << kHostEventRemoveShift) |
                             (xfer << kHostEventXferShift);
     out.core1_min_sp = deeper(min_stack_pointer[0].load(std::memory_order_relaxed),
                               min_stack_pointer[1].load(std::memory_order_relaxed));
+    const std::uint32_t task_snapshot =
+        xfer_completions_at_attach[0].load(std::memory_order_relaxed);
+    const std::uint32_t isr_snapshot =
+        xfer_completions_at_attach[1].load(std::memory_order_relaxed);
+    out.xfer_completions_at_attach =
+        task_snapshot > isr_snapshot ? task_snapshot : isr_snapshot;
     return out;
 }
 }  // namespace duo_input::u1::pio_usb
@@ -188,6 +203,13 @@ void tuh_event_hook_cb(std::uint8_t rhport, std::uint32_t eventid, bool in_isr) 
     const std::size_t context = in_isr ? 1u : 0u;
     switch (eventid) {
         case duo_input::u1::pio_usb::kEventAttach:
+            // Snapshot before changing the attach count: this is the total at
+            // the queue edge itself. Separate single-writer words avoid an
+            // interrupt racing a task-context load/store; taking the maximum
+            // later selects the latest attach because this total is monotonic.
+            duo_input::u1::pio_usb::xfer_completions_at_attach[context].store(
+                duo_input::u1::pio_usb::xfer_event_total(),
+                std::memory_order_relaxed);
             duo_input::u1::pio_usb::increment_saturating(
                 duo_input::u1::pio_usb::attach_events[context],
                 duo_input::u1::pio_usb::kHostEventAttachLimit);

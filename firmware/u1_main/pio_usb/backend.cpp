@@ -87,6 +87,40 @@ std::uint8_t encode_endpoint_slot(const endpoint_t& endpoint) noexcept {
     return static_cast<std::uint8_t>(encoded | (number & kEpSlotEndpointMask));
 }
 
+/// One ep_transfer_flags byte for one pool entry. Zero means closed.
+std::uint8_t encode_endpoint_transfer(const endpoint_t& endpoint) noexcept {
+    if (endpoint.size == 0) {
+        return 0;
+    }
+
+    std::uint8_t encoded = kEpXferOpen;
+    if (endpoint.need_pre) {
+        encoded = static_cast<std::uint8_t>(encoded | kEpXferNeedPre);
+    }
+    if (endpoint.stalled) {
+        encoded = static_cast<std::uint8_t>(encoded | kEpXferStalled);
+    }
+    if (endpoint.transfer_aborted) {
+        encoded = static_cast<std::uint8_t>(encoded | kEpXferAborted);
+    }
+    if (!endpoint.has_transfer) {
+        // is_tx and data_id retain the preceding stage after completion; they
+        // are not a live direction or PID while the endpoint is idle.
+        return encoded;
+    }
+
+    encoded = static_cast<std::uint8_t>(encoded | kEpXferHasTransfer);
+    if (endpoint.is_tx) {
+        encoded = static_cast<std::uint8_t>(encoded | kEpXferHostOut);
+    }
+    if (endpoint.data_id == USB_PID_SETUP) {
+        encoded = static_cast<std::uint8_t>(encoded | kEpXferSetupStaged);
+    } else if (endpoint.data_id == 1u) {
+        encoded = static_cast<std::uint8_t>(encoded | kEpXferData1);
+    }
+    return encoded;
+}
+
 }  // namespace
 
 void PioUsbBackend::begin() {
@@ -197,6 +231,7 @@ void PioUsbBackend::task(std::uint32_t now_us) {
 
     std::uint8_t slots_opened = 0;
     std::uint32_t slot_map = 0;
+    std::uint32_t transfer_flags = 0;
     for (std::size_t index = 0; index < PIO_USB_EP_POOL_CNT; ++index) {
         const endpoint_t& endpoint = pio_usb_ep_pool[index];
         if (endpoint.size != 0 && slots_opened != 0xFFu) {
@@ -209,6 +244,9 @@ void PioUsbBackend::task(std::uint32_t now_us) {
         if (index < kEpSlotMapSlots) {
             slot_map |= static_cast<std::uint32_t>(encode_endpoint_slot(endpoint))
                         << (8u * index);
+            transfer_flags |=
+                static_cast<std::uint32_t>(encode_endpoint_transfer(endpoint))
+                << (8u * index);
         }
         publish_max(ep_max_failed_count_, endpoint.failed_count);
     }
@@ -217,6 +255,9 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     // down when an endpoint closes. ep_slots_opened beside it stays the
     // high-water count, so the pair says both how far it went and where it is.
     ep_slot_map_.store(slot_map, std::memory_order_relaxed);
+    // Live like ep_slot_map: Core 1 is the only pool sampler and publishes one
+    // already-packed word for Core 0, which never touches library storage.
+    ep_transfer_flags_.store(transfer_flags, std::memory_order_relaxed);
 
     // The attach edge. Nothing below TinyUSB reports one, so it is polled
     // here: four volatile reads a pass, no allocation and no wait. It counts
@@ -313,11 +354,13 @@ HostObservability PioUsbBackend::observe() const {
     out.hub_mount_events =
         static_cast<std::uint16_t>(hub_mount_events_.load(std::memory_order_relaxed));
     out.ep_slot_map = ep_slot_map_.load(std::memory_order_relaxed);
+    out.ep_transfer_flags = ep_transfer_flags_.load(std::memory_order_relaxed);
     out.host_event_counts = callbacks.host_event_counts;
     out.enum_progress_mask = enum_progress_mask_.load(std::memory_order_relaxed);
     out.long_pass_count = long_pass_count_.load(std::memory_order_relaxed);
     out.long_pass_total_ms = long_pass_total_ms_.load(std::memory_order_relaxed);
     out.core1_min_sp = callbacks.core1_min_sp;
+    out.xfer_completions_at_attach = callbacks.xfer_completions_at_attach;
 
     const root_port_t& root = pio_usb_root_port[0];
     std::uint8_t state = 0;

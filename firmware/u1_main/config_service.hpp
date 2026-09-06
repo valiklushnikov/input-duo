@@ -283,12 +283,19 @@ struct HostObservation {
     /// stack was queueing an event. ZERO MEANS NO SAMPLE - no host event has
     /// ever been queued - and is not a stack that reached address zero.
     std::uint32_t core1_min_sp = 0;
+    /// Live Pico-PIO-USB transfer flags for pool slots 0-3. See the host
+    /// backend's kEpXfer* constants; zero bytes are closed slots.
+    std::uint32_t ep_transfer_flags = 0;
+    /// Transfer-completion total captured when the latest attach was queued.
+    /// Current host_event_counts completions minus this is the post-attach
+    /// control-stage count (until the 16-bit total saturates).
+    std::uint32_t xfer_completions_at_attach = 0;
 };
 
 /// The observation's own bytes on the wire, without its leading length.
 inline constexpr std::size_t kHostObservationBytes =
     1 + 4 + 4 + 4 + 1 + 2 + 4 + 2 + 2 + 2 + 1 + 1 + 4 + 2 + 2 + 2 + 4 + 4 + 4 +
-    4 + 4 + 4;
+    4 + 4 + 4 + 4 + 4;
 
 /// The appended host block: one length byte, then that many bytes.
 ///

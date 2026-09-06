@@ -176,6 +176,8 @@ def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
         2,
         950,
         0x20040A40,
+        0x00270101,
+        41,
     )
     with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
         page.service.connect_device(emulator)
@@ -220,6 +222,15 @@ def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
     assert (
         "Deepest input-core stack pointer (0 = no host event was ever queued): "
         "0x20040A40" in reported
+    )
+    assert (
+        "Endpoint transfer state, live (pool slots 0-3): slot0 open idle "
+        "| slot1 open idle | slot2 open active SETUP host-out | slot3 closed"
+        in reported
+    )
+    assert (
+        "Transfer completions when latest attach was queued "
+        "(subtract from current total): 41" in reported
     )
     # The page must not carry the old derived row either: it called a healthy
     # board faulty and it separated this board from a healthy one not at all.

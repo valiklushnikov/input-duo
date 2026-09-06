@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "pio_usb.h"
+
 namespace duo::test::tinyusb_host {
 
 inline constexpr std::uint8_t kProtocolNone = 0;
@@ -53,6 +55,16 @@ void set_endpoint(std::size_t index, std::uint16_t size, std::uint8_t failed_cou
 /// exists for.
 void set_endpoint_identity(std::size_t index, std::uint16_t size,
                            std::uint8_t dev_addr, std::uint8_t ep_num);
+/// Live Pico-PIO-USB fields behind the transfer-state diagnostic byte.
+struct EndpointTransfer {
+    bool has_transfer = false;
+    bool is_tx = false;
+    std::uint8_t data_id = 0;
+    bool need_pre = false;
+    bool stalled = false;
+    bool transfer_aborted = false;
+};
+void set_endpoint_transfer(std::size_t index, const EndpointTransfer& transfer);
 void set_hub_mounted(bool mounted);
 /// What tuh_mounted() reports for one downstream address.
 void set_device_mounted(std::uint8_t dev_addr, bool mounted);

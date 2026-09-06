@@ -158,6 +158,17 @@ void set_endpoint_identity(std::size_t index, std::uint16_t size,
     }
 }
 
+void set_endpoint_transfer(std::size_t index, const EndpointTransfer& transfer) {
+    if (index < PIO_USB_EP_POOL_CNT) {
+        pio_usb_ep_pool[index].has_transfer = transfer.has_transfer;
+        pio_usb_ep_pool[index].is_tx = transfer.is_tx;
+        pio_usb_ep_pool[index].data_id = transfer.data_id;
+        pio_usb_ep_pool[index].need_pre = transfer.need_pre;
+        pio_usb_ep_pool[index].stalled = transfer.stalled;
+        pio_usb_ep_pool[index].transfer_aborted = transfer.transfer_aborted;
+    }
+}
+
 void set_hub_mounted(bool mounted) { hub_mounted = mounted; }
 
 void set_device_mounted(std::uint8_t dev_addr, bool mounted) {
