@@ -1,8 +1,10 @@
 """The guard that stops a PIO USB U1 image from being labelled CH375, or back.
 
 Both ``pico-release`` and ``pico-pio-usb-release`` produce a
-``firmware/u1_main/duo_u1_main.elf``, and ``tools/build_release.ps1`` decides
-which name to give the resulting UF2 (``duo-input-u1-<version>.uf2`` or
+``firmware/u1_main/duo_u1_main.elf``. The reference preset instead produces
+``firmware/u1_reference/duo_u1_reference.elf``.
+``tools/build_release.ps1`` decides which name to give the resulting UF2
+(``duo-input-u1-<version>.uf2`` or
 ``duo-input-u1-pio-usb-<version>.uf2``) from which preset it was asked to
 build. That is a naming decision made *before* this file ever runs, so the
 thing worth checking is not the name - it is whether the artefact the name
@@ -48,6 +50,16 @@ CH375_ONLY_SYMBOL_FRAGMENT = "Ch375Device4tick"
 #: which the CH375 branch of firmware/u1_main/CMakeLists.txt never links.
 PIO_USB_ONLY_SYMBOL_FRAGMENTS = ("tuh_task", "tuh_hid_receive_report")
 
+# Device-side TinyUSB calls that the frozen upstream reference must retain.
+REFERENCE_DEVICE_SYMBOL_FRAGMENTS = ("tud_task", "tud_cdc_n_write")
+
+# Production integration symbols that must not leak into the frozen reference.
+REFERENCE_EXCLUDED_SYMBOL_FRAGMENTS = (
+    CH375_ONLY_SYMBOL_FRAGMENT,
+    "InputPipeline8on_event",
+    "PioUsbBackend4task",
+)
+
 #: Common to both backends (firmware/u1_main/input/pipeline.cpp is compiled
 #: unconditionally), so its presence alone proves nothing about which
 #: backend an image is - it only rules out a build that links neither.
@@ -60,6 +72,10 @@ def _build_dir() -> Path:
 
 
 def _u1_elf(build_dir: Path) -> Path:
+    if (build_dir / "CMakeCache.txt").is_file() and (
+        declared_backend(build_dir) == "PIO_USB_REFERENCE"
+    ):
+        return build_dir / "firmware" / "u1_reference" / "duo_u1_reference.elf"
     return build_dir / "firmware" / "u1_main" / "duo_u1_main.elf"
 
 
@@ -88,10 +104,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_declared_backend_is_one_of_the_two_known_values():
+def test_declared_backend_is_one_of_the_three_known_values():
     # cmake/*.cmake refuses any other value at configure time already; this
     # is the assumption every other test in this file is allowed to make.
-    assert declared_backend(BUILD_DIR) in ("CH375", "PIO_USB")
+    assert declared_backend(BUILD_DIR) in ("CH375", "PIO_USB", "PIO_USB_REFERENCE")
 
 
 def test_a_ch375_declared_build_actually_links_ch375_and_not_pio_usb():
@@ -137,3 +153,25 @@ def test_a_pio_usb_declared_build_actually_links_pio_usb_and_not_ch375():
         f"linked image contains Ch375Device::tick - a CH375 image would "
         "ship under the PIO USB name"
     )
+
+
+def test_a_reference_declared_build_links_only_the_upstream_host_device_path():
+    if declared_backend(BUILD_DIR) != "PIO_USB_REFERENCE":
+        pytest.skip("this build directory is not configured for PIO_USB_REFERENCE")
+
+    symbols = linked_symbols(U1_ELF)
+
+    required_fragments = (
+        *PIO_USB_ONLY_SYMBOL_FRAGMENTS,
+        *REFERENCE_DEVICE_SYMBOL_FRAGMENTS,
+    )
+    for fragment in required_fragments:
+        assert any(fragment in name for name in symbols), (
+            f"{U1_ELF}'s build directory is configured for PIO_USB_REFERENCE "
+            f"but its linked image contains no {fragment}"
+        )
+    for fragment in REFERENCE_EXCLUDED_SYMBOL_FRAGMENTS:
+        assert not any(fragment in name for name in symbols), (
+            f"{U1_ELF}'s build directory is configured for PIO_USB_REFERENCE, "
+            f"but its linked image contains production symbol {fragment}"
+        )

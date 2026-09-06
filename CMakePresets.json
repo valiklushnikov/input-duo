@@ -59,6 +59,16 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
+    },
+    {
+      "name": "pico-pio-usb-reference-release",
+      "inherits": "pico-pio-usb-release",
+      "displayName": "RP2040 firmware (frozen PIO USB reference, release)",
+      "description": "U1 built as a byte-for-byte maintained copy of the pinned Pico-PIO-USB host_hid_to_device_cdc example.",
+      "binaryDir": "${sourceDir}/build/pico-pio-usb-reference-release",
+      "cacheVariables": {
+        "DUO_INPUT_BACKEND": "PIO_USB_REFERENCE"
+      }
     }
   ],
   "buildPresets": [
@@ -81,6 +91,10 @@
     {
       "name": "pico-pio-usb-debug",
       "configurePreset": "pico-pio-usb-debug"
+    },
+    {
+      "name": "pico-pio-usb-reference-release",
+      "configurePreset": "pico-pio-usb-reference-release"
     }
   ],
   "testPresets": [

@@ -71,10 +71,15 @@ someone's hands.
 | `pico-debug` | the same CH375 images with symbols, for a debug probe |
 | `pico-pio-usb-release` | U1 built against the native Pico-PIO-USB/TinyUSB host, `DUO_INPUT_BACKEND=PIO_USB` - see "The PIO USB backend toolchain" below |
 | `pico-pio-usb-debug` | the same PIO USB host build with symbols, for a debug probe |
+| `pico-pio-usb-reference-release` | frozen U1 golden built from the pinned upstream `host_hid_to_device_cdc` example, `DUO_INPUT_BACKEND=PIO_USB_REFERENCE` |
 
 `DUO_INPUT_BACKEND` selects which USB host path U1 is built with. It accepts
-exactly `CH375` or `PIO_USB`; any other value fails configuration rather than
-silently defaulting to one of them.
+exactly `CH375`, `PIO_USB` or `PIO_USB_REFERENCE`; any other value fails
+configuration rather than silently defaulting to one of them. The reference
+preset produces
+`build/pico-pio-usb-reference-release/firmware/u1_reference/duo_u1_reference.uf2`.
+It is a development/hardware-gate artifact and is not selected by release
+packaging until the reference-first acceptance plan reaches its release slice.
 
 ## The PIO USB backend toolchain
 
@@ -121,6 +126,9 @@ set PATH=%PICO_TOOLCHAIN_PATH%\bin;%PATH%
 
 cmake --preset pico-pio-usb-release
 cmake --build --preset pico-pio-usb-release --parallel
+
+cmake --preset pico-pio-usb-reference-release
+cmake --build --preset pico-pio-usb-reference-release --parallel
 ```
 
 Unlike `pico-release`, `PICO_SDK_PATH` must **not** be set for this preset -

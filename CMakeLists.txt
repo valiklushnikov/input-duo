@@ -31,18 +31,19 @@ if(DUO_PICO_FIRMWARE)
 
     # Which physical USB host path U1 uses. CH375 is the currently shipping
     # implementation; PIO_USB is the native Pico-PIO-USB/TinyUSB host under
-    # migration (see docs/superpowers/specs/2026-09-02-pio-usb-hub-v1-design.md).
+    # migration, while PIO_USB_REFERENCE is the frozen upstream golden target
+    # used to rebuild that integration one measured layer at a time.
     # An unrecognised value fails configuration outright: silently building
     # one backend when a different one was asked for is worse than refusing
     # to build at all.
-    set(DUO_INPUT_BACKEND "CH375" CACHE STRING "U1 USB host backend: CH375 or PIO_USB")
-    set_property(CACHE DUO_INPUT_BACKEND PROPERTY STRINGS CH375 PIO_USB)
-    if(NOT DUO_INPUT_BACKEND STREQUAL "CH375" AND NOT DUO_INPUT_BACKEND STREQUAL "PIO_USB")
-        message(FATAL_ERROR
-            "Unknown DUO_INPUT_BACKEND '${DUO_INPUT_BACKEND}'; expected CH375 or PIO_USB.")
+    set(DUO_INPUT_BACKEND "CH375" CACHE STRING "U1 USB host backend")
+    set(_duo_input_backends CH375 PIO_USB PIO_USB_REFERENCE)
+    set_property(CACHE DUO_INPUT_BACKEND PROPERTY STRINGS ${_duo_input_backends})
+    if(NOT DUO_INPUT_BACKEND IN_LIST _duo_input_backends)
+        message(FATAL_ERROR "Unknown DUO_INPUT_BACKEND '${DUO_INPUT_BACKEND}'")
     endif()
 
-    if(DUO_INPUT_BACKEND STREQUAL "PIO_USB")
+    if(NOT DUO_INPUT_BACKEND STREQUAL "CH375")
         # Locates and verifies its own Pico SDK / TinyUSB / Pico-PIO-USB
         # clones under .deps/, independently of PICO_SDK_PATH. The CH375
         # branch below is untouched: it keeps resolving PICO_SDK_PATH from
@@ -65,8 +66,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(DUO_PICO_FIRMWARE)
     if(DUO_INPUT_BACKEND STREQUAL "CH375")
         add_compile_definitions(DUO_INPUT_BACKEND_CH375=1)
-    else()
+    elseif(DUO_INPUT_BACKEND STREQUAL "PIO_USB")
         add_compile_definitions(DUO_INPUT_BACKEND_PIO_USB=1)
+    else()
+        add_compile_definitions(DUO_INPUT_BACKEND_PIO_USB_REFERENCE=1)
     endif()
     pico_sdk_init()
 endif()
