@@ -8,6 +8,13 @@ hand-editing the clones - which
 fixes live here as patches under version control, and the bootstrap applies
 them and commits them into the clone.
 
+Pico-PIO-USB carries a second, numbered patch that is not a fix at all: the
+control-transfer packet trace, a diagnostic instrument that is meant to be
+deleted once the question it was built to answer has been answered. It is a
+separate file so deleting it is deleting a file, and the last part of this
+module is what keeps it honest - above all that it records *after* the
+handshake for each packet has been sent, never before.
+
 That commit's SHA is what the lock pins, so it has to be reproducible on any
 machine. A git commit hashes its tree, its parent and its author and committer
 identity, name, email and date alike - so every one of those is fixed, and the
@@ -34,7 +41,7 @@ PICO_PIO_USB_BASE_REVISION = "3c1eec341a5232640e4c00628b889b641af34b28"
 #: bases above, with the fixed identity and date below. These are what the
 #: build is verified against.
 TINYUSB_PATCHED_REVISION = "507766faf14f38a6752401fb4f324cc00cd145dd"
-PICO_PIO_USB_PATCHED_REVISION = "a2a076497ab6f373ae1c9e98777bf3a0c6f4a40e"
+PICO_PIO_USB_PATCHED_REVISION = "0ba2b6fe3e92289a9c40c33d3f7906db7506845a"
 
 #: Fixed so the commit SHA is reproducible.
 PATCH_COMMIT_IDENTITY = "toolchain@duo-input.invalid"
@@ -63,10 +70,38 @@ def _patch_paths() -> list[Path]:
 # ------------------------------------------------------------------ patches
 
 
-def test_every_patched_dependency_has_exactly_one_patch():
+def test_every_patched_dependency_has_at_least_one_patch_in_sorted_order():
+    """One patch per dependency was the rule until the control trace.
+
+    The trace instrumentation is diagnostic and temporary: it exists to tell
+    "the device sent nothing" from "the host stack lost what the device sent",
+    and it is meant to be deleted once that question is answered. Folding it
+    into ``0001-duo-input-host-fixes.patch`` would bury four measured, keeping
+    fixes and one throwaway instrument in the same file, and removing the
+    instrument later would then mean editing the file that carries the fixes.
+    A separate numbered patch is deleted by deleting a file.
+
+    What replaces the old invariant is the property that actually mattered:
+    the patches are numbered, applied in sorted order, and every one of them
+    is accounted for.
+    """
     for name in PATCHED_DEPENDENCIES:
         patches = sorted((REPOSITORY_ROOT / "patches" / name).glob("*.patch"))
-        assert len(patches) == 1, f"{name}: expected one patch, found {patches}"
+        assert patches, f"{name}: no patches found"
+        for index, patch in enumerate(patches, start=1):
+            assert patch.name.startswith(f"{index:04d}-"), (
+                f"{name}: patches must be numbered without gaps so their apply "
+                f"order is unambiguous; found {patch.name} at position {index}"
+            )
+
+
+def test_the_bootstrap_applies_the_patches_in_sorted_order():
+    """More than one patch means the order they apply in is load-bearing."""
+    bootstrap = _bootstrap_text()
+    assert "Sort-Object Name" in bootstrap, (
+        "the bootstrap does not sort the patch files, so a second patch would "
+        "apply in whatever order the filesystem returned"
+    )
 
 
 def test_patches_are_tracked_text_and_not_empty():
@@ -78,15 +113,18 @@ def test_patches_are_tracked_text_and_not_empty():
         )
 
 
-def test_the_pico_pio_usb_patch_touches_only_the_host_transaction_file():
-    text = (
-        REPOSITORY_ROOT / "patches" / "pico-pio-usb" / "0001-duo-input-host-fixes.patch"
-    ).read_text(encoding="utf-8")
-    touched = {line.split(" b/")[1].strip() for line in text.splitlines() if line.startswith("diff --git ")}
-    assert touched == {"src/pio_usb_host.c"}, (
-        "the PIO programs and bus timing are deliberately left alone; "
-        f"this patch touches {sorted(touched)}"
-    )
+def test_the_pico_pio_usb_patches_touch_only_the_host_transaction_file():
+    for patch in sorted((REPOSITORY_ROOT / "patches" / "pico-pio-usb").glob("*.patch")):
+        text = patch.read_text(encoding="utf-8")
+        touched = {
+            line.split(" b/")[1].strip()
+            for line in text.splitlines()
+            if line.startswith("diff --git ")
+        }
+        assert touched == {"src/pio_usb_host.c"}, (
+            "the PIO programs and bus timing are deliberately left alone; "
+            f"{patch.name} touches {sorted(touched)}"
+        )
 
 
 def test_the_tinyusb_patch_touches_only_the_three_host_files():
@@ -181,3 +219,191 @@ def test_patches_are_exempt_from_line_ending_conversion():
     """
     attributes = (REPOSITORY_ROOT / ".gitattributes").read_text(encoding="utf-8")
     assert "patches/**/*.patch -text" in attributes
+
+
+# ------------------------------------------------- the control-transfer trace
+
+
+def _patched_file(patch: Path, path: str) -> str:
+    """The post-image of one file as a patch leaves it, hunks only.
+
+    A diff carries context lines as well as added ones, so with enough context
+    the ordering of the shipped code is readable straight out of the patch -
+    which is exactly what has to be asserted here. Placement is this
+    instrumentation's whole design: recording before the handshake broke
+    enumeration on this hardware, recording after it did not.
+    """
+    lines: list[str] = []
+    in_file = False
+    in_hunk = False
+    for line in patch.read_text(encoding="utf-8").splitlines():
+        if line.startswith("diff --git "):
+            in_file = line.split(" b/")[1].strip() == path
+            in_hunk = False
+            continue
+        if not in_file:
+            continue
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if not in_hunk:
+            continue
+        if line.startswith("+") or line.startswith(" "):
+            lines.append(line[1:])
+    assert lines, f"{patch} carries no hunk for {path}"
+    return "\n".join(lines)
+
+
+CONTROL_TRACE_PATCH = (
+    REPOSITORY_ROOT / "patches" / "pico-pio-usb" / "0002-duo-input-control-trace.patch"
+)
+
+
+def _control_trace_source() -> str:
+    return _patched_file(CONTROL_TRACE_PATCH, "src/pio_usb_host.c")
+
+
+def test_the_control_trace_records_after_the_handshake_never_before():
+    """The one placement rule this instrument has.
+
+    ``pio_usb_bus_receive_packet_and_handshake`` sends the ACK before it
+    returns, so the return site is already past the timing-critical window.
+    Anything recorded before it is recorded inside that window, and this
+    project has measured what that costs: instrumentation before the ACK broke
+    enumeration outright.
+    """
+    source = _control_trace_source()
+
+    handshake = source.index("pio_usb_bus_receive_packet_and_handshake")
+    continued = source.index("pio_usb_ll_transfer_continue(ep, receive_len)")
+    recorded = source.index("ctrl_trace_record(PIO_USB_CTRL_TRACE_KIND_DATA")
+    assert handshake < recorded, (
+        "the DATA packet is recorded before its handshake has been sent"
+    )
+    assert continued < recorded, (
+        "the DATA packet is recorded before pio_usb_ll_transfer_continue, so "
+        "ep->actual_len and ep->total_len would be the values from before it"
+    )
+
+    setup_wait = source.index("pio_usb_bus_wait_handshake")
+    setup_recorded = source.index("ctrl_trace_record(PIO_USB_CTRL_TRACE_KIND_SETUP")
+    assert setup_wait < setup_recorded, (
+        "the SETUP packet is recorded before its handshake was waited for"
+    )
+
+
+def test_the_control_trace_admits_only_control_endpoints():
+    """Interrupt IN report traffic must never enter the ring.
+
+    A single keyboard produces thousands of interrupt IN packets a second. Any
+    of them in the ring buries the enumeration and the two descriptor
+    experiments the ring exists to capture.
+    """
+    source = _control_trace_source()
+    record_start = source.index("ctrl_trace_record)(")
+    body = source[record_start : source.index("pio_usb_host_ctrl_trace_take")]
+    assert "(ep->ep_num & 0x7f) != 0" in body, (
+        "the record site does not filter on the control endpoint number"
+    )
+    assert body.index("(ep->ep_num & 0x7f) != 0") < body.index("ctrl_trace_head"), (
+        "the filter runs after the ring has already been touched"
+    )
+
+
+def test_the_control_trace_counts_what_it_could_not_keep():
+    """A silently dropped packet reads exactly like one the device never sent."""
+    source = _control_trace_source()
+    assert "ctrl_trace_lost" in source
+    assert "uint32_t pio_usb_host_ctrl_trace_lost(void)" in source, (
+        "the overflow count is not readable, so it can never be reported"
+    )
+    record_start = source.index("ctrl_trace_record)(")
+    body = source[record_start : source.index("pio_usb_host_ctrl_trace_take")]
+    assert "ctrl_trace_lost++" in body or "ctrl_trace_lost += 1" in body, (
+        "a refused record is dropped without being counted"
+    )
+
+
+def test_the_control_trace_records_the_setup_bytes_that_caused_each_run():
+    source = _control_trace_source()
+    assert "PIO_USB_CTRL_TRACE_KIND_SETUP" in source
+    assert "ctrl_trace_record(PIO_USB_CTRL_TRACE_KIND_SETUP, ep, handshake, 8," in source, (
+        "the SETUP entry does not carry the eight request bytes, so a run of "
+        "DATA packets cannot be attributed to the request that caused it"
+    )
+
+
+def test_the_control_trace_reports_the_endpoint_fields_it_claims_to():
+    """ep->size is what turns EP0 = 8 versus EP0 = 64 into a measurement."""
+    source = _control_trace_source()
+    record_start = source.index("ctrl_trace_record)(")
+    body = source[record_start : source.index("pio_usb_host_ctrl_trace_take")]
+    for field, assignment in (
+        ("ep_size", "entry->ep_size = ep->size;"),
+        ("actual_len", "entry->actual_len = ep->actual_len;"),
+        ("total_len", "entry->total_len = ep->total_len;"),
+        ("dev_addr", "entry->dev_addr = ep->dev_addr;"),
+        ("ep_num", "entry->ep_num = ep->ep_num;"),
+    ):
+        assert assignment in body, f"{field} is not taken from its own endpoint field"
+
+
+def test_the_control_trace_does_no_formatting_or_blocking_at_the_record_site():
+    """Copying sixteen bytes and a few scalars is the entire permitted cost."""
+    source = _control_trace_source()
+    record_start = source.index("ctrl_trace_record)(")
+    body = source[record_start : source.index("pio_usb_host_ctrl_trace_take")]
+    for forbidden in ("printf", "snprintf", "malloc", "busy_wait", "sleep_", "while ("):
+        assert forbidden not in body, (
+            f"{forbidden} appears at the record site, which runs on the host "
+            "core inside the transaction path"
+        )
+
+
+def test_the_control_trace_exposes_a_drain_api_without_a_shared_layout():
+    """The firmware must not have to mirror a struct it cannot include.
+
+    ``test_the_pico_pio_usb_patches_touch_only_the_host_transaction_file``
+    keeps the patch out of the headers, so the drain has to hand back scalars
+    rather than an entry whose layout two files would have to agree on.
+    """
+    source = _control_trace_source()
+    assert "bool pio_usb_host_ctrl_trace_take(" in source
+    take = source[source.index("bool pio_usb_host_ctrl_trace_take(") :]
+    for out_param in (
+        "out_seq",
+        "out_kind",
+        "out_dev_addr",
+        "out_ep_num",
+        "out_pid",
+        "out_len",
+        "out_ep_size",
+        "out_actual_len",
+        "out_total_len",
+        "out_bytes",
+        "out_byte_count",
+    ):
+        assert out_param in take, f"the drain never returns {out_param}"
+    assert "pio_usb_ctrl_trace_entry_t" not in take.split("{", 1)[0], (
+        "the drain's signature exposes the private entry layout"
+    )
+
+
+def test_the_control_trace_entry_kinds_are_the_numbers_the_firmware_expects():
+    """Two files agree on these three numbers and cannot include each other."""
+    source = _control_trace_source()
+    for name, value in (
+        ("PIO_USB_CTRL_TRACE_KIND_SETUP", "0"),
+        ("PIO_USB_CTRL_TRACE_KIND_DATA", "1"),
+        ("PIO_USB_CTRL_TRACE_KIND_DONE", "2"),
+    ):
+        assert f"#define {name} {value}u" in source, (
+            f"{name} is not defined as {value}"
+        )
+
+    callbacks = (
+        REPOSITORY_ROOT / "firmware" / "u1_reference" / "host_callbacks.cpp"
+    ).read_text(encoding="utf-8")
+    assert "static_assert" in callbacks and "ReferenceControlTraceKind" in callbacks, (
+        "nothing pins the firmware enum to the numbers the patch produces"
+    )

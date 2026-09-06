@@ -24,8 +24,10 @@ set(DUO_PIO_USB_PICO_SDK_REVISION "98a542c1a62fb549ffb5d66a3e5892b06276b670")
 set(DUO_PIO_USB_TINYUSB_BASE_REVISION "86ad6e56c1700e85f1c5678607a762cfe3aa2f47")
 set(DUO_PIO_USB_PICO_PIO_USB_BASE_REVISION "3c1eec341a5232640e4c00628b889b641af34b28")
 
-# TinyUSB and Pico-PIO-USB are built one commit further on, with the four host
-# fixes in patches/ applied. Those defects are measured and recorded in
+# TinyUSB and Pico-PIO-USB are built one commit further on, with everything in
+# patches/ applied: the four host fixes, and - for now - one diagnostic patch
+# that instruments Pico-PIO-USB's control transfers. Those defects are measured
+# and recorded in
 # docs/superpowers/records/2026-09-03-pio-usb-hub-v1-record.md; without them
 # this hardware does not enumerate a second device, does not mount a keyboard,
 # and loses hub port events for the rest of the session after a single
@@ -37,7 +39,7 @@ set(DUO_PIO_USB_PICO_PIO_USB_BASE_REVISION "3c1eec341a5232640e4c00628b889b641af3
 # strict: exact revision, and a clone with no uncommitted changes. A tree
 # hand-edited after bootstrapping still cannot be built against silently.
 set(DUO_PIO_USB_TINYUSB_REVISION "507766faf14f38a6752401fb4f324cc00cd145dd")
-set(DUO_PIO_USB_PICO_PIO_USB_REVISION "a2a076497ab6f373ae1c9e98777bf3a0c6f4a40e")
+set(DUO_PIO_USB_PICO_PIO_USB_REVISION "0ba2b6fe3e92289a9c40c33d3f7906db7506845a")
 
 find_package(Git QUIET)
 if(NOT GIT_FOUND)
