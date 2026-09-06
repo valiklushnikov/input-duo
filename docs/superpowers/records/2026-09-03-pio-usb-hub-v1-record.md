@@ -1109,3 +1109,60 @@ loudly as an unreviewed first one.
 
 Verification run: 113 build tests pass, 43 native tests pass, and all three Pico
 presets build.
+
+## The wheel: measured, and why the gate row cannot be met by the reference (2026-09-06)
+
+Every capture showed a zero wheel column. That was investigated rather than
+assumed, by printing the report length and raw bytes the device actually
+delivers - the upstream example takes `len` and discards it (`(void) len`).
+
+**In boot protocol**, which is what the host selects by default
+(`hid_host.c:71`, `_hidh_default_protocol = HID_PROTOCOL_BOOT`, and the example
+never changes it):
+
+```
+addr=1 itf=0 proto=2 (Mouse)     len=3   x1278
+addr=1 itf=2 proto=1 (Keyboard)  len=7   x30
+```
+
+Three bytes: buttons, X, Y - exactly the boot mouse report. Not one of 1278
+reports had a non-zero fourth or fifth byte, because there is no fourth byte.
+The example nonetheless casts the buffer to `hid_mouse_report_t`, five fields
+wide, and prints `report->wheel`: it reads **past the end of the received
+data**. The zeros printed all day were not a wheel reading zero, they were an
+out-of-bounds read that happened to land on zero. The keyboard path has the
+same flaw - 7 bytes received, cast to an 8-byte `hid_keyboard_report_t`, so
+`keycode[5]` is read out of bounds too.
+
+**In report protocol**, requested with `tuh_hid_set_default_protocol(HID_PROTOCOL_REPORT)`:
+
+```
+addr=1 itf=0 proto=2 (Mouse)     len=8   x691
+addr=1 itf=2 proto=1 (Keyboard)  len=9   x36
+```
+
+| mouse byte | observed | meaning |
+| --- | --- | --- |
+| 0 | always `03` | report ID 3 |
+| 1 | `00 01 02` | buttons |
+| 2-3 | varies, byte 3 is `00`/`FF` | X, 16-bit signed little-endian |
+| 4-5 | varies, byte 5 is `00`/`FF` | Y, 16-bit signed little-endian |
+| 6 | `00 01 02 FE FF` | **wheel, both directions** |
+| 7 | always `00` | pan |
+
+The keyboard is the same shape: byte 0 is always `01` - report ID 1 - then
+modifiers, reserved, and keycodes (`4F`, `50` observed).
+
+So the wheel exists and is reachable, but **both devices use report IDs**. The
+first byte is an identifier, not data. Simply switching the reference to report
+protocol would make it read the report ID as the button mask; the layout has to
+come from the report descriptor, which is what the production neutral pipeline
+does and what Task 3 restores.
+
+**Consequence for the plan.** Task 1 Step 7 lists "mouse movement/buttons/wheel
+reports" as a PASS requirement. The frozen reference is a byte-for-byte copy of
+an example that runs in boot protocol, where no wheel byte is transmitted at
+all. That row is unsatisfiable by construction: it asks the reference to report
+something the protocol it speaks does not carry. The defect is in the plan's
+acceptance criteria, not in the firmware or the hardware, and the row is moved
+to Task 3 where descriptor parsing makes it meaningful.
