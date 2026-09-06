@@ -1023,3 +1023,38 @@ Still outstanding: the address 2 replug row; whether fix 5 is necessary on its
 own; why the device disagrees about the data toggle at all; the wired Aula F75
 taking the whole bus down; and adoption through forked dependencies with new
 pinned revisions in `cmake/pio_usb_toolchain_lock.cmake`.
+
+## Minimisation: the turnaround change is unnecessary (2026-09-06)
+
+`candidate_v6` (`2216d782c0db377375056d1a026379e222b93ab57e90a1f7b69ac6575c41ee63`)
+is `candidate_v5` with fix 5 removed, so `pio_usb.c` is untouched and no bus
+timing is altered at all.
+
+| | v5 (with fix 5) | v6 (without) |
+| --- | --- | --- |
+| interfaces mounted | 5 | 5 |
+| mouse reports, cold start | 3270 | 2378 |
+| keyboard characters | 59 | 86 |
+| unmounts / errors | 0 / 0 | 0 / 0 |
+| hot replug | 6 unmount + 6 mount, 1179 reports after | 3 unmount + 3 mount, 2711 reports after |
+
+The report counts differ only by how much the mouse was moved. Nothing regressed,
+so **fix 5 is dropped**: its earlier apparent benefit (early toggle mismatches
+falling from 1018 to 6) was not needed once the toggle policy and the hub poll
+were repaired, and it is not worth changing handshake timing without cause.
+
+### The adopted change set is four fixes
+
+`tinyusb-host-fixes.patch`:
+1. `usbh.c` - enable `ENUM_RESET_2`, `RESET_DELAY` -> `ENUM_RESET_DELAY_MS`.
+2. `hid_host.c` - mount a boot-protocol interface when the Report Descriptor
+   fetch fails.
+3. `hub.c` - re-arm the hub status poll after a failed transfer.
+
+`pico-pio-usb-host-fixes.patch`:
+4. `pio_usb_host.c` - bound the control-endpoint toggle-mismatch retry; on
+   non-control endpoints discard first and resync only after a run of
+   consecutive mismatches.
+
+Plus `CFG_TUH_HID 4 -> 8` in the reference `tusb_config.h`. `pio_usb.c`,
+`usb_crc.c` and every PIO program are unmodified.
