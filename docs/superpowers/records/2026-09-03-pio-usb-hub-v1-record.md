@@ -514,3 +514,122 @@ assumed the upstream example is a working hub baseline on this hardware; that
 assumption is now measured false.
 
 Full host log: captured 2026-09-06 17:03, 434 lines, 14063 bytes.
+
+## The enumeration defect is fixable in TinyUSB, and one gap remains (2026-09-06)
+
+With permission to modify the pinned dependencies, the failure recorded above
+was traced to a specific place in TinyUSB's enumeration and fixed there. The
+measurement is unambiguous, because the instrumented build counts SETUP
+transactions per device address at the bus level.
+
+### The measurement that names the failure
+
+Diagnostic build `cdf31764ea8635f49dfd9cf5dff4e6029ff5b49cf3afe4bd6a31e56231da23a3`
+counts SETUP outcomes inside `pio_usb_host.c` and records, for each failure, the
+receive phase and the token bytes actually transmitted:
+
+```
+SETUP addr=0 ok=6  fail=0
+SETUP addr=1 ok=12 fail=0     <- Keychron receiver, EP0 = 8
+SETUP addr=5 ok=19 fail=0     <- hub 1A86:8091, EP0 = 64
+SETUP addr=2 ok=0  fail=12 last=0x00 NONE phase=NO-RX-START token=02 a8
+```
+
+`token = 02 a8` is a correctly formed token: address 2, endpoint 0, CRC5 `0x15`
+(`0x15 << 3 = 0xa8`). `phase = NO-RX-START` means the receiver never saw even
+the start of a reply. So the host emits a valid SETUP to address 2 and nothing
+on the bus answers, while the same device answered every request at address 0
+and its `SET_ADDRESS` status stage completed.
+
+Two candidate explanations were retired without touching the bench:
+
+- **CRC5.** The library's `calc_usb_crc5` was compared against the USB
+  specification algorithm for all 16 addresses across three endpoint numbers.
+  No mismatch.
+- **SETUP packet length.** `prepare_tx_data` uses
+  `pio_usb_ll_get_transaction_len`, which is `min(ep->size, remaining)`, so a
+  64-byte EP0 still emits an 8-byte SETUP.
+
+TinyUSB does honour the 2 ms address-recovery time (`usbh.c:1448`, USB 9.2.6.3).
+
+### The fix
+
+`usbh.c` already contains the remedy, written by upstream and disabled:
+`ENUM_RESET_2` — "2nd reset before set address" — sits behind `#if 0` with the
+comment *"not used by now, but may be needed for some devices !?"*. Its
+supporting states `ENUM_HUB_GET_STATUS_2` and `ENUM_HUB_CLEAR_RESET_2` are live
+and reachable; only the entry into them is compiled out. The device measured
+here is exactly the class that comment describes.
+
+```diff
+--- a/src/host/usbh.c
++++ b/src/host/usbh.c
+@@ -1411,11 +1411,10 @@ static void process_enumeration(tuh_xfer_t* xfer) {
+       TU_ASSERT(tuh_descriptor_get_device(addr0, _usbh_epbuf.ctrl, 8,
+-                                          process_enumeration, ENUM_SET_ADDR),);
++                                          process_enumeration, ENUM_RESET_2),);
+       break;
+     }
+ 
+-#if 0
+       case ENUM_RESET_2:
+@@ -1423,7 +1422,7 @@ static void process_enumeration(tuh_xfer_t* xfer) {
+           hcd_port_reset( _dev0.rhport );
+-          tusb_time_delay_ms_api(RESET_DELAY);
++          tusb_time_delay_ms_api(ENUM_RESET_DELAY_MS);
+@@ -1437,7 +1436,6 @@ static void process_enumeration(tuh_xfer_t* xfer) {
+         TU_ATTR_FALLTHROUGH;
+-#endif
+ 
+     case ENUM_SET_ADDR:
+```
+
+`RESET_DELAY` no longer exists in this revision; `ENUM_RESET_DELAY_MS` (50 ms,
+`usbh.c:1305`) is its replacement. Without that substitution the file does not
+compile, which is why the block had rotted unnoticed.
+
+### Measured effect
+
+Same hardware, same hub, same two receivers, one power cycle:
+
+| | before | after |
+| --- | --- | --- |
+| `SETUP addr=2` | ok=0, fail=12 | **ok=7, fail=0** |
+| device at address 2 | never enumerates | full descriptor, configuration descriptor (59 bytes), `Set Configuration`, HID setup requests |
+| other devices | unaffected | unaffected, no new failures at any address |
+
+The device that had been invisible is now enumerated. Nothing regressed: every
+address shows zero SETUP failures.
+
+### The gap that remains — the gate still fails
+
+Enumeration is fixed; **HID mounting for that receiver is not**. After the fix,
+address 2 completes `Set Configuration` and begins per-interface HID setup, but
+no `tuh_hid_mount_cb` fires for it and typing produces no characters. A clean
+boot capture with no mouse traffic at all (so nothing can be lost from the CDC
+FIFO) shows only the Keychron receiver's three interfaces.
+
+One contributing limit is already visible in the log and is separate from the
+enumeration defect:
+
+```
+[1:2] Interface 1: class = 3 subclass = 1 protocol = 2 is not supported
+```
+
+The upstream example sets `CFG_TUH_HID 4`. The Keychron receiver alone consumes
+three instances, so a second composite receiver cannot fit. Raising it to 8 (the
+production firmware's `2 * CFG_TUH_DEVICE_MAX`) was included in the validation
+image `6e3f766617c10aa1cc70e34a8a0688e990701e0c66826b206a8589f7572c29ac` and did
+not by itself produce a mount, so the remaining cause is elsewhere in the HID
+setup path for that device and is not yet identified.
+
+**Task 1's gate therefore still fails** and the plan stays stopped. What is
+established is that the blocker is a defect in the pinned dependency stack with
+a located, measured, partially effective fix — not a defect in Duo Input code,
+and not the "almost upstream integrated build" the previous session blamed.
+
+Any adoption of this fix must go through a forked dependency and a new pinned
+revision in `cmake/pio_usb_toolchain_lock.cmake`. That lock correctly refuses to
+build against a hand-edited clone; the diagnostic builds above bypassed it only
+through a temporary, reverted `DUO_PIO_USB_DIAGNOSTIC_ALLOW_DIRTY` flag, and no
+such build is a release candidate.
