@@ -855,3 +855,74 @@ receiver consumes three HID instances, so two of them cannot fit in four.
 - Task 1's remaining gate rows are untested: replug/re-enumeration of each
   device, keyboard and mouse under rapid simultaneous load, and detach while
   held.
+
+## Gate rows run on the working image, and where it still fails (2026-09-06)
+
+Image `6fb3d6b0454102c261a3797adadfafde1a575cbaa2911be32ae5d6419e15e086`
+(`candidate_v4`, 102400 bytes) refines the toggle resync: discard first, as the
+specification says, and resync only after a run of consecutive mismatches.
+Resyncing on *every* mismatch (candidate_v3) accepted an endlessly repeated
+packet endlessly, flooding the bus at ~670 reports/s and starving the other
+endpoints.
+
+### Passing
+
+**Cold start with both receivers, repeated three times.** Five HID interfaces
+mount every time and both devices work simultaneously:
+
+| run | mouse reports | keyboard chars | unmounts | errors |
+| --- | --- | --- | --- | --- |
+| candidate_v3 | 3463 | 85 | 0 | 0 |
+| candidate_v3 (repeat) | 3133 | 89 | 0 | 0 |
+| candidate_v4 | 3329 | 133 | 0 | 0 |
+
+All mouse reports come from address 1 at a normal rate (~100/s). No stalls, no
+stuck state, no lost devices over 30-35 s of continuous simultaneous input.
+
+### Failing: hot replug
+
+Unplugging a receiver produces **no `is unmounted` line**, and plugging it back
+produces no mount line and no working device. The host keeps polling endpoints
+that are gone, and the bus degrades into ~670 reports/s from both addresses with
+the keyboard dead. Identical on candidate_v3 and candidate_v4, so this is not
+caused by the resync policy.
+
+This is the same class of symptom as the original pre-fix report: hub port
+change events are serviced during start-up but not during operation. What the
+fixes repaired is enumeration at power-up; hot-plug event handling is untouched
+and remains broken.
+
+**It is bounded and recoverable.** A U1 power cycle restores everything: 2737
+mouse reports from address 1 and 116 keyboard characters immediately afterwards,
+with no flood. So the failure mode is "replug requires a power cycle", not a
+dead rig.
+
+### The wired keyboard takes the whole bus down
+
+Connecting the Aula F75 by its own cable instead of its receiver worked briefly
+(characters were received) and then killed enumeration entirely: after it, even
+a power cycle produced 0 bytes and the mouse receiver that had been working
+stopped enumerating too. Removing the cable restored everything on the next
+power cycle (37837 bytes, mouse mounted and reporting).
+
+The leading suspect is power, not protocol: the hub is fed from PC1 VBUS and a
+backlit keyboard adds substantial current, and a brownout stops enumeration for
+every device at once. This is what the RGB power gate in
+`docs/release/pio-usb-hardware-checklist-ru.md` exists to catch. It has not been
+measured, and no conclusion should be drawn until it is.
+
+### Gate status
+
+| Task 1 Step 7 row | result |
+| --- | --- |
+| hub enumeration | pass |
+| keyboard and mouse HID mount | pass (5 interfaces, both receivers) |
+| keyboard characters | pass |
+| mouse movement and buttons | pass (`L`, `R`) |
+| mouse wheel | not observable in boot protocol - see above |
+| simultaneous use | pass, 30-35 s, three runs |
+| re-enumeration after each replug | **fail** |
+
+The gate is not passed. What changed today is that the blocker is now a single
+known row with a documented workaround, rather than a device that could not be
+enumerated at all.
