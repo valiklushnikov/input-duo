@@ -149,6 +149,25 @@ Taken take(ReferenceSourceAdapter& adapter) {
     return taken;
 }
 
+struct CdcWriter final : IReferenceCdcWriter {
+    std::size_t space = 0;
+    std::size_t write_limit = 0;
+    std::size_t write_calls = 0;
+    std::size_t flush_calls = 0;
+    std::string output;
+
+    std::size_t available() const override { return space; }
+
+    std::size_t write(const char* data, std::size_t size) override {
+        ++write_calls;
+        const std::size_t count = std::min(size, write_limit);
+        output.append(data, count);
+        return count;
+    }
+
+    void flush() override { ++flush_calls; }
+};
+
 }  // namespace
 
 TEST_CASE(a_boot_mouse_mount_is_announced_as_a_ready_mouse) {
@@ -603,16 +622,6 @@ TEST_CASE(descriptor_completion_rejects_failure_short_lifetime_and_overflow) {
           State::Completion::Success);
 }
 
-TEST_CASE(synchronous_descriptor_cancellation_prevents_a_reused_address_offer) {
-    ReferenceSourceAdapter adapter;
-    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0u);
-    CHECK(take(adapter).ok);
-    adapter.cancel_descriptor_request(2, 0);
-    ReferenceSourceAdapter::DescriptorRequest request{};
-    CHECK_FALSE(adapter.take_descriptor_request(
-        ReferenceSourceAdapter::kDescriptorQuietUs, request));
-}
-
 TEST_CASE(desc64_comparison_uses_actual_length_and_the_independent_golden_prefix) {
     using Result = duo_input::u1::reference::DescriptorDiagnosticResult;
     const auto golden = aula_keyboard_descriptor_vector();
@@ -639,6 +648,119 @@ TEST_CASE(desc64_comparison_uses_actual_length_and_the_independent_golden_prefix
     const auto failed = duo_input::u1::reference::descriptor_diagnostic_complete(
         false, 64u, golden.data(), golden.size());
     CHECK(failed.kind == Result::Kind::Failure);
+}
+
+TEST_CASE(descriptor_completion_owns_cdc_until_one_full_write) {
+    using Coordinator =
+        duo_input::u1::reference::DescriptorDiagnosticCoordinator;
+    using Completion =
+        duo_input::u1::reference::DescriptorTransferState::Completion;
+
+    reference_queue_reset();
+    ReferenceSourceAdapter adapter;
+    Coordinator coordinator(adapter);
+    const auto golden = aula_keyboard_descriptor_vector();
+
+    ReferenceTraceEntry report_trace{};
+    report_trace.kind = ReferenceCallbackKind::Report;
+    report_trace.dev_addr = 7;
+    report_trace.instance = 1;
+    report_trace.length = 8;
+    CHECK(reference_trace_push(report_trace));
+
+    CHECK(coordinator.start(2, 0));
+    const std::uint32_t token = coordinator.lifetime_token();
+    CHECK(coordinator.complete(2, true, 64u, true, golden.data(),
+                               golden.size(), token) == Completion::Success);
+
+    CdcWriter writer;
+    reference_service_cdc(writer);
+    CHECK_EQ(writer.write_calls, 0u);
+    CHECK(writer.output.empty());
+
+    writer.space = 96;
+    writer.write_limit = 2;
+    reference_service_cdc(writer);
+    CHECK_EQ(writer.write_calls, 1u);
+    CHECK_EQ(writer.flush_calls, 0u);
+    CHECK_EQ(writer.output, std::string{"DE"});
+
+    writer.write_limit = 96;
+    reference_service_cdc(writer);
+    CHECK_EQ(writer.write_calls, 2u);
+    CHECK_EQ(writer.flush_calls, 1u);
+    CHECK_EQ(writer.output, std::string{"DESC64_MATCH actual=64\r\n"});
+
+    reference_service_cdc(writer);
+    CHECK_EQ(writer.write_calls, 3u);
+    CHECK_EQ(writer.flush_calls, 2u);
+    CHECK_EQ(writer.output,
+             std::string{"DESC64_MATCH actual=64\r\n"
+                         "REPORT a=7 i=1 len=8\r\n"});
+
+    reference_service_cdc(writer);
+    CHECK_EQ(writer.write_calls, 3u);
+    CHECK_EQ(writer.flush_calls, 2u);
+}
+
+TEST_CASE(refused_unmount_capture_retires_descriptor_state_before_replug) {
+    using Coordinator =
+        duo_input::u1::reference::DescriptorDiagnosticCoordinator;
+    using Completion =
+        duo_input::u1::reference::DescriptorTransferState::Completion;
+
+    reference_queue_reset();
+    ReferenceSourceAdapter adapter;
+    Coordinator coordinator(adapter);
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0u);
+    CHECK(take(adapter).ok);
+
+    ReferenceSourceAdapter::DescriptorRequest old_request{};
+    CHECK(adapter.take_descriptor_request(
+        ReferenceSourceAdapter::kDescriptorQuietUs, old_request));
+    CHECK(coordinator.start(old_request.dev_addr, old_request.instance));
+    const std::uint32_t old_token = coordinator.lifetime_token();
+
+    const std::uint8_t byte = 0xA5;
+    for (std::size_t index = 0; index < kReferenceQueueCapacity; ++index) {
+        CHECK(reference_capture(reference_make_report(
+            static_cast<std::uint8_t>(10 + index), 0, &byte, 1, 1u)));
+    }
+    CHECK_FALSE(coordinator.capture_unmount(2, 0, 2u));
+    CHECK_EQ(reference_overflows(), 1u);
+    CHECK_FALSE(coordinator.active());
+    CHECK_FALSE(adapter.take_descriptor_request(
+        ReferenceSourceAdapter::kDescriptorQuietUs +
+            ReferenceSourceAdapter::kDescriptorOfferIntervalUs,
+        old_request));
+    const Taken detached = take(adapter);
+    CHECK(detached.ok);
+    CHECK(detached.event.kind == SourceEventKind::Detached);
+
+    ReferenceCallbackRecord queued{};
+    while (reference_take(queued)) {
+    }
+    CHECK(reference_capture(
+        mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {})));
+    CHECK(reference_take(queued));
+    adapter.consume(queued, 10u);
+    CHECK(take(adapter).ok);
+
+    ReferenceSourceAdapter::DescriptorRequest fresh_request{};
+    CHECK(adapter.take_descriptor_request(
+        10u + ReferenceSourceAdapter::kDescriptorQuietUs, fresh_request));
+    CHECK(coordinator.start(fresh_request.dev_addr, fresh_request.instance));
+    coordinator.request_accepted();
+    const std::uint32_t fresh_token = coordinator.lifetime_token();
+    CHECK(fresh_token != old_token);
+
+    const auto golden = aula_keyboard_descriptor_vector();
+    CHECK(coordinator.complete(2, true, 64u, true, golden.data(),
+                               golden.size(), old_token) == Completion::Ignored);
+    CHECK(coordinator.active());
+    CHECK(coordinator.complete(2, true, 64u, true, golden.data(),
+                               golden.size(), fresh_token) == Completion::Success);
+    CHECK_FALSE(coordinator.active());
 }
 
 TEST_CASE(an_ignored_interface_asks_for_no_protocol_change) {

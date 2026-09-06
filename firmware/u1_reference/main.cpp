@@ -21,7 +21,6 @@
 // callback record from the host callbacks, and an output command from the
 // runtime. Neither core waits on the other.
 
-#include <algorithm>
 #include <array>
 #include <cstdint>
 
@@ -33,8 +32,7 @@
 #include "pio_usb.h"
 #include "tusb.h"
 
-extern "C" void reference_print_one_trace();
-extern "C" bool reference_print_one_descriptor_diagnostic();
+extern "C" void reference_service_one_cdc();
 extern "C" void reference_drain_one_callback();
 
 #include "callback_queue.hpp"
@@ -104,48 +102,20 @@ ReferenceSourceAdapter g_adapter;
 static std::array<std::uint8_t, kReferenceDescriptorCapacity>
     g_post_mount_descriptor{};
 
-duo_input::u1::reference::DescriptorTransferState g_descriptor_read;
+duo_input::u1::reference::DescriptorDiagnosticCoordinator
+    g_descriptor_diagnostic(g_adapter);
 
 void post_mount_descriptor_complete(tuh_xfer_t* xfer) {
-    if (xfer == nullptr || !g_descriptor_read.active()) {
+    if (xfer == nullptr || !g_descriptor_diagnostic.active()) {
         return;
     }
 
-    const std::uint8_t dev_addr = g_descriptor_read.dev_addr();
-    const std::uint8_t instance = g_descriptor_read.instance();
-    const auto completion = g_descriptor_read.complete(
+    const std::uint8_t dev_addr = g_descriptor_diagnostic.dev_addr();
+    const std::uint8_t instance = g_descriptor_diagnostic.instance();
+    g_descriptor_diagnostic.complete(
         xfer->daddr, xfer->result == XFER_RESULT_SUCCESS, xfer->actual_len,
-        tuh_hid_mounted(dev_addr, instance), g_post_mount_descriptor.size(),
-        xfer->user_data);
-    if (completion == duo_input::u1::reference::DescriptorTransferState::
-                          Completion::Ignored) {
-        return;
-    }
-
-    ReferenceDescriptorDiagnostic diagnostic{};
-    diagnostic.dev_addr = dev_addr;
-    diagnostic.instance = instance;
-    diagnostic.actual_len = static_cast<std::uint16_t>(xfer->actual_len);
-    if (completion == duo_input::u1::reference::DescriptorTransferState::
-                          Completion::Failure) {
-        diagnostic.kind = ReferenceDescriptorDiagnosticKind::Failure;
-        reference_descriptor_diagnostic_push(diagnostic);
-        return;
-    }
-
-    const auto result = duo_input::u1::reference::descriptor_diagnostic_complete(
-        xfer->result == XFER_RESULT_SUCCESS, xfer->actual_len,
-        g_post_mount_descriptor.data(), g_post_mount_descriptor.size());
-    diagnostic.first_difference = result.first_difference;
-    diagnostic.kind = result.kind == duo_input::u1::reference::
-                               DescriptorDiagnosticResult::Kind::Match
-                          ? ReferenceDescriptorDiagnosticKind::Match
-                          : ReferenceDescriptorDiagnosticKind::Mismatch;
-    diagnostic.prefix_size = static_cast<std::uint8_t>(
-        std::min<std::uint32_t>(xfer->actual_len, diagnostic.prefix.size()));
-    std::copy_n(g_post_mount_descriptor.begin(), diagnostic.prefix_size,
-                diagnostic.prefix.begin());
-    reference_descriptor_diagnostic_push(diagnostic);
+        tuh_hid_mounted(dev_addr, instance), g_post_mount_descriptor.data(),
+        g_post_mount_descriptor.size(), xfer->user_data);
 }
 
 std::uint32_t now_ms() {
@@ -160,9 +130,10 @@ std::uint32_t now_ms() {
 /// drained before it is fed, so nothing it produced is ever dropped for want
 /// of somewhere to put it.
 void service_input(std::uint32_t millis) {
-    if (g_descriptor_read.active()) {
-        g_descriptor_read.abandon_if_unmounted(tuh_hid_mounted(
-            g_descriptor_read.dev_addr(), g_descriptor_read.instance()));
+    if (g_descriptor_diagnostic.active()) {
+        g_descriptor_diagnostic.abandon_if_unmounted(tuh_hid_mounted(
+            g_descriptor_diagnostic.dev_addr(),
+            g_descriptor_diagnostic.instance()));
     }
 
     duo_input::u1::input::SourceEvent event{};
@@ -214,7 +185,7 @@ void service_input(std::uint32_t millis) {
     }
 
     ReferenceSourceAdapter::DescriptorRequest descriptor_request{};
-    if (!g_descriptor_read.active() &&
+    if (!g_descriptor_diagnostic.active() &&
         g_adapter.take_descriptor_request(time_us_32(), descriptor_request)) {
         tuh_itf_info_t info{};
         if (!tuh_hid_mounted(descriptor_request.dev_addr,
@@ -224,8 +195,8 @@ void service_input(std::uint32_t millis) {
             return;
         }
 
-        g_descriptor_read.start(descriptor_request.dev_addr,
-                                descriptor_request.instance);
+        g_descriptor_diagnostic.start(descriptor_request.dev_addr,
+                                      descriptor_request.instance);
         // The public descriptor API takes bInterfaceNumber. The callback gives
         // us TinyUSB's HID instance/index; they are not interchangeable (the
         // Aula logs interfaces 3/4 while their instances are 0/1).
@@ -233,16 +204,11 @@ void service_input(std::uint32_t millis) {
             descriptor_request.dev_addr, info.desc.bInterfaceNumber,
             HID_DESC_TYPE_REPORT, 0, g_post_mount_descriptor.data(),
             descriptor_request.length, post_mount_descriptor_complete,
-            g_descriptor_read.lifetime_token());
+            g_descriptor_diagnostic.lifetime_token());
         if (accepted) {
-            g_adapter.descriptor_request_accepted();
-            ReferenceDescriptorDiagnostic started{};
-            started.kind = ReferenceDescriptorDiagnosticKind::Start;
-            started.dev_addr = descriptor_request.dev_addr;
-            started.instance = descriptor_request.instance;
-            reference_descriptor_diagnostic_push(started);
+            g_descriptor_diagnostic.request_accepted();
         } else {
-            g_descriptor_read.refused();
+            g_descriptor_diagnostic.refused();
         }
         return;
     }
@@ -259,10 +225,10 @@ void service_input(std::uint32_t millis) {
 
 }  // namespace
 
-extern "C" void reference_descriptor_unmounted(std::uint8_t dev_addr,
-                                                std::uint8_t instance) {
-    g_descriptor_read.abandon(dev_addr, instance);
-    g_adapter.cancel_descriptor_request(dev_addr, instance);
+extern "C" bool reference_descriptor_unmounted(std::uint8_t dev_addr,
+                                                std::uint8_t instance,
+                                                std::uint32_t now_us) {
+    return g_descriptor_diagnostic.capture_unmount(dev_addr, instance, now_us);
 }
 
 // core1: the USB host, and everything that reads what it produced
@@ -307,12 +273,7 @@ int main() {
 
     while (true) {
         g_usb.task();
-        // A pending descriptor measurement owns CDC until it is completely
-        // queued. REPORT traces are best-effort; letting one consume the last
-        // bytes of CDC space would starve this one-shot diagnostic forever.
-        if (!reference_print_one_descriptor_diagnostic()) {
-            reference_print_one_trace();
-        }
+        reference_service_one_cdc();
 
         const std::uint32_t millis = now_ms();
         g_outputs.drain(millis, time_us_32());

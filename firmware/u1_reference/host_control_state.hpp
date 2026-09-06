@@ -149,4 +149,98 @@ private:
     std::uint32_t lifetime_token_ = 0;
 };
 
+// The host callback lifecycle for the one-packet descriptor measurement.
+// TinyUSB's wrapper delegates here so native tests exercise the same
+// cancellation, stale-completion, and diagnostic-queue path as the firmware.
+// All work is fixed-size and non-blocking; CDC formatting stays on Core 0.
+class DescriptorDiagnosticCoordinator {
+public:
+    explicit DescriptorDiagnosticCoordinator(ReferenceSourceAdapter& adapter)
+        : adapter_(adapter) {}
+
+    bool start(std::uint8_t dev_addr, std::uint8_t instance) {
+        return transfer_.start(dev_addr, instance);
+    }
+
+    void request_accepted() {
+        adapter_.descriptor_request_accepted();
+        ReferenceDescriptorDiagnostic started{};
+        started.kind = ReferenceDescriptorDiagnosticKind::Start;
+        started.dev_addr = transfer_.dev_addr();
+        started.instance = transfer_.instance();
+        reference_descriptor_diagnostic_push(started);
+    }
+
+    void refused() { transfer_.refused(); }
+
+    bool abandon_if_unmounted(bool mounted) {
+        return transfer_.abandon_if_unmounted(mounted);
+    }
+
+    // Cancels application state before offering the UMOUNT record to the
+    // bounded callback queue. Even if capture is refused, a replug cannot
+    // inherit the old offer, interface ownership, or transfer generation.
+    bool capture_unmount(std::uint8_t dev_addr,
+                         std::uint8_t instance,
+                         std::uint32_t now_us) {
+        const ReferenceCallbackRecord unmount =
+            reference_make_unmount(dev_addr, instance, now_us);
+        transfer_.abandon(dev_addr, instance);
+        adapter_.consume(unmount, now_us);
+        return reference_capture(unmount);
+    }
+
+    DescriptorTransferState::Completion complete(
+        std::uint8_t dev_addr,
+        bool transfer_succeeded,
+        std::uint32_t actual_len,
+        bool still_mounted,
+        const std::uint8_t* bytes,
+        std::size_t capacity,
+        std::uint32_t lifetime_token) {
+        const std::uint8_t diagnostic_dev_addr = transfer_.dev_addr();
+        const std::uint8_t diagnostic_instance = transfer_.instance();
+        const DescriptorTransferState::Completion completion =
+            transfer_.complete(dev_addr, transfer_succeeded, actual_len,
+                               still_mounted, capacity, lifetime_token);
+        if (completion == DescriptorTransferState::Completion::Ignored) {
+            return completion;
+        }
+
+        ReferenceDescriptorDiagnostic diagnostic{};
+        diagnostic.dev_addr = diagnostic_dev_addr;
+        diagnostic.instance = diagnostic_instance;
+        diagnostic.actual_len = static_cast<std::uint16_t>(actual_len);
+        if (completion == DescriptorTransferState::Completion::Failure) {
+            diagnostic.kind = ReferenceDescriptorDiagnosticKind::Failure;
+            reference_descriptor_diagnostic_push(diagnostic);
+            return completion;
+        }
+
+        const DescriptorDiagnosticResult result = descriptor_diagnostic_complete(
+            transfer_succeeded, actual_len, bytes, capacity);
+        diagnostic.first_difference = result.first_difference;
+        diagnostic.kind =
+            result.kind == DescriptorDiagnosticResult::Kind::Match
+                ? ReferenceDescriptorDiagnosticKind::Match
+                : ReferenceDescriptorDiagnosticKind::Mismatch;
+        diagnostic.prefix_size = static_cast<std::uint8_t>(
+            std::min<std::size_t>(actual_len, diagnostic.prefix.size()));
+        std::copy_n(bytes, diagnostic.prefix_size, diagnostic.prefix.begin());
+        reference_descriptor_diagnostic_push(diagnostic);
+        return completion;
+    }
+
+    bool active() const { return transfer_.active(); }
+    std::uint8_t dev_addr() const { return transfer_.dev_addr(); }
+    std::uint8_t instance() const { return transfer_.instance(); }
+    std::uint32_t lifetime_token() const {
+        return transfer_.lifetime_token();
+    }
+
+private:
+    ReferenceSourceAdapter& adapter_;
+    DescriptorTransferState transfer_{};
+};
+
 }  // namespace duo_input::u1::reference

@@ -168,6 +168,6 @@ public:
     virtual void flush() = 0;
 };
 
-// True while a descriptor diagnostic owns CDC, including when it could not be
-// completely queued this pass. The entry is removed only after a full write.
-bool reference_deliver_one_descriptor_diagnostic(IReferenceCdcWriter& writer);
+// Service one CDC item. A retained descriptor diagnostic is an absolute
+// priority boundary: no ordinary trace is consumed until its full write wins.
+void reference_service_cdc(IReferenceCdcWriter& writer);

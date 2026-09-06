@@ -524,7 +524,7 @@ def test_a_refused_capture_is_surfaced_and_not_merely_counted():
         encoding="utf-8"
     )
     drain_start = source.index("void reference_drain_one_callback")
-    drain = source[drain_start:source.index("void reference_print_one_trace")]
+    drain = source[drain_start:source.index("void reference_service_one_cdc")]
 
     assert "reference_overflows()" in drain, (
         "the drain never looks at the overflow count, so a refused capture "
@@ -546,14 +546,14 @@ def test_post_mount_descriptor_retry_uses_the_pinned_async_api_safely():
         r"descriptor_request\.dev_addr, info\.desc\.bInterfaceNumber, "
         r"HID_DESC_TYPE_REPORT, 0, g_post_mount_descriptor\.data\(\), "
         r"descriptor_request\.length, post_mount_descriptor_complete, "
-        r"g_descriptor_read\.lifetime_token\(\)\)"
+        r"g_descriptor_diagnostic\.lifetime_token\(\)\)"
     )
     assert "tuh_hid_itf_get_info" in source
     assert exact_call.search(compact), (
         "tuh_descriptor_get_hid_report takes bInterfaceNumber, not HID instance"
     )
     assert re.search(
-        r"descriptor_diagnostic_complete\([^;]+xfer->actual_len",
+        r"g_descriptor_diagnostic\.complete\([^;]+xfer->actual_len",
         compact,
     ), "an async completion must compare only the bytes actually transferred"
     assert "static std::array<std::uint8_t" in source, (
@@ -570,10 +570,17 @@ def test_desc64_measurement_requests_and_compares_one_packet_only():
     )
 
     assert "kAulaKeyboardDescriptorLength = 64" in adapter
-    assert "descriptor_diagnostic_complete" in source, (
-        "the 64-byte experiment must compare its actual completion bytes"
+    assert "g_descriptor_diagnostic.complete(" in source, (
+        "the TinyUSB completion must enter the tested diagnostic coordinator"
     )
     assert "xfer->actual_len" in source
+    callbacks = (ROOT / "firmware" / "u1_reference" / "host_callbacks.cpp").read_text(
+        encoding="utf-8"
+    )
+    assert "reference_service_cdc(writer)" in callbacks, (
+        "the TinyUSB CDC wrapper must use the tested priority service"
+    )
+    assert "reference_service_one_cdc();" in source
 
 
 def test_stale_control_work_cannot_hide_an_unmount_forever():
@@ -587,7 +594,7 @@ def test_stale_control_work_cannot_hide_an_unmount_forever():
         r"protocol_request\.dev_addr, protocol_request\.instance\)\)",
         compact,
     )
-    assert "g_descriptor_read.abandon_if_unmounted(" in source
+    assert "g_descriptor_diagnostic.abandon_if_unmounted(" in source
     callbacks = (ROOT / "firmware" / "u1_reference" / "host_callbacks.cpp").read_text(
         encoding="utf-8"
     )
@@ -595,4 +602,7 @@ def test_stale_control_work_cannot_hide_an_unmount_forever():
         callbacks.index("void tuh_hid_umount_cb"):
         callbacks.index("void tuh_hid_report_received_cb")
     ]
-    assert "reference_descriptor_unmounted(dev_addr, instance)" in umount
+    assert (
+        "reference_descriptor_unmounted(dev_addr, instance, time_us_32())"
+        in umount
+    )

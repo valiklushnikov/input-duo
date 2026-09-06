@@ -79,7 +79,6 @@ public:
     bool take_descriptor_request(std::uint32_t now_us,
                                  DescriptorRequest& request);
     void descriptor_request_accepted();
-    void cancel_descriptor_request(std::uint8_t dev_addr, std::uint8_t instance);
 
     /// Whether an event is waiting. The caller drains before consuming again,
     /// so nothing this adapter produced is ever dropped for want of room.
@@ -134,6 +133,8 @@ private:
                           std::uint8_t protocol);
     void cancel_protocol_requests(std::uint8_t dev_addr,
                                   std::uint8_t instance);
+    void cancel_descriptor_request(std::uint8_t dev_addr,
+                                   std::uint8_t instance);
     void on_mount(const ReferenceCallbackRecord& record, std::uint32_t now_us);
     void on_unmount(const ReferenceCallbackRecord& record);
     void on_report(const ReferenceCallbackRecord& record, std::uint32_t now_us);

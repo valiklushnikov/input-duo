@@ -7,6 +7,24 @@
 
 namespace {
 
+const char* kind_name(ReferenceCallbackKind kind) {
+    switch (kind) {
+        case ReferenceCallbackKind::Mount:
+            return "MOUNT";
+        case ReferenceCallbackKind::Unmount:
+            return "UMOUNT";
+        case ReferenceCallbackKind::Report:
+            return "REPORT";
+        case ReferenceCallbackKind::Overflow:
+            return "OVERFLOW";
+        case ReferenceCallbackKind::DescriptorStart:
+            return "DESC_START";
+        case ReferenceCallbackKind::DescriptorFailure:
+            return "DESC_FAIL";
+    }
+    return "?";
+}
+
 constexpr std::size_t kIndexMask = kReferenceQueueCapacity - 1;
 static_assert((kReferenceQueueCapacity & kIndexMask) == 0,
               "the capacity must be a power of two: indices are masked");
@@ -244,6 +262,7 @@ constexpr std::size_t kDescriptorDiagnosticCapacity = 4;
 ReferenceDescriptorDiagnostic g_descriptor_diagnostics[kDescriptorDiagnosticCapacity];
 std::atomic<std::uint32_t> g_descriptor_diagnostic_head{0};
 std::atomic<std::uint32_t> g_descriptor_diagnostic_tail{0};
+std::size_t g_descriptor_delivery_offset = 0;
 
 }  // namespace
 
@@ -266,6 +285,7 @@ bool reference_descriptor_diagnostic_take(ReferenceDescriptorDiagnostic& entry) 
     }
     entry = g_descriptor_diagnostics[tail % kDescriptorDiagnosticCapacity];
     g_descriptor_diagnostic_tail.store(tail + 1, std::memory_order_release);
+    g_descriptor_delivery_offset = 0;
     return true;
 }
 
@@ -282,31 +302,108 @@ bool reference_descriptor_diagnostic_peek(ReferenceDescriptorDiagnostic& entry) 
 void reference_descriptor_diagnostic_reset() {
     g_descriptor_diagnostic_head.store(0, std::memory_order_relaxed);
     g_descriptor_diagnostic_tail.store(0, std::memory_order_relaxed);
+    g_descriptor_delivery_offset = 0;
     for (auto& entry : g_descriptor_diagnostics) {
         entry = ReferenceDescriptorDiagnostic{};
     }
 }
 
-bool reference_deliver_one_descriptor_diagnostic(IReferenceCdcWriter& writer) {
+namespace {
+
+bool deliver_one_descriptor_diagnostic(IReferenceCdcWriter& writer) {
     ReferenceDescriptorDiagnostic entry{};
-    if (!reference_descriptor_diagnostic_peek(entry)) return false;
+    if (!reference_descriptor_diagnostic_peek(entry)) {
+        return false;
+    }
+
     char line[96];
     int written = 0;
     switch (entry.kind) {
-        case ReferenceDescriptorDiagnosticKind::Start: written = std::snprintf(line, sizeof(line), "DESC64_START\r\n"); break;
-        case ReferenceDescriptorDiagnosticKind::Match: written = std::snprintf(line, sizeof(line), "DESC64_MATCH actual=%u\r\n", entry.actual_len); break;
-        case ReferenceDescriptorDiagnosticKind::Mismatch:
-            written = std::snprintf(line, sizeof(line), "DESC64_MISMATCH actual=%u first=%u prefix=", entry.actual_len, entry.first_difference);
-            for (std::uint8_t i = 0; i < entry.prefix_size && written > 0 && written < static_cast<int>(sizeof(line)) - 4; ++i)
-                written += std::snprintf(line + written, sizeof(line) - written, "%02X", entry.prefix[i]);
-            if (written > 0 && written < static_cast<int>(sizeof(line)) - 2) { line[written++]='\r'; line[written++]='\n'; }
+        case ReferenceDescriptorDiagnosticKind::Start:
+            written = std::snprintf(line, sizeof(line), "DESC64_START\r\n");
             break;
-        case ReferenceDescriptorDiagnosticKind::Failure: written = std::snprintf(line, sizeof(line), "DESC64_FAIL\r\n"); break;
+        case ReferenceDescriptorDiagnosticKind::Match:
+            written = std::snprintf(line, sizeof(line),
+                                    "DESC64_MATCH actual=%u\r\n",
+                                    entry.actual_len);
+            break;
+        case ReferenceDescriptorDiagnosticKind::Mismatch:
+            written = std::snprintf(
+                line, sizeof(line),
+                "DESC64_MISMATCH actual=%u first=%u prefix=", entry.actual_len,
+                entry.first_difference);
+            for (std::uint8_t index = 0;
+                 index < entry.prefix_size && written > 0 &&
+                 written < static_cast<int>(sizeof(line)) - 4;
+                 ++index) {
+                written += std::snprintf(line + written,
+                                         sizeof(line) - written, "%02X",
+                                         entry.prefix[index]);
+            }
+            if (written > 0 &&
+                written < static_cast<int>(sizeof(line)) - 2) {
+                line[written++] = '\r';
+                line[written++] = '\n';
+            }
+            break;
+        case ReferenceDescriptorDiagnosticKind::Failure:
+            written = std::snprintf(line, sizeof(line), "DESC64_FAIL\r\n");
+            break;
     }
-    if (written <= 0 || writer.available() < static_cast<std::size_t>(written)) return true;
-    if (writer.write(line, static_cast<std::size_t>(written)) != static_cast<std::size_t>(written)) return true;
+
+    if (written <= 0) {
+        return true;
+    }
+    const std::size_t line_size = static_cast<std::size_t>(written);
+    if (g_descriptor_delivery_offset > line_size) {
+        g_descriptor_delivery_offset = 0;
+    }
+    const std::size_t remaining = line_size - g_descriptor_delivery_offset;
+    if (writer.available() < remaining) {
+        return true;
+    }
+    const std::size_t accepted = writer.write(
+        line + g_descriptor_delivery_offset, remaining);
+    g_descriptor_delivery_offset += std::min(accepted, remaining);
+    if (g_descriptor_delivery_offset != line_size) {
+        return true;
+    }
+
     ReferenceDescriptorDiagnostic consumed{};
     reference_descriptor_diagnostic_take(consumed);
     writer.flush();
     return true;
+}
+
+}  // namespace
+
+void reference_service_cdc(IReferenceCdcWriter& writer) {
+    if (deliver_one_descriptor_diagnostic(writer)) {
+        return;
+    }
+
+    ReferenceTraceEntry entry{};
+    if (!reference_trace_take(entry)) {
+        return;
+    }
+
+    char line[96];
+    int written = std::snprintf(line, sizeof(line), "%s a=%u i=%u len=%u",
+                                kind_name(entry.kind), entry.dev_addr,
+                                entry.instance, entry.length);
+    for (std::uint8_t index = 0;
+         index < entry.prefix_size && written > 0 &&
+         written < static_cast<int>(sizeof(line)) - 4;
+         ++index) {
+        written += std::snprintf(line + written, sizeof(line) - written,
+                                 " %02X", entry.prefix[index]);
+    }
+    if (written > 0 && written < static_cast<int>(sizeof(line)) - 2) {
+        line[written++] = '\r';
+        line[written++] = '\n';
+    }
+    if (written > 0) {
+        writer.write(line, static_cast<std::size_t>(written));
+        writer.flush();
+    }
 }

@@ -15,10 +15,8 @@
 // visible Overflow event; losing reports silently is what this queue exists to
 // rule out.
 
-#include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <string>
 
 #include "callback_queue.hpp"
 #include "test_support.hpp"
@@ -364,34 +362,4 @@ TEST_CASE(the_trace_capacity_is_a_power_of_two) {
     CHECK(kReferenceTraceCapacity > 0);
     CHECK_EQ(kReferenceTraceCapacity & (kReferenceTraceCapacity - 1),
              static_cast<std::size_t>(0));
-}
-
-TEST_CASE(descriptor_delivery_retains_until_a_full_cdc_write) {
-    struct Writer final : IReferenceCdcWriter {
-        std::size_t space = 0;
-        std::size_t limit = 0;
-        std::string output;
-        std::size_t available() const override { return space; }
-        std::size_t write(const char* data, std::size_t size) override {
-            const std::size_t count = std::min(size, limit);
-            output.append(data, count);
-            return count;
-        }
-        void flush() override {}
-    } writer;
-    reference_queue_reset();
-    ReferenceDescriptorDiagnostic entry{};
-    entry.kind = ReferenceDescriptorDiagnosticKind::Match;
-    entry.actual_len = 64;
-    CHECK(reference_descriptor_diagnostic_push(entry));
-    CHECK(reference_deliver_one_descriptor_diagnostic(writer));
-    ReferenceDescriptorDiagnostic held{};
-    CHECK(reference_descriptor_diagnostic_peek(held));
-    writer.space = 64; writer.limit = 2;
-    CHECK(reference_deliver_one_descriptor_diagnostic(writer));
-    CHECK(reference_descriptor_diagnostic_peek(held));
-    writer.limit = 64;
-    CHECK(reference_deliver_one_descriptor_diagnostic(writer));
-    CHECK_FALSE(reference_descriptor_diagnostic_peek(held));
-    CHECK(writer.output.find("DESC64_MATCH actual=64") != std::string::npos);
 }

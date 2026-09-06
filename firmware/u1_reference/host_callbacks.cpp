@@ -16,35 +16,30 @@
 // clock, settle, launch Core 1, tuh_init on Core 1, tud_init on Core 0.
 
 #include <cstdint>
-#include <cstdio>
 
 #include "pico/time.h"
 #include "tusb.h"
 
 #include "callback_queue.hpp"
 
-extern "C" void reference_descriptor_unmounted(std::uint8_t dev_addr,
-                                                std::uint8_t instance);
+extern "C" bool reference_descriptor_unmounted(std::uint8_t dev_addr,
+                                                std::uint8_t instance,
+                                                std::uint32_t now_us);
 
 namespace {
 
-const char* kind_name(ReferenceCallbackKind kind) {
-    switch (kind) {
-        case ReferenceCallbackKind::Mount:
-            return "MOUNT";
-        case ReferenceCallbackKind::Unmount:
-            return "UMOUNT";
-        case ReferenceCallbackKind::Report:
-            return "REPORT";
-        case ReferenceCallbackKind::Overflow:
-            return "OVERFLOW";
-        case ReferenceCallbackKind::DescriptorStart:
-            return "DESC_START";
-        case ReferenceCallbackKind::DescriptorFailure:
-            return "DESC_FAIL";
+class TinyUsbCdcWriter final : public IReferenceCdcWriter {
+public:
+    std::size_t available() const override {
+        return tud_cdc_write_available();
     }
-    return "?";
-}
+
+    std::size_t write(const char* data, std::size_t size) override {
+        return tud_cdc_write(data, static_cast<std::uint32_t>(size));
+    }
+
+    void flush() override { tud_cdc_write_flush(); }
+};
 
 }  // namespace
 
@@ -79,8 +74,7 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     // The pinned host stack cancels an in-flight control transfer on removal
     // without invoking its application completion callback. Retire the
     // matching application-side lifetime token here so a replug can retry.
-    reference_descriptor_unmounted(dev_addr, instance);
-    reference_capture(reference_make_unmount(dev_addr, instance, time_us_32()));
+    reference_descriptor_unmounted(dev_addr, instance, time_us_32());
 }
 
 void tuh_hid_report_received_cb(uint8_t dev_addr,
@@ -138,78 +132,12 @@ void reference_drain_one_callback(void) {
 
 }
 
-// Core 0, from the device loop. Formatting and CDC belong here.
-void reference_print_one_trace(void) {
-    ReferenceTraceEntry entry{};
-    if (!reference_trace_take(entry)) {
-        return;
-    }
-
-    char line[96];
-    int written = snprintf(line, sizeof(line), "%s a=%u i=%u len=%u",
-                           kind_name(entry.kind), entry.dev_addr,
-                           entry.instance, entry.length);
-    for (uint8_t index = 0; index < entry.prefix_size && written > 0 &&
-                            written < static_cast<int>(sizeof(line)) - 4;
-         ++index) {
-        written += snprintf(line + written, sizeof(line) - written, " %02X",
-                            entry.prefix[index]);
-    }
-    if (written > 0 && written < static_cast<int>(sizeof(line)) - 2) {
-        line[written++] = '\r';
-        line[written++] = '\n';
-    }
-
-    tud_cdc_write(line, static_cast<uint32_t>(written));
-    tud_cdc_write_flush();
-}
-
-bool reference_print_one_descriptor_diagnostic(void) {
-    ReferenceDescriptorDiagnostic entry{};
-    if (!reference_descriptor_diagnostic_peek(entry)) {
-        return false;
-    }
-
-    char line[96];
-    int written = 0;
-    switch (entry.kind) {
-        case ReferenceDescriptorDiagnosticKind::Start:
-            written = snprintf(line, sizeof(line), "DESC64_START");
-            break;
-        case ReferenceDescriptorDiagnosticKind::Match:
-            written = snprintf(line, sizeof(line), "DESC64_MATCH actual=%u",
-                               entry.actual_len);
-            break;
-        case ReferenceDescriptorDiagnosticKind::Mismatch:
-            written = snprintf(line, sizeof(line),
-                               "DESC64_MISMATCH actual=%u first=%u prefix=",
-                               entry.actual_len, entry.first_difference);
-            for (uint8_t index = 0; index < entry.prefix_size && written > 0 &&
-                                    written < static_cast<int>(sizeof(line)) - 3;
-                 ++index) {
-                written += snprintf(line + written, sizeof(line) - written, "%02X",
-                                    entry.prefix[index]);
-            }
-            break;
-        case ReferenceDescriptorDiagnosticKind::Failure:
-            written = snprintf(line, sizeof(line), "DESC64_FAIL");
-            break;
-    }
-    if (written > 0 && written < static_cast<int>(sizeof(line)) - 2) {
-        line[written++] = '\r';
-        line[written++] = '\n';
-    }
-    if (tud_cdc_write_available() < static_cast<uint32_t>(written)) {
-        return true;
-    }
-    if (tud_cdc_write(line, static_cast<uint32_t>(written)) !=
-        static_cast<uint32_t>(written)) {
-        return true;
-    }
-    ReferenceDescriptorDiagnostic consumed{};
-    reference_descriptor_diagnostic_take(consumed);
-    tud_cdc_write_flush();
-    return true;
+// Core 0, from the device loop. TinyUSB is only the writer; priority,
+// retention, formatting, and queue consumption live in the native-tested
+// service coordinator.
+void reference_service_one_cdc(void) {
+    TinyUsbCdcWriter writer;
+    reference_service_cdc(writer);
 }
 
 }  // extern "C"
