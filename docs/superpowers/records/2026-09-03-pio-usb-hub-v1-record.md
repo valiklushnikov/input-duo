@@ -404,3 +404,113 @@ comparison this way. `26cc0f4982075a5e5a3f7d16fb7d6a1c3c8c085dcf5f8c5de282fdd792
 (U2) are the CH375 baseline this migration now compares against; the
 Task 1 hashes at the top of this record are superseded and must not be
 used for that comparison.
+
+## Reference-first rebuild, Task 1 Step 7 — hardware gate FAILED (2026-09-06)
+
+Plan: `docs/superpowers/plans/2026-09-06-pio-usb-reference-first-rebuild.md`.
+Gate image: `duo_u1_reference.uf2`, 102400 bytes, SHA-256
+`b6e722f1f9efb1e9f79f2182be401d7c71f09342753ae769910aad47542cb2c6`,
+built from clean tree at `ff6e391`.
+
+### The previous session's conclusion was wrong, and how that was settled
+
+The prior session reported "the problem is in our almost-upstream integrated
+build" from an A/B in which the reference image was judged without a U1 power
+cycle and the upstream standalone was judged after one. Two measurements
+retired that conclusion:
+
+1. **Static.** `build/task1-fix4-upstream-sde/.../host_hid_to_device_cdc` and
+   the reference image differ in exactly one thing: the program-name string in
+   `binary_info` (`host_hid_to_device_cdc` → `duo_u1_reference`, `.rodata`
+   `0x5ec` → `0x5e4`). Both disassemble to 22658 lines with no differing
+   instruction, and the printable-string sets differ only by that name.
+2. **Dynamic.** The same reference image produced 0 bytes of CDC output in 30 s
+   before a U1 power cycle and 29139 bytes / 1687 lines after one.
+
+**Rule this sets:** a U1 power cycle is a required step of every hardware gate,
+performed after flashing and before any judgement about the image. Silence in
+CDC without it is not evidence about the firmware. The upstream example has no
+`pico_enable_stdio_usb`, so the 1200-baud BOOTSEL reset does not work on it;
+BOOTSEL needs BOOT held across a power cycle.
+
+### What the gate actually measured
+
+All rows below are after a U1 power cycle, hub `1A86:8091` (WCH, 4 ports).
+The hub, both receivers, mouse and keyboard were verified working when the same
+hub was plugged directly into PC1.
+
+| Configuration | Result |
+| --- | --- |
+| hub + both receivers | only `3434:d030` mounts (Interface0 Mouse, Interface1 None, Interface2 Keyboard); 1687–1943 mouse report lines |
+| hub + `3554:FA09` alone (Aula "2.4G Wireless Receiver") | 0 bytes in 25 s |
+| replug of any device, port open | no `umount`, no `mount`; a replugged device is left unpowered |
+| the same hub and devices directly on PC1 | everything enumerates and works |
+
+Task 1 Step 7 requires hub enumeration, keyboard **and** mouse mount, keyboard
+characters, wheel, simultaneous use and re-enumeration after each replug. Only
+mouse mount and mouse movement/buttons were obtained. **The gate fails, and per
+the plan's own rule the sequence stops at Task 1.** No later task may be built
+on this image.
+
+### Hypotheses tested and retired
+
+Each was a single-variable diagnostic image, never committed; the tree was
+restored to `ff6e391` after each build and the golden artifact rebuilt to its
+recorded hash.
+
+| Hypothesis | Image | Result |
+| --- | --- | --- |
+| HID instance slots exhausted (`CFG_TUH_HID 4` vs production's 8) | `8f7206a759d7c2f98dc0e98c0fb50be45a1a5fe2f418df8e7bfd3c9dcb2073ab` | identical behaviour; retired |
+| config descriptor exceeds `CFG_TUH_ENUMERATION_BUFSIZE 256` | `019441d24c8ef98c49d9ce2402e76f36f377b302440f80245118841898e7f164` | identical behaviour; retired |
+| enumeration never reaches HID interface opening | `e1f2cf26767d4c80320578a77d747d5961b907a16b2d50821ebc7db6e5de4175` (device-level `tuh_mount_cb`) | confirmed: no non-hub device mounts. Note `tuh_mount_cb` is **not** called for hubs (`usbh.c:1760`), so its silence says nothing about the hub |
+
+### Root cause, from TinyUSB's own host log
+
+Instrument: `d17d2f91808f0c10c4431f61afedf4555b22d2acf57380cc984a2dec8bdb538d`
+— `CFG_TUSB_DEBUG 2`, `CFG_TUH_LOG_LEVEL 2`, `CFG_TUD_LOG_LEVEL 0`, host-core
+log buffered in a 64 KB RAM ring and drained from core 0 only after the CDC host
+connects, so the boot enumeration survives. `CFG_TUSB_DEBUG 3` does not compile:
+`hid_host.c:413,448` log `hidh_interface_t` members that do not exist.
+
+The hub enumerates normally at address 5 and powers all four ports. It then
+reports port changes **for both ports**, one after the other:
+
+```
+  Hub Status Change = 0x10          <- port 4, the receiver that works
+  ...
+  Set Address = 1
+  [1:1] Control data:
+    0000:  12 01 10 01 00 00 00 08 34 34 30 D0 ...    <- bMaxPacketSize0 = 8
+  ...
+  Hub Status Change = 0x02          <- port 1, the receiver that fails
+  HUB Set Feature: PORT_RESET, addr = 5 port = 1
+  [1:] USBH Device Attach
+  [1:0] Control data:
+    0000:  12 01 00 02 00 00 00 40                    <- bMaxPacketSize0 = 64
+  Set Address = 2
+  on EP 00 with 8 bytes: OK
+  [1:2] Open EP0 with Size = 64
+  Get Device Descriptor
+  [1:2] Get Descriptor: 80 06 00 01 00 00 12 00
+  on EP 00 with 0 bytes: FAILED
+  [1:2] Control FAILED, xferred_bytes = 0
+  Enumeration attempt 1 ... 2 ... 3
+  on EP 82 with 0 bytes: FAILED     <- the working device's IN transfers fail too
+  Queue EP 81 with 1 bytes ... OK   <- three attempts, then silent give-up
+```
+
+**The defect:** on the pinned Pico-PIO-USB / TinyUSB revisions, a full-speed
+device behind the hub whose EP0 max packet size is 64 fails every control
+transfer issued to its new address, while a device behind the same hub with an
+8-byte EP0 enumerates and runs. `SET_ADDRESS` itself succeeds; the first
+transaction at the new address does not. During the retries, interrupt transfers
+belonging to the already-mounted device fail as well, so the fault is not
+confined to the device being enumerated. After three attempts TinyUSB abandons
+the device without a callback, which is why the upstream example prints nothing.
+
+This is in the pinned dependency stack, not in Duo Input code, and it reproduces
+on a byte-for-byte copy of the upstream example. The reference-first plan
+assumed the upstream example is a working hub baseline on this hardware; that
+assumption is now measured false.
+
+Full host log: captured 2026-09-06 17:03, 434 lines, 14063 bytes.
