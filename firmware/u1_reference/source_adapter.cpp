@@ -216,11 +216,7 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
 
 void ReferenceSourceAdapter::on_unmount(const ReferenceCallbackRecord& record) {
     cancel_protocol_requests(record.dev_addr, record.instance);
-    if (descriptor_request_.active &&
-        descriptor_request_.request.dev_addr == record.dev_addr &&
-        descriptor_request_.request.instance == record.instance) {
-        descriptor_request_ = PendingDescriptorRequest{};
-    }
+    cancel_descriptor_request(record.dev_addr, record.instance);
     Interface* entry = find(record.dev_addr, record.instance);
     if (entry == nullptr) {
         return;
@@ -358,6 +354,15 @@ bool ReferenceSourceAdapter::take_descriptor_request(std::uint32_t now_us,
 
 void ReferenceSourceAdapter::descriptor_request_accepted() {
     descriptor_request_ = PendingDescriptorRequest{};
+}
+
+void ReferenceSourceAdapter::cancel_descriptor_request(std::uint8_t dev_addr,
+                                                       std::uint8_t instance) {
+    if (descriptor_request_.active &&
+        descriptor_request_.request.dev_addr == dev_addr &&
+        descriptor_request_.request.instance == instance) {
+        descriptor_request_ = PendingDescriptorRequest{};
+    }
 }
 
 bool ReferenceSourceAdapter::take_event(SourceEvent& event,

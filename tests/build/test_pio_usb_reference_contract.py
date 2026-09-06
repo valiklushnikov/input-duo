@@ -545,7 +545,8 @@ def test_post_mount_descriptor_retry_uses_the_pinned_async_api_safely():
         r"tuh_descriptor_get_hid_report\( "
         r"descriptor_request\.dev_addr, info\.desc\.bInterfaceNumber, "
         r"HID_DESC_TYPE_REPORT, 0, g_post_mount_descriptor\.data\(\), "
-        r"descriptor_request\.length, post_mount_descriptor_complete, 0\)"
+        r"descriptor_request\.length, post_mount_descriptor_complete, "
+        r"g_descriptor_read\.lifetime_token\(\)\)"
     )
     assert "tuh_hid_itf_get_info" in source
     assert exact_call.search(compact), (

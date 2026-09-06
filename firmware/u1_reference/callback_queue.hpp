@@ -156,5 +156,6 @@ struct ReferenceDescriptorDiagnostic {
 // Descriptor measurements bypass the ordinary report trace queue. They remain
 // bounded and non-blocking, but continuous report traffic cannot hide them.
 bool reference_descriptor_diagnostic_push(const ReferenceDescriptorDiagnostic& entry);
+bool reference_descriptor_diagnostic_peek(ReferenceDescriptorDiagnostic& entry);
 bool reference_descriptor_diagnostic_take(ReferenceDescriptorDiagnostic& entry);
 void reference_descriptor_diagnostic_reset();

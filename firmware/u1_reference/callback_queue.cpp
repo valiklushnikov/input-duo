@@ -268,6 +268,16 @@ bool reference_descriptor_diagnostic_take(ReferenceDescriptorDiagnostic& entry) 
     return true;
 }
 
+bool reference_descriptor_diagnostic_peek(ReferenceDescriptorDiagnostic& entry) {
+    const std::uint32_t tail = g_descriptor_diagnostic_tail.load(std::memory_order_relaxed);
+    const std::uint32_t head = g_descriptor_diagnostic_head.load(std::memory_order_acquire);
+    if (head == tail) {
+        return false;
+    }
+    entry = g_descriptor_diagnostics[tail % kDescriptorDiagnosticCapacity];
+    return true;
+}
+
 void reference_descriptor_diagnostic_reset() {
     g_descriptor_diagnostic_head.store(0, std::memory_order_relaxed);
     g_descriptor_diagnostic_tail.store(0, std::memory_order_relaxed);

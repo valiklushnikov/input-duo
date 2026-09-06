@@ -598,6 +598,19 @@ TEST_CASE(descriptor_completion_rejects_failure_short_lifetime_and_overflow) {
     CHECK(transfer.start(2, 0));
     CHECK(transfer.complete(2, true, 257u, true, 256u) ==
           State::Completion::Failure);
+    CHECK(transfer.start(2, 0));
+    CHECK(transfer.complete(2, true, 0u, true, 256u) ==
+          State::Completion::Success);
+}
+
+TEST_CASE(synchronous_descriptor_cancellation_prevents_a_reused_address_offer) {
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0u);
+    CHECK(take(adapter).ok);
+    adapter.cancel_descriptor_request(2, 0);
+    ReferenceSourceAdapter::DescriptorRequest request{};
+    CHECK_FALSE(adapter.take_descriptor_request(
+        ReferenceSourceAdapter::kDescriptorQuietUs, request));
 }
 
 TEST_CASE(desc64_comparison_uses_actual_length_and_the_independent_golden_prefix) {

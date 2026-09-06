@@ -166,7 +166,7 @@ void reference_print_one_trace(void) {
 
 void reference_print_one_descriptor_diagnostic(void) {
     ReferenceDescriptorDiagnostic entry{};
-    if (!reference_descriptor_diagnostic_take(entry)) {
+    if (!reference_descriptor_diagnostic_peek(entry)) {
         return;
     }
 
@@ -199,7 +199,15 @@ void reference_print_one_descriptor_diagnostic(void) {
         line[written++] = '\r';
         line[written++] = '\n';
     }
-    tud_cdc_write(line, static_cast<uint32_t>(written));
+    if (tud_cdc_write_available() < static_cast<uint32_t>(written)) {
+        return;
+    }
+    if (tud_cdc_write(line, static_cast<uint32_t>(written)) !=
+        static_cast<uint32_t>(written)) {
+        return;
+    }
+    ReferenceDescriptorDiagnostic consumed{};
+    reference_descriptor_diagnostic_take(consumed);
     tud_cdc_write_flush();
 }
 

@@ -131,8 +131,7 @@ public:
             return Completion::Ignored;
         }
         active_ = false;
-        return transfer_succeeded && actual_len != 0 &&
-                       actual_len <= capacity && still_mounted
+        return transfer_succeeded && actual_len <= capacity && still_mounted
                    ? Completion::Success
                    : Completion::Failure;
     }

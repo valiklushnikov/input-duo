@@ -262,6 +262,7 @@ void service_input(std::uint32_t millis) {
 extern "C" void reference_descriptor_unmounted(std::uint8_t dev_addr,
                                                 std::uint8_t instance) {
     g_descriptor_read.abandon(dev_addr, instance);
+    g_adapter.cancel_descriptor_request(dev_addr, instance);
 }
 
 // core1: the USB host, and everything that reads what it produced
