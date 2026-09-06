@@ -1426,3 +1426,81 @@ control slot break an unrelated call. Different conditions, one build to test.
 The analyser is still wanted, but it no longer blocks: the mouse is read through
 its descriptor today, and what remains for the analyser is this one device and
 the underlying stack defect that will meet other devices later.
+
+## Post-mount descriptor retry: the transfer completes, but the document is invalid (2026-09-06)
+
+The cheap experiment proposed above was implemented and measured before the
+analyser session. The implementation is deliberately scoped to the Aula
+`3554:FA09` keyboard interface that mounted through the boot fallback with no
+Report Descriptor. It waits one second after that mount, then offers
+`tuh_descriptor_get_hid_report` again every 10 ms, at most 100 times, until
+TinyUSB accepts one request. Once accepted there is exactly one on-wire read.
+The asynchronous call uses a static buffer, passes the interface's
+`bInterfaceNumber` (not TinyUSB's HID instance), and consumes only
+`xfer->actual_len` after checking that the same interface is still mounted.
+Unmount also cancels pending or held descriptor/protocol work so a stale
+control request cannot hide the detach or poison a later replug.
+
+The tested implementation is commit `6b561a1` (`Make post-mount retry lifecycle
+safe`). Its U1 artifact was verified before flashing, after exactly one
+`RPI-RP2` volume appeared, and followed by the required U1 power cycle:
+
+| item | measured value |
+| --- | --- |
+| UF2 size | 230912 bytes |
+| UF2 SHA-256 | `fe710645c3cb5c970661840b5a61c44673e0f4faf39a4befa379e18ec4437dcf` |
+
+With the bus left untouched and idle after boot, CDC reported:
+
+```
+DESC_START a=2 i=3 len=77
+MOUNT a=2 i=3 len=77 81 00 05 FF 09 03 75 08
+```
+
+This proves that the post-mount control transfer was accepted and completed
+with 77 bytes. It does **not** prove that a valid 77-byte Report Descriptor was
+received. The returned buffer begins `81 00 05 FF 09 03 75 08`: `81 00` is an
+Input main item, not a valid beginning for this standalone descriptor, because
+the global/local declarations and Collection that must establish its context
+are absent. The production parser therefore rejected the document, did not
+replace the existing boot layout, and did not request report protocol.
+
+No key press was needed to establish the resulting protocol state. Thousands
+of subsequent idle records were all:
+
+```
+REPORT a=2 i=3 len=8 00 00 00 00 00 00 00 00
+```
+
+The eight-byte, no-Report-ID shape is the existing boot keyboard report. The
+interface therefore remained usable through the boot fallback; the late read
+did not promote it to its descriptor layout.
+
+This result narrows the analyser job but does not identify the corruption
+mechanism. In particular, the prefix alone cannot distinguish a wrong packet
+offset, overwritten buffer contents, a device-side response defect, or another
+control-transfer assembly error. Do not name one of those as the cause until
+the bytes and handshakes on the wire have been captured.
+
+### Updated `What to capture`
+
+Keep the original trigger from the earlier section:
+`SETUP 80 06 00 22 00 00 4D 00` to address 2, endpoint 0. There are now two
+instances of that request worth retaining in one capture: the enumeration-time
+attempts and the single post-mount retry approximately one second after mount.
+For the late retry, decode and export every DATA packet in order, including its
+PID/toggle, payload length and payload bytes, plus every host ACK/NAK and the
+status stage. Compare the first eight concatenated wire-payload bytes with the
+eight-byte prefix reported over CDC; this diagnostic image did not print the
+remaining 69 buffer bytes, so it provides no host-side byte-for-byte comparison
+beyond that prefix.
+
+The three original handshake questions remain valid, but the late transfer's
+successful completion adds a prior discriminator: determine whether the wire
+itself begins with `81 00 05 FF 09 03 75 08`. If it does, the host returned the
+observed prefix that the device sent and the investigation moves toward the
+device/request context. If it does not, find the first divergence within those
+eight bytes; that localises the defect to receive/assembly/lifetime handling.
+The analyser trace, not CDC, must establish the rest of the 77-byte wire
+document. Preserve the address 1 successful multi-packet descriptor fetch in
+the same trace as the working comparison case.
