@@ -101,6 +101,10 @@ void tud_cdc_rx_cb(uint8_t itf) {
 
 // Core 1, after each tuh_task() returns. At most one record per pass, so a
 // burst can never turn a service loop into a long one.
+//
+// Kept for the overflow watch below. Since Task 3 the input path is the
+// queue's only consumer, so this no longer takes records itself - taking them
+// here would mean a report reaching the diagnostics instead of the keyboard.
 void reference_drain_one_callback(void) {
     // A refused capture is the one thing that must never pass unnoticed: it is
     // input this firmware was handed and did not keep. Counting it is not
@@ -121,11 +125,6 @@ void reference_drain_one_callback(void) {
         return;
     }
 
-    ReferenceCallbackRecord record{};
-    if (!reference_take(record)) {
-        return;
-    }
-    reference_trace_push(reference_trace_from(record));
 }
 
 // Core 0, from the device loop. Formatting and CDC belong here.

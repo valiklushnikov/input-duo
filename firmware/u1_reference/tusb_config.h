@@ -70,11 +70,29 @@
 #endif
 
 //------------- CLASS -------------//
+// The device side is this firmware's output to PC1 and no longer the example's
+// CDC-only trace link. These values are firmware/u1_main/tusb_config.h's,
+// copied rather than reinvented so the two builds present the same device to
+// the same computer. The HOST section below is untouched: it is what this
+// migration spent its measurements on.
+//
+// Keyboard, mouse and consumer each get their own interface so the keyboard
+// can be a real boot keyboard; see firmware/common/hid/report_ids.hpp.
+#define CFG_TUD_HID              3
 #define CFG_TUD_CDC              1
+#define CFG_TUD_MSC              0
+#define CFG_TUD_MIDI             0
+#define CFG_TUD_VENDOR           0
 
-// CDC FIFO size of TX and RX
-#define CFG_TUD_CDC_RX_BUFSIZE   256
-#define CFG_TUD_CDC_TX_BUFSIZE   256
+#define CFG_TUD_HID_EP_BUFSIZE   8
+
+// The protocol permits a 1024-byte payload, but CDC carries the complete COBS
+// wire frame: header, CRC, COBS overhead and delimiter make that frame larger
+// than 1024 bytes. tud_cdc_write() accepts only what fits in this FIFO and
+// returns a short count for the rest, so a 1024-byte FIFO silently cut the
+// diagnostic reply before its delimiter and made it undecodable.
+#define CFG_TUD_CDC_RX_BUFSIZE   1024
+#define CFG_TUD_CDC_TX_BUFSIZE   2048
 
 // CDC Endpoint transfer buffer size, more is faster
 #define CFG_TUD_CDC_EP_BUFSIZE   64

@@ -288,20 +288,21 @@ def test_incomplete_u2_rebuild_rejects_stale_uf2_and_restores_prior_artifacts(
 
 
 def test_reference_sources_are_maintained_outside_build_output():
-    for name in ("main.c", "tusb_config.h", "usb_descriptors.c"):
+    for name in ("main.cpp", "tusb_config.h", "callback_queue.cpp",
+                 "host_callbacks.cpp", "source_adapter.cpp"):
         path = ROOT / "firmware" / "u1_reference" / name
         assert path.is_file(), f"missing maintained reference source: {path}"
 
 
 def test_reference_sources_are_byte_for_byte_the_pinned_upstream_example():
-    # main.c is deliberately no longer among these. Task 2 moves the host
-    # callbacks out of it into host_callbacks.cpp, so a whole-file hash would
-    # only record that an intended change happened. What still has to hold -
-    # the upstream lifecycle and its order - is asserted below instead.
-    copies = {
-        "tusb_config.h": "tusb_config.h",
-        "usb_descriptors.c": "usb_descriptors.c",
-    }
+    # Nothing is compared whole any more, and each departure was made by a
+    # task that had to justify it. Task 2 moved the callbacks out of main.c, so
+    # a whole-file hash there only recorded that an intended change happened.
+    # Task 3 replaced the example's CDC-only descriptors with the ones this
+    # firmware presents to PC1, and gave tusb_config.h the device classes that
+    # needs. What still has to hold is asserted directly below: the upstream
+    # lifecycle and its order, and every host setting in tusb_config.h.
+    copies = {}
 
     revision = subprocess.run(
         ["git", "-C", str(PICO_PIO_USB_ROOT), "rev-parse", "HEAD"],
@@ -352,7 +353,7 @@ def test_the_reference_keeps_the_upstream_host_lifecycle_in_order():
     being able to say that the moment the callbacks moved out of it, so assert
     the sequence itself.
     """
-    source = (ROOT / "firmware" / "u1_reference" / "main.c").read_text(encoding="utf-8")
+    source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(encoding="utf-8")
 
     core1_ordered = [
         "pio_usb_configuration_t",
@@ -364,8 +365,11 @@ def test_the_reference_keeps_the_upstream_host_lifecycle_in_order():
         "set_sys_clock_khz(120000, true)",
         "multicore_reset_core1()",
         "multicore_launch_core1(core1_main)",
-        "tud_init(0)",
-        "tud_task()",
+        # UsbService::begin() is tud_init(0) with the reason written down: the
+        # argument-less tusb_init() brings up BOTH stacks on this TinyUSB, which
+        # started the host on Core 0 at the wrong clock once already.
+        "g_usb.begin()",
+        "g_usb.task()",
     ]
 
     # core1_main is written above main, so the two sequences are checked inside
@@ -392,12 +396,20 @@ def test_the_reference_keeps_the_upstream_host_lifecycle_in_order():
     # paid for once.
     assert "tud_init" not in core1_body
     assert "tuh_init" not in main_body
+    # Never the argument-less form, on either core. Checked against code
+    # rather than the whole file: main.cpp explains in a comment why that call
+    # must not appear, and a naive search would fail on the explanation.
+    code = " ".join(line.split("//", 1)[0] for line in source.splitlines())
+    assert "tusb_init(" not in code, (
+        "tusb_init() brings up both stacks on this TinyUSB; the device stack "
+        "must be started with tud_init(0) alone"
+    )
 
 
 def test_the_reference_callbacks_left_main_but_not_the_build():
     """Callbacks moved out; they did not quietly disappear."""
     reference = ROOT / "firmware" / "u1_reference"
-    main_source = (reference / "main.c").read_text(encoding="utf-8")
+    main_source = (reference / "main.cpp").read_text(encoding="utf-8")
     callbacks = (reference / "host_callbacks.cpp").read_text(encoding="utf-8")
 
     for callback in (
@@ -407,7 +419,7 @@ def test_the_reference_callbacks_left_main_but_not_the_build():
         "tud_cdc_rx_cb",
     ):
         assert callback not in main_source, (
-            f"{callback} is still defined in main.c; the point of Task 2 is "
+            f"{callback} is still defined in main.cpp; the point of Task 2 is "
             "that callbacks do no work on the host core"
         )
         assert callback in callbacks, f"{callback} was lost, not moved"
@@ -457,10 +469,21 @@ def test_reference_elf_contains_only_the_upstream_host_device_path(
         f"{REFERENCE_ELF} contains no exact tud_cdc_n_write symbol"
     )
 
+    # Task 3 admits the input path, so the pipeline is now required rather
+    # than forbidden. What stays out is the old host backend, CH375, and
+    # everything Task 4 and Task 5 have yet to admit.
+    for required_symbol in ("InputPipeline8on_event", "OutputRuntime",
+                            "Core1Runtime", "ReferenceSourceAdapter"):
+        assert any(required_symbol in name for name in symbols), (
+            f"{REFERENCE_ELF} contains no {required_symbol}"
+        )
+
     for excluded in (
         "Ch375Device4tick",
-        "InputPipeline8on_event",
         "PioUsbBackend4task",
+        "SpiMaster",
+        "ConfigService",
+        "CoreBridge",
     ):
         assert not any(excluded in name for name in symbols), (
             f"{REFERENCE_ELF} unexpectedly contains {excluded}"
