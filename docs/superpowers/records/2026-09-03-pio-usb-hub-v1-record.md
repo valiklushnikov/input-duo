@@ -926,3 +926,97 @@ measured, and no conclusion should be drawn until it is.
 The gate is not passed. What changed today is that the blocker is now a single
 known row with a documented workaround, rather than a device that could not be
 enumerated at all.
+
+## Fifth defect: one failed status poll ends hub monitoring for the session (2026-09-06)
+
+Hot replug never worked, and the counters showed why. Per-address IN transaction
+counters, sampled every 3 s during a replug:
+
+```
+CNT addr=1 try=58365 ok=70   ...  try=76365   <- device endpoint, polled normally
+CNT addr=5 try=467   ok=18   ...  try=467     <- hub endpoint, FROZEN
+```
+
+The hub's status endpoint was not failing - it was **not being polled at all**.
+`try` stopped increasing entirely. The last real transaction on it had
+`lastpid = 0x97`, which is neither ACK, NAK, STALL nor a DATA PID: a corrupted
+response. That single corrupted response ended hub monitoring permanently, so no
+port change could ever be reported again and hot-plug was impossible.
+
+The cause is one line in `hub.c`:
+
+```c
+bool hub_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes) {
+  TU_VERIFY(result == XFER_RESULT_SUCCESS);   // returns without re-arming
+```
+
+Every other branch of that function carefully re-arms the poll with
+`hub_edpt_status_xfer()` - including the branch for a zero status change, which
+upstream comments as "This shouldn't happen, but it does with some devices". The
+failure branch is the only one that does not.
+
+```diff
+-  TU_VERIFY(result == XFER_RESULT_SUCCESS);
++  if (result != XFER_RESULT_SUCCESS) {
++    // Giving up here ends hub monitoring for the rest of the session ...
++    return hub_edpt_status_xfer(dev_addr);
++  }
+```
+
+Measured effect, same rig, same replug:
+
+| | before | after |
+| --- | --- | --- |
+| `Hub Status Change` events | 1-2, at boot only | 4 |
+| `is unmounted` lines | 0 | 1, then 6 across two replugs |
+| hub endpoint counter | frozen at `try=467 ok=18` | `try=3616 ok=39`, still growing |
+| device after replug | dead, bus flooded | re-enumerated, 2596 reports |
+
+### Validation of the complete change set
+
+Image `9c2b9dd0bcfd81c5835d3e02b03abcba3f299d8e8848b36d708d06124baaa6be`
+(`candidate_v5`, 102400 bytes, no diagnostics).
+
+Cold start, both receivers: 3270 mouse reports from address 1, `L` and `R`
+buttons, 59 keyboard characters, 0 unmounts, 0 errors.
+
+Hot replug without any power cycle: six unmount lines (two complete
+three-interface detach events) and six matching mount lines, 1179 mouse reports
+afterwards at a normal rate, keyboard typing throughout. Both replugs were of
+the receiver at address 1; a replug of the address 2 receiver was not captured
+and that row is still unconfirmed.
+
+### The five fixes
+
+`tinyusb-host-fixes.patch`:
+1. `usbh.c` - enable `ENUM_RESET_2` (second port reset before `SET_ADDRESS`),
+   with `RESET_DELAY` corrected to `ENUM_RESET_DELAY_MS`.
+2. `hid_host.c` - mount a boot-protocol interface when the Report Descriptor
+   fetch fails, instead of abandoning it.
+3. `hub.c` - re-arm the hub status poll after a failed transfer.
+
+`pico-pio-usb-host-fixes.patch`:
+4. `pio_usb_host.c` - bound the control-endpoint toggle-mismatch retry; on
+   non-control endpoints discard first and resync only after a run of
+   consecutive mismatches.
+5. `pio_usb.c` - apply the 1 bit-time inter-packet delay before the handshake at
+   full speed as well as low speed.
+
+Plus `CFG_TUH_HID 4 -> 8` in the reference `tusb_config.h`.
+
+### Gate status now
+
+| Task 1 Step 7 row | result |
+| --- | --- |
+| hub enumeration | pass |
+| keyboard and mouse HID mount | pass, 5 interfaces |
+| keyboard characters | pass |
+| mouse movement and buttons | pass |
+| mouse wheel | not observable in boot protocol |
+| simultaneous use | pass |
+| re-enumeration after replug | pass for the address 1 receiver; address 2 unconfirmed |
+
+Still outstanding: the address 2 replug row; whether fix 5 is necessary on its
+own; why the device disagrees about the data toggle at all; the wired Aula F75
+taking the whole bus down; and adoption through forked dependencies with new
+pinned revisions in `cmake/pio_usb_toolchain_lock.cmake`.
