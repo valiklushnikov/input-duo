@@ -1058,3 +1058,54 @@ were repaired, and it is not worth changing handshake timing without cause.
 
 Plus `CFG_TUH_HID 4 -> 8` in the reference `tusb_config.h`. `pio_usb.c`,
 `usb_crc.c` and every PIO program are unmodified.
+
+## Adoption: the fixes are now reproducible, not hand-applied (2026-09-06)
+
+Every image before this point was built through a temporary bypass of the
+toolchain lock, which is not a state any later task can build on. The four
+fixes are now carried as reviewed patches under version control.
+
+**How.** `patches/tinyusb/` and `patches/pico-pio-usb/` hold the diffs.
+`tools/bootstrap_pio_usb_toolchain.ps1` fetches the upstream base revision as
+before, normalises the clone to LF, applies the patches and commits them with a
+fixed author, committer, date (`1788691431 +0000`) and message. Everything a
+git commit hashes is therefore fixed, so the resulting revision is the same on
+any machine. `cmake/pio_usb_toolchain_lock.cmake` pins those revisions and keeps
+both of its original checks unchanged - exact SHA and an empty
+`git status --porcelain`. A hand-edited clone still cannot be built against.
+
+| | upstream base | built as |
+| --- | --- | --- |
+| TinyUSB | `86ad6e56c1700e85f1c5678607a762cfe3aa2f47` | `507766faf14f38a6752401fb4f324cc00cd145dd` |
+| Pico-PIO-USB | `3c1eec341a5232640e4c00628b889b641af34b28` | `a2a076497ab6f373ae1c9e98777bf3a0c6f4a40e` |
+| Pico SDK | `98a542c1a62fb549ffb5d66a3e5892b06276b670` | unmodified |
+
+**Verified, not assumed.** `.deps/pico-pio-usb` was deleted outright and the
+bootstrap re-ran the full clone-and-patch path against GitHub. It produced
+`a2a076497ab6f373ae1c9e98777bf3a0c6f4a40e` - the pinned SHA - and the firmware
+rebuilt from that fresh clone is
+`2216d782c0db377375056d1a026379e222b93ab57e90a1f7b69ac6575c41ee63`, byte for
+byte the `candidate_v6` image validated on the bench. The build no longer needs
+the diagnostic bypass, and `DUO_PIO_USB_DIAGNOSTIC_ALLOW_DIRTY` is gone from the
+tree.
+
+**Two traps found while doing it**, both of the kind that work on one machine
+and fail on another:
+
+- The clone is checked out under the global `core.autocrlf=true`, so its files
+  had CRLF. A commit made over that tree hashes differently than the same patch
+  applied on Linux, and the LF patch would not even apply. The bootstrap now
+  normalises before patching. TinyUSB happened to already be LF and gave the
+  same SHA either way; Pico-PIO-USB did not.
+- The patch files themselves would have been converted to CRLF on checkout,
+  which breaks `git apply` against the normalised clone. `.gitattributes` now
+  exempts them, and a test asserts that.
+
+**`CFG_TUH_HID 4 -> 8`** is the one place the reference deviates from the
+upstream example. `test_pio_usb_reference_contract.py` no longer just carries a
+different hash for `tusb_config.h`: it asserts the maintained copy differs from
+upstream in exactly the listed lines, so an accidental second edit fails as
+loudly as an unreviewed first one.
+
+Verification run: 113 build tests pass, 43 native tests pass, and all three Pico
+presets build.
