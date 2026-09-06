@@ -4,7 +4,7 @@
 
 **Goal:** Build a separately selectable U1 firmware from the proven Pico-PIO-USB upstream lifecycle, restore Duo Input one measured layer at a time, and preserve the implemented shared clipboard.
 
-**Architecture:** A new `PIO_USB_REFERENCE` backend starts as a maintained byte-for-byte copy of the pinned `host_hid_to_device_cdc` example. TinyUSB host ownership and ordering stay fixed while a bounded callback queue, the existing neutral input pipeline, PC1 output, U2 routing, configuration, diagnostics and the existing clipboard branch are admitted sequentially; each firmware layer must pass a real-hardware gate before the next begins.
+**Architecture:** A new `PIO_USB_REFERENCE` backend starts as a maintained copy of the pinned `host_hid_to_device_cdc` example, byte for byte apart from deviations listed in `DOCUMENTED_REFERENCE_DEVIATIONS` in `tests/build/test_pio_usb_reference_contract.py` - currently only `CFG_TUH_HID 4 -> 8`, because one composite 2.4 GHz receiver claims three HID instances and two of them do not fit in four. TinyUSB host ownership and ordering stay fixed while a bounded callback queue, the existing neutral input pipeline, PC1 output, U2 routing, configuration, diagnostics and the existing clipboard branch are admitted sequentially; each firmware layer must pass a real-hardware gate before the next begins.
 
 **Tech Stack:** C/C++17, Raspberry Pi Pico SDK 2.3.0, TinyUSB, Pico-PIO-USB 0.7.2, CMake/Ninja, Python/pytest, PySide6, Windows PowerShell, RP2040 UF2/HIL.
 
@@ -13,7 +13,18 @@
 ## Global Constraints
 
 - Keep `CH375`, the current `PIO_USB`, and the new `PIO_USB_REFERENCE` builds separately reproducible.
-- Use the revisions already pinned in `cmake/pio_usb_toolchain_lock.cmake`: Pico SDK `98a542c1a62fb549ffb5d66a3e5892b06276b670`, TinyUSB `86ad6e56c1700e85f1c5678607a762cfe3aa2f47`, Pico-PIO-USB `3c1eec341a5232640e4c00628b889b641af34b28`.
+- Use the revisions pinned in `cmake/pio_usb_toolchain_lock.cmake`: Pico SDK
+  `98a542c1a62fb549ffb5d66a3e5892b06276b670` unmodified, TinyUSB
+  `86ad6e56c1700e85f1c5678607a762cfe3aa2f47` built as
+  `507766faf14f38a6752401fb4f324cc00cd145dd`, and Pico-PIO-USB
+  `3c1eec341a5232640e4c00628b889b641af34b28` built as
+  `a2a076497ab6f373ae1c9e98777bf3a0c6f4a40e`. The last two carry the reviewed
+  host fixes in `patches/`, applied and committed by
+  `tools/bootstrap_pio_usb_toolchain.ps1` with a fixed identity and date so the
+  revisions are reproducible. Without them this hardware does not enumerate a
+  second device, does not mount a keyboard, hangs the host stack on a control
+  transfer, and loses hub port events for the rest of the session. Do not build
+  against a hand-edited clone; the lock refuses it.
 - Use `SOURCE_DATE_EPOCH=1788691431` for byte-identity comparisons across task commits; otherwise the repository intentionally stamps each commit's date into the UF2 and unchanged U2/legacy sources will not hash identically.
 - U1 host pins stay GP0 D+ and GP1 D-. U1/U2 SPI stays GP10↔GP10, GP9↔GP9, U1 GP11→U2 GP8, U2 GP11→U1 GP8, common GND.
 - U1 is the only peripheral host. Do not change or flash U2 unless the unchanged compatibility contract demonstrably fails.
