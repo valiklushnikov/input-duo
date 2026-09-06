@@ -91,7 +91,8 @@ RuntimeInput g_input;
 duo_input::u1::input::InputPipeline g_keyboard_pipeline(g_input);
 duo_input::u1::input::InputPipeline g_mouse_pipeline(g_input);
 
-duo_input::u1::reference::ReferenceSourceAdapter g_adapter;
+using duo_input::u1::reference::ReferenceSourceAdapter;
+ReferenceSourceAdapter g_adapter;
 
 std::uint32_t now_ms() {
     return to_ms_since_boot(get_absolute_time());
@@ -114,6 +115,18 @@ void service_input(std::uint32_t millis) {
                 ? &g_keyboard_pipeline
                 : &g_mouse_pipeline;
         pipeline->on_event(event, identity, millis);
+        return;
+    }
+
+    // An interface whose layout came from its report descriptor has to be
+    // moved into report protocol before that layout describes anything: TinyUSB
+    // starts boot-capable interfaces in boot protocol, whose mouse report is
+    // three bytes with no Report ID. This is the only place that call can be
+    // made - the adapter is transport neutral and tested without TinyUSB.
+    ReferenceSourceAdapter::ProtocolRequest protocol_request{};
+    if (g_adapter.take_protocol_request(protocol_request)) {
+        tuh_hid_set_protocol(protocol_request.dev_addr, protocol_request.instance,
+                             protocol_request.protocol);
         return;
     }
 

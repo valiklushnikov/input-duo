@@ -76,12 +76,25 @@ void ReferenceSourceAdapter::push(SourceEventKind kind,
     ++pending_count_;
 }
 
+void ReferenceSourceAdapter::request_protocol(std::uint8_t dev_addr,
+                                              std::uint8_t instance,
+                                              std::uint8_t protocol) {
+    if (protocol_request_count_ >= kInterfaceCapacity) {
+        return;
+    }
+    const std::size_t at =
+        (protocol_request_head_ + protocol_request_count_) % kInterfaceCapacity;
+    protocol_requests_[at] = ProtocolRequest{dev_addr, instance, protocol};
+    ++protocol_request_count_;
+}
+
 void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record) {
     SourceIdentity identity{};
-    const bool classified = pio_usb::classify_hid(
+    const pio_usb::HidLayoutSource layout_source = pio_usb::classify_hid_layout(
         record.protocol,
         record.descriptor_size != 0 ? record.descriptor.data() : nullptr,
         record.descriptor_size, identity);
+    const bool classified = layout_source != pio_usb::HidLayoutSource::None;
     if (!classified || identity.kind == DeviceKind::Unknown) {
         // Nothing here this firmware can read. Deliberately not given a role:
         // an interface that cannot be parsed must not keep the real device
@@ -107,7 +120,20 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record) {
         return;
     }
 
+    // A descriptor layout describes report protocol, so the interface has to
+    // be moved there for it to describe anything at all. An interface that
+    // fell back to the boot layout must stay where it is: moving it would make
+    // the device send a format nothing here knows how to read.
+    //
+    // Not requested for the auxiliary channel above: its reports are matched
+    // by shape rather than by layout, and that shape is boot protocol's.
+    const bool wants_report_protocol =
+        layout_source == pio_usb::HidLayoutSource::ReportDescriptor;
+
     if (identity.kind == DeviceKind::Keyboard && !keyboard_owned_) {
+        if (wants_report_protocol) {
+            request_protocol(record.dev_addr, record.instance, kHidProtocolReport);
+        }
         entry->role = Role::Keyboard;
         keyboard_owned_ = true;
         keyboard_identity_ = identity;
@@ -116,6 +142,9 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record) {
     }
 
     if (identity.kind == DeviceKind::Mouse && !mouse_owned_) {
+        if (wants_report_protocol) {
+            request_protocol(record.dev_addr, record.instance, kHidProtocolReport);
+        }
         entry->role = Role::Mouse;
         mouse_owned_ = true;
         mouse_identity_ = identity;
@@ -231,6 +260,17 @@ void ReferenceSourceAdapter::consume(const ReferenceCallbackRecord& record,
             on_overflow();
             return;
     }
+}
+
+bool ReferenceSourceAdapter::take_protocol_request(ProtocolRequest& request) {
+    if (protocol_request_count_ == 0) {
+        return false;
+    }
+    request = protocol_requests_[protocol_request_head_];
+    protocol_request_head_ = static_cast<std::uint8_t>(
+        (protocol_request_head_ + 1) % kInterfaceCapacity);
+    --protocol_request_count_;
+    return true;
 }
 
 bool ReferenceSourceAdapter::take_event(SourceEvent& event,

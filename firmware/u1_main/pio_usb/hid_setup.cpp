@@ -10,8 +10,10 @@ constexpr std::uint8_t kProtocolMouse = 2;
 
 }  // namespace
 
-bool classify_hid(std::uint8_t protocol, const std::uint8_t* descriptor,
-                  std::size_t length, input::SourceIdentity& out) {
+HidLayoutSource classify_hid_layout(std::uint8_t protocol,
+                                    const std::uint8_t* descriptor,
+                                    std::size_t length,
+                                    input::SourceIdentity& out) {
     out = {};
 
     if (descriptor != nullptr && length != 0) {
@@ -23,31 +25,37 @@ bool classify_hid(std::uint8_t protocol, const std::uint8_t* descriptor,
             input::hid::classify_report_descriptor(
                 protocol::ByteView{descriptor, length}, keyboard, mouse);
         if (role == input::hid::ReportDescriptorRole::Ambiguous) {
-            return false;
+            return HidLayoutSource::None;
         }
         if (role == input::hid::ReportDescriptorRole::Keyboard) {
             out.kind = input::DeviceKind::Keyboard;
             out.keyboard_layout = keyboard;
-            return true;
+            return HidLayoutSource::ReportDescriptor;
         }
         if (role == input::hid::ReportDescriptorRole::Mouse) {
             out.kind = input::DeviceKind::Mouse;
             out.mouse_layout = mouse;
-            return true;
+            return HidLayoutSource::ReportDescriptor;
         }
     }
 
     if (protocol == kProtocolKeyboard) {
         out.kind = input::DeviceKind::Keyboard;
         out.keyboard_layout = input::hid::boot_keyboard_layout();
-        return true;
+        return HidLayoutSource::BootProtocol;
     }
     if (protocol == kProtocolMouse) {
         out.kind = input::DeviceKind::Mouse;
         out.mouse_layout = input::hid::boot_mouse_layout();
-        return true;
+        return HidLayoutSource::BootProtocol;
     }
-    return false;
+    return HidLayoutSource::None;
+}
+
+bool classify_hid(std::uint8_t protocol, const std::uint8_t* descriptor,
+                  std::size_t length, input::SourceIdentity& out) {
+    return classify_hid_layout(protocol, descriptor, length, out) !=
+          HidLayoutSource::None;
 }
 
 bool is_keychron_auxiliary_interface(std::uint16_t vendor_id, std::uint16_t product_id,

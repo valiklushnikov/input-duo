@@ -38,6 +38,28 @@ public:
     /// Take one event this adapter has produced. False when there is none.
     bool take_event(input::SourceEvent& event, input::SourceIdentity& identity);
 
+    //: HID interface protocol values, named here so this stays transport
+    //: neutral and unit-testable without TinyUSB.
+    static constexpr std::uint8_t kHidProtocolBoot = 0;
+    static constexpr std::uint8_t kHidProtocolReport = 1;
+
+    /// An interface that has to be moved to a different HID protocol.
+    ///
+    /// A layout taken from a report descriptor describes what the device sends
+    /// in *report* protocol. TinyUSB starts boot-capable interfaces in boot
+    /// protocol, whose mouse report is three bytes with no Report ID, so
+    /// reading those with a descriptor layout drops every report. The adapter
+    /// cannot call TinyUSB itself - it is transport neutral and tested without
+    /// it - so it says which interface needs what, and the host core acts.
+    struct ProtocolRequest {
+        std::uint8_t dev_addr = 0;
+        std::uint8_t instance = 0;
+        std::uint8_t protocol = kHidProtocolReport;
+    };
+
+    /// Take one pending protocol change. False when there is none.
+    bool take_protocol_request(ProtocolRequest& request);
+
     /// Whether an event is waiting. The caller drains before consuming again,
     /// so nothing this adapter produced is ever dropped for want of room.
     bool has_pending() const { return pending_count_ != 0; }
@@ -87,10 +109,18 @@ private:
               std::size_t report_size = 0,
               std::uint32_t received_us = 0);
 
+    void request_protocol(std::uint8_t dev_addr, std::uint8_t instance,
+                          std::uint8_t protocol);
     void on_mount(const ReferenceCallbackRecord& record);
     void on_unmount(const ReferenceCallbackRecord& record);
     void on_report(const ReferenceCallbackRecord& record, std::uint32_t now_us);
     void on_overflow();
+
+    //: One request per interface that can ask for one, which is at most the
+    //: interface table itself.
+    ProtocolRequest protocol_requests_[kInterfaceCapacity]{};
+    std::uint8_t protocol_request_count_ = 0;
+    std::uint8_t protocol_request_head_ = 0;
 
     Interface interfaces_[kInterfaceCapacity]{};
     Pending pending_[kPendingCapacity]{};

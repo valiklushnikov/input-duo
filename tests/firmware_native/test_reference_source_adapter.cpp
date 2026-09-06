@@ -6,9 +6,14 @@
 // adapter's own helpers - a wrong answer that both the code and the test agree
 // on is exactly what this file has to be unable to produce.
 //
-// Real descriptors, not invented ones: the same fixtures the CH375 and current
-// PIO backends are tested against, so a device that reads one way there cannot
-// quietly read another way here.
+// Two kinds of descriptor are involved and they are not interchangeable. The
+// files under tests/vectors/hid_descriptors are *configuration* descriptors,
+// which is what parse_configuration reads; a report descriptor is a different
+// document, fetched with its own request. Feeding a configuration descriptor
+// where a report descriptor belongs is not a parse failure to be shrugged at -
+// it is how a test comes to pass for a reason its name does not claim. So the
+// descriptor path is exercised with a real report descriptor, and the files are
+// used only where the point is that a descriptor cannot be read at all.
 
 #include <cstdint>
 #include <cstring>
@@ -37,6 +42,47 @@ std::vector<std::uint8_t> descriptor(const char* name) {
     std::ifstream stream(std::string{DUO_TEST_VECTOR_DIR} + "/hid_descriptors/" + name,
                          std::ios::binary);
     return {std::istreambuf_iterator<char>{stream}, std::istreambuf_iterator<char>{}};
+}
+
+/// A report descriptor a mouse would actually send: Report ID 1, five buttons,
+/// 16-bit axes and a wheel. Copied from test_report_descriptor.cpp so both
+/// files describe the same device to the same parser.
+std::vector<std::uint8_t> report_id_wheel_mouse() {
+    return {
+        0x05, 0x01,        // Usage Page (Generic Desktop)
+        0x09, 0x02,        // Usage (Mouse)
+        0xA1, 0x01,        // Collection (Application)
+        0x85, 0x01,        //   Report ID (1)
+        0x09, 0x01,        //   Usage (Pointer)
+        0xA1, 0x00,        //   Collection (Physical)
+        0x05, 0x09,        //     Usage Page (Button)
+        0x19, 0x01,        //     Usage Minimum (Button 1)
+        0x29, 0x05,        //     Usage Maximum (Button 5)
+        0x15, 0x00,        //     Logical Minimum (0)
+        0x25, 0x01,        //     Logical Maximum (1)
+        0x75, 0x01,        //     Report Size (1)
+        0x95, 0x05,        //     Report Count (5)
+        0x81, 0x02,        //     Input (Data,Var,Abs)
+        0x75, 0x03,        //     Report Size (3)
+        0x95, 0x01,        //     Report Count (1)
+        0x81, 0x01,        //     Input (Cnst) - padding to a byte
+        0x05, 0x01,        //     Usage Page (Generic Desktop)
+        0x09, 0x30,        //     Usage (X)
+        0x09, 0x31,        //     Usage (Y)
+        0x16, 0x01, 0xF8,  //     Logical Minimum (-2047)
+        0x26, 0xFF, 0x07,  //     Logical Maximum (2047)
+        0x75, 0x10,        //     Report Size (16)
+        0x95, 0x02,        //     Report Count (2)
+        0x81, 0x06,        //     Input (Data,Var,Rel)
+        0x09, 0x38,        //     Usage (Wheel)
+        0x15, 0x81,        //     Logical Minimum (-127)
+        0x25, 0x7F,        //     Logical Maximum (127)
+        0x75, 0x08,        //     Report Size (8)
+        0x95, 0x01,        //     Report Count (1)
+        0x81, 0x06,        //     Input (Data,Var,Rel)
+        0xC0,              //   End Collection
+        0xC0,              // End Collection
+    };
 }
 
 ReferenceCallbackRecord mount(std::uint8_t dev_addr,
@@ -105,17 +151,23 @@ TEST_CASE(a_boot_keyboard_mount_is_announced_as_a_ready_keyboard) {
           adapter.logical_port(DeviceKind::Mouse));
 }
 
-TEST_CASE(a_five_button_mouse_keeps_the_layout_its_descriptor_declared) {
+TEST_CASE(a_mouse_keeps_the_layout_its_report_descriptor_declared) {
     ReferenceSourceAdapter adapter;
     adapter.consume(mount(1, 0, kProtocolMouse, 0x3434, 0xD031,
-                          descriptor("mouse_5_button.bin")),
+                          report_id_wheel_mouse()),
                     0);
 
     const Taken taken = take(adapter);
     CHECK(taken.ok);
     CHECK(taken.identity.kind == DeviceKind::Mouse);
-    // The whole point of parsing the descriptor rather than assuming boot
-    // protocol: a wheel this device declares and boot protocol cannot carry.
+
+    // Asserted on the Report ID rather than on the wheel: boot_mouse_layout()
+    // also marks a wheel present, so a wheel assertion passes just as happily
+    // when the descriptor was never read. Only a descriptor can declare an
+    // identifier, and only 16-bit axes distinguish this from boot protocol.
+    CHECK(taken.identity.mouse_layout.report_id);
+    CHECK_EQ(taken.identity.mouse_layout.report_id_value, 1u);
+    CHECK_EQ(taken.identity.mouse_layout.x.bytes, 2u);
     CHECK(taken.identity.mouse_layout.wheel.present);
 }
 
@@ -273,9 +325,10 @@ TEST_CASE(an_overflow_with_nothing_attached_faults_nothing) {
 TEST_CASE(a_descriptor_that_will_not_parse_does_not_take_a_role_on_its_shape) {
     ReferenceSourceAdapter adapter;
 
-    // A truncated descriptor with no interface protocol to fall back on is a
-    // device this firmware cannot read. Claiming a role for it would keep the
-    // real device that follows from ever getting one.
+    // Not a report descriptor at all - a configuration descriptor, offered
+    // where a report descriptor belongs - and no interface protocol to fall
+    // back on. A device this firmware cannot read. Claiming a role for it would
+    // keep the real device that follows from ever getting one.
     adapter.consume(mount(1, 0, kProtocolNone, 0x9999, 0x8888,
                           descriptor("truncated_item.bin")),
                     0);
@@ -307,4 +360,76 @@ TEST_CASE(pending_events_are_visible_before_they_are_taken) {
     CHECK(adapter.has_pending());
     CHECK(take(adapter).ok);
     CHECK_FALSE(adapter.has_pending());
+}
+
+// --------------------------------------------------------------------------
+// Protocol selection: the layout and the wire format have to agree.
+// --------------------------------------------------------------------------
+
+TEST_CASE(an_interface_read_by_descriptor_is_moved_to_report_protocol) {
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(1, 0, kProtocolMouse, 0x3434, 0xD031,
+                          report_id_wheel_mouse()),
+                    0);
+    CHECK(take(adapter).ok);
+
+    ReferenceSourceAdapter::ProtocolRequest request{};
+    CHECK(adapter.take_protocol_request(request));
+    CHECK_EQ(request.dev_addr, 1u);
+    CHECK_EQ(request.instance, 0u);
+    CHECK_EQ(request.protocol, ReferenceSourceAdapter::kHidProtocolReport);
+
+    CHECK_FALSE(adapter.take_protocol_request(request));
+}
+
+TEST_CASE(an_interface_that_fell_back_to_boot_is_left_where_it_is) {
+    ReferenceSourceAdapter adapter;
+
+    // No descriptor at all: this is the receiver whose descriptor fetch fails.
+    // Its layout is boot protocol's, so moving it to report protocol would make
+    // it send a format nothing here can read.
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0);
+    const Taken taken = take(adapter);
+    CHECK(taken.ok);
+    CHECK(taken.identity.kind == DeviceKind::Keyboard);
+
+    ReferenceSourceAdapter::ProtocolRequest request{};
+    CHECK_FALSE(adapter.take_protocol_request(request));
+}
+
+TEST_CASE(an_ignored_interface_asks_for_no_protocol_change) {
+    ReferenceSourceAdapter adapter;
+
+    // Second claimant for a role already taken.
+    adapter.consume(mount(1, 0, kProtocolMouse, 0x1BCF, 0x0005,
+                          descriptor("boot_mouse.bin")),
+                    0);
+    CHECK(take(adapter).ok);
+    ReferenceSourceAdapter::ProtocolRequest first{};
+    adapter.take_protocol_request(first);
+
+    adapter.consume(mount(3, 0, kProtocolMouse, 0x2222, 0x3333,
+                          report_id_wheel_mouse()),
+                    0);
+    CHECK_FALSE(take(adapter).ok);
+
+    ReferenceSourceAdapter::ProtocolRequest request{};
+    CHECK_FALSE(adapter.take_protocol_request(request));
+}
+
+TEST_CASE(the_keychron_side_channel_stays_in_boot_protocol) {
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(1, 0, kProtocolMouse, 0x3434, 0xD030,
+                          descriptor("boot_mouse.bin")),
+                    0);
+    CHECK(take(adapter).ok);
+    ReferenceSourceAdapter::ProtocolRequest request{};
+    while (adapter.take_protocol_request(request)) {
+    }
+
+    // Its reports are matched by shape, and that shape is boot protocol's.
+    adapter.consume(mount(1, 2, kProtocolKeyboard, 0x3434, 0xD030,
+                          descriptor("boot_keyboard.bin")),
+                    0);
+    CHECK_FALSE(adapter.take_protocol_request(request));
 }
