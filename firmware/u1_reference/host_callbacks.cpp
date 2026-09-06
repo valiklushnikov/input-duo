@@ -26,7 +26,64 @@ extern "C" bool reference_descriptor_unmounted(std::uint8_t dev_addr,
                                                 std::uint8_t instance,
                                                 std::uint32_t now_us);
 
+// Pico-PIO-USB's control-transfer packet trace, from patches/pico-pio-usb/.
+// The patch is confined to src/pio_usb_host.c - it touches no header, and a
+// build test keeps it that way - so the drain hands back scalars and these
+// prototypes are declared here rather than included. Nothing mirrors a struct
+// layout across the boundary; only the three kind numbers do, and they are
+// pinned below and by a build test on both sides.
+extern "C" {
+bool pio_usb_host_ctrl_trace_take(std::uint32_t* out_seq,
+                                  std::uint8_t* out_kind,
+                                  std::uint8_t* out_dev_addr,
+                                  std::uint8_t* out_ep_num,
+                                  std::uint8_t* out_pid,
+                                  std::uint16_t* out_len,
+                                  std::uint16_t* out_ep_size,
+                                  std::uint16_t* out_actual_len,
+                                  std::uint16_t* out_total_len,
+                                  std::uint8_t* out_bytes,
+                                  std::uint8_t* out_byte_count);
+std::uint32_t pio_usb_host_ctrl_trace_lost(void);
+}
+
+static_assert(static_cast<std::uint8_t>(ReferenceControlTraceKind::Setup) == 0,
+              "PIO_USB_CTRL_TRACE_KIND_SETUP is 0 in the patch");
+static_assert(static_cast<std::uint8_t>(ReferenceControlTraceKind::Data) == 1,
+              "PIO_USB_CTRL_TRACE_KIND_DATA is 1 in the patch");
+static_assert(static_cast<std::uint8_t>(ReferenceControlTraceKind::Done) == 2,
+              "PIO_USB_CTRL_TRACE_KIND_DONE is 2 in the patch");
+static_assert(kReferenceControlTraceBytes == 16,
+              "PIO_USB_CTRL_TRACE_BYTES is 16 in the patch, and the drain "
+              "writes exactly that many bytes into the array below");
+
 namespace {
+
+// Core 0 only. Everything this does is copy out of a ring the host core
+// filled; it never reaches back into the host stack.
+class PioUsbControlTrace final : public IReferenceControlTraceSource {
+public:
+    bool take(ReferenceControlTraceEntry& entry) override {
+        std::uint8_t kind = 0;
+        std::uint8_t byte_count = 0;
+        if (!pio_usb_host_ctrl_trace_take(
+                &entry.seq, &kind, &entry.dev_addr, &entry.ep_num, &entry.pid,
+                &entry.length, &entry.ep_size, &entry.actual_len,
+                &entry.total_len, entry.bytes.data(), &byte_count)) {
+            return false;
+        }
+        entry.kind = static_cast<ReferenceControlTraceKind>(kind);
+        // Bounded here as well as in the patch: a count larger than the array
+        // would be read past its end by the renderer.
+        entry.byte_count = static_cast<std::uint8_t>(
+            byte_count < entry.bytes.size() ? byte_count : entry.bytes.size());
+        return true;
+    }
+
+    std::uint32_t lost() override { return pio_usb_host_ctrl_trace_lost(); }
+};
+
+PioUsbControlTrace g_control_trace;
 
 class TinyUsbCdcWriter final : public IReferenceCdcWriter {
 public:
@@ -136,6 +193,14 @@ void reference_drain_one_callback(void) {
 // retention, formatting, and queue consumption live in the native-tested
 // service coordinator.
 void reference_service_one_cdc(void) {
+    // Installed here, on Core 0, and nowhere else: draining the packet ring
+    // belongs to the core that prints, never to the core that fills it.
+    static bool trace_installed = false;
+    if (!trace_installed) {
+        reference_set_control_trace_source(&g_control_trace);
+        trace_installed = true;
+    }
+
     TinyUsbCdcWriter writer;
     reference_service_cdc(writer);
 }

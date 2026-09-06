@@ -37,7 +37,7 @@ FIXED_SOURCE_DATE_EPOCH = "1788691431"
 # applied - see cmake/pio_usb_toolchain_lock.cmake. The examples/ directory the
 # reference copies come from is untouched by that patch, so the upstream blob
 # hashes below still hold.
-PINNED_PICO_PIO_USB_REVISION = "a2a076497ab6f373ae1c9e98777bf3a0c6f4a40e"
+PINNED_PICO_PIO_USB_REVISION = "0ba2b6fe3e92289a9c40c33d3f7906db7506845a"
 REVIEWED_REFERENCE_SHA256 = {
     "main.c": "e8539134690e597be9254ee179f72a2b5cc93becf355e033f994d08955ea8ea1",
     "tusb_config.h": "4ce4ff7a45fc93b5695ddc9375c091995ce19ab078fc32a23d3f4299ee95594c",
@@ -659,4 +659,102 @@ def test_stale_control_work_cannot_hide_an_unmount_forever():
     assert (
         "reference_descriptor_unmounted(dev_addr, instance, time_us_32())"
         in umount
+    )
+
+
+def test_the_control_trace_is_drained_and_printed_only_from_core_0():
+    """Nothing about the packet trace may run on the host core.
+
+    The ring is filled inside Pico-PIO-USB's transaction path; everything on
+    this side of it - draining, formatting, CDC - belongs to Core 0's device
+    loop, on the far side of the same boundary the report trace already
+    respects.
+    """
+    callbacks = (
+        ROOT / "firmware" / "u1_reference" / "host_callbacks.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert "pio_usb_host_ctrl_trace_take" in callbacks, (
+        "nothing drains the Pico-PIO-USB control trace ring"
+    )
+    assert "pio_usb_host_ctrl_trace_lost" in callbacks, (
+        "the ring's overflow count is never read, so a dropped packet would "
+        "leave a hole in the trace that reads like a packet never sent"
+    )
+    assert "reference_set_control_trace_source" in callbacks
+
+    service = callbacks[callbacks.index("void reference_service_one_cdc") :]
+    assert "reference_set_control_trace_source" in service, (
+        "the trace source is not installed from the Core 0 CDC service"
+    )
+
+    # Core 1's drain must not touch it.
+    core1_drain = callbacks[
+        callbacks.index("void reference_drain_one_callback") : callbacks.index(
+            "void reference_service_one_cdc"
+        )
+    ]
+    for forbidden in ("pio_usb_host_ctrl_trace_take", "reference_service_cdc"):
+        assert forbidden not in core1_drain, (
+            f"{forbidden} is called from the Core 1 drain"
+        )
+
+    # And no host callback may format or write it.
+    for callback in ("tuh_hid_mount_cb", "tuh_hid_report_received_cb"):
+        start = callbacks.index(f"void {callback}")
+        body = callbacks[start : start + 1200]
+        for forbidden in ("snprintf", "tud_cdc_write", "pio_usb_host_ctrl_trace"):
+            assert forbidden not in body, (
+                f"{forbidden} is called from {callback}, on the core that "
+                "drives tuh_task"
+            )
+
+
+def test_both_descriptor_experiments_run_from_one_boot():
+    """Two boots would compare two different device states.
+
+    The 64-byte read and the 77-byte read have to happen in the same session,
+    against the same enumeration, or the answer to one says nothing about the
+    other.
+    """
+    adapter = (ROOT / "firmware" / "u1_reference" / "source_adapter.cpp").read_text(
+        encoding="utf-8"
+    )
+    source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert "kAulaKeyboardDescriptorLength = 64" in adapter
+    assert "kAulaKeyboardFollowupLength = 77" in adapter, (
+        "the follow-up must request the whole 77-byte document, not another "
+        "single packet"
+    )
+    assert "g_descriptor_diagnostic.take_completed()" in source, (
+        "nothing notices that the first attempt completed, so the follow-up "
+        "is never armed"
+    )
+    assert "g_adapter.schedule_descriptor_followup(" in source
+
+
+def test_the_follow_up_reuses_the_poisoned_request_path():
+    """One request path, one poison, one on-wire attempt per experiment.
+
+    A second code path for the second measurement is a second place for the
+    poison to be forgotten, and a buffer that still holds the first attempt's
+    bytes turns a transfer that writes nothing into a MATCH.
+    """
+    source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(
+        encoding="utf-8"
+    )
+    assert source.count("tuh_descriptor_get_hid_report(") == 1, (
+        "the follow-up must reuse the single, poisoned request path"
+    )
+    assert source.count("poison_descriptor_buffer(") == 1
+    assert re.search(
+        r"g_descriptor_diagnostic\.start\(\s*descriptor_request\.dev_addr,"
+        r"\s*descriptor_request\.instance,\s*descriptor_request\.length\)",
+        source,
+    ), (
+        "the diagnostic must be told the length that was actually requested, "
+        "so DESC64_ and DESC77_ cannot be confused"
     )

@@ -10,9 +10,15 @@
 namespace duo_input::u1::reference {
 
 inline constexpr std::size_t kAulaDescriptorPacketBytes = 64;
-// Measurement oracle only: golden bytes 0..63 from the checked-in Aula
-// descriptor vector. This never reaches the HID parser or routing path.
-inline constexpr std::array<std::uint8_t, kAulaDescriptorPacketBytes>
+//: The whole checked-in Aula document, not only its first packet. The
+//: follow-up experiment asks for all 77 bytes, and calling that answer a
+//: match while having compared only 64 of them would assert that bytes 64..76
+//: were golden without looking at one of them - the exact fabrication the
+//: previous round removed from first_difference.
+inline constexpr std::size_t kAulaDescriptorGoldenBytes = 77;
+// Measurement oracle only: the checked-in Aula descriptor vector. This never
+// reaches the HID parser or routing path.
+inline constexpr std::array<std::uint8_t, kAulaDescriptorGoldenBytes>
     kAulaDescriptorPrefix = {
         0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x05, 0x08, 0x19, 0x01,
         0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x03,
@@ -20,7 +26,8 @@ inline constexpr std::array<std::uint8_t, kAulaDescriptorPacketBytes>
         0x29, 0xE7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08,
         0x81, 0x02, 0x75, 0x08, 0x95, 0x01, 0x81, 0x01, 0x05, 0x07,
         0x19, 0x00, 0x2A, 0xFF, 0x00, 0x15, 0x00, 0x26, 0xFF, 0x00,
-        0x75, 0x08, 0x95, 0x05,
+        0x75, 0x08, 0x95, 0x05, 0x81, 0x00, 0x05, 0xFF, 0x09, 0x03,
+        0x75, 0x08, 0x95, 0x01, 0x81, 0x02, 0xC0,
     };
 
 //: Written over the whole request buffer before every on-wire attempt. The
@@ -45,20 +52,22 @@ struct DescriptorDiagnosticResult {
     std::uint16_t first_difference = kReferenceNoDifference;
 };
 
+//: `expected_len` is the wLength the attempt asked for. It is mandatory: a
+//: default would silently make the 77-byte follow-up measure itself against
+//: the 64-byte experiment's idea of success.
 inline DescriptorDiagnosticResult descriptor_diagnostic_complete(
     bool transfer_succeeded, std::uint32_t actual_len, const std::uint8_t* bytes,
-    std::size_t capacity) {
+    std::size_t capacity, std::uint32_t expected_len) {
     DescriptorDiagnosticResult result{};
     result.actual_len = actual_len;
     if (!transfer_succeeded || bytes == nullptr || actual_len > capacity) {
         return result;
     }
-    // Compare for real, however short the completion was. Reporting
-    // min(actual_len, 64) as a first difference without looking at a byte
-    // asserts that those bytes were golden, which is the one thing this
-    // measurement exists to find out.
+    // Compare for real, however short the completion was. Reporting a first
+    // difference without looking at a byte asserts that those bytes were
+    // golden, which is the one thing this measurement exists to find out.
     const std::size_t compared = static_cast<std::size_t>(
-        std::min<std::uint32_t>(actual_len, kAulaDescriptorPacketBytes));
+        std::min<std::uint32_t>(actual_len, kAulaDescriptorGoldenBytes));
     for (std::size_t index = 0; index < compared; ++index) {
         if (bytes[index] != kAulaDescriptorPrefix[index]) {
             result.kind = DescriptorDiagnosticResult::Kind::Mismatch;
@@ -66,9 +75,9 @@ inline DescriptorDiagnosticResult descriptor_diagnostic_complete(
             return result;
         }
     }
-    // Every compared byte agreed. Only a full packet is a match; anything
-    // shorter is a mismatch with no first difference to name.
-    result.kind = actual_len == kAulaDescriptorPacketBytes
+    // Every compared byte agreed. Only an answer as long as the one requested
+    // is a match; anything else is a mismatch with no first difference to name.
+    result.kind = actual_len == expected_len
                       ? DescriptorDiagnosticResult::Kind::Match
                       : DescriptorDiagnosticResult::Kind::Mismatch;
     return result;
@@ -113,13 +122,16 @@ class DescriptorTransferState {
 public:
     enum class Completion : std::uint8_t { Ignored, Success, Failure };
 
-    bool start(std::uint8_t dev_addr, std::uint8_t instance) {
+    bool start(std::uint8_t dev_addr,
+               std::uint8_t instance,
+               std::uint16_t requested) {
         if (active_) {
             return false;
         }
         active_ = true;
         dev_addr_ = dev_addr;
         instance_ = instance;
+        requested_ = requested;
         ++lifetime_token_;
         return true;
     }
@@ -164,12 +176,14 @@ public:
     bool active() const { return active_; }
     std::uint8_t dev_addr() const { return dev_addr_; }
     std::uint8_t instance() const { return instance_; }
+    std::uint16_t requested() const { return requested_; }
     std::uint32_t lifetime_token() const { return lifetime_token_; }
 
 private:
     bool active_ = false;
     std::uint8_t dev_addr_ = 0;
     std::uint8_t instance_ = 0;
+    std::uint16_t requested_ = 0;
     std::uint32_t lifetime_token_ = 0;
 };
 
@@ -182,8 +196,10 @@ public:
     explicit DescriptorDiagnosticCoordinator(ReferenceSourceAdapter& adapter)
         : adapter_(adapter) {}
 
-    bool start(std::uint8_t dev_addr, std::uint8_t instance) {
-        return transfer_.start(dev_addr, instance);
+    bool start(std::uint8_t dev_addr,
+               std::uint8_t instance,
+               std::uint16_t requested) {
+        return transfer_.start(dev_addr, instance, requested);
     }
 
     void request_accepted() {
@@ -192,6 +208,7 @@ public:
         started.kind = ReferenceDescriptorDiagnosticKind::Start;
         started.dev_addr = transfer_.dev_addr();
         started.instance = transfer_.instance();
+        started.requested = transfer_.requested();
         reference_descriptor_diagnostic_push(started);
     }
 
@@ -202,22 +219,26 @@ public:
     // flashed, and this project has paid for that confusion before.
     void skipped(ReferenceDescriptorReason reason,
                  std::uint8_t dev_addr,
-                 std::uint8_t instance) {
+                 std::uint8_t instance,
+                 std::uint16_t requested) {
         ReferenceDescriptorDiagnostic skip{};
         skip.kind = ReferenceDescriptorDiagnosticKind::Skip;
         skip.reason = reason;
         skip.dev_addr = dev_addr;
         skip.instance = instance;
+        skip.requested = requested;
         reference_descriptor_diagnostic_push(skip);
     }
 
     bool abandon_if_unmounted(bool mounted) {
         const std::uint8_t dev_addr = transfer_.dev_addr();
         const std::uint8_t instance = transfer_.instance();
+        const std::uint16_t requested = transfer_.requested();
         if (!transfer_.abandon_if_unmounted(mounted)) {
             return false;
         }
-        skipped(ReferenceDescriptorReason::Unmounted, dev_addr, instance);
+        skipped(ReferenceDescriptorReason::Unmounted, dev_addr, instance,
+                requested);
         return true;
     }
 
@@ -229,8 +250,10 @@ public:
                          std::uint32_t now_us) {
         const ReferenceCallbackRecord unmount =
             reference_make_unmount(dev_addr, instance, now_us);
+        const std::uint16_t requested = transfer_.requested();
         if (transfer_.abandon(dev_addr, instance)) {
-            skipped(ReferenceDescriptorReason::Unmounted, dev_addr, instance);
+            skipped(ReferenceDescriptorReason::Unmounted, dev_addr, instance,
+                    requested);
         }
         adapter_.consume(unmount, now_us);
         return reference_capture(unmount);
@@ -246,16 +269,22 @@ public:
         std::uint32_t lifetime_token) {
         const std::uint8_t diagnostic_dev_addr = transfer_.dev_addr();
         const std::uint8_t diagnostic_instance = transfer_.instance();
+        const std::uint16_t diagnostic_requested = transfer_.requested();
         const DescriptorTransferState::Completion completion =
             transfer_.complete(dev_addr, transfer_succeeded, actual_len,
                                still_mounted, capacity, lifetime_token);
         if (completion == DescriptorTransferState::Completion::Ignored) {
             return completion;
         }
+        // Something reached the wire and came back, whatever it said. That is
+        // what arms the follow-up measurement; a completion that answered for
+        // nothing does not.
+        completed_ = true;
 
         ReferenceDescriptorDiagnostic diagnostic{};
         diagnostic.dev_addr = diagnostic_dev_addr;
         diagnostic.instance = diagnostic_instance;
+        diagnostic.requested = diagnostic_requested;
         diagnostic.actual_len = static_cast<std::uint16_t>(actual_len);
         // The request buffer's leading bytes, on every outcome and whatever
         // actual_len says. Bounded by the buffer, never by the reported
@@ -279,7 +308,8 @@ public:
         }
 
         const DescriptorDiagnosticResult result = descriptor_diagnostic_complete(
-            transfer_succeeded, actual_len, bytes, capacity);
+            transfer_succeeded, actual_len, bytes, capacity,
+            diagnostic_requested);
         if (result.kind == DescriptorDiagnosticResult::Kind::Failure) {
             // An internal fault, not a device measurement. Reporting it as a
             // mismatch would put a firmware bug on the device's record.
@@ -297,9 +327,18 @@ public:
         return completion;
     }
 
+    //: One shot. The host core asks once per completion whether to arm the
+    //: follow-up; asking again must not arm a third experiment.
+    bool take_completed() {
+        const bool completed = completed_;
+        completed_ = false;
+        return completed;
+    }
+
     bool active() const { return transfer_.active(); }
     std::uint8_t dev_addr() const { return transfer_.dev_addr(); }
     std::uint8_t instance() const { return transfer_.instance(); }
+    std::uint16_t requested() const { return transfer_.requested(); }
     std::uint32_t lifetime_token() const {
         return transfer_.lifetime_token();
     }
@@ -307,6 +346,7 @@ public:
 private:
     ReferenceSourceAdapter& adapter_;
     DescriptorTransferState transfer_{};
+    bool completed_ = false;
 };
 
 }  // namespace duo_input::u1::reference

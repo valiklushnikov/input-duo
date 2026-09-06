@@ -175,11 +175,22 @@ enum class ReferenceDescriptorReason : std::uint8_t {
 //: claim this measurement exists to test.
 inline constexpr std::uint16_t kReferenceNoDifference = 0xFFFFu;
 
+//: Wide enough to show buffer[13..20]. If the 77-byte answer was the golden
+//: document rotated by 64, those bytes read 05 01 09 06 A1 01 05 08; if only a
+//: 13-byte second packet ever landed at offset zero, they read A5. Eight bytes
+//: cannot tell those apart, which is why this is not kReferenceTracePrefix.
+inline constexpr std::size_t kReferenceDescriptorPrefix = 24;
+
 struct ReferenceDescriptorDiagnostic {
     ReferenceDescriptorDiagnosticKind kind{};
     ReferenceDescriptorReason reason{};
     std::uint8_t dev_addr{};
     std::uint8_t instance{};
+    //: The wLength this attempt asked for, and the number in its token:
+    //: DESC64_ for the one-packet read, DESC77_ for the whole document. It is
+    //: carried rather than assumed so a line can never claim to belong to an
+    //: experiment that did not produce it.
+    std::uint16_t requested{};
     std::uint16_t actual_len{};
     std::uint16_t first_difference = kReferenceNoDifference;
     //: The first bytes of the *request buffer*, not of what the transfer said
@@ -187,7 +198,7 @@ struct ReferenceDescriptorDiagnostic {
     //: what separates "nothing arrived" from "bytes arrived and only the
     //: count was lost", and it is reported on every completion outcome.
     std::uint8_t prefix_size{};
-    std::array<std::uint8_t, kReferenceTracePrefix> prefix{};
+    std::array<std::uint8_t, kReferenceDescriptorPrefix> prefix{};
 };
 
 // Descriptor measurements bypass the ordinary report trace queue. They remain
@@ -197,6 +208,70 @@ bool reference_descriptor_diagnostic_peek(ReferenceDescriptorDiagnostic& entry);
 bool reference_descriptor_diagnostic_take(ReferenceDescriptorDiagnostic& entry);
 void reference_descriptor_diagnostic_reset();
 
+// The control-transfer packet trace.
+//
+// Pico-PIO-USB records one entry per DATA packet on a control endpoint into a
+// static ring inside its own transaction path - after the handshake for that
+// packet has already gone out, never before. This is the far side of that
+// ring: Core 0 drains it in the bounded CDC service below and turns it into
+// one line per packet, so "the device sent nothing" can be told apart from
+// "the host stack lost what the device sent".
+//
+// The ring itself lives in the dependency, which cannot include this header,
+// so the source is an interface: the firmware implements it over the C drain
+// API and native tests implement it over a vector.
+
+enum class ReferenceControlTraceKind : std::uint8_t {
+    //: The eight SETUP bytes of the request the DATA packets answer.
+    Setup = 0,
+    //: One received DATA packet.
+    Data = 1,
+    //: The transfer stopped being active. It bounds the run of packets before
+    //: it, which is what makes a zero-length first packet legible as a
+    //: completed transfer rather than a stalled one.
+    Done = 2,
+};
+
+//: At most this many payload bytes are kept per packet. Copying more inside
+//: the transaction path buys nothing: what a reader needs is the first items
+//: of the descriptor and the length, not the whole packet.
+inline constexpr std::size_t kReferenceControlTraceBytes = 16;
+
+struct ReferenceControlTraceEntry {
+    ReferenceControlTraceKind kind{};
+    std::uint8_t dev_addr{};
+    std::uint8_t ep_num{};
+    //: The received PID byte, as it appeared on the wire.
+    std::uint8_t pid{};
+    //: Monotonic across every entry, and incremented even when the ring was
+    //: full, so a gap in the sequence is itself visible.
+    std::uint32_t seq{};
+    std::uint16_t length{};
+    //: ep->size. This is what turns "EP0 is 8 bytes" from an assumption into
+    //: a measurement.
+    std::uint16_t ep_size{};
+    std::uint16_t actual_len{};
+    std::uint16_t total_len{};
+    std::uint8_t byte_count{};
+    std::array<std::uint8_t, kReferenceControlTraceBytes> bytes{};
+};
+
+class IReferenceControlTraceSource {
+public:
+    virtual ~IReferenceControlTraceSource() = default;
+    //: False when the ring is empty; `entry` is then untouched.
+    virtual bool take(ReferenceControlTraceEntry& entry) = 0;
+    //: How many entries the ring refused since boot. Never resets.
+    virtual std::uint32_t lost() = 0;
+};
+
+//: Installed once, from Core 0. Null until then, and null again after a reset,
+//: so nothing in a native test can reach a source that has gone out of scope.
+void reference_set_control_trace_source(IReferenceControlTraceSource* source);
+
+//: Tests only, and any deliberate restart.
+void reference_control_trace_reset();
+
 class IReferenceCdcWriter {
 public:
     virtual ~IReferenceCdcWriter() = default;
@@ -205,6 +280,9 @@ public:
     virtual void flush() = 0;
 };
 
-// Service one CDC item. A retained descriptor diagnostic is an absolute
-// priority boundary: no ordinary trace is consumed until its full write wins.
+// Service one CDC item. Priority is absolute and in this order: a retained
+// descriptor diagnostic, then the control-transfer packet trace, then the
+// ordinary report trace. Both diagnostics outrank report traffic because a
+// keyboard produces thousands of reports a second and would otherwise bury
+// every line the measurement exists to produce.
 void reference_service_cdc(IReferenceCdcWriter& writer);

@@ -144,7 +144,17 @@ void service_input(std::uint32_t millis) {
     ReferenceSourceAdapter::DescriptorRequest giveup_request{};
     if (g_adapter.take_descriptor_giveup(giveup_reason, giveup_request)) {
         g_descriptor_diagnostic.skipped(giveup_reason, giveup_request.dev_addr,
-                                        giveup_request.instance);
+                                        giveup_request.instance,
+                                        giveup_request.length);
+    }
+
+    // The second measurement. One boot has to yield both the one-packet read
+    // and the whole-document read, or the two answers describe two different
+    // device states and neither explains the other. take_completed() is one
+    // shot and the adapter arms the follow-up once, so this cannot turn into
+    // a third experiment.
+    if (g_descriptor_diagnostic.take_completed()) {
+        g_adapter.schedule_descriptor_followup(time_us_32());
     }
 
     duo_input::u1::input::SourceEvent event{};
@@ -215,7 +225,8 @@ void service_input(std::uint32_t millis) {
         }
 
         g_descriptor_diagnostic.start(descriptor_request.dev_addr,
-                                      descriptor_request.instance);
+                                      descriptor_request.instance,
+                                      descriptor_request.length);
         // The public descriptor API takes bInterfaceNumber. The callback gives
         // us TinyUSB's HID instance/index; they are not interchangeable (the
         // Aula logs interfaces 3/4 while their instances are 0/1).

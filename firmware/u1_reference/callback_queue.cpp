@@ -199,6 +199,7 @@ void reference_queue_reset() {
     }
     reference_trace_reset();
     reference_descriptor_diagnostic_reset();
+    reference_control_trace_reset();
 }
 
 // --------------------------------------------------------------------------
@@ -352,38 +353,40 @@ bool deliver_one_descriptor_diagnostic(IReferenceCdcWriter& writer) {
     bool renders_prefix = false;
     switch (entry.kind) {
         case ReferenceDescriptorDiagnosticKind::Start:
-            written = std::snprintf(line, sizeof(line), "DESC64_START\r\n");
+            written = std::snprintf(line, sizeof(line), "DESC%u_START\r\n",
+                                    entry.requested);
             break;
         case ReferenceDescriptorDiagnosticKind::Match:
             // prefix= on a match too: what the buffer holds is reported on
             // every completion outcome, not only on a disagreement.
             written = std::snprintf(line, sizeof(line),
-                                    "DESC64_MATCH actual=%u prefix=",
-                                    entry.actual_len);
+                                    "DESC%u_MATCH actual=%u prefix=",
+                                    entry.requested, entry.actual_len);
             renders_prefix = true;
             break;
         case ReferenceDescriptorDiagnosticKind::Mismatch:
             if (entry.first_difference == kReferenceNoDifference) {
                 written = std::snprintf(
                     line, sizeof(line),
-                    "DESC64_MISMATCH actual=%u first=none prefix=",
-                    entry.actual_len);
+                    "DESC%u_MISMATCH actual=%u first=none prefix=",
+                    entry.requested, entry.actual_len);
             } else {
                 written = std::snprintf(
                     line, sizeof(line),
-                    "DESC64_MISMATCH actual=%u first=%u prefix=",
-                    entry.actual_len, entry.first_difference);
+                    "DESC%u_MISMATCH actual=%u first=%u prefix=",
+                    entry.requested, entry.actual_len, entry.first_difference);
             }
             renders_prefix = true;
             break;
         case ReferenceDescriptorDiagnosticKind::Failure:
             written = std::snprintf(line, sizeof(line),
-                                    "DESC64_FAIL actual=%u r=%s\r\n",
-                                    entry.actual_len, reason_name(entry.reason));
+                                    "DESC%u_FAIL actual=%u r=%s\r\n",
+                                    entry.requested, entry.actual_len,
+                                    reason_name(entry.reason));
             break;
         case ReferenceDescriptorDiagnosticKind::Skip:
-            written = std::snprintf(line, sizeof(line), "DESC64_SKIP r=%s\r\n",
-                                    reason_name(entry.reason));
+            written = std::snprintf(line, sizeof(line), "DESC%u_SKIP r=%s\r\n",
+                                    entry.requested, reason_name(entry.reason));
             break;
     }
 
@@ -439,8 +442,211 @@ bool deliver_one_descriptor_diagnostic(IReferenceCdcWriter& writer) {
 
 }  // namespace
 
+// --------------------------------------------------------------------------
+// The control-transfer packet trace
+// --------------------------------------------------------------------------
+
+namespace {
+
+//: The wire PID bytes, as Pico-PIO-USB's usb_definitions.h defines them. They
+//: are repeated here rather than included because that header belongs to a
+//: dependency this file is deliberately kept independent of; the mapping is
+//: pinned by a native test.
+constexpr std::uint8_t kPidData0 = 0xC3;
+constexpr std::uint8_t kPidData1 = 0x4B;
+constexpr std::uint8_t kPidAck = 0xD2;
+constexpr std::uint8_t kPidNak = 0x5A;
+constexpr std::uint8_t kPidStall = 0x1E;
+constexpr std::uint8_t kPidSetup = 0x2D;
+
+IReferenceControlTraceSource* g_control_trace_source = nullptr;
+
+//: One line is built at a time and retained until the writer has taken all of
+//: it. A half-written CTRL line is worse than a late one: it would read as a
+//: packet with different fields.
+char g_control_line[192];
+std::size_t g_control_line_size = 0;
+std::size_t g_control_offset = 0;
+
+//: How many refused records have already been announced. Marked as announced
+//: when the line is built rather than when it lands, which is safe precisely
+//: because a built line is retained until the writer has taken all of it: the
+//: only path that discards one also resets this counter.
+std::uint32_t g_control_reported_lost = 0;
+
+const char* pid_name(std::uint8_t pid, char* scratch, std::size_t scratch_size) {
+    switch (pid) {
+        case kPidData0:
+            return "DATA0";
+        case kPidData1:
+            return "DATA1";
+        case kPidAck:
+            return "ACK";
+        case kPidNak:
+            return "NAK";
+        case kPidStall:
+            return "STALL";
+        case kPidSetup:
+            return "SETUP";
+        default:
+            break;
+    }
+    // Anything else is reported as the byte it was. Rendering it as "?" would
+    // hide exactly the packet a reader most needs to see.
+    std::snprintf(scratch, scratch_size, "0x%02X", pid);
+    return scratch;
+}
+
+//: Append the payload bytes that were kept, and say so when there were more
+//: than were kept. A truncated dump rendered as a complete one is a lie about
+//: what was on the wire.
+std::size_t append_payload(char* line,
+                           std::size_t capacity,
+                           std::size_t used,
+                           const ReferenceControlTraceEntry& entry) {
+    for (std::uint8_t index = 0; index < entry.byte_count; ++index) {
+        // Two hex digits, the truncation marker, and the CRLF after them.
+        if (used + 2 > capacity - 3) {
+            break;
+        }
+        std::snprintf(line + used, 3, "%02X", entry.bytes[index]);
+        used += 2;
+    }
+    if (entry.byte_count < entry.length && used < capacity - 3) {
+        line[used++] = '+';
+    }
+    return used;
+}
+
+//: Build the next control trace line, or leave the buffer empty when there is
+//: nothing to say. Never blocks and never allocates.
+void build_next_control_line() {
+    if (g_control_trace_source == nullptr) {
+        return;
+    }
+
+    const std::uint32_t lost = g_control_trace_source->lost();
+    if (lost != g_control_reported_lost) {
+        // Announced once, at the point it was noticed: a loss repeated every
+        // pass is noise that buries the packets it exists to qualify.
+        const int written = std::snprintf(
+            g_control_line, sizeof(g_control_line), "CTRL_LOST n=%lu\r\n",
+            static_cast<unsigned long>(lost - g_control_reported_lost));
+        g_control_line_size =
+            written > 0 ? std::min<std::size_t>(static_cast<std::size_t>(written),
+                                                sizeof(g_control_line))
+                        : 0;
+        g_control_offset = 0;
+        g_control_reported_lost = lost;
+        return;
+    }
+
+    ReferenceControlTraceEntry entry{};
+    if (!g_control_trace_source->take(entry)) {
+        return;
+    }
+
+    g_control_offset = 0;
+
+    char scratch[8];
+    int written = 0;
+    bool renders_payload = false;
+    switch (entry.kind) {
+        case ReferenceControlTraceKind::Setup:
+            written = std::snprintf(
+                g_control_line, sizeof(g_control_line),
+                "CTRL_SETUP a=%u ep=%u seq=%lu pid=%s bytes=", entry.dev_addr,
+                entry.ep_num, static_cast<unsigned long>(entry.seq),
+                pid_name(entry.pid, scratch, sizeof(scratch)));
+            renders_payload = true;
+            break;
+        case ReferenceControlTraceKind::Data:
+            written = std::snprintf(
+                g_control_line, sizeof(g_control_line),
+                "CTRL_RX a=%u ep=%u seq=%lu pid=%s len=%u size=%u act=%u "
+                "tot=%u bytes=",
+                entry.dev_addr, entry.ep_num,
+                static_cast<unsigned long>(entry.seq),
+                pid_name(entry.pid, scratch, sizeof(scratch)), entry.length,
+                entry.ep_size, entry.actual_len, entry.total_len);
+            renders_payload = true;
+            break;
+        case ReferenceControlTraceKind::Done:
+            written = std::snprintf(
+                g_control_line, sizeof(g_control_line),
+                "CTRL_DONE a=%u ep=%u seq=%lu act=%u tot=%u\r\n",
+                entry.dev_addr, entry.ep_num,
+                static_cast<unsigned long>(entry.seq), entry.actual_len,
+                entry.total_len);
+            break;
+    }
+
+    // snprintf reports what it would have written, so clamp to what fits and
+    // keep two bytes in hand for the CRLF below.
+    std::size_t used =
+        written > 0 ? std::min<std::size_t>(static_cast<std::size_t>(written),
+                                            sizeof(g_control_line) - 2)
+                    : 0;
+    if (used != 0 && renders_payload) {
+        used = append_payload(g_control_line, sizeof(g_control_line), used,
+                              entry);
+        g_control_line[used++] = '\r';
+        g_control_line[used++] = '\n';
+    }
+    g_control_line_size = used;
+}
+
+bool deliver_one_control_trace(IReferenceCdcWriter& writer) {
+    if (g_control_line_size == 0) {
+        build_next_control_line();
+    }
+    if (g_control_line_size == 0) {
+        return false;
+    }
+
+    const std::size_t remaining = g_control_line_size - g_control_offset;
+    if (writer.available() < remaining) {
+        // Retain, and hold the lower-priority queue back with it: a report
+        // let past here would appear between two packets of one transfer.
+        return true;
+    }
+
+    const std::size_t accepted =
+        writer.write(g_control_line + g_control_offset, remaining);
+    g_control_offset += std::min(accepted, remaining);
+    if (g_control_offset != g_control_line_size) {
+        return true;
+    }
+
+    g_control_line_size = 0;
+    g_control_offset = 0;
+    writer.flush();
+    return true;
+}
+
+}  // namespace
+
+void reference_set_control_trace_source(IReferenceControlTraceSource* source) {
+    // A new source counts its own losses from its own zero, and a line half
+    // built from the old one describes a ring that is no longer being read.
+    g_control_trace_source = source;
+    g_control_line_size = 0;
+    g_control_offset = 0;
+    g_control_reported_lost = 0;
+}
+
+void reference_control_trace_reset() {
+    g_control_trace_source = nullptr;
+    g_control_line_size = 0;
+    g_control_offset = 0;
+    g_control_reported_lost = 0;
+}
+
 void reference_service_cdc(IReferenceCdcWriter& writer) {
     if (deliver_one_descriptor_diagnostic(writer)) {
+        return;
+    }
+    if (deliver_one_control_trace(writer)) {
         return;
     }
 

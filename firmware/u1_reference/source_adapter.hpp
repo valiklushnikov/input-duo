@@ -80,6 +80,18 @@ public:
                                  DescriptorRequest& request);
     void descriptor_request_accepted();
 
+    /// Arm the second measurement: the whole 77-byte document, from the same
+    /// interface, in the same session.
+    ///
+    /// Two boots would compare two different device states, so the follow-up
+    /// has to run against the enumeration that produced the first answer. It
+    /// is armed only once, and only for an interface whose first attempt was
+    /// actually accepted by the host stack - there is nothing to follow up on
+    /// an experiment that never reached the wire. The bus is already settled
+    /// by then, so it is offered immediately rather than after another quiet
+    /// period.
+    void schedule_descriptor_followup(std::uint32_t now_us);
+
     /// Take the one give-up this attempt produced, if it produced one.
     ///
     /// A scheduled measurement that never reaches the wire used to end in
@@ -184,6 +196,14 @@ private:
     ReferenceDescriptorReason descriptor_giveup_ =
         ReferenceDescriptorReason::None;
     DescriptorRequest descriptor_giveup_request_{};
+
+    //: The interface whose request the host stack last accepted, and whether
+    //: the follow-up has already been armed for it. Both are needed: the
+    //: pending request is cleared on acceptance, and the follow-up must never
+    //: turn into a third experiment.
+    bool descriptor_attempted_ = false;
+    DescriptorRequest descriptor_attempted_request_{};
+    bool descriptor_followup_armed_ = false;
 };
 
 }  // namespace duo_input::u1::reference

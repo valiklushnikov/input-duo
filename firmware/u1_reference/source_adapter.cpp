@@ -17,6 +17,10 @@ using input::SourceIdentity;
 constexpr std::uint16_t kAulaVendorId = 0x3554;
 constexpr std::uint16_t kAulaProductId = 0xFA09;
 constexpr std::uint16_t kAulaKeyboardDescriptorLength = 64;
+//: The follow-up asks for the whole document. The 77-byte read is the one
+//: that came back rotated by 64; running it in the same session as the
+//: one-packet read is what lets the two answers be compared at all.
+constexpr std::uint16_t kAulaKeyboardFollowupLength = 77;
 
 bool time_reached(std::uint32_t now, std::uint32_t deadline) {
     return static_cast<std::int32_t>(now - deadline) >= 0;
@@ -354,9 +358,30 @@ bool ReferenceSourceAdapter::take_descriptor_request(std::uint32_t now_us,
 }
 
 void ReferenceSourceAdapter::descriptor_request_accepted() {
+    descriptor_attempted_ = true;
+    descriptor_attempted_request_ = descriptor_request_.request;
     descriptor_request_ = PendingDescriptorRequest{};
     descriptor_giveup_ = ReferenceDescriptorReason::None;
     descriptor_giveup_request_ = DescriptorRequest{};
+}
+
+void ReferenceSourceAdapter::schedule_descriptor_followup(
+    std::uint32_t now_us) {
+    if (!descriptor_attempted_ || descriptor_followup_armed_ ||
+        descriptor_request_.active) {
+        // Nothing reached the wire, the follow-up has already been armed, or
+        // a request is already pending. Any of the three makes a second
+        // on-wire attempt for this experiment, which the design forbids.
+        return;
+    }
+    descriptor_followup_armed_ = true;
+    descriptor_request_.active = true;
+    descriptor_request_.request =
+        DescriptorRequest{descriptor_attempted_request_.dev_addr,
+                          descriptor_attempted_request_.instance,
+                          kAulaKeyboardFollowupLength};
+    descriptor_request_.next_offer_us = now_us;
+    descriptor_request_.offers = 0;
 }
 
 void ReferenceSourceAdapter::note_descriptor_giveup(
