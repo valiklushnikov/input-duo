@@ -21,6 +21,7 @@
 // callback record from the host callbacks, and an output command from the
 // runtime. Neither core waits on the other.
 
+#include <array>
 #include <cstdint>
 
 #include "hardware/clocks.h"
@@ -94,6 +95,51 @@ duo_input::u1::input::InputPipeline g_mouse_pipeline(g_input);
 using duo_input::u1::reference::ReferenceSourceAdapter;
 ReferenceSourceAdapter g_adapter;
 
+// tuh_descriptor_get_hid_report is asynchronous. TinyUSB retains the buffer
+// pointer until its completion callback, so stack storage would be a use after
+// return. Only one targeted experiment can be active, hence one fixed buffer.
+static std::array<std::uint8_t, kReferenceDescriptorCapacity>
+    g_post_mount_descriptor{};
+
+struct ActiveDescriptorRead {
+    bool active = false;
+    std::uint8_t dev_addr = 0;
+    std::uint8_t instance = 0;
+};
+
+ActiveDescriptorRead g_descriptor_read;
+
+void post_mount_descriptor_complete(tuh_xfer_t* xfer) {
+    const ActiveDescriptorRead completed = g_descriptor_read;
+    g_descriptor_read = ActiveDescriptorRead{};
+    if (!completed.active || xfer == nullptr ||
+        xfer->daddr != completed.dev_addr) {
+        return;
+    }
+
+    if (xfer->result != XFER_RESULT_SUCCESS || xfer->actual_len == 0 ||
+        xfer->actual_len > g_post_mount_descriptor.size() ||
+        !tuh_hid_mounted(completed.dev_addr, completed.instance)) {
+        ReferenceTraceEntry failed{};
+        failed.kind = ReferenceCallbackKind::DescriptorFailure;
+        failed.dev_addr = completed.dev_addr;
+        failed.instance = completed.instance;
+        failed.length = static_cast<std::uint16_t>(xfer->actual_len);
+        reference_trace_push(failed);
+        return;
+    }
+
+    std::uint16_t vid = 0;
+    std::uint16_t pid = 0;
+    tuh_vid_pid_get(completed.dev_addr, &vid, &pid);
+    const std::uint8_t protocol =
+        tuh_hid_interface_protocol(completed.dev_addr, completed.instance);
+    reference_capture(reference_make_mount(
+        completed.dev_addr, completed.instance, protocol, vid, pid,
+        g_post_mount_descriptor.data(),
+        static_cast<std::uint16_t>(xfer->actual_len), time_us_32()));
+}
+
 std::uint32_t now_ms() {
     return to_ms_since_boot(get_absolute_time());
 }
@@ -139,6 +185,40 @@ void service_input(std::uint32_t millis) {
                                  protocol_request.instance,
                                  protocol_request.protocol)) {
             protocol_request_held = false;
+        }
+        return;
+    }
+
+    ReferenceSourceAdapter::DescriptorRequest descriptor_request{};
+    if (!g_descriptor_read.active &&
+        g_adapter.take_descriptor_request(time_us_32(), descriptor_request)) {
+        tuh_itf_info_t info{};
+        if (!tuh_hid_mounted(descriptor_request.dev_addr,
+                             descriptor_request.instance) ||
+            !tuh_hid_itf_get_info(descriptor_request.dev_addr,
+                                  descriptor_request.instance, &info)) {
+            return;
+        }
+
+        g_descriptor_read = ActiveDescriptorRead{
+            true, descriptor_request.dev_addr, descriptor_request.instance};
+        // The public descriptor API takes bInterfaceNumber. The callback gives
+        // us TinyUSB's HID instance/index; they are not interchangeable (the
+        // Aula logs interfaces 3/4 while their instances are 0/1).
+        const bool accepted = tuh_descriptor_get_hid_report(
+            descriptor_request.dev_addr, info.desc.bInterfaceNumber,
+            HID_DESC_TYPE_REPORT, 0, g_post_mount_descriptor.data(),
+            descriptor_request.length, post_mount_descriptor_complete, 0);
+        if (accepted) {
+            g_adapter.descriptor_request_accepted();
+            ReferenceTraceEntry started{};
+            started.kind = ReferenceCallbackKind::DescriptorStart;
+            started.dev_addr = descriptor_request.dev_addr;
+            started.instance = descriptor_request.instance;
+            started.length = descriptor_request.length;
+            reference_trace_push(started);
+        } else {
+            g_descriptor_read = ActiveDescriptorRead{};
         }
         return;
     }

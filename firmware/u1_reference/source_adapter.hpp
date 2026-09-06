@@ -60,6 +60,25 @@ public:
     /// Take one pending protocol change. False when there is none.
     bool take_protocol_request(ProtocolRequest& request);
 
+    struct DescriptorRequest {
+        std::uint8_t dev_addr = 0;
+        std::uint8_t instance = 0;
+        std::uint16_t length = 0;
+    };
+
+    // The post-mount read is an experiment for the one receiver measured to
+    // fail its 77-byte descriptor during enumeration. One second leaves the
+    // sibling-interface enumeration and normal report traffic settled. If
+    // TinyUSB's single control slot is still occupied, offers are spaced by
+    // 10 ms and stop after one second; once the API accepts one transfer there
+    // is never a second on-wire attempt.
+    static constexpr std::uint32_t kDescriptorQuietUs = 1000000u;
+    static constexpr std::uint32_t kDescriptorOfferIntervalUs = 10000u;
+    static constexpr std::uint32_t kDescriptorMaxOffers = 100u;
+
+    bool take_descriptor_request(std::uint32_t now_us,
+                                 DescriptorRequest& request);
+    void descriptor_request_accepted();
 
     /// Whether an event is waiting. The caller drains before consuming again,
     /// so nothing this adapter produced is ever dropped for want of room.
@@ -112,7 +131,7 @@ private:
 
     void request_protocol(std::uint8_t dev_addr, std::uint8_t instance,
                           std::uint8_t protocol);
-    void on_mount(const ReferenceCallbackRecord& record);
+    void on_mount(const ReferenceCallbackRecord& record, std::uint32_t now_us);
     void on_unmount(const ReferenceCallbackRecord& record);
     void on_report(const ReferenceCallbackRecord& record, std::uint32_t now_us);
     void on_overflow();
@@ -132,6 +151,13 @@ private:
     input::SourceIdentity mouse_identity_{};
     bool keyboard_owned_ = false;
     bool mouse_owned_ = false;
+
+    struct PendingDescriptorRequest {
+        bool active = false;
+        DescriptorRequest request{};
+        std::uint32_t next_offer_us = 0;
+        std::uint32_t offers = 0;
+    } descriptor_request_{};
 };
 
 }  // namespace duo_input::u1::reference

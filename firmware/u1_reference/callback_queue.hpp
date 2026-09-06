@@ -25,6 +25,8 @@ enum class ReferenceCallbackKind : std::uint8_t {
     Unmount,
     Report,
     Overflow,
+    DescriptorStart,
+    DescriptorFailure,
 };
 
 //: CFG_TUH_ENUMERATION_BUFSIZE is 256, so a report descriptor TinyUSB was able

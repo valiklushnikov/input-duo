@@ -85,6 +85,19 @@ std::vector<std::uint8_t> report_id_wheel_mouse() {
     };
 }
 
+std::vector<std::uint8_t> aula_keyboard_report() {
+    return {
+        0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x05, 0x08, 0x19, 0x01,
+        0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x03,
+        0x91, 0x02, 0x95, 0x05, 0x91, 0x01, 0x05, 0x07, 0x19, 0xE0,
+        0x29, 0xE7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08,
+        0x81, 0x02, 0x75, 0x08, 0x95, 0x01, 0x81, 0x01, 0x05, 0x07,
+        0x19, 0x00, 0x2A, 0xFF, 0x00, 0x15, 0x00, 0x26, 0xFF, 0x00,
+        0x75, 0x08, 0x95, 0x05, 0x81, 0x00, 0x05, 0xFF, 0x09, 0x03,
+        0x75, 0x08, 0x95, 0x01, 0x81, 0x02, 0xC0,
+    };
+}
+
 ReferenceCallbackRecord mount(std::uint8_t dev_addr,
                               std::uint8_t instance,
                               std::uint8_t protocol,
@@ -395,6 +408,99 @@ TEST_CASE(an_interface_that_fell_back_to_boot_is_left_where_it_is) {
 
     ReferenceSourceAdapter::ProtocolRequest request{};
     CHECK_FALSE(adapter.take_protocol_request(request));
+}
+
+TEST_CASE(the_aula_keyboard_gets_one_delayed_post_mount_descriptor_request) {
+    CHECK_EQ(ReferenceSourceAdapter::kDescriptorQuietUs, 1000000u);
+    CHECK_EQ(ReferenceSourceAdapter::kDescriptorOfferIntervalUs, 10000u);
+    CHECK_EQ(ReferenceSourceAdapter::kDescriptorMaxOffers, 100u);
+
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 100u);
+    CHECK(take(adapter).ok);
+
+    ReferenceSourceAdapter::DescriptorRequest request{};
+    CHECK_FALSE(adapter.take_descriptor_request(
+        1000099u, request));
+    CHECK(adapter.take_descriptor_request(1000100u, request));
+    CHECK_EQ(request.dev_addr, 2u);
+    CHECK_EQ(request.instance, 0u);
+    CHECK_EQ(request.length, 77u);
+
+    adapter.descriptor_request_accepted();
+    CHECK_FALSE(adapter.take_descriptor_request(
+        100u + ReferenceSourceAdapter::kDescriptorQuietUs +
+            ReferenceSourceAdapter::kDescriptorOfferIntervalUs,
+        request));
+}
+
+TEST_CASE(a_busy_control_slot_is_reoffered_at_a_bounded_rate_and_count) {
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0u);
+    CHECK(take(adapter).ok);
+
+    ReferenceSourceAdapter::DescriptorRequest request{};
+    std::uint32_t now = ReferenceSourceAdapter::kDescriptorQuietUs;
+    for (std::uint32_t offer = 0;
+         offer < ReferenceSourceAdapter::kDescriptorMaxOffers; ++offer) {
+        CHECK(adapter.take_descriptor_request(now, request));
+        CHECK_FALSE(adapter.take_descriptor_request(now, request));
+        now += ReferenceSourceAdapter::kDescriptorOfferIntervalUs;
+    }
+    CHECK_FALSE(adapter.take_descriptor_request(now, request));
+    CHECK_FALSE(adapter.take_descriptor_request(now + 1000000u, request));
+}
+
+TEST_CASE(unmount_cancels_a_descriptor_request_that_has_not_started) {
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0u);
+    CHECK(take(adapter).ok);
+    adapter.consume(reference_make_unmount(2, 0, 1u), 1u);
+    CHECK(take(adapter).ok);
+
+    ReferenceSourceAdapter::DescriptorRequest request{};
+    CHECK_FALSE(adapter.take_descriptor_request(
+        ReferenceSourceAdapter::kDescriptorQuietUs, request));
+}
+
+TEST_CASE(the_post_mount_experiment_is_scoped_to_the_aula_keyboard) {
+    ReferenceSourceAdapter adapter;
+    ReferenceSourceAdapter::DescriptorRequest request{};
+
+    adapter.consume(mount(1, 0, kProtocolKeyboard, 0x1234, 0x5678, {}), 0u);
+    CHECK(take(adapter).ok);
+    CHECK_FALSE(adapter.take_descriptor_request(
+        ReferenceSourceAdapter::kDescriptorQuietUs, request));
+
+    ReferenceSourceAdapter aula_mouse;
+    aula_mouse.consume(mount(2, 1, kProtocolMouse, 0x3554, 0xFA09, {}), 0u);
+    CHECK(take(aula_mouse).ok);
+    CHECK_FALSE(aula_mouse.take_descriptor_request(
+        ReferenceSourceAdapter::kDescriptorQuietUs, request));
+}
+
+TEST_CASE(a_late_aula_descriptor_reclassifies_the_existing_keyboard) {
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0u);
+    const Taken boot = take(adapter);
+    CHECK(boot.ok);
+    CHECK_FALSE(boot.identity.keyboard_layout.report_id);
+
+    const auto descriptor_bytes = aula_keyboard_report();
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09,
+                          descriptor_bytes),
+                    ReferenceSourceAdapter::kDescriptorQuietUs + 100u);
+    const Taken upgraded = take(adapter);
+    CHECK(upgraded.ok);
+    CHECK(upgraded.event.kind == SourceEventKind::Ready);
+    CHECK(upgraded.identity.kind == DeviceKind::Keyboard);
+    CHECK_EQ(upgraded.identity.keyboard_layout.key_element_count, 5u);
+
+    ReferenceSourceAdapter::ProtocolRequest protocol{};
+    CHECK(adapter.take_protocol_request(protocol));
+    CHECK_EQ(protocol.dev_addr, 2u);
+    CHECK_EQ(protocol.instance, 0u);
+    CHECK_EQ(protocol.protocol, ReferenceSourceAdapter::kHidProtocolReport);
 }
 
 TEST_CASE(an_ignored_interface_asks_for_no_protocol_change) {

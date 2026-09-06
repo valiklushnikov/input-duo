@@ -14,6 +14,14 @@ using input::SourceEvent;
 using input::SourceEventKind;
 using input::SourceIdentity;
 
+constexpr std::uint16_t kAulaVendorId = 0x3554;
+constexpr std::uint16_t kAulaProductId = 0xFA09;
+constexpr std::uint16_t kAulaKeyboardDescriptorLength = 77;
+
+bool time_reached(std::uint32_t now, std::uint32_t deadline) {
+    return static_cast<std::int32_t>(now - deadline) >= 0;
+}
+
 }  // namespace
 
 ReferenceSourceAdapter::Interface* ReferenceSourceAdapter::find(
@@ -88,7 +96,8 @@ void ReferenceSourceAdapter::request_protocol(std::uint8_t dev_addr,
     ++protocol_request_count_;
 }
 
-void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record) {
+void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
+                                      std::uint32_t now_us) {
     SourceIdentity identity{};
     const pio_usb::HidLayoutSource layout_source = pio_usb::classify_hid_layout(
         record.protocol,
@@ -105,6 +114,7 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record) {
     identity.vendor_id = record.vid;
     identity.product_id = record.pid;
 
+    Interface* const existing = find(record.dev_addr, record.instance);
     Interface* entry = claim_slot(record.dev_addr, record.instance);
     if (entry == nullptr) {
         return;
@@ -130,6 +140,24 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record) {
     const bool wants_report_protocol =
         layout_source == pio_usb::HidLayoutSource::ReportDescriptor;
 
+    // A successful late read describes the interface already announced with
+    // its boot fallback. Replace that identity in place and announce a new
+    // Ready so InputPipeline atomically adopts the descriptor layout before
+    // report protocol is requested.
+    if (entry->role == Role::Keyboard && keyboard_owned_ &&
+        identity.kind == DeviceKind::Keyboard && wants_report_protocol) {
+        keyboard_identity_ = identity;
+        request_protocol(record.dev_addr, record.instance, kHidProtocolReport);
+        push(SourceEventKind::Ready, kKeyboardPort, identity);
+        return;
+    }
+    if (existing != nullptr) {
+        // A late descriptor may only refine the role this exact interface
+        // already owns. A truncated or unrelated document must not turn an
+        // existing keyboard into a mouse while leaving keyboard_owned_ set.
+        return;
+    }
+
     if (identity.kind == DeviceKind::Keyboard && !keyboard_owned_) {
         if (wants_report_protocol) {
             request_protocol(record.dev_addr, record.instance, kHidProtocolReport);
@@ -137,6 +165,14 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record) {
         entry->role = Role::Keyboard;
         keyboard_owned_ = true;
         keyboard_identity_ = identity;
+        if (!wants_report_protocol && record.vid == kAulaVendorId &&
+            record.pid == kAulaProductId && !descriptor_request_.active) {
+            descriptor_request_.active = true;
+            descriptor_request_.request = DescriptorRequest{
+                record.dev_addr, record.instance, kAulaKeyboardDescriptorLength};
+            descriptor_request_.next_offer_us = now_us + kDescriptorQuietUs;
+            descriptor_request_.offers = 0;
+        }
         push(SourceEventKind::Ready, kKeyboardPort, identity);
         return;
     }
@@ -159,6 +195,11 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record) {
 }
 
 void ReferenceSourceAdapter::on_unmount(const ReferenceCallbackRecord& record) {
+    if (descriptor_request_.active &&
+        descriptor_request_.request.dev_addr == record.dev_addr &&
+        descriptor_request_.request.instance == record.instance) {
+        descriptor_request_ = PendingDescriptorRequest{};
+    }
     Interface* entry = find(record.dev_addr, record.instance);
     if (entry == nullptr) {
         return;
@@ -242,13 +283,14 @@ void ReferenceSourceAdapter::on_overflow() {
     for (Interface& entry : interfaces_) {
         entry = Interface{};
     }
+    descriptor_request_ = PendingDescriptorRequest{};
 }
 
 void ReferenceSourceAdapter::consume(const ReferenceCallbackRecord& record,
                                      std::uint32_t now_us) {
     switch (record.kind) {
         case ReferenceCallbackKind::Mount:
-            on_mount(record);
+            on_mount(record, now_us);
             return;
         case ReferenceCallbackKind::Unmount:
             on_unmount(record);
@@ -258,6 +300,9 @@ void ReferenceSourceAdapter::consume(const ReferenceCallbackRecord& record,
             return;
         case ReferenceCallbackKind::Overflow:
             on_overflow();
+            return;
+        case ReferenceCallbackKind::DescriptorStart:
+        case ReferenceCallbackKind::DescriptorFailure:
             return;
     }
 }
@@ -271,6 +316,27 @@ bool ReferenceSourceAdapter::take_protocol_request(ProtocolRequest& request) {
         (protocol_request_head_ + 1) % kInterfaceCapacity);
     --protocol_request_count_;
     return true;
+}
+
+bool ReferenceSourceAdapter::take_descriptor_request(std::uint32_t now_us,
+                                                     DescriptorRequest& request) {
+    if (!descriptor_request_.active ||
+        descriptor_request_.offers >= kDescriptorMaxOffers ||
+        !time_reached(now_us, descriptor_request_.next_offer_us)) {
+        return false;
+    }
+
+    request = descriptor_request_.request;
+    ++descriptor_request_.offers;
+    descriptor_request_.next_offer_us = now_us + kDescriptorOfferIntervalUs;
+    if (descriptor_request_.offers >= kDescriptorMaxOffers) {
+        descriptor_request_.active = false;
+    }
+    return true;
+}
+
+void ReferenceSourceAdapter::descriptor_request_accepted() {
+    descriptor_request_ = PendingDescriptorRequest{};
 }
 
 bool ReferenceSourceAdapter::take_event(SourceEvent& event,

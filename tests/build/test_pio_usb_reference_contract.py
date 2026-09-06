@@ -533,3 +533,21 @@ def test_a_refused_capture_is_surfaced_and_not_merely_counted():
     assert "ReferenceCallbackKind::Overflow" in drain, (
         "an overflow is not turned into a trace entry"
     )
+
+
+def test_post_mount_descriptor_retry_uses_the_pinned_async_api_safely():
+    source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert "tuh_hid_itf_get_info" in source
+    assert ".desc.bInterfaceNumber" in source, (
+        "tuh_descriptor_get_hid_report takes bInterfaceNumber, not HID instance"
+    )
+    assert "tuh_descriptor_get_hid_report" in source
+    assert "xfer->actual_len" in source, (
+        "an async completion must classify only the bytes actually transferred"
+    )
+    assert "static std::array<std::uint8_t" in source, (
+        "the async descriptor buffer must outlive the initiating stack frame"
+    )

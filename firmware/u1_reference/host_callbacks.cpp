@@ -35,6 +35,10 @@ const char* kind_name(ReferenceCallbackKind kind) {
             return "REPORT";
         case ReferenceCallbackKind::Overflow:
             return "OVERFLOW";
+        case ReferenceCallbackKind::DescriptorStart:
+            return "DESC_START";
+        case ReferenceCallbackKind::DescriptorFailure:
+            return "DESC_FAIL";
     }
     return "?";
 }
