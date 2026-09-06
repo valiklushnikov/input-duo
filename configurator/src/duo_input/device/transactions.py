@@ -477,6 +477,16 @@ class HostObservation:
     #: completed after that attach. At saturation, the delta is no longer
     #: informative.
     xfer_completions_at_attach: int | None = None
+    #: That subtraction, done here rather than at a bench.
+    #:
+    #: DERIVED, not a wire field: the device sends the two numbers above and
+    #: this is their difference, which is the reading anybody actually wants.
+    #: ``None`` only when one of the two is absent, i.e. when the firmware
+    #: predates them. It is still a raw difference - whether it can be trusted
+    #: depends on the completion total not having saturated and on an attach
+    #: having been accepted at all, and the exported report says so in the row
+    #: rather than leaving a reader to notice.
+    xfer_completions_since_attach: int | None = None
 
 
 @dataclass(frozen=True)
@@ -902,6 +912,23 @@ def _parse_backend(block: bytes) -> tuple[InputBackendReport | None, bytes]:
     return (report, bytes(block[expected:]))
 
 
+def _completions_since_attach(
+    host_event_counts: int | None, at_attach: int | None
+) -> int | None:
+    """Transfer completions queued after the latest accepted attach.
+
+    ``None`` when either input is absent, which is what an older firmware
+    sends. Clamped at zero rather than allowed to go negative: the snapshot is
+    taken from the same monotonic total, so a negative difference is not a
+    reading, it is a firmware defect, and a negative number in a report reads
+    as neither.
+    """
+    if host_event_counts is None or at_attach is None:
+        return None
+    total = (host_event_counts >> HOST_EVENT_XFER_SHIFT) & 0xFFFF
+    return max(0, total - at_attach)
+
+
 def _parse_host_observation(block: bytes) -> HostObservation | None:
     """Read the appended host block, in both compatibility directions.
 
@@ -1024,6 +1051,9 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
         core1_min_sp=extension[14],
         ep_transfer_flags=extension[15],
         xfer_completions_at_attach=extension[16],
+        xfer_completions_since_attach=_completions_since_attach(
+            extension[10], extension[16]
+        ),
     )
 
 

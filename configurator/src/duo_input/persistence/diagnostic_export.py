@@ -239,6 +239,21 @@ _HOST_STACK_ROWS = (
 )
 
 
+#: Completions the hub itself contributes after the host stack accepts a port
+#: attach, before the downstream device is asked anything at all:
+#: ``GET_PORT_STATUS`` is three control stages and
+#: ``CLEAR_FEATURE(C_PORT_RESET)`` is two. Named once, here, because the bench
+#: decision table in ``docs/protocol/compatibility.md`` is written in terms of
+#: it and a guard compares the two.
+HUB_COMPLETIONS_AFTER_ATTACH = 5
+
+#: The subtracted row's label. Built from the constant above so the number in
+#: the label cannot drift away from the number the table is written against.
+_COMPLETIONS_SINCE_ATTACH_LABEL = (
+    "Transfer completions since the latest attach "
+    f"({HUB_COMPLETIONS_AFTER_ATTACH} of them are the hub's own)"
+)
+
 #: The readings from inside the window where enumeration stops, in the order a
 #: person works through them: whose endpoints are open, what the host stack
 #: saw, how far each address got, what it spent the time on, and how close the
@@ -269,9 +284,15 @@ _HOST_STACK_PACKED_ROWS = (
     ("ep_transfer_flags", "Endpoint transfer state, live (pool slots 0-3)"),
     (
         "xfer_completions_at_attach",
-        "Transfer completions when latest attach was queued (subtract from current total)",
+        "Transfer completions when latest attach was queued (the baseline)",
     ),
+    ("xfer_completions_since_attach", _COMPLETIONS_SINCE_ATTACH_LABEL),
 )
+
+
+def completions_since_attach_label() -> str:
+    """The subtracted row's label, for anything that has to look the row up."""
+    return _COMPLETIONS_SINCE_ATTACH_LABEL
 
 
 def host_stack_field_names() -> set[str]:
@@ -314,36 +335,60 @@ def _host_event_counts(value: int) -> str:
     return f"attach {attach} | remove {remove} | transfer completions {transfers}"
 
 
+def endpoint_transfer_slot(byte: int) -> str:
+    """One ``ep_transfer_flags`` byte, in the words the report prints.
+
+    Public because it is the single definition of what each bit READS AS, and
+    the bench decision table in ``docs/protocol/compatibility.md`` is checked
+    against it rather than against a second copy of the same prose. Inverting
+    DATA1 and DATA0, or host-out and host-in, in either place now fails a test.
+    """
+    if not byte & transactions.EP_XFER_OPEN:
+        return "closed"
+
+    state = ["open"]
+    active = bool(byte & transactions.EP_XFER_HAS_TRANSFER)
+    state.append("active" if active else "idle")
+    if active:
+        if byte & transactions.EP_XFER_SETUP_STAGED:
+            state.append("SETUP")
+        elif byte & transactions.EP_XFER_DATA1:
+            state.append("DATA1")
+        else:
+            state.append("DATA0")
+        state.append("host-out" if byte & transactions.EP_XFER_HOST_OUT else "host-in")
+    if byte & transactions.EP_XFER_NEED_PRE:
+        state.append("PRE")
+    if byte & transactions.EP_XFER_STALLED:
+        state.append("stalled")
+    if byte & transactions.EP_XFER_ABORTED:
+        state.append("aborted")
+    return " ".join(state)
+
+
 def _endpoint_transfer_flags(value: int) -> str:
     """Decode whether each pool slot is idle or carrying a control stage."""
-    parts: list[str] = []
-    for slot in range(transactions.EP_SLOT_COUNT):
-        byte = (value >> (8 * slot)) & 0xFF
-        if not byte & transactions.EP_XFER_OPEN:
-            parts.append(f"slot{slot} closed")
-            continue
+    return " | ".join(
+        f"slot{slot} {endpoint_transfer_slot((value >> (8 * slot)) & 0xFF)}"
+        for slot in range(transactions.EP_SLOT_COUNT)
+    )
 
-        state = [f"slot{slot} open"]
-        active = bool(byte & transactions.EP_XFER_HAS_TRANSFER)
-        state.append("active" if active else "idle")
-        if active:
-            if byte & transactions.EP_XFER_SETUP_STAGED:
-                state.append("SETUP")
-            elif byte & transactions.EP_XFER_DATA1:
-                state.append("DATA1")
-            else:
-                state.append("DATA0")
-            state.append(
-                "host-out" if byte & transactions.EP_XFER_HOST_OUT else "host-in"
-            )
-        if byte & transactions.EP_XFER_NEED_PRE:
-            state.append("PRE")
-        if byte & transactions.EP_XFER_STALLED:
-            state.append("stalled")
-        if byte & transactions.EP_XFER_ABORTED:
-            state.append("aborted")
-        parts.append(" ".join(state))
-    return " | ".join(parts)
+
+def _completions_since_attach(value: int, observation: object) -> str:
+    """The subtracted delta, or why it is not a number worth printing.
+
+    Two cases have to announce themselves rather than print a plausible
+    integer. A completion total clamped at 65535 makes every difference below
+    it a fiction, and a snapshot taken before any attach was ever accepted is a
+    zero rather than a baseline - subtracting from it just reprints the total.
+    """
+    counts = getattr(observation, "host_event_counts", None)
+    if counts is not None:
+        if (counts >> transactions.HOST_EVENT_XFER_SHIFT) & 0xFFFF == 0xFFFF:
+            return "unavailable - the completion count has saturated at 65535"
+        if counts & 0xFF == 0:
+            return "not a baseline - no attach has been accepted yet"
+    return str(value)
 
 
 def _enum_progress(value: int) -> str:
@@ -391,6 +436,14 @@ _HOST_STACK_FORMATTERS = {
 }
 
 
+#: Rows whose rendering depends on more than their own value. Kept apart from
+#: the table above rather than widening every formatter's signature: only this
+#: one is derived from a second field, and the separation is what says so.
+_HOST_STACK_OBSERVATION_FORMATTERS = {
+    "xfer_completions_since_attach": _completions_since_attach,
+}
+
+
 #: The row a broken host block gets instead of readings.
 HOST_STACK_UNREADABLE = "Host stack readings"
 
@@ -425,6 +478,8 @@ def _host_stack(counters: object) -> dict[str, str]:
             continue
         if isinstance(value, bool):
             rows[label] = "yes" if value else "no"
+        elif name in _HOST_STACK_OBSERVATION_FORMATTERS:
+            rows[label] = _HOST_STACK_OBSERVATION_FORMATTERS[name](value, observation)
         else:
             formatter = _HOST_STACK_FORMATTERS.get(name)
             rows[label] = formatter(value) if formatter else str(value)

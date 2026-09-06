@@ -229,8 +229,14 @@ def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
         in reported
     )
     assert (
-        "Transfer completions when latest attach was queued "
-        "(subtract from current total): 41" in reported
+        "Transfer completions when latest attach was queued (the baseline): 41"
+        in reported
+    )
+    # And the subtraction itself, so the bench procedure never asks a person
+    # holding a board to do arithmetic between two printed numbers.
+    assert (
+        "Transfer completions since the latest attach (5 of them are the "
+        "hub's own): 0" in reported
     )
     # The page must not carry the old derived row either: it called a healthy
     # board faulty and it separated this board from a healthy one not at all.

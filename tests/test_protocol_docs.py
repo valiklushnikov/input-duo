@@ -8,12 +8,17 @@ added to the firmware and forgotten in the document, or a document listing the
 fields in an order the firmware does not serialise, would both have passed
 every test in this tree.
 
-The two assertions below close that. Both expectations are DERIVED from
-``ConfigService::write_host_observation`` rather than written down here, so the
-guard cannot drift with the thing it guards, and it fails on a reordering as
-well as on an omission - which matters, because the block is append-only and a
-reordering is the one mistake that silently breaks every already-shipped
-configurator.
+``HostBlockDocumentationTest`` closes that. Both of its expectations are
+DERIVED from ``ConfigService::write_host_observation`` rather than written down
+here, so the guard cannot drift with the thing it guards, and it fails on a
+reordering as well as on an omission - which matters, because the block is
+append-only and a reordering is the one mistake that silently breaks every
+already-shipped configurator.
+
+``EndpointTransferDocumentationTest`` does the same for the part of the
+document a person reads at a bench: the bit list comes from the firmware
+header, every rendered spelling from the configurator's own decoder, and the
+delta arithmetic from the constant the exported report is built on.
 
 The comparison is over ``(name, width)`` PAIRS, not over a sum of widths. The
 earlier version of this guard compared the total of the documented widths
@@ -70,6 +75,39 @@ def _documented_host_fields() -> list[tuple[str, str]]:
     return fields[1:]
 
 
+BACKEND_HEADER = (
+    ROOT / "firmware" / "u1_main" / "pio_usb" / "backend.hpp"
+)
+
+
+def _markdown_table(header: str) -> list[list[str]]:
+    """The body rows of the one table whose header line starts with ``header``.
+
+    Cells are stripped of surrounding whitespace and of the backticks the
+    document sets identifiers in, so a guard compares the identifier and not
+    the markup around it.
+    """
+    text = COMPATIBILITY.read_text(encoding="utf-8")
+    start = text.index(header)
+    block = text[start : text.index("\n\n", start)]
+    rows = []
+    for line in block.splitlines()[2:]:  # skip the header and its separator
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        rows.append([cell.strip().strip("`") for cell in line.strip("|").split("|")])
+    return rows
+
+
+def _firmware_endpoint_transfer_bits() -> list[tuple[int, str]]:
+    """``(bit, constant)`` for every ``kEpXfer*`` the firmware defines."""
+    body = BACKEND_HEADER.read_text(encoding="utf-8")
+    found = re.findall(
+        r"inline constexpr std::uint8_t (kEpXfer[A-Za-z0-9_]*) = 1u << (\d+);", body
+    )
+    return sorted(((int(bit), name) for name, bit in found), key=lambda pair: pair[0])
+
+
 class HostBlockDocumentationTest(unittest.TestCase):
     def test_the_document_lists_every_serialised_host_field_in_wire_order(self):
         self.assertEqual(_documented_host_fields(), _serialised_host_fields())
@@ -98,6 +136,108 @@ class HostBlockDocumentationTest(unittest.TestCase):
         expected = sum(int(part) for part in re.findall(r"\d+", declared))
 
         self.assertEqual(serialised, expected)
+
+
+class EndpointTransferDocumentationTest(unittest.TestCase):
+    """The prose an operator reads at a bench is a deliverable, so it is derived.
+
+    Round 5's review made this concrete rather than theoretical: it inverted
+    "bit 3 means DATA1 (clear means DATA0)" and changed the hub's fixed share of
+    the completion delta from five to nine, in the one document a person holds
+    a board next to, and every test in this repository passed. The three
+    assertions below take the bit list from the firmware header, the rendered
+    spelling of every bit from the configurator's own decoder, and the delta
+    arithmetic from the constant the exported report is built on, so none of
+    those three edits can pass again.
+    """
+
+    def test_the_document_lists_the_endpoint_transfer_bits_the_firmware_defines(self):
+        documented = [(int(bit), name) for bit, name in _markdown_table(
+            "| bit | firmware constant |"
+        )]
+        self.assertEqual(documented, _firmware_endpoint_transfer_bits())
+
+    def test_the_configurator_bit_constants_are_the_firmwares(self):
+        """The parser keeps its own copy of these bits; it must be the same copy."""
+        from duo_input.device import transactions
+
+        for bit, name in _firmware_endpoint_transfer_bits():
+            # kEpXferHasTransfer -> EP_XFER_HAS_TRANSFER
+            tail = re.sub(r"(?<!^)(?=[A-Z])", "_", name[len("kEpXfer"):]).upper()
+            self.assertEqual(
+                getattr(transactions, f"EP_XFER_{tail}"), 1 << bit, name
+            )
+
+    def test_every_documented_byte_reads_as_what_the_report_prints(self):
+        from duo_input.persistence.diagnostic_export import endpoint_transfer_slot
+
+        rows = _markdown_table("| byte | reads as |")
+        self.assertTrue(rows)
+        for byte, reads_as in rows:
+            self.assertEqual(endpoint_transfer_slot(int(byte, 16)), reads_as, byte)
+
+    def test_every_endpoint_transfer_bit_is_exercised_by_a_documented_byte(self):
+        """A bit no example sets is a bit whose spelling nothing checks."""
+        covered = 0
+        for byte, _ in _markdown_table("| byte | reads as |"):
+            covered |= int(byte, 16)
+        for bit, name in _firmware_endpoint_transfer_bits():
+            self.assertTrue(covered & (1 << bit), name)
+
+    def test_the_documented_hub_cost_adds_up_to_the_constant_the_report_uses(self):
+        """The fixed part of the delta, itemised, summed and tied to one constant.
+
+        The review's second mutation changed this number in the prose and
+        nothing failed. It is now three numbers in a table: the two stages that
+        make it up and their total, checked against each other and against the
+        constant the exported row's label is built from.
+        """
+        from duo_input.persistence.diagnostic_export import (
+            HUB_COMPLETIONS_AFTER_ATTACH as HUB,
+            completions_since_attach_label,
+        )
+
+        rows = _markdown_table("| hub work after an accepted port attach |")
+        stages = [int(row[1]) for row in rows]
+        self.assertEqual(stages[-1], HUB)
+        self.assertEqual(sum(stages[:-1]), stages[-1])
+        self.assertIn(str(HUB), completions_since_attach_label())
+
+    def test_the_bench_decision_table_agrees_with_the_decoder_and_the_hub_cost(self):
+        from duo_input.persistence.diagnostic_export import (
+            HUB_COMPLETIONS_AFTER_ATTACH as HUB,
+            endpoint_transfer_slot,
+        )
+
+        rows = _markdown_table("| Slot-2 byte |")
+        listed = [row for row in rows if row[0].startswith("0x")]
+
+        # The last row is the catch-all for every state/delta pair the rows
+        # above do not list, and its instruction is the deliverable: a person
+        # holding a board must be told to stop rather than left to decide which
+        # half of an inconsistent pair to believe. Asserted on the wording,
+        # because a catch-all row that merely EXISTS is one a rewrite can empty
+        # out without failing anything - which is exactly what happened to the
+        # first version of this assertion.
+        self.assertEqual(len(rows) - len(listed), 1, "the catch-all row is missing")
+        catch_all = rows[-1]
+        self.assertEqual(catch_all[0], "anything else")
+        self.assertIn("Record both rows verbatim and stop", catch_all[3])
+
+        self.assertEqual(
+            [endpoint_transfer_slot(int(row[0], 16)) for row in listed],
+            [row[1] for row in listed],
+        )
+        self.assertEqual(
+            [row[2] for row in listed],
+            [
+                str(HUB),
+                str(HUB),
+                str(HUB + 1),
+                str(HUB + 2),
+                f"{HUB + 3} or more",
+            ],
+        )
 
 
 if __name__ == "__main__":

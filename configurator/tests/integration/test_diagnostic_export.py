@@ -671,17 +671,75 @@ def test_endpoint_transfer_state_names_every_live_flag(qtbot, tmp_path):
     )
 
 
+def test_the_report_subtracts_the_attach_baseline_so_nobody_has_to(qtbot, tmp_path):
+    """The delta is the reading, so the report has to carry it as a row.
+
+    Every version of the bench procedure that asked an operator to subtract one
+    printed number from another was asking for the one step a person holding a
+    board gets wrong.
+    """
+    from duo_input.persistence.diagnostic_export import (
+        HUB_COMPLETIONS_AFTER_ATTACH,
+        completions_since_attach_label,
+    )
+
+    host = _host_rows(qtbot, tmp_path, WEDGED_MID_ENUMERATION)
+
+    # 41 completions in total and 41 at the attach: nothing at all completed
+    # after it, not even the hub's own five, which is itself a reading.
+    assert host[completions_since_attach_label()] == "0"
+    assert str(HUB_COMPLETIONS_AFTER_ATTACH) in completions_since_attach_label()
+
+
+def test_the_subtracted_row_counts_forward_from_the_baseline_not_backward(qtbot, tmp_path):
+    """Direction matters, and only a non-zero delta can prove which way it runs.
+
+    The wedged capture has the same number in both places, so a subtraction
+    performed backwards produces the same zero and reads as correct. This is
+    the row-4 case of the bench decision table: two stages completed after the
+    attach on top of the hub's own five.
+    """
+    from duo_input.persistence.diagnostic_export import completions_since_attach_label
+
+    later = list(WEDGED_MID_ENUMERATION)
+    later[17] = (48 << 16) | (0 << 8) | 2
+    host = _host_rows(qtbot, tmp_path, tuple(later), name="seven-after-attach")
+
+    assert host[completions_since_attach_label()] == "7"
+
+
+def test_the_subtracted_row_announces_a_saturated_completion_count(qtbot, tmp_path):
+    """65535 is a clamp, not a measurement, and the delta below it is a fiction."""
+    from duo_input.persistence.diagnostic_export import completions_since_attach_label
+
+    saturated = list(WEDGED_MID_ENUMERATION)
+    saturated[17] = (0xFFFF << 16) | (0 << 8) | 2
+    host = _host_rows(qtbot, tmp_path, tuple(saturated), name="saturated")
+
+    assert host[completions_since_attach_label()] == (
+        "unavailable - the completion count has saturated at 65535"
+    )
+
+
+def test_the_subtracted_row_refuses_to_be_a_baseline_before_any_attach(qtbot, tmp_path):
+    """With no accepted attach the snapshot is a zero, not a measurement."""
+    from duo_input.persistence.diagnostic_export import completions_since_attach_label
+
+    never_attached = list(WEDGED_MID_ENUMERATION)
+    never_attached[17] = (41 << 16) | (0 << 8) | 0
+    never_attached[23] = 0
+    host = _host_rows(qtbot, tmp_path, tuple(never_attached), name="no-attach")
+
+    assert host[completions_since_attach_label()] == (
+        "not a baseline - no attach has been accepted yet"
+    )
+
+
 def test_the_report_names_the_attach_snapshot_as_a_delta_baseline(qtbot, tmp_path):
     """The number is a baseline, not a second cumulative completion count."""
     host = _host_rows(qtbot, tmp_path, WEDGED_MID_ENUMERATION)
 
-    assert (
-        host[
-            "Transfer completions when latest attach was queued "
-            "(subtract from current total)"
-        ]
-        == "41"
-    )
+    assert host["Transfer completions when latest attach was queued (the baseline)"] == "41"
 
 
 def test_the_report_says_that_blocked_passes_are_normal_where_it_reports_them(

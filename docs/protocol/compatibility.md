@@ -189,13 +189,39 @@ each self-delimiting so the one behind it can always be found:
   the linked image rather than from this document.
 
   `ep_transfer_flags` is a **live**, non-sticky byte per endpoint-pool slot 0-3, slot 0 in the
-  LOW byte. Bit 0 is open; bit 1 is `has_transfer`; while bit 1 is set, bit 2 means host-OUT
-  (clear means host-IN), bit 3 means DATA1 (clear means DATA0), and bit 5 means the distinct
-  SETUP PID rather than either data toggle. Bit 4 is `need_pre`, bit 6 is the library's live
-  `stalled` flag, and bit 7 is its live `transfer_aborted` flag. A closed slot is zero. Direction
-  and PID are deliberately suppressed when the endpoint is idle because Pico-PIO-USB retains the
-  preceding stage in those fields after completion; `need_pre`, stalled and aborted remain true
-  live endpoint properties.
+  LOW byte. A closed slot is zero. The bits are the firmware's own `kEpXfer*` constants, and a
+  guard derives this list from `firmware/u1_main/pio_usb/backend.hpp` rather than trusting it:
+
+  | bit | firmware constant |
+  |---:|---|
+  | 0 | `kEpXferOpen` |
+  | 1 | `kEpXferHasTransfer` |
+  | 2 | `kEpXferHostOut` |
+  | 3 | `kEpXferData1` |
+  | 4 | `kEpXferNeedPre` |
+  | 5 | `kEpXferSetupStaged` |
+  | 6 | `kEpXferStalled` |
+  | 7 | `kEpXferAborted` |
+
+  What a byte READS AS is the spelling the configurator's report prints, and every example below
+  is checked against that decoder rather than written out beside it. Between them these bytes set
+  every bit above, so no bit's spelling is unguarded:
+
+  | byte | reads as |
+  |---|---|
+  | `0x00` | `closed` |
+  | `0x01` | `open idle` |
+  | `0x03` | `open active DATA0 host-in` |
+  | `0x07` | `open active DATA0 host-out` |
+  | `0x0B` | `open active DATA1 host-in` |
+  | `0x27` | `open active SETUP host-out` |
+  | `0x11` | `open idle PRE` |
+  | `0xC1` | `open idle stalled aborted` |
+
+  Direction and PID are deliberately suppressed when the endpoint is idle, because Pico-PIO-USB
+  retains the preceding stage in `is_tx` and `data_id` after a transfer completes and an idle
+  endpoint reading as one mid-transfer is the exact confusion this field removes. `need_pre`,
+  `stalled` and `transfer_aborted` are true live endpoint properties and are reported either way.
 
   Because this reading is live, take it TWICE, twenty seconds apart, like every other
   procedure in this file. A single `active` sample can be the ordinary instant between a
@@ -209,32 +235,48 @@ each self-delimiting so the one behind it can always be found:
   answering the token and refusing the data.
 
   `xfer_completions_at_attach` snapshots the saturated transfer-completion total at the latest
-  accepted attach event. Subtract it from bits 16-31 of `host_event_counts` to get completions
-  queued **after that attach**, cancelling every hub-control transfer before it. Both values
-  saturate at 65535, so a current total of 65535 makes the delta unavailable. With two accepted
-  attaches, the latest is the downstream device; with no accepted attach, the zero snapshot is
-  not a baseline.
+  accepted attach event. Subtracting it from bits 16-31 of `host_event_counts` gives the control
+  stages that completed **after that attach**, cancelling every hub-control transfer before it -
+  including one `SET_FEATURE(PORT_POWER)` per hub port, which is why the reading needs to know
+  nothing about the hub in front of the device. **The configurator does that subtraction and
+  prints it as its own row**, so nothing below asks anybody to do arithmetic; the two raw numbers
+  are still reported beside it. Both saturate at 65535, and a saturated total makes the
+  difference a fiction rather than a small number - the subtracted row says so instead of
+  printing one. A snapshot taken before any attach was accepted is a zero, not a baseline, and
+  that row says that too.
 
-  For the stable wedge this pair was added to decide (`attach 2`, `enum_progress_mask` showing
-  `dev5 configured+descriptor` and `dev1`-`dev4` `nothing`, and `ep_slot_map` slot 2 reading
-  `dev0 ep0 out`), the next read is interpreted without arithmetic as follows.
+  For the stable wedge this pair was added to decide, the next read is interpreted as follows.
+  First confirm the board is in that state at all - `attach 2`, `enum_progress_mask` showing
+  `dev5 configured+descriptor` with `dev1`-`dev4` all `nothing`, and `ep_slot_map` slot 2 holding
+  **`dev0 ep0`, in either direction**. The direction bit of a control endpoint tracks whichever
+  stage last ran on it and is not part of the identity; gating on it would throw away one of the
+  states this table exists to name.
 
-  The completion delta is bits 16-31 of `host_event_counts` MINUS `xfer_completions_at_attach`.
-  **Five of it is fixed and belongs to the hub, not the device**: after the host stack accepts a
-  port-attach it issues `GET_PORT_STATUS` (three completions) and `CLEAR_FEATURE(C_PORT_RESET)`
-  (two), and only then the first request the downstream device itself ever sees. So a delta of 5
-  means that first request produced nothing. Every transfer BEFORE the attach - including one
-  `SET_FEATURE(PORT_POWER)` per hub port - cancels out, which is why this reading needs to know
-  nothing about the hub in front of it. `PRE` may be present in every slot-2 pattern below and
-  only says the downstream device is low speed.
+  Then read the verdict off the slot-2 byte of `ep_transfer_flags` and the subtracted row.
+  `PRE` may be set in any of these patterns and only says the downstream device is low speed:
 
-  | Slot-2 transfer state | Completion delta | Meaning |
-  |---|---:|---|
-  | `open idle` | 5 | The first request to address 0 was never placed on the wire: `tuh_descriptor_get_device()` returned false before `hcd_setup_send`. |
-  | `open active SETUP host-out` | 5 | The SETUP was accepted by the endpoint layer and is still staged. On one read this can be the instant before the next SOF; on two reads twenty seconds apart, with `ep_max_failed_count` still 0, the endpoint is never being serviced. |
-  | `open active DATA1 host-in` | 6 | The SETUP completed; the eight-byte device-descriptor DATA-IN stage is outstanding. |
-  | `open active DATA1 host-out` | 7 | The SETUP and the DATA-IN stage completed; the zero-length status-OUT stage is outstanding. |
-  | `open idle` | 8 or more | The whole three-stage request completed and the stop is further along; read `enum_progress_mask` and `ep_max_failed_count` instead. |
+  | Slot-2 byte | reads as | completions since the latest attach | verdict |
+  |---|---|---:|---|
+  | `0x01` | `open idle` | 5 | The first request to address 0 never reached the wire: `tuh_descriptor_get_device()` returned false before `hcd_setup_send`. |
+  | `0x27` | `open active SETUP host-out` | 5 | The SETUP was accepted by the endpoint layer and is still staged. On one read this can be the instant before the next SOF; on two reads twenty seconds apart, with `ep_max_failed_count` still 0, the endpoint is never being serviced. |
+  | `0x0B` | `open active DATA1 host-in` | 6 | The SETUP completed; the eight-byte device-descriptor DATA-IN stage is outstanding. |
+  | `0x0F` | `open active DATA1 host-out` | 7 | The SETUP and the DATA-IN stage completed; the zero-length status-OUT stage is outstanding. |
+  | `0x01` | `open idle` | 8 or more | The whole three-stage request completed and the stop is further along; read `enum_progress_mask` and `ep_max_failed_count` instead. |
+  | anything else | - | - | **Not in this table. Record both rows verbatim and stop.** A pair this table does not list - a `SETUP` byte beside a delta of 7, say - is not a reading to interpret, and guessing which half to believe is how the previous four rounds each cost a bench trip. |
+
+  Part of that delta is fixed and belongs to the hub rather than the device: after the host stack
+  accepts a port attach it finishes the port's own paperwork before the downstream device is
+  asked anything at all.
+
+  | hub work after an accepted port attach | control stages |
+  |---|---:|
+  | `GET_PORT_STATUS` | 3 |
+  | `CLEAR_FEATURE(C_PORT_RESET)` | 2 |
+  | **total, already included in every delta above** | 5 |
+
+  So the smallest delta any of the rows above can carry is that total, and it means the first
+  request to the device produced nothing. The subtracted row's own label carries the same number,
+  and a guard ties the table, the label and the firmware-side constant together.
 
   A delta of 5 or more with slot 2 CLOSED, or `ep_slot_map` showing an address other than `dev0`
   in it, means the board is no longer in this state at all and the table does not apply.
