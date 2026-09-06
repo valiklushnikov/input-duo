@@ -633,3 +633,115 @@ revision in `cmake/pio_usb_toolchain_lock.cmake`. That lock correctly refuses to
 build against a hand-edited clone; the diagnostic builds above bypassed it only
 through a temporary, reverted `DUO_PIO_USB_DIAGNOSTIC_ALLOW_DIRTY` flag, and no
 such build is a release candidate.
+
+## Second defect: an unbounded retry loop in the control IN path (2026-09-06)
+
+With the enumeration fix in place, the same receiver still failed to mount, and
+the host log stopped dead at one request:
+
+```
+HID Get Report Descriptor
+[1:1] Get Descriptor: 81 06 00 22 00 00 4D 00     <- 77 bytes wanted
+on EP 00 with 8 bytes: OK                          <- SETUP fine
+                                                   <- data stage never completes
+```
+
+77 bytes on a 64-byte EP0 is this device's first **multi-packet** control IN.
+The device descriptor (18 bytes) and configuration descriptor (59 bytes) each
+fit one packet. The Keychron receiver has an 8-byte EP0 and does multi-packet
+control transfers constantly, which is why it never showed this.
+
+### What the counters proved
+
+Per-address IN transaction counters inside `usb_in_transaction`
+(`2a0040eef4f4237f60a05880507d710075f1000010b2b6682534ae4c718fbef5`):
+
+```
+IN addr=1 try=19072 ok=7 toggle=19065 nak=0 busy=0 lastlen=64 lastpid=0x4b
+```
+
+`try` climbs by ~1000/s for ever while `ok` stays at 7. Every one of those
+attempts receives a valid 64-byte packet with a good CRC whose PID is
+`0x4b = DATA1`, while the host — having already accepted the first packet and
+flipped its toggle — expects DATA0. The device is re-sending the same packet,
+so it never saw our ACK.
+
+The reason nothing recovers is a missing bound. Every other outcome in
+`usb_in_transaction` counts failures and gives up after `TRANSACTION_MAX_RETRY`;
+the DATA0/1 mismatch branch is empty except for a comment:
+
+```c
+} else {
+  // DATA0/1 mismatched, 0 for re-try next frame
+}
+```
+
+So the transfer neither completes nor fails, and TinyUSB waits on it for ever
+with nothing to recover from. That is the hang.
+
+### Bounding it (adopted)
+
+```diff
+--- a/src/pio_usb_host.c
++++ b/src/pio_usb_host.c
+     } else {
+-      // DATA0/1 mismatched, 0 for re-try next frame
++      // DATA0/1 mismatched. ... Bound it exactly like the NAK and error paths below.
++      res = -1;
++      if (++ep->failed_count >= TRANSACTION_MAX_RETRY) {
++        pio_usb_ll_transfer_complete(ep, PIO_USB_INTS_ENDPOINT_ERROR_BITS);
++      }
+     }
+```
+
+Measured effect: `try` fell from 19072-and-climbing to 10, `toggle` stopped at
+the retry limit of 3, and the transfer now ends as a real error the stack can
+see:
+
+```
+on EP 80 with 64 bytes: FAILED
+[1:1] Control FAILED, xferred_bytes = 64
+```
+
+This converts an unrecoverable hang into a recoverable failure and keeps the
+host stack alive. It does **not** make the device mount: TinyUSB does not retry
+the report-descriptor fetch, so the HID interface is still not enumerated.
+
+### The turnaround hypothesis, tested and rejected
+
+The device never seeing our ACK points at the handshake timing. The receive
+loop skips the inter-packet delay at full speed entirely:
+
+```c
+// Since there is also overhead, we only wait 1.5 bit for LS and no wait for FS
+if (pp->low_speed) { busy_wait_at_least_cycles(turnaround_in_cycle); }
+```
+
+Adding 2 bit times of delay for full speed (USB 7.1.18) was built and flashed
+(`c23c6904827433b46c4dc4a4412dd99f324dba934a5167b620bbccaa4d7596cf`) and made
+things strictly worse: **the hub stopped enumerating too**, stalling on the very
+first device-descriptor request. The specification requires the handshake within
+a 2-to-7 bit-time window, not merely after 2 bit times; the implementation
+already spends that budget on overhead, so the added delay pushes the ACK past
+the upper bound. The change was reverted. Any future work here needs the window
+measured, not guessed — a logic analyser on D+/D-, not another build.
+
+### State at the end of this session
+
+Two fixes are established and carried as patches, neither adopted into the
+pinned clones:
+
+- `tinyusb-reset2.patch` — enables `ENUM_RESET_2`; turns a device that never
+  enumerates into one that enumerates fully.
+- `pico-pio-usb-bounded-toggle-retry.patch` — bounds the DATA0/1 mismatch
+  retry; turns an unrecoverable hang into a reported error.
+
+Clean candidate carrying both plus `CFG_TUH_HID 8`:
+`706d909a07e624669a8ad9f8ba6aa51ce16b4555c75063f32b7e296347408ae7`
+(102400 bytes). It is what is currently flashed on U1.
+
+**Task 1's gate still fails.** The Aula receiver `3554:FA09` enumerates but its
+HID interfaces do not mount, because the report-descriptor fetch cannot complete
+while the device and host disagree about the data toggle. That single unresolved
+question — why a full-speed device behind this hub misses the host's ACK on a
+64-byte packet — is what a focused bug plan should start from.
