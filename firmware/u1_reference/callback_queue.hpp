@@ -243,8 +243,8 @@ struct ReferenceControlTraceEntry {
     std::uint8_t ep_num{};
     //: The received PID byte, as it appeared on the wire.
     std::uint8_t pid{};
-    //: Monotonic across every entry, and incremented even when the ring was
-    //: full, so a gap in the sequence is itself visible.
+    //: Monotonic and contiguous across accepted entries. Ring refusal is
+    //: reported separately by CTRL_LOST and does not consume this number.
     std::uint32_t seq{};
     std::uint16_t length{};
     //: ep->size. This is what turns "EP0 is 8 bytes" from an assumption into

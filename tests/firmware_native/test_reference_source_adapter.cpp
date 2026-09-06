@@ -1154,6 +1154,14 @@ TEST_CASE(the_comparison_covers_the_whole_golden_document_not_only_one_packet) {
     CHECK_EQ(wrong_length.first_difference, kNoDifferenceSentinel);
 }
 
+TEST_CASE(a_zero_length_request_can_never_report_a_match_without_comparing_a_byte) {
+    using Result = duo_input::u1::reference::DescriptorDiagnosticResult;
+    const auto golden = aula_keyboard_descriptor_vector();
+    const auto result = duo_input::u1::reference::descriptor_diagnostic_complete(
+        true, 0u, golden.data(), golden.size(), 0u);
+    CHECK(result.kind != Result::Kind::Match);
+}
+
 TEST_CASE(a_completed_measurement_arms_the_seventy_seven_byte_follow_up_once) {
     ReferenceSourceAdapter adapter;
     adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0u);

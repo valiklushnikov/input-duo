@@ -661,12 +661,37 @@ TEST_CASE(a_control_done_entry_bounds_the_run_of_packets_before_it) {
     done.dev_addr = 2;
     done.ep_num = 0x80;
     done.seq = 9;
+    done.pid = 0x1E;
     done.actual_len = 0;
     done.total_len = 64;
     done.ep_size = 64;
 
     CHECK_EQ(render_control(done),
-             std::string{"CTRL_DONE a=2 ep=128 seq=9 act=0 tot=64\r\n"});
+             std::string{"CTRL_DONE a=2 ep=128 seq=9 pid=STALL act=0 tot=64\r\n"});
+}
+
+TEST_CASE(every_descriptor_failure_reason_has_a_stable_r_token) {
+    const struct {
+        ReferenceDescriptorReason reason;
+        const char* token;
+    } cases[] = {
+        {ReferenceDescriptorReason::Transfer, "xfer"},
+        {ReferenceDescriptorReason::Gone, "gone"},
+        {ReferenceDescriptorReason::TooLong, "toolong"},
+        {ReferenceDescriptorReason::NoBuffer, "nobuf"},
+        {ReferenceDescriptorReason::Unmounted, "unmounted"},
+        {ReferenceDescriptorReason::NoInterface, "noitf"},
+        {ReferenceDescriptorReason::NoOffer, "nooffers"},
+        {ReferenceDescriptorReason::Overflow, "overflow"},
+    };
+    for (const auto& item : cases) {
+        ReferenceDescriptorDiagnostic diagnostic{};
+        diagnostic.kind = ReferenceDescriptorDiagnosticKind::Failure;
+        diagnostic.reason = item.reason;
+        diagnostic.requested = 64;
+        CHECK_EQ(render_one(diagnostic),
+                 std::string{"DESC64_FAIL actual=0 r="} + item.token + "\r\n");
+    }
 }
 
 TEST_CASE(every_control_trace_pid_renders_by_name_or_by_value) {

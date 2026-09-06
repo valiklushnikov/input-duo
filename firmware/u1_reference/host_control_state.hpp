@@ -77,7 +77,7 @@ inline DescriptorDiagnosticResult descriptor_diagnostic_complete(
     }
     // Every compared byte agreed. Only an answer as long as the one requested
     // is a match; anything else is a mismatch with no first difference to name.
-    result.kind = actual_len == expected_len
+    result.kind = expected_len != 0 && actual_len == expected_len
                       ? DescriptorDiagnosticResult::Kind::Match
                       : DescriptorDiagnosticResult::Kind::Mismatch;
     return result;

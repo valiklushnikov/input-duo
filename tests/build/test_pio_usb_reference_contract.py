@@ -37,7 +37,7 @@ FIXED_SOURCE_DATE_EPOCH = "1788691431"
 # applied - see cmake/pio_usb_toolchain_lock.cmake. The examples/ directory the
 # reference copies come from is untouched by that patch, so the upstream blob
 # hashes below still hold.
-PINNED_PICO_PIO_USB_REVISION = "0ba2b6fe3e92289a9c40c33d3f7906db7506845a"
+PINNED_PICO_PIO_USB_REVISION = "3e07f6b3b1fac410d49576c6177d87a26422b16a"
 REVIEWED_REFERENCE_SHA256 = {
     "main.c": "e8539134690e597be9254ee179f72a2b5cc93becf355e033f994d08955ea8ea1",
     "tusb_config.h": "4ce4ff7a45fc93b5695ddc9375c091995ce19ab078fc32a23d3f4299ee95594c",
@@ -734,6 +734,28 @@ def test_both_descriptor_experiments_run_from_one_boot():
         "is never armed"
     )
     assert "g_adapter.schedule_descriptor_followup(" in source
+
+
+def test_descriptor_completion_uses_the_transfer_result_and_current_mount_state():
+    source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(
+        encoding="utf-8"
+    )
+    compact = re.sub(r"\s+", " ", source)
+    assert re.search(
+        r"g_descriptor_diagnostic\.complete\( xfer->daddr, "
+        r"xfer->result == XFER_RESULT_SUCCESS, xfer->actual_len, "
+        r"tuh_hid_mounted\(dev_addr, instance\)",
+        compact,
+    )
+
+
+def test_give_up_is_drained_before_a_completion_arms_the_follow_up():
+    source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(
+        encoding="utf-8"
+    )
+    give_up = source.index("g_adapter.take_descriptor_giveup(")
+    completion = source.index("g_descriptor_diagnostic.take_completed()")
+    assert give_up < completion
 
 
 def test_the_follow_up_reuses_the_poisoned_request_path():

@@ -41,7 +41,7 @@ PICO_PIO_USB_BASE_REVISION = "3c1eec341a5232640e4c00628b889b641af34b28"
 #: bases above, with the fixed identity and date below. These are what the
 #: build is verified against.
 TINYUSB_PATCHED_REVISION = "507766faf14f38a6752401fb4f324cc00cd145dd"
-PICO_PIO_USB_PATCHED_REVISION = "0ba2b6fe3e92289a9c40c33d3f7906db7506845a"
+PICO_PIO_USB_PATCHED_REVISION = "3e07f6b3b1fac410d49576c6177d87a26422b16a"
 
 #: Fixed so the commit SHA is reproducible.
 PATCH_COMMIT_IDENTITY = "toolchain@duo-input.invalid"
@@ -274,9 +274,19 @@ def test_the_control_trace_records_after_the_handshake_never_before():
     """
     source = _control_trace_source()
 
-    handshake = source.index("pio_usb_bus_receive_packet_and_handshake")
-    continued = source.index("pio_usb_ll_transfer_continue(ep, receive_len)")
-    recorded = source.index("ctrl_trace_record(PIO_USB_CTRL_TRACE_KIND_DATA")
+    receive_call = "pio_usb_bus_receive_packet_and_handshake(pp, USB_PID_ACK)"
+    assert receive_call in source, (
+        "the shipped patch lacks enough real call-site context to prove that "
+        "the DATA trace is after the handshake call"
+    )
+    transaction_start = source.index(receive_call)
+    transaction_end = source.index("(usb_out_transaction)(", transaction_start)
+    transaction = source[transaction_start:transaction_end]
+    handshake = transaction.index(receive_call)
+    continued = transaction.index("pio_usb_ll_transfer_continue(ep, receive_len)")
+    recorded = transaction.index(
+        "ctrl_trace_record(PIO_USB_CTRL_TRACE_KIND_DATA"
+    )
     assert handshake < recorded, (
         "the DATA packet is recorded before its handshake has been sent"
     )
@@ -285,11 +295,78 @@ def test_the_control_trace_records_after_the_handshake_never_before():
         "ep->actual_len and ep->total_len would be the values from before it"
     )
 
-    setup_wait = source.index("pio_usb_bus_wait_handshake")
-    setup_recorded = source.index("ctrl_trace_record(PIO_USB_CTRL_TRACE_KIND_SETUP")
+    setup_start = source.index("pio_usb_bus_wait_handshake(pp)")
+    setup_end = source.index("(handle_endpoint_irq)(", setup_start)
+    setup = source[setup_start:setup_end]
+    setup_wait = setup.index("pio_usb_bus_wait_handshake(pp)")
+    setup_recorded = setup.index(
+        "ctrl_trace_record(PIO_USB_CTRL_TRACE_KIND_SETUP"
+    )
     assert setup_wait < setup_recorded, (
         "the SETUP packet is recorded before its handshake was waited for"
     )
+
+
+def test_the_control_trace_ring_is_deep_enough_for_pre_cdc_enumeration():
+    source = _control_trace_source()
+    assert "#define PIO_USB_CTRL_TRACE_CAPACITY 2048u" in source
+    assert "#define PIO_USB_CTRL_TRACE_MASK (PIO_USB_CTRL_TRACE_CAPACITY - 1u)" in source
+
+
+def test_the_control_trace_copy_is_bounded_by_the_entry_payload():
+    source = _control_trace_source()
+    record_start = source.index("ctrl_trace_record)(")
+    body = source[record_start : source.index("pio_usb_host_ctrl_trace_take")]
+    assert "(len < PIO_USB_CTRL_TRACE_BYTES) ? len" in body
+    assert ": PIO_USB_CTRL_TRACE_BYTES;" in body
+    assert "idx < copied" in body
+    assert "entry->byte_count = (uint8_t)copied;" in body
+
+
+def test_the_control_trace_packet_fields_come_from_the_call_arguments():
+    source = _control_trace_source()
+    record_start = source.index("ctrl_trace_record)(")
+    body = source[record_start : source.index("pio_usb_host_ctrl_trace_take")]
+    assert "entry->pid = pid;" in body
+    assert "entry->len = len;" in body
+
+    receive_call = "pio_usb_bus_receive_packet_and_handshake(pp, USB_PID_ACK)"
+    assert receive_call in source
+    transaction_start = source.index(receive_call)
+    transaction_end = source.index("(usb_out_transaction)(", transaction_start)
+    transaction = source[transaction_start:transaction_end]
+    assert (
+        "ctrl_trace_record(PIO_USB_CTRL_TRACE_KIND_DATA, ep, receive_pid,\n"
+        "                      (uint16_t)receive_len, &pp->usb_rx_buffer[2]);"
+        in transaction
+    )
+
+
+def test_a_refused_record_does_not_consume_a_sequence_number():
+    source = _control_trace_source()
+    record_start = source.index("ctrl_trace_record)(")
+    body = source[record_start : source.index("pio_usb_host_ctrl_trace_take")]
+    full = body.index("head - tail >= PIO_USB_CTRL_TRACE_CAPACITY")
+    refused = body.index("return;", full)
+    increment = body.index("ctrl_trace_seq++")
+    assert refused < increment, (
+        "the sequence is consumed before the ring-full decision; CTRL_LOST "
+        "already reports refused records, so accepted entries must stay contiguous"
+    )
+
+
+def test_the_done_entry_is_recorded_at_the_end_of_usb_in_transaction():
+    source = _control_trace_source()
+    receive_call = "pio_usb_bus_receive_packet_and_handshake(pp, USB_PID_ACK)"
+    assert receive_call in source
+    transaction_start = source.index(receive_call)
+    transaction_end = source.index("(usb_out_transaction)(", transaction_start)
+    transaction = source[transaction_start:transaction_end]
+    inactive = transaction.index("if (!ep->has_transfer)")
+    done = transaction.index(
+        "ctrl_trace_record(PIO_USB_CTRL_TRACE_KIND_DONE, ep, receive_pid, 0, NULL);"
+    )
+    assert inactive < done
 
 
 def test_the_control_trace_admits_only_control_endpoints():

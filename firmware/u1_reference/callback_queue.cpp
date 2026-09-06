@@ -574,10 +574,11 @@ void build_next_control_line() {
         case ReferenceControlTraceKind::Done:
             written = std::snprintf(
                 g_control_line, sizeof(g_control_line),
-                "CTRL_DONE a=%u ep=%u seq=%lu act=%u tot=%u\r\n",
+                "CTRL_DONE a=%u ep=%u seq=%lu pid=%s act=%u tot=%u\r\n",
                 entry.dev_addr, entry.ep_num,
-                static_cast<unsigned long>(entry.seq), entry.actual_len,
-                entry.total_len);
+                static_cast<unsigned long>(entry.seq),
+                pid_name(entry.pid, scratch, sizeof(scratch)),
+                entry.actual_len, entry.total_len);
             break;
     }
 

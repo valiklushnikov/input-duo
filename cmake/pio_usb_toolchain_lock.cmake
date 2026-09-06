@@ -39,7 +39,7 @@ set(DUO_PIO_USB_PICO_PIO_USB_BASE_REVISION "3c1eec341a5232640e4c00628b889b641af3
 # strict: exact revision, and a clone with no uncommitted changes. A tree
 # hand-edited after bootstrapping still cannot be built against silently.
 set(DUO_PIO_USB_TINYUSB_REVISION "507766faf14f38a6752401fb4f324cc00cd145dd")
-set(DUO_PIO_USB_PICO_PIO_USB_REVISION "0ba2b6fe3e92289a9c40c33d3f7906db7506845a")
+set(DUO_PIO_USB_PICO_PIO_USB_REVISION "3e07f6b3b1fac410d49576c6177d87a26422b16a")
 
 find_package(Git QUIET)
 if(NOT GIT_FOUND)
