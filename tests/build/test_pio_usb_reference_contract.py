@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,9 +15,31 @@ REFERENCE_BUILD = ROOT / "build" / "pico-pio-usb-reference-release"
 REFERENCE_ELF = (
     REFERENCE_BUILD / "firmware" / "u1_reference" / "duo_u1_reference.elf"
 )
-UPSTREAM_REFERENCE = (
-    ROOT / ".deps" / "pico-pio-usb" / "examples" / "host_hid_to_device_cdc"
+REFERENCE_UF2 = (
+    REFERENCE_BUILD / "firmware" / "u1_reference" / "duo_u1_reference.uf2"
 )
+REFERENCE_U2_UF2 = (
+    REFERENCE_BUILD / "firmware" / "u2_endpoint" / "duo_u2_endpoint.uf2"
+)
+PIO_USB_U2_UF2 = (
+    ROOT
+    / "build"
+    / "pico-pio-usb-release"
+    / "firmware"
+    / "u2_endpoint"
+    / "duo_u2_endpoint.uf2"
+)
+PICO_PIO_USB_ROOT = ROOT / ".deps" / "pico-pio-usb"
+UPSTREAM_REFERENCE = (
+    PICO_PIO_USB_ROOT / "examples" / "host_hid_to_device_cdc"
+)
+REFERENCE_PRESET = "pico-pio-usb-reference-release"
+PINNED_PICO_PIO_USB_REVISION = "3c1eec341a5232640e4c00628b889b641af34b28"
+REVIEWED_REFERENCE_SHA256 = {
+    "main.c": "e8539134690e597be9254ee179f72a2b5cc93becf355e033f994d08955ea8ea1",
+    "tusb_config.h": "4ce4ff7a45fc93b5695ddc9375c091995ce19ab078fc32a23d3f4299ee95594c",
+    "usb_descriptors.c": "18745d895aff262c81f7a1a7b70887af4670e16100cb4a566782ea8601cf9143",
+}
 
 sys.path.insert(0, str(ROOT / "tools"))
 
@@ -34,6 +58,17 @@ def _reference_symbols() -> dict:
     return Elf32(REFERENCE_ELF.read_bytes()).symbols()
 
 
+def _configured_make_program() -> str:
+    cache = (REFERENCE_BUILD / "CMakeCache.txt").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    match = re.search(r"^CMAKE_MAKE_PROGRAM:[^=]+=(.+)$", cache, re.MULTILINE)
+    assert match, (
+        f"CMAKE_MAKE_PROGRAM is absent from {REFERENCE_BUILD / 'CMakeCache.txt'}"
+    )
+    return match.group(1).strip()
+
+
 def test_reference_preset_selects_only_the_reference_backend():
     presets = json.loads((ROOT / "CMakePresets.json").read_text(encoding="utf-8"))
     selected = next(
@@ -44,6 +79,34 @@ def test_reference_preset_selects_only_the_reference_backend():
 
     assert selected["cacheVariables"]["DUO_INPUT_BACKEND"] == "PIO_USB_REFERENCE"
     assert selected["binaryDir"] == "${sourceDir}/build/pico-pio-usb-reference-release"
+
+    build_selected = next(
+        preset
+        for preset in presets["buildPresets"]
+        if preset["name"] == REFERENCE_PRESET
+    )
+    assert build_selected["configurePreset"] == REFERENCE_PRESET
+
+
+def test_invalid_backend_configuration_is_rejected_by_cmake(tmp_path):
+    result = subprocess.run(
+        [
+            "cmake",
+            "--preset",
+            REFERENCE_PRESET,
+            "-B",
+            str(tmp_path / "invalid-backend"),
+            "-DDUO_INPUT_BACKEND=NOT_A_DUO_BACKEND",
+            f"-DCMAKE_MAKE_PROGRAM={_configured_make_program()}",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    output = result.stdout + result.stderr
+    assert "Unknown DUO_INPUT_BACKEND 'NOT_A_DUO_BACKEND'" in output
 
 
 def test_reference_sources_are_maintained_outside_build_output():
@@ -59,11 +122,38 @@ def test_reference_sources_are_byte_for_byte_the_pinned_upstream_example():
         "usb_descriptors.c": "usb_descriptors.c",
     }
 
+    revision = subprocess.run(
+        ["git", "-C", str(PICO_PIO_USB_ROOT), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert revision == PINNED_PICO_PIO_USB_REVISION
+
+    checkout_status = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(PICO_PIO_USB_ROOT),
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert checkout_status == "", "pinned Pico-PIO-USB checkout is dirty"
+
     for maintained_name, upstream_name in copies.items():
         maintained = ROOT / "firmware" / "u1_reference" / maintained_name
         upstream = UPSTREAM_REFERENCE / upstream_name
-        assert _sha256(maintained) == _sha256(upstream), (
-            f"{maintained} is not a byte-for-byte copy of {upstream}"
+        reviewed_hash = REVIEWED_REFERENCE_SHA256[maintained_name]
+        assert _sha256(maintained) == reviewed_hash, (
+            f"{maintained} does not have its immutable reviewed SHA-256"
+        )
+        assert _sha256(upstream) == reviewed_hash, (
+            f"pinned blob checkout {upstream} does not have its reviewed SHA-256"
         )
 
     assert b"tud_cdc_write(" in (ROOT / "firmware" / "u1_reference" / "main.c").read_bytes()
@@ -72,17 +162,17 @@ def test_reference_sources_are_byte_for_byte_the_pinned_upstream_example():
 def test_reference_elf_contains_only_the_upstream_host_device_path():
     symbols = _reference_symbols()
 
-    for required in (
-        "tuh_task",
-        "tuh_hid_receive_report",
-        "tud_task",
-        # tud_cdc_write() is an always-inline TinyUSB wrapper; this is its
-        # out-of-line implementation in the pinned TinyUSB revision.
-        "tud_cdc_n_write",
-    ):
+    for required in ("tuh_task", "tuh_hid_receive_report", "tud_task"):
         assert any(required in name for name in symbols), (
             f"{REFERENCE_ELF} contains no {required}"
         )
+
+    # tud_cdc_write() is an always-inline TinyUSB wrapper; the controller's
+    # ruling requires exact membership for its out-of-line implementation so
+    # tud_cdc_n_write_flush cannot accidentally satisfy this data-write gate.
+    assert "tud_cdc_n_write" in symbols, (
+        f"{REFERENCE_ELF} contains no exact tud_cdc_n_write symbol"
+    )
 
     for excluded in (
         "Ch375Device4tick",
@@ -92,3 +182,32 @@ def test_reference_elf_contains_only_the_upstream_host_device_path():
         assert not any(excluded in name for name in symbols), (
             f"{REFERENCE_ELF} unexpectedly contains {excluded}"
         )
+
+
+def test_current_build_graph_recreates_reference_artifacts_from_named_target():
+    for artifact in (REFERENCE_ELF, REFERENCE_UF2):
+        artifact.unlink(missing_ok=True)
+
+    result = subprocess.run(
+        [
+            "cmake",
+            "--build",
+            "--preset",
+            REFERENCE_PRESET,
+            "--target",
+            "duo_u1_reference",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert REFERENCE_ELF.is_file(), "named target did not recreate its ELF"
+    assert REFERENCE_UF2.is_file(), "named target did not recreate its UF2"
+
+
+def test_reference_u2_matches_the_same_toolchain_pio_usb_u2():
+    assert REFERENCE_U2_UF2.is_file(), f"missing reference-preset U2: {REFERENCE_U2_UF2}"
+    assert PIO_USB_U2_UF2.is_file(), f"missing PIO_USB-preset U2: {PIO_USB_U2_UF2}"
+    assert REFERENCE_U2_UF2.read_bytes() == PIO_USB_U2_UF2.read_bytes()

@@ -4,8 +4,8 @@
 # Task 1's baseline recorded that the CH375 `pico-release` build resolves
 # PICO_SDK_PATH from the shell environment to Pico SDK 2.1.0 (95ea6ac). That
 # is deliberately left alone: this file is included only when
-# DUO_INPUT_BACKEND is PIO_USB, and it never touches PICO_SDK_PATH for a
-# CH375 configure.
+# DUO_INPUT_BACKEND is PIO_USB or PIO_USB_REFERENCE, and it never touches
+# PICO_SDK_PATH for a CH375 configure.
 #
 # The PIO USB backend instead needs Pico SDK 2.3.0, TinyUSB and Pico-PIO-USB
 # at exact revisions. tools/bootstrap_pio_usb_toolchain.ps1 clones/fetches
@@ -114,8 +114,9 @@ _duo_pio_usb_verify_clone("Pico-PIO-USB"
 # CMakeLists.txt) that lets TinyUSB come from somewhere other than the SDK's
 # own lib/tinyusb submodule - which is exactly what is needed here, since
 # that submodule is pinned to a different TinyUSB revision than this build
-# wants. PICO_PIO_USB_PATH has no SDK meaning yet; it is where a later task
-# points its own add_subdirectory() at the verified Pico-PIO-USB clone.
+# wants. PICO_PIO_USB_PATH selects the verified Pico-PIO-USB clone for both
+# TinyUSB's PIO host-controller integration and the frozen reference target's
+# direct add_subdirectory().
 #
 # FORCE, so a stale value cached from an earlier, differently-configured
 # build directory cannot linger and silently win.

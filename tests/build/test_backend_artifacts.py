@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -51,7 +52,11 @@ CH375_ONLY_SYMBOL_FRAGMENT = "Ch375Device4tick"
 PIO_USB_ONLY_SYMBOL_FRAGMENTS = ("tuh_task", "tuh_hid_receive_report")
 
 # Device-side TinyUSB calls that the frozen upstream reference must retain.
-REFERENCE_DEVICE_SYMBOL_FRAGMENTS = ("tud_task", "tud_cdc_n_write")
+REFERENCE_DEVICE_SYMBOL_FRAGMENTS = ("tud_task",)
+
+# Exact membership is required: the always-present flush helper must not
+# satisfy the reference image's CDC data-write contract.
+REFERENCE_EXACT_SYMBOLS = ("tud_cdc_n_write",)
 
 # Production integration symbols that must not leak into the frozen reference.
 REFERENCE_EXCLUDED_SYMBOL_FRAGMENTS = (
@@ -159,6 +164,14 @@ def test_a_reference_declared_build_links_only_the_upstream_host_device_path():
     if declared_backend(BUILD_DIR) != "PIO_USB_REFERENCE":
         pytest.skip("this build directory is not configured for PIO_USB_REFERENCE")
 
+    build = subprocess.run(
+        ["cmake", "--build", str(BUILD_DIR), "--target", "duo_u1_reference"],
+        cwd=REPOSITORY_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert build.returncode == 0, build.stdout + build.stderr
+
     symbols = linked_symbols(U1_ELF)
 
     required_fragments = (
@@ -169,6 +182,11 @@ def test_a_reference_declared_build_links_only_the_upstream_host_device_path():
         assert any(fragment in name for name in symbols), (
             f"{U1_ELF}'s build directory is configured for PIO_USB_REFERENCE "
             f"but its linked image contains no {fragment}"
+        )
+    for name in REFERENCE_EXACT_SYMBOLS:
+        assert name in symbols, (
+            f"{U1_ELF}'s build directory is configured for PIO_USB_REFERENCE "
+            f"but its linked image contains no exact {name} symbol"
         )
     for fragment in REFERENCE_EXCLUDED_SYMBOL_FRAGMENTS:
         assert not any(fragment in name for name in symbols), (

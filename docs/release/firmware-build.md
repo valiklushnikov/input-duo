@@ -83,9 +83,9 @@ packaging until the reference-first acceptance plan reaches its release slice.
 
 ## The PIO USB backend toolchain
 
-The PIO USB backend (a native Pico-PIO-USB/TinyUSB host, replacing the CH375
-chips - see `docs/superpowers/specs/2026-09-02-pio-usb-hub-v1-design.md`) is
-pinned to its own toolchain, independent of `PICO_SDK_PATH` and everything
+The PIO USB backends (the current integration and the frozen reference target)
+use a native Pico-PIO-USB/TinyUSB host in place of the CH375 chips and are
+pinned to their own toolchain, independent of `PICO_SDK_PATH` and everything
 else CH375 depends on:
 
 | Dependency | Revision |
@@ -131,7 +131,7 @@ cmake --preset pico-pio-usb-reference-release
 cmake --build --preset pico-pio-usb-reference-release --parallel
 ```
 
-Unlike `pico-release`, `PICO_SDK_PATH` must **not** be set for this preset -
+Unlike `pico-release`, `PICO_SDK_PATH` must **not** be set for these presets -
 `cmake/pio_usb_toolchain_lock.cmake` sets it (and `PICO_TINYUSB_PATH`,
 `PICO_PIO_USB_PATH`) itself, forced to the verified `.deps/` clones, so this
 build never depends on whatever the CH375 build has that variable pointed at.
@@ -151,11 +151,12 @@ a toolchain problem, and the message says which one happened.
 
 ### Offline rebuild
 
-Once `.deps/` has been populated by the bootstrap script, `pico-pio-usb-release`
-and `pico-pio-usb-debug` configure entirely from local paths - no network
-access is required to reconfigure or rebuild from an existing `.deps/` tree.
-Only `tools/bootstrap_pio_usb_toolchain.ps1` itself needs network access, and
-only for dependencies it has not already fetched at the correct revision.
+Once `.deps/` has been populated by the bootstrap script,
+`pico-pio-usb-release`, `pico-pio-usb-debug`, and
+`pico-pio-usb-reference-release` configure entirely from local paths - no
+network access is required to reconfigure or rebuild from an existing `.deps/`
+tree. Only `tools/bootstrap_pio_usb_toolchain.ps1` itself needs network access,
+and only for dependencies it has not already fetched at the correct revision.
 
 ### Licensing
 

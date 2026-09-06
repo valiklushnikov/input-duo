@@ -30,8 +30,9 @@ XIP_BASE = 0x10000000
 #: Firmware owns the first 1024 KiB. Config A starts here.
 FIRMWARE_LIMIT = 0x10100000
 
-#: Exactly these two, and nothing else.
-EXPECTED_ARTIFACTS = ("duo_u1_main.uf2", "duo_u2_endpoint.uf2")
+#: Exactly one backend-specific U1 and the unchanged U2, and nothing else.
+PRODUCTION_ARTIFACTS = ("duo_u1_main.uf2", "duo_u2_endpoint.uf2")
+REFERENCE_ARTIFACTS = ("duo_u1_reference.uf2", "duo_u2_endpoint.uf2")
 
 _UF2_MAGIC_START0 = 0x0A324655
 _UF2_MAGIC_START1 = 0x9E5D5157
@@ -43,6 +44,25 @@ _UF2_HEADER = struct.Struct("<8I")
 def _build_dir() -> Path:
     override = os.environ.get("DUO_INPUT_PICO_BUILD")
     return Path(override) if override else REPOSITORY_ROOT / "build" / "pico-release"
+
+
+def _declared_backend() -> str | None:
+    """What CMakeCache.txt says DUO_INPUT_BACKEND is, or None if unreadable."""
+    cache_path = _build_dir() / "CMakeCache.txt"
+    if not cache_path.is_file():
+        return None
+    cache = cache_path.read_text(encoding="utf-8", errors="replace")
+    match = re.search(r"^DUO_INPUT_BACKEND:STRING=(.+)$", cache, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def _expected_artifacts() -> tuple[str, str]:
+    if _declared_backend() == "PIO_USB_REFERENCE":
+        return REFERENCE_ARTIFACTS
+    return PRODUCTION_ARTIFACTS
+
+
+EXPECTED_ARTIFACTS = _expected_artifacts()
 
 
 def _artifacts() -> list[Path]:
@@ -133,24 +153,6 @@ def test_the_two_images_are_different(artifacts):
 
 def _u1_elf() -> Path:
     return _build_dir() / "firmware" / "u1_main" / "duo_u1_main.elf"
-
-
-def _declared_backend() -> str | None:
-    """What CMakeCache.txt says DUO_INPUT_BACKEND is, or None if unreadable.
-
-    Both ``pico-release`` and ``pico-pio-usb-release`` land a
-    ``duo_u1_main.elf`` at this same relative path, and they link different
-    input paths into it - see ``tests/build/test_backend_artifacts.py`` for
-    the guard that checks a build directory's declared backend against what
-    its ELF actually links. This file only needs to know which real-input
-    assertion applies below.
-    """
-    cache_path = _build_dir() / "CMakeCache.txt"
-    if not cache_path.is_file():
-        return None
-    cache = cache_path.read_text(encoding="utf-8", errors="replace")
-    match = re.search(r"^DUO_INPUT_BACKEND:STRING=(.+)$", cache, re.MULTILINE)
-    return match.group(1).strip() if match else None
 
 
 @pytest.mark.skipif(not _u1_elf().is_file(), reason="no U1 ELF in this build")
@@ -265,6 +267,11 @@ def test_the_image_dates_itself_by_the_source_not_by_the_clock(artifacts, name):
     the one the SDK emits today, means a future ``__DATE__`` leaking in from
     anywhere else fails here too.
     """
-    found = sorted({match.group().decode() for match in _DATE_IN_IMAGE.finditer(artifacts[name].read_bytes())})
+    found = sorted(
+        {
+            match.group().decode()
+            for match in _DATE_IN_IMAGE.finditer(artifacts[name].read_bytes())
+        }
+    )
 
     assert found == [expected_build_date()]
