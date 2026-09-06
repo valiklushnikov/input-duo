@@ -28,7 +28,6 @@ using duo_input::u1::pio_usb::kEpXferHostOut;
 using duo_input::u1::pio_usb::kEpXferNeedPre;
 using duo_input::u1::pio_usb::kEpXferOpen;
 using duo_input::u1::pio_usb::kEpXferSetupStaged;
-using duo_input::u1::pio_usb::kEnumStallTimeoutUs;
 using duo_input::u1::pio_usb::kEpXferStalled;
 using duo_input::u1::pio_usb::LogicalRole;
 using duo_input::u1::pio_usb::PioUsbBackend;
@@ -1322,17 +1321,17 @@ TEST_CASE(a_control_transfer_to_address_zero_that_never_completes_is_restarted) 
     duo::test::tinyusb_host::set_endpoint_transfer(2, status_out);
     duo::test::tinyusb_host::set_device_zero_topology(1u, 5u, 3u);
 
-    backend.task(1000u);
+    backend.task(0u);
     CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{0});
     CHECK_EQ(backend.observe().enum_stall_recoveries, 0u);
 
-    // Still inside the window: a control stage may legitimately be outstanding
-    // for many frames, and a recovery that fired on one would tear down a
-    // healthy enumeration.
-    backend.task(1000u + kEnumStallTimeoutUs - 1u);
+    // These are independently derived literal wall-clock readings, not the
+    // firmware constant under test. A recovery one microsecond early would
+    // tear down a healthy enumeration.
+    backend.task(1'999'999u);
     CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{0});
 
-    backend.task(1000u + kEnumStallTimeoutUs);
+    backend.task(2'000'000u);
     const auto& events = duo::test::tinyusb_host::host_events();
     CHECK_EQ(events.size(), std::size_t{1});
     CHECK_EQ(events[0].event_id, static_cast<std::uint8_t>(HCD_EVENT_DEVICE_ATTACH));
@@ -1354,16 +1353,16 @@ TEST_CASE(a_transfer_that_completes_inside_the_window_never_triggers_a_recovery)
     duo::test::tinyusb_host::EndpointTransfer running;
     running.has_transfer = true;
     duo::test::tinyusb_host::set_endpoint_transfer(2, running);
-    backend.task(1000u);
+    backend.task(1'000u);
 
     // The stage completes. The next one starts the clock again from scratch,
     // so a chain of ordinary stages never adds up to a false recovery.
     duo::test::tinyusb_host::set_endpoint_transfer(
         2, duo::test::tinyusb_host::EndpointTransfer{});
-    backend.task(1000u + kEnumStallTimeoutUs);
+    backend.task(2'001'000u);
     duo::test::tinyusb_host::set_endpoint_transfer(2, running);
-    backend.task(1000u + kEnumStallTimeoutUs + 1u);
-    backend.task(1000u + 2u * kEnumStallTimeoutUs);
+    backend.task(2'001'001u);
+    backend.task(4'001'000u);
 
     CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{0});
     CHECK_EQ(backend.observe().enum_stall_recoveries, 0u);
@@ -1383,14 +1382,87 @@ TEST_CASE(an_outstanding_transfer_on_an_addressed_device_is_not_an_enumeration_s
     armed.has_transfer = true;
     duo::test::tinyusb_host::set_endpoint_transfer(1, armed);
 
-    backend.task(1000u);
-    backend.task(1000u + 4u * kEnumStallTimeoutUs);
+    backend.task(1'000u);
+    backend.task(8'001'000u);
 
     CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{0});
     CHECK_EQ(backend.observe().enum_stall_recoveries, 0u);
 }
 
-TEST_CASE(a_wedge_that_survives_its_own_recovery_is_retried_and_counted) {
+TEST_CASE(a_wedge_that_survives_its_own_recovery_is_retried_twice_then_left_quiet) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_endpoint_identity(2, 8u, 0u, 0x00u);
+    duo::test::tinyusb_host::EndpointTransfer status_out;
+    status_out.has_transfer = true;
+    status_out.is_tx = true;
+    status_out.data_id = 1u;
+    duo::test::tinyusb_host::set_endpoint_transfer(2, status_out);
+    duo::test::tinyusb_host::set_device_zero_topology(1u, 5u, 3u);
+
+    backend.task(0u);
+    backend.task(2'000'000u);
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{1});
+
+    // ONE PER WINDOW, NOT ONE PER PASS. These passes are all inside the
+    // second window and must produce nothing.
+    for (std::uint32_t pass = 1; pass <= 64u; ++pass) {
+        backend.task(2'000'000u + pass);
+    }
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{1});
+
+    // A second full, literal 2 s observation produces the last bench retry.
+    // At 3,999,999 us the back-off is still in effect; exactly at 4,000,000
+    // us the second and final duplicate-attach event is queued.
+    backend.task(3'999'999u);
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{1});
+    backend.task(4'000'000u);
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{2});
+
+    // A third 2 s window proves the cap is inclusive of exactly two queued
+    // recovery events, not "two retries plus the original". Removing the cap
+    // or changing its comparison to <= creates a third event here.
+    backend.task(6'000'000u);
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{2});
+    CHECK_EQ(backend.observe().enum_stall_recoveries, 2u);
+}
+
+TEST_CASE(a_mounted_downstream_child_suppresses_and_rearms_address_zero_recovery) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_endpoint_identity(2, 8u, 0u, 0x00u);
+    duo::test::tinyusb_host::EndpointTransfer status_out;
+    status_out.has_transfer = true;
+    status_out.is_tx = true;
+    status_out.data_id = 1u;
+    duo::test::tinyusb_host::set_endpoint_transfer(2, status_out);
+    duo::test::tinyusb_host::set_device_zero_topology(1u, 5u, 3u);
+
+    // Address 4 exercises the last possible downstream address, rather than
+    // only the first child. A recovery must never sacrifice any working HID
+    // device to restart a different address-0 enumeration.
+    duo::test::tinyusb_host::set_device_mounted(4u, true);
+    backend.task(0u);
+    backend.task(2'000'000u);
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{0});
+    CHECK_EQ(backend.observe().enum_stall_recoveries, 0u);
+
+    // Once the child is gone, use a complete new observation window. A
+    // recovery immediately at removal would still charge time during the
+    // protected interval to the next enumeration.
+    duo::test::tinyusb_host::set_device_mounted(4u, false);
+    backend.task(3'999'999u);
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{0});
+    backend.task(4'000'000u);
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{1});
+    CHECK_EQ(backend.observe().enum_stall_recoveries, 1u);
+}
+
+TEST_CASE(a_root_port_topology_never_turns_an_address_zero_watchdog_into_a_reset) {
     duo::test::tinyusb_host::reset();
     PioUsbBackend backend;
     backend.begin();
@@ -1402,24 +1474,42 @@ TEST_CASE(a_wedge_that_survives_its_own_recovery_is_retried_and_counted) {
     status_out.data_id = 1u;
     duo::test::tinyusb_host::set_endpoint_transfer(2, status_out);
 
+    // The backend cannot read TinyUSB's private _dev0.enumerating flag. Its
+    // published HCD boundary does expose the topology it would put in the
+    // synthetic attach. hub_addr == 0 is the only value that sends
+    // enum_new_device() through its root-port reset branch, so it is rejected.
+    duo::test::tinyusb_host::set_device_zero_topology(1u, 0u, 0u);
     backend.task(0u);
-    backend.task(kEnumStallTimeoutUs);
-    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{1});
+    backend.task(2'000'000u);
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{0});
+    CHECK_EQ(backend.observe().enum_stall_recoveries, 0u);
 
-    // ONE PER WINDOW, NOT ONE PER PASS. This loop turns tens of thousands of
-    // times inside one window, and a recovery that fired on each of them would
-    // fill the host stack's sixteen-entry event queue in milliseconds and drop
-    // the very event it exists to deliver. These passes are all inside the
-    // second window and must produce nothing.
-    for (std::uint32_t pass = 1; pass <= 64u; ++pass) {
-        backend.task(kEnumStallTimeoutUs + pass);
-    }
+    // A safe, hub-backed topology gets its own new 2 s window after the
+    // rejected sample; it is not charged against the root-port interval.
+    duo::test::tinyusb_host::set_device_zero_topology(1u, 5u, 3u);
+    backend.task(3'999'999u);
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{0});
+    backend.task(4'000'000u);
     CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{1});
+}
 
-    backend.task(2u * kEnumStallTimeoutUs);
-    backend.task(3u * kEnumStallTimeoutUs);
-    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{3});
-    CHECK_EQ(backend.observe().enum_stall_recoveries, 3u);
+TEST_CASE(the_watchdog_samples_the_pool_before_tuh_task_can_start_a_transfer) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    // The fake starts address-0 transfer only from inside the first service
+    // call. Sampling before service must defer the watchdog's start to the
+    // next pass. Moving tuh_task() above the pool scan starts it at 0 and
+    // makes the 2,000,000 us pass queue a false recovery.
+    duo::test::tinyusb_host::set_device_zero_topology(1u, 5u, 3u);
+    duo::test::tinyusb_host::set_tuh_task_effect(
+        duo::test::tinyusb_host::TuhTaskEffect::StartAddressZeroTransferOnce);
+    backend.task(0u);
+    backend.task(2'000'000u);
+
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{0});
+    CHECK_EQ(backend.observe().enum_stall_recoveries, 0u);
 }
 
 TEST_CASE(mount_processing_stores_vid_pid_protocol_descriptor_hash_and_neutral_layout) {

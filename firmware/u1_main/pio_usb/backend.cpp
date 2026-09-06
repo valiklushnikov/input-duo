@@ -130,6 +130,20 @@ std::uint8_t encode_endpoint_transfer(const endpoint_t& endpoint) noexcept {
     return encoded;
 }
 
+/// A recovery of an unaddressed device must never tear down an already useful
+/// downstream HID device. These are TinyUSB's public configured-device reads;
+/// no dependency-owned state is reached from Core 0 or copied across cores.
+bool any_downstream_device_mounted() {
+    // Address 5 is the fixed hub, not a child the recovery must protect.
+    // This image reserves 1-4 for downstream devices (kHubAddress is 5).
+    for (std::uint8_t address = 1; address < kHubAddress; ++address) {
+        if (tuh_mounted(address)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 void PioUsbBackend::begin() {
@@ -293,16 +307,29 @@ void PioUsbBackend::task(std::uint32_t now_us) {
         if (!address0_transfer_outstanding_) {
             address0_transfer_since_us_ = now_us;
         } else if (now_us - address0_transfer_since_us_ >= kEnumStallTimeoutUs) {
-            restart_wedged_enumeration();
-            increment_saturating(enum_stall_recoveries_, 0xFFFFFFFFu);
-            // Re-armed rather than latched: if the restart does not take, the
-            // next attempt is one whole window away. Once per pass would fill
-            // the host stack's sixteen-entry event queue in milliseconds and
-            // drop the very event this exists to deliver.
+            // This must stay ahead of tuh_task(). A transfer that starts while
+            // host service is running is first observed on the next pass, so
+            // time spent inside TinyUSB's legitimate enumeration waits cannot
+            // be charged to that new transfer.
+            if (host_ready_ && !any_downstream_device_mounted() &&
+                enum_stall_recovery_attempts_ < kEnumStallRecoveryMaxAttempts &&
+                restart_wedged_enumeration()) {
+                increment_saturating(enum_stall_recoveries_, 0xFFFFFFFFu);
+                ++enum_stall_recovery_attempts_;
+            }
+            // Whether a recovery was submitted, safety-suppressed or capped,
+            // require another full quiet 2 s observation window before making
+            // the next decision. This is both the back-off and the protection
+            // against charging a protected interval to a later enumeration.
             address0_transfer_since_us_ = now_us;
         }
+        address0_transfer_outstanding_ = true;
+    } else {
+        // A completed/aborted address-0 transfer closes this episode. A later
+        // one is a separate enumeration and may use the two bounded attempts.
+        address0_transfer_outstanding_ = false;
+        enum_stall_recovery_attempts_ = 0;
     }
-    address0_transfer_outstanding_ = address0_outstanding;
 
     // The attach edge. Nothing below TinyUSB reports one, so it is polled
     // here: four volatile reads a pass, no allocation and no wait. It counts
@@ -374,7 +401,7 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     registry_.retry_pending_arms(now_us);
 }
 
-void PioUsbBackend::restart_wedged_enumeration() {
+bool PioUsbBackend::restart_wedged_enumeration() {
     // The cure is already inside the host stack; nothing on this board will
     // ever raise the event that triggers it. tuh_task()'s attach branch
     // (usbh.c:498-508) treats an attach whose rhport, hub address and hub port
@@ -392,6 +419,17 @@ void PioUsbBackend::restart_wedged_enumeration() {
     hcd_devtree_info_t topology{};
     hcd_devtree_get_info(0, &topology);
 
+    // The backend cannot inspect TinyUSB's private _dev0.enumerating flag.
+    // Its published HCD getter does expose the topology a synthetic attach
+    // would use. A zero hub address takes enum_new_device() through the root
+    // port reset path; on this fixed one-hub image anything other than the
+    // configured hub/port is unsafe to manufacture. Refuse it rather than
+    // letting a stale or inactive _dev0 reset the working hub.
+    if (topology.rhport != kHostRhPort || topology.hub_addr != kHubAddress ||
+        topology.hub_port == 0u) {
+        return false;
+    }
+
     hcd_event_t event{};
     event.rhport = topology.rhport;
     event.event_id = HCD_EVENT_DEVICE_ATTACH;
@@ -400,6 +438,7 @@ void PioUsbBackend::restart_wedged_enumeration() {
     // in_isr false: this runs in Core 1's thread context, inside task(), which
     // is where the host stack expects a non-interrupt event to be queued from.
     hcd_event_handler(&event, false);
+    return true;
 }
 
 HostObservability PioUsbBackend::observe() const {

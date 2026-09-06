@@ -672,21 +672,17 @@ def test_endpoint_transfer_state_names_every_live_flag(qtbot, tmp_path):
     )
 
 
-def test_the_report_says_a_restart_count_of_zero_is_the_healthy_reading(qtbot, tmp_path):
-    """The label carries the verdict, because the number alone does not.
-
-    Zero is what a healthy board reports and also what a board wedged somewhere
-    the watchdog cannot see reports, so a row printing a bare ``0`` would be
-    read as "no problem" by the one person it matters to.
-    """
+def test_the_report_names_recovery_requests_without_calling_zero_healthy(qtbot, tmp_path):
+    """The label says exactly what an operator can conclude from the value."""
     host = _host_rows(qtbot, tmp_path, WEDGED_MID_ENUMERATION)
 
-    assert host["Wedged enumerations restarted by the device (0 is healthy)"] == "0"
+    label = "Address-0 recovery attach events submitted (0 is not a health verdict)"
+    assert host[label] == "0"
 
     retried = list(WEDGED_MID_ENUMERATION)
     retried[24] = 3
     climbing = _host_rows(qtbot, tmp_path, tuple(retried), name="retried")
-    assert climbing["Wedged enumerations restarted by the device (0 is healthy)"] == "3"
+    assert climbing[label] == "3"
 
 
 def test_the_report_subtracts_the_attach_baseline_so_nobody_has_to(qtbot, tmp_path):

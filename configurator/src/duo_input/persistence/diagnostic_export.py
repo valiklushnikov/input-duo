@@ -289,7 +289,7 @@ _HOST_STACK_PACKED_ROWS = (
     ("xfer_completions_since_attach", _COMPLETIONS_SINCE_ATTACH_LABEL),
     (
         "enum_stall_recoveries",
-        "Wedged enumerations restarted by the device (0 is healthy)",
+        "Address-0 recovery attach events submitted (0 is not a health verdict)",
     ),
 )
 

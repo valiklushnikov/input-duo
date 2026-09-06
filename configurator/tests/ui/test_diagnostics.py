@@ -240,7 +240,8 @@ def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
         "hub's own): 0" in reported
     )
     assert (
-        "Wedged enumerations restarted by the device (0 is healthy): 0" in reported
+        "Address-0 recovery attach events submitted (0 is not a health verdict): 0"
+        in reported
     )
     # The page must not carry the old derived row either: it called a healthy
     # board faulty and it separated this board from a healthy one not at all.

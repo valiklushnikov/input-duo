@@ -477,12 +477,13 @@ class HostObservation:
     #: completed after that attach. At saturation, the delta is no longer
     #: informative.
     xfer_completions_at_attach: int | None = None
-    #: Wedged enumerations the device restarted by itself, saturating.
+    #: Synthetic address-0 duplicate-attach recovery requests submitted,
+    #: saturating.
     #:
-    #: ZERO IS THE HEALTHY READING, and it is also what a board wedged
-    #: somewhere the watchdog does not detect reports, so it is never a verdict
-    #: on its own. A value that CLIMBS between two reads says the wedge is
-    #: reproducible and the restart is not curing it.
+    #: ZERO IS NOT A HEALTH VERDICT: it also covers a watchdog that is
+    #: inapplicable, safety-suppressed for a mounted child, or capped. A rising
+    #: value proves the bounded recovery request repeated, not why the status
+    #: stage was retried.
     enum_stall_recoveries: int | None = None
     #: That subtraction, done here rather than at a bench.
     #:

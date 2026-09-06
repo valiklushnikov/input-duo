@@ -281,18 +281,37 @@ each self-delimiting so the one behind it can always be found:
   A delta of 5 or more with slot 2 CLOSED, or `ep_slot_map` showing an address other than `dev0`
   in it, means the board is no longer in this state at all and the table does not apply.
 
-  `enum_stall_recoveries` counts how many times the device has restarted an enumeration that
-  wedged. It is a saturating count and **zero is the healthy reading** - which is also what a
-  board wedged somewhere this watchdog does not detect reports, so it is never a verdict on its
-  own. The device raises the restart itself: when a control transfer to address 0 has been
-  outstanding for two seconds, which is far longer than any legitimate control stage on this bus,
-  it reports a duplicate attach for the port the host stack is already enumerating, and the host
-  stack's own handling of a duplicate attach aborts the stuck transfer and starts the enumeration
-  again. It is a recovery, not a cure: **a count that CLIMBS between two reads says the wedge is
-  reproducible and the restart is not curing it**, which is a far more useful fact than a board
-  that stopped once and stayed stopped. Before this counter existed, a wedged enumeration could
-  not be cleared by anything short of a reboot - not even by unplugging and re-plugging the hub,
-  because a root-port disconnect is not reported against the port being enumerated.
+  `enum_stall_recoveries` counts only **synthetic duplicate-attach recovery requests submitted**
+  by this backend, not every suspected stall and not successful enumeration restarts. It is
+  saturating and **zero is not a health verdict**: the watchdog can be inapplicable,
+  safety-suppressed while any downstream address 1-4 is mounted, or capped. A rise proves that
+  this bounded recovery request repeated, **not its cause**. For this bench role it submits at
+  most two requests while one address-0 transfer stays continuously outstanding, with a new
+  two-second observation window after every request, cap, or safety suppression. One retry can
+  clear a transient wedge and the second distinguishes that from a repeatable one; a third adds
+  no new binary outcome while every hub-side enumeration can block Core 1 for about 475 ms.
+  The cap resets only when the address-0 predicate goes quiet, so a later independent enumeration
+  is eligible without an autonomous retry loop.
+
+  The pool is sampled before `tuh_task()`: a transfer that starts inside host service begins its
+  watchdog window on the next pass, rather than being charged the host stack's legitimate blocking
+  waits. A request is refused unless the published HCD topology names this image's hub-backed
+  port (`rhport=1`, hub address 5, nonzero hub port); that is the honest boundary available without
+  reading TinyUSB's private `_dev0.enumerating`. In particular it never manufactures a root-port
+  attach that could start a fresh enumeration and reset the working hub. It also never calls
+  `tuh_deinit`: that API exists, but calls `process_removing_device(rhport, 0, 0)` and would tear
+  down the hub and every working child.
+
+  `ep_max_failed_count == 0` over the observed frames already excludes the broad no-response/no-
+  bytes case: a zero byte reaches Pico-PIO-USB's error path and increments `failed_count`; a real
+  NAK resets it. The pinned `usb_out_transaction` still discards the validated handshake result,
+  so a repeated valid-byte misclassification remains a dependency defect but is probably not the
+  root cause: that case would need the same framing slip to look like a valid NAK every time.
+  `ep_max_failed_count == 0` therefore strongly favours a **real NAK**. No inert firmware field
+  can discriminate:
+  the RX buffer is cleared before the ISR returns and `transfer_started` is visible only while that
+  ISR owns Core 1. The remaining discriminators are a GP0/GP1 logic analyser or the pinned
+  upstream example against the same downstream device and status stage.
 
   `clk_hz_now`, `sof_frame_count` and `root_port_state` are sampled once per device main-loop
   pass and held until the request arrives, so a reading can be up to one pass old - far below the

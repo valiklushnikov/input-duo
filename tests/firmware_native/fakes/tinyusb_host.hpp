@@ -66,6 +66,17 @@ struct EndpointTransfer {
     bool transfer_aborted = false;
 };
 void set_endpoint_transfer(std::size_t index, const EndpointTransfer& transfer);
+/// A controlled consequence of the next fake ``tuh_task()`` call.
+///
+/// The service-order guard needs a transfer that starts *inside* host service:
+/// sampling it before service must begin its watchdog window on the next pass,
+/// while sampling after service would incorrectly charge time spent in TinyUSB
+/// to that new transfer.
+enum class TuhTaskEffect : std::uint8_t {
+    None,
+    StartAddressZeroTransferOnce,
+};
+void set_tuh_task_effect(TuhTaskEffect effect);
 /// What hcd_devtree_get_info(0, ...) reports - the port the host stack is
 /// enumerating. The recovery has to address its synthetic attach at exactly
 /// this port, because any other value takes tuh_task's "defer" branch instead

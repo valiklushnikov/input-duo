@@ -63,6 +63,8 @@ std::uint32_t sof_frames = 0;
 bool hub_mounted = false;
 std::array<bool, 16> device_mounted{};
 std::uint32_t stack_pointer = 0;
+duo::test::tinyusb_host::TuhTaskEffect tuh_task_effect =
+    duo::test::tinyusb_host::TuhTaskEffect::None;
 
 }  // namespace
 
@@ -98,6 +100,7 @@ void reset() {
     hub_mounted = false;
     device_mounted = {};
     stack_pointer = 0;
+    tuh_task_effect = TuhTaskEffect::None;
     pio_usb_root_port[0] = root_port_t{};
     pio_usb_root_port[1] = root_port_t{};
     for (endpoint_t& endpoint : pio_usb_ep_pool) {
@@ -178,6 +181,8 @@ void set_endpoint_transfer(std::size_t index, const EndpointTransfer& transfer) 
         pio_usb_ep_pool[index].transfer_aborted = transfer.transfer_aborted;
     }
 }
+
+void set_tuh_task_effect(TuhTaskEffect effect) { tuh_task_effect = effect; }
 
 void set_device_zero_topology(std::uint8_t rhport, std::uint8_t hub_addr,
                               std::uint8_t hub_port) {
@@ -328,7 +333,22 @@ extern "C" bool tuh_mounted(std::uint8_t dev_addr) {
 // Core 1's stack wherever it needs it without an ARM core to read one from.
 extern "C" std::uint32_t duo_core1_stack_pointer(void) { return stack_pointer; }
 
-extern "C" void tuh_task(void) { ++host_tasks; }
+extern "C" void tuh_task(void) {
+    ++host_tasks;
+    if (tuh_task_effect == duo::test::tinyusb_host::TuhTaskEffect::StartAddressZeroTransferOnce) {
+        // This transfer begins while the host stack is being serviced, not in
+        // the pre-service pool observation. The call-order test must observe
+        // the resulting one-pass delay before starting its 2 s watchdog.
+        endpoint_t& endpoint = pio_usb_ep_pool[2];
+        endpoint.size = 8u;
+        endpoint.dev_addr = 0u;
+        endpoint.ep_num = 0u;
+        endpoint.has_transfer = true;
+        endpoint.is_tx = true;
+        endpoint.data_id = 1u;
+        tuh_task_effect = duo::test::tinyusb_host::TuhTaskEffect::None;
+    }
+}
 
 // Deliberately not derived from host_tasks or from any per-pass counter: the
 // point of the capture timestamp is that it is read where the report arrives,

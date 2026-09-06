@@ -203,26 +203,36 @@ class EndpointTransferDocumentationTest(unittest.TestCase):
         self.assertEqual(sum(stages[:-1]), stages[-1])
         self.assertIn(str(HUB), completions_since_attach_label())
 
-    def test_the_document_and_the_report_row_agree_about_the_healthy_restart_count(self):
-        """Both texts have to name the same value as healthy, and say so.
+    def test_the_recovery_counter_names_submitted_events_not_health_or_cause(self):
+        """The operator text must not overclaim what this counter knows.
 
-        ``enum_stall_recoveries`` is the one reading in the block whose plain
-        number is ambiguous: zero is a healthy board AND a board wedged where
-        the watchdog cannot see it. Both the exported row's label and the
-        document have to carry that, and a reader must not be able to find one
-        saying zero is healthy while the other implies it is a fault.
+        Removing ``submitted``, calling zero healthy, or treating a rise as a
+        cause would make the same number mean materially different things at a
+        bench. The label and durable protocol text therefore have to state the
+        same bounded observation, not merely share the field name.
         """
         from duo_input.persistence.diagnostic_export import host_stack_labels
 
         label = host_stack_labels()["enum_stall_recoveries"]
-        self.assertIn("0 is healthy", label)
+        self.assertEqual(
+            label,
+            "Address-0 recovery attach events submitted (0 is not a health verdict)",
+        )
 
         text = COMPATIBILITY.read_text(encoding="utf-8")
         start = text.index("`enum_stall_recoveries` counts")
-        paragraph = text[start : text.index("\n\n", start)]
-        self.assertIn("zero is the healthy reading", paragraph)
-        # And the fact that makes the field worth reading twice.
-        self.assertIn("CLIMBS between two reads", paragraph)
+        section = " ".join(text[start : text.index("`clk_hz_now`", start)].split())
+        self.assertIn("synthetic duplicate-attach recovery requests submitted", section)
+        self.assertIn("zero is not a health verdict", section)
+        self.assertIn("at most two", section)
+        self.assertIn("not its cause", section)
+        self.assertIn("tuh_deinit", section)
+        self.assertIn("process_removing_device", section)
+        self.assertIn("ep_max_failed_count == 0", section)
+        self.assertIn("real NAK", section)
+        self.assertIn("probably not the root cause", section)
+        self.assertIn("logic analyser", section)
+        self.assertIn("upstream example", section)
 
     def test_the_bench_decision_table_agrees_with_the_decoder_and_the_hub_cost(self):
         from duo_input.persistence.diagnostic_export import (

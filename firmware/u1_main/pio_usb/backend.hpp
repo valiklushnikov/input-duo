@@ -174,13 +174,14 @@ struct HostObservability {
     /// total to count stages completed after that attach without knowing how
     /// many hub-control transfers preceded it.
     std::uint32_t xfer_completions_at_attach = 0;
-    /// How many times a wedged enumeration has been restarted, saturating.
+    /// Synthetic duplicate-attach recovery requests submitted to TinyUSB,
+    /// saturating.
     ///
-    /// ZERO IS THE HEALTHY READING and also the reading of a board that wedged
-    /// somewhere this recovery does not detect, so it is never a verdict on its
-    /// own - read it beside ep_transfer_flags. A value that CLIMBS between two
-    /// reads says the wedge is reproducible and the restart is not curing it,
-    /// which is a different and much more useful fact than a dead board.
+    /// It counts only requests this backend submitted, not every suspected
+    /// stall and not successful enumeration restarts. ZERO IS NOT A HEALTH
+    /// VERDICT: the watchdog may be inapplicable, safety-suppressed for a
+    /// mounted child, or capped. A value that rises proves this bounded
+    /// recovery request repeated; it does not identify the NAK's cause.
     std::uint32_t enum_stall_recoveries = 0;
 };
 
@@ -282,6 +283,17 @@ inline constexpr int kEnumDescriptorShift = 8;
 /// legitimately blocks for 950 ms inside tuh_task() where this loop cannot
 /// sample at all.
 inline constexpr std::uint32_t kEnumStallTimeoutUs = 2000000u;
+
+/// At most two duplicate-attach recovery requests are submitted while one
+/// address-0 transfer remains continuously outstanding.
+///
+/// This is a bench recovery, not a permanent autonomous repair loop. One
+/// request can clear a transient wedge and the second distinguishes that from
+/// a repeatable one; a third contributes no new binary outcome while each
+/// hub-side enumeration can block Core 1 for about 475 ms. The count resets
+/// only after the address-0 predicate goes quiet, making a later independent
+/// enumeration eligible without spinning forever on this one.
+inline constexpr std::uint8_t kEnumStallRecoveryMaxAttempts = 2u;
 
 /// What counts as a blocked Core 1 pass, in microseconds.
 ///
@@ -432,7 +444,10 @@ private:
     /// ask for: it is only ever correct when task() has just established that
     /// a control transfer to address 0 has been outstanding for longer than
     /// any legitimate one could be.
-    void restart_wedged_enumeration();
+    /// Submit a duplicate attach only for this image's one hub-backed port.
+    /// False means the published topology could initiate an unsafe root-port
+    /// enumeration, so no event was submitted.
+    bool restart_wedged_enumeration();
 
     ClockChangeBarrier clock_change_;
     DeviceRegistry registry_;
@@ -461,12 +476,12 @@ private:
     PublishedObservationWord ep_slot_map_{0};
     PublishedObservationWord ep_transfer_flags_{0};
 
-    // The enumeration watchdog. Core 1's alone: the two booleans and the
-    // timestamp are only ever touched by task(), and Core 0 reads nothing but
-    // the published counter.
+    // The enumeration watchdog. Core 1's alone: its state is only ever
+    // touched by task(), and Core 0 reads nothing but the published counter.
     PublishedObservationWord enum_stall_recoveries_{0};
     bool address0_transfer_outstanding_ = false;
     std::uint32_t address0_transfer_since_us_ = 0;
+    std::uint8_t enum_stall_recovery_attempts_ = 0;
     // Sticky, so an address that reached a state for one pass and lost it
     // before the next GET_DIAGNOSTICS is still a fact about the run.
     PublishedObservationWord enum_progress_mask_{0};
