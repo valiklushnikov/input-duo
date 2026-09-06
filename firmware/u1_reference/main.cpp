@@ -123,10 +123,23 @@ void service_input(std::uint32_t millis) {
     // starts boot-capable interfaces in boot protocol, whose mouse report is
     // three bytes with no Report ID. This is the only place that call can be
     // made - the adapter is transport neutral and tested without TinyUSB.
-    ReferenceSourceAdapter::ProtocolRequest protocol_request{};
-    if (g_adapter.take_protocol_request(protocol_request)) {
-        tuh_hid_set_protocol(protocol_request.dev_addr, protocol_request.instance,
-                             protocol_request.protocol);
+    // TinyUSB has a single control transfer in flight at a time, so this call
+    // is refused while the other interfaces of the same device are still being
+    // set up. Refusing is not failing: the request is held and offered again
+    // next pass rather than dropped, because dropping it leaves the interface
+    // in boot protocol while the layout describes report protocol - which is
+    // silently no input at all.
+    static ReferenceSourceAdapter::ProtocolRequest protocol_request{};
+    static bool protocol_request_held = false;
+    if (!protocol_request_held) {
+        protocol_request_held = g_adapter.take_protocol_request(protocol_request);
+    }
+    if (protocol_request_held) {
+        if (tuh_hid_set_protocol(protocol_request.dev_addr,
+                                 protocol_request.instance,
+                                 protocol_request.protocol)) {
+            protocol_request_held = false;
+        }
         return;
     }
 

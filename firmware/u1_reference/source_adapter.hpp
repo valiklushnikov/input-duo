@@ -60,6 +60,7 @@ public:
     /// Take one pending protocol change. False when there is none.
     bool take_protocol_request(ProtocolRequest& request);
 
+
     /// Whether an event is waiting. The caller drains before consuming again,
     /// so nothing this adapter produced is ever dropped for want of room.
     bool has_pending() const { return pending_count_ != 0; }
