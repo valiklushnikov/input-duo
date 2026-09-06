@@ -1341,3 +1341,88 @@ pinned patched revisions, and the reference artifact rebuilds to the recorded
 hash. Every diagnostic build in this section has been reverted. Task 3's gate is
 not attempted: its wheel, side-button and macro rows all depend on descriptor
 reading, which is what is blocked.
+
+## The mouse works, and the wheel exists for the first time (2026-09-06)
+
+`097635c`. The decision taken was that every device is read through its own
+report descriptor rather than through boot protocol, because the shipped
+firmware has to work for devices nobody here owns and boot protocol does not
+describe a device, it guesses at one.
+
+### The rule
+
+A layout and a wire format have to agree. `classify_hid` now reports which of
+the two it used, and the caller keeps the interface in the protocol that layout
+describes:
+
+- layout from the report descriptor -> the interface is moved to report
+  protocol with `tuh_hid_set_protocol`;
+- layout from boot protocol, because no descriptor could be read -> the
+  interface stays exactly where it is. Moving it would make the device send a
+  format nothing here can read.
+- the Keychron side channel asks for nothing: its reports are matched by shape,
+  and that shape is boot protocol's.
+
+The adapter cannot call TinyUSB - it is transport neutral and unit tested
+without it - so it names the interface and the host core makes the call.
+
+### Why the first attempt did nothing
+
+`tuh_hid_set_protocol` returned false and the interface stayed in boot
+protocol. TinyUSB carries one control transfer at a time, and the call is
+refused while the other interfaces of the same device are still being set up.
+The first version ignored that result and dropped the request. A dropped request
+leaves the layout describing report protocol while the device speaks boot
+protocol, which is silently no input at all - the same shape of defect as every
+other ignored return value in this migration. The request is now held and
+offered again each pass until the stack accepts it.
+
+### Measured
+
+```
+READY port=0 kind=1 src=2 rid=0 ridv=0 xb=0 minbody=8   keyboard, boot layout
+READY port=1 kind=2 src=1 rid=1 ridv=3 xb=2 minbody=5   mouse, descriptor layout
+```
+
+Before, and no cursor movement at all:
+
+```
+REPORT a=1 i=0 len=3  00 C9 03
+```
+
+After:
+
+```
+REPORT a=1 i=0 len=8  03 00 08 00 FC FF 00 00
+                      ^^ report ID 3      ^^ wheel
+```
+
+Sixteen-bit axes as the descriptor declares, and byte 6 taking `00 01 02 FE FF`
+- a wheel turning both ways. **The wheel has not been available at any point in
+this migration before now**, because boot protocol carries no such byte.
+
+Two of the adapter's own tests were passing for reasons their names did not
+claim and were fixed alongside: the files under `tests/vectors/hid_descriptors`
+are *configuration* descriptors, not report descriptors, so every mount in those
+tests had reached its role through the protocol fallback and never through a
+descriptor; and the wheel assertion held just as well when no descriptor was
+read, because `boot_mouse_layout()` marks a wheel present too.
+
+### Where that leaves the keyboard
+
+The Aula receiver still mounts with no descriptor and is read with the boot
+layout, and it types. That is defensible behaviour rather than a workaround: a
+device that will not describe itself has to be read by the only description
+there is. What it loses is everything beyond the boot layout.
+
+The open question is which of two things is true - the device refuses its
+descriptor, or this stack cannot fetch it - and they are not distinguishable
+from here. One cheap software experiment remains before the analyser: retry
+`tuh_descriptor_get_hid_report` *after* mount, once the bus is quiet. TinyUSB
+makes its three attempts inside enumeration, all at once and while the sibling
+interfaces are still being configured - and this session has just watched a busy
+control slot break an unrelated call. Different conditions, one build to test.
+
+The analyser is still wanted, but it no longer blocks: the mouse is read through
+its descriptor today, and what remains for the analyser is this one device and
+the underlying stack defect that will meet other devices later.
