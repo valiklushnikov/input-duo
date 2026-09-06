@@ -294,8 +294,11 @@ def test_reference_sources_are_maintained_outside_build_output():
 
 
 def test_reference_sources_are_byte_for_byte_the_pinned_upstream_example():
+    # main.c is deliberately no longer among these. Task 2 moves the host
+    # callbacks out of it into host_callbacks.cpp, so a whole-file hash would
+    # only record that an intended change happened. What still has to hold -
+    # the upstream lifecycle and its order - is asserted below instead.
     copies = {
-        "main.c": "host_hid_to_device_cdc.c",
         "tusb_config.h": "tusb_config.h",
         "usb_descriptors.c": "usb_descriptors.c",
     }
@@ -337,7 +340,102 @@ def test_reference_sources_are_byte_for_byte_the_pinned_upstream_example():
                 f"{maintained} does not have its immutable reviewed SHA-256"
             )
 
-    assert b"tud_cdc_write(" in (ROOT / "firmware" / "u1_reference" / "main.c").read_bytes()
+
+
+def test_the_reference_keeps_the_upstream_host_lifecycle_in_order():
+    """The one thing about main.c that must never drift.
+
+    Every failure this migration has chased came back to who owns the host
+    stack and when it is started: the clock has to be final before anything
+    USB, Core 1 has to be launched before it, tuh_init has to run *on* Core 1,
+    and the device stack has to come up on Core 0. Hashing the file stopped
+    being able to say that the moment the callbacks moved out of it, so assert
+    the sequence itself.
+    """
+    source = (ROOT / "firmware" / "u1_reference" / "main.c").read_text(encoding="utf-8")
+
+    core1_ordered = [
+        "pio_usb_configuration_t",
+        "tuh_configure(1, TUH_CFGID_RPI_PIO_USB_CONFIGURATION",
+        "tuh_init(1)",
+        "tuh_task()",
+    ]
+    main_ordered = [
+        "set_sys_clock_khz(120000, true)",
+        "multicore_reset_core1()",
+        "multicore_launch_core1(core1_main)",
+        "tud_init(0)",
+        "tud_task()",
+    ]
+
+    # core1_main is written above main, so the two sequences are checked inside
+    # their own function bodies rather than across the whole file.
+    core1_body = source[source.index("void core1_main"):source.index("int main(")]
+    main_body = source[source.index("int main("):]
+
+    for body, ordered, where in (
+        (core1_body, core1_ordered, "core1_main"),
+        (main_body, main_ordered, "main"),
+    ):
+        position = -1
+        for fragment in ordered:
+            found = body.find(fragment)
+            assert found != -1, f"{where} no longer contains {fragment!r}"
+            assert found > position, (
+                f"in {where}, {fragment!r} appears before something that must "
+                "precede it; the upstream host lifecycle order has changed"
+            )
+            position = found
+
+    # The host stack must come up on Core 1 and the device stack on Core 0.
+    # Running the host on the wrong core is a failure this project has already
+    # paid for once.
+    assert "tud_init" not in core1_body
+    assert "tuh_init" not in main_body
+
+
+def test_the_reference_callbacks_left_main_but_not_the_build():
+    """Callbacks moved out; they did not quietly disappear."""
+    reference = ROOT / "firmware" / "u1_reference"
+    main_source = (reference / "main.c").read_text(encoding="utf-8")
+    callbacks = (reference / "host_callbacks.cpp").read_text(encoding="utf-8")
+
+    for callback in (
+        "tuh_hid_mount_cb",
+        "tuh_hid_umount_cb",
+        "tuh_hid_report_received_cb",
+        "tud_cdc_rx_cb",
+    ):
+        assert callback not in main_source, (
+            f"{callback} is still defined in main.c; the point of Task 2 is "
+            "that callbacks do no work on the host core"
+        )
+        assert callback in callbacks, f"{callback} was lost, not moved"
+
+    # The stack delivers nothing more until the report is re-armed, so the one
+    # piece of work upstream does in a callback has to survive the move.
+    assert "tuh_hid_receive_report" in callbacks
+
+
+def test_no_formatting_or_cdc_write_happens_in_a_host_callback():
+    """What the callbacks must *not* do, asserted where it can be checked.
+
+    Formatting inside tuh_hid_report_received_cb is what the upstream example
+    does and what this task exists to remove: it spends the host core's time on
+    text while the bus waits.
+    """
+    source = (ROOT / "firmware" / "u1_reference" / "host_callbacks.cpp").read_text(
+        encoding="utf-8"
+    )
+    body_start = source.index("void tuh_hid_report_received_cb")
+    body_end = source.index("void tud_cdc_rx_cb")
+    report_callback = source[body_start:body_end]
+
+    for forbidden in ("snprintf", "sprintf", "tud_cdc_write"):
+        assert forbidden not in report_callback, (
+            f"{forbidden} is called from the report callback, on the core that "
+            "drives tuh_task"
+        )
 
 
 def test_reference_elf_contains_only_the_upstream_host_device_path(

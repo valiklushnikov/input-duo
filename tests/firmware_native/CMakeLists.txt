@@ -773,3 +773,19 @@ if(MSVC)
 endif()
 
 add_test(NAME pio_usb_recovery COMMAND duo_pio_usb_recovery_test)
+
+add_executable(duo_reference_callback_queue_test
+    test_main.cpp
+    test_reference_callback_queue.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_reference/callback_queue.cpp
+)
+
+target_include_directories(duo_reference_callback_queue_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_reference
+)
+
+if(MSVC)
+    target_compile_options(duo_reference_callback_queue_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME reference_callback_queue COMMAND duo_reference_callback_queue_test)

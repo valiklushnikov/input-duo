@@ -1,6 +1,8 @@
-# Frozen golden U1: the pinned Pico-PIO-USB host_hid_to_device_cdc example.
-# Keep the implementation sources and linked libraries aligned with upstream;
-# later reference-first slices build on a different contract.
+# U1 reference target. main.c keeps the upstream host_hid_to_device_cdc
+# lifecycle unchanged - clock, settle, launch Core 1, tuh_init there, tud_init
+# on Core 0 - while the callbacks live in host_callbacks.cpp and hand bounded
+# records to callback_queue.cpp instead of formatting CDC inside the USB host
+# callback. See docs/superpowers/plans/2026-09-06-pio-usb-reference-first-rebuild.md.
 if(NOT TARGET pico_pio_usb)
     add_subdirectory(
         "${PICO_PIO_USB_PATH}"
@@ -12,6 +14,8 @@ add_executable(duo_u1_reference)
 
 target_sources(duo_u1_reference PRIVATE
     main.c
+    callback_queue.cpp
+    host_callbacks.cpp
     usb_descriptors.c
     ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/dcd_pio_usb.c
     ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/hcd_pio_usb.c

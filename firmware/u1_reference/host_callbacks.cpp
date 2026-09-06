@@ -1,0 +1,138 @@
+// The USB host callbacks, and nothing else.
+//
+// These are the same three callbacks the upstream example defines, with the
+// work taken out of them. Upstream formats text and writes CDC here; this
+// copies bounded data into a queue and re-arms the report, which is the only
+// other thing the stack requires of it. Everything a trace line needs -
+// formatting, hex, CDC - happens on Core 0, on the far side of two queues.
+//
+// Why that matters on this hardware rather than as a matter of taste: these run
+// on the core that drives tuh_task, and a bus transaction that misses its
+// window is not retried politely. This session measured a device resending one
+// packet 19,065 times because a handshake arrived late. Time spent formatting
+// here is time the bus is not serviced.
+//
+// main() and core1_main() stay in C and keep the upstream lifecycle exactly:
+// clock, settle, launch Core 1, tuh_init on Core 1, tud_init on Core 0.
+
+#include <cstdint>
+#include <cstdio>
+
+#include "pico/time.h"
+#include "tusb.h"
+
+#include "callback_queue.hpp"
+
+namespace {
+
+const char* kind_name(ReferenceCallbackKind kind) {
+    switch (kind) {
+        case ReferenceCallbackKind::Mount:
+            return "MOUNT";
+        case ReferenceCallbackKind::Unmount:
+            return "UMOUNT";
+        case ReferenceCallbackKind::Report:
+            return "REPORT";
+        case ReferenceCallbackKind::Overflow:
+            return "OVERFLOW";
+    }
+    return "?";
+}
+
+}  // namespace
+
+extern "C" {
+
+//--------------------------------------------------------------------+
+// Host HID callbacks - Core 1, task context
+//--------------------------------------------------------------------+
+
+void tuh_hid_mount_cb(uint8_t dev_addr,
+                      uint8_t instance,
+                      uint8_t const* desc_report,
+                      uint16_t desc_len) {
+    uint16_t vid = 0;
+    uint16_t pid = 0;
+    tuh_vid_pid_get(dev_addr, &vid, &pid);
+
+    reference_capture(reference_make_mount(dev_addr, instance, vid, pid,
+                                           desc_report, desc_len,
+                                           time_us_32()));
+
+    // Upstream arms the report here for boot keyboards and mice, and the stack
+    // delivers nothing until it is armed. Keep that, and only that.
+    uint8_t const itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
+    if (itf_protocol == HID_ITF_PROTOCOL_KEYBOARD ||
+        itf_protocol == HID_ITF_PROTOCOL_MOUSE) {
+        tuh_hid_receive_report(dev_addr, instance);
+    }
+}
+
+void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
+    reference_capture(reference_make_unmount(dev_addr, instance, time_us_32()));
+}
+
+void tuh_hid_report_received_cb(uint8_t dev_addr,
+                                uint8_t instance,
+                                uint8_t const* report,
+                                uint16_t len) {
+    reference_capture(
+        reference_make_report(dev_addr, instance, report, len, time_us_32()));
+
+    // Re-arm unconditionally, as upstream does: a report that is not requested
+    // again is the last one this interface will ever deliver.
+    tuh_hid_receive_report(dev_addr, instance);
+}
+
+//--------------------------------------------------------------------+
+// Device CDC - Core 0
+//--------------------------------------------------------------------+
+
+void tud_cdc_rx_cb(uint8_t itf) {
+    (void)itf;
+    char buf[64];
+    uint32_t count = tud_cdc_read(buf, sizeof(buf));
+    (void)count;
+}
+
+//--------------------------------------------------------------------+
+// The two drains, called from the two loops in main.c
+//--------------------------------------------------------------------+
+
+// Core 1, after each tuh_task() returns. At most one record per pass, so a
+// burst can never turn a service loop into a long one.
+void reference_drain_one_callback(void) {
+    ReferenceCallbackRecord record{};
+    if (!reference_take(record)) {
+        return;
+    }
+    reference_trace_push(reference_trace_from(record));
+}
+
+// Core 0, from the device loop. Formatting and CDC belong here.
+void reference_print_one_trace(void) {
+    ReferenceTraceEntry entry{};
+    if (!reference_trace_take(entry)) {
+        return;
+    }
+
+    char line[96];
+    int written = snprintf(line, sizeof(line), "%s a=%u i=%u len=%u",
+                           kind_name(entry.kind), entry.dev_addr,
+                           entry.instance, entry.length);
+    for (uint8_t index = 0; index < entry.prefix_size && written > 0 &&
+                            written < static_cast<int>(sizeof(line)) - 4;
+         ++index) {
+        written += snprintf(line + written, sizeof(line) - written, " %02X",
+                            entry.prefix[index]);
+    }
+    if (written > 0 && written < static_cast<int>(sizeof(line)) - 2) {
+        line[written++] = '\r';
+        line[written++] = '\n';
+    }
+
+    tud_cdc_write(line, static_cast<uint32_t>(written));
+    tud_cdc_write_flush();
+}
+
+}  // extern "C"
