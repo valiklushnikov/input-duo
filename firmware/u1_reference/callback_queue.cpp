@@ -38,6 +38,7 @@ std::uint16_t copy_bounded(std::uint8_t* destination,
 
 ReferenceCallbackRecord reference_make_mount(std::uint8_t dev_addr,
                                              std::uint8_t instance,
+                                             std::uint8_t protocol,
                                              std::uint16_t vid,
                                              std::uint16_t pid,
                                              const std::uint8_t* descriptor,
@@ -47,6 +48,7 @@ ReferenceCallbackRecord reference_make_mount(std::uint8_t dev_addr,
     record.kind = ReferenceCallbackKind::Mount;
     record.dev_addr = dev_addr;
     record.instance = instance;
+    record.protocol = protocol;
     record.vid = vid;
     record.pid = pid;
     record.received_us = now_us;
@@ -102,6 +104,7 @@ bool reference_capture(const ReferenceCallbackRecord& record) {
     slot.kind = record.kind;
     slot.dev_addr = record.dev_addr;
     slot.instance = record.instance;
+    slot.protocol = record.protocol;
     slot.vid = record.vid;
     slot.pid = record.pid;
     slot.received_us = record.received_us;
@@ -130,6 +133,7 @@ bool reference_take(ReferenceCallbackRecord& record) {
     record.kind = slot.kind;
     record.dev_addr = slot.dev_addr;
     record.instance = slot.instance;
+    record.protocol = slot.protocol;
     record.vid = slot.vid;
     record.pid = slot.pid;
     record.received_us = slot.received_us;

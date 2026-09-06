@@ -106,7 +106,7 @@ TEST_CASE(a_descriptor_longer_than_the_record_is_truncated_not_overflowed) {
     }
 
     CHECK(reference_capture(reference_make_mount(
-        3, 1, 0x3554, 0xfa09, huge,
+        3, 1, 1, 0x3554, 0xfa09, huge,
         static_cast<std::uint16_t>(sizeof(huge)), 0)));
 
     ReferenceCallbackRecord taken{};
@@ -121,7 +121,7 @@ TEST_CASE(a_mount_carries_the_identity_the_consumer_needs) {
 
     const std::uint8_t descriptor[] = {0x05, 0x01, 0x09, 0x02};
     CHECK(reference_capture(
-        reference_make_mount(2, 1, 0x3434, 0xd030, descriptor, 4, 12345)));
+        reference_make_mount(2, 1, 2, 0x3434, 0xd030, descriptor, 4, 12345)));
 
     ReferenceCallbackRecord taken{};
     CHECK(reference_take(taken));
@@ -130,6 +130,7 @@ TEST_CASE(a_mount_carries_the_identity_the_consumer_needs) {
     CHECK_EQ(taken.instance, 1u);
     CHECK_EQ(taken.vid, 0x3434u);
     CHECK_EQ(taken.pid, 0xd030u);
+    CHECK_EQ(taken.protocol, 2u);
     CHECK_EQ(taken.descriptor_size, 4u);
     CHECK_EQ(taken.descriptor[1], 0x01u);
     CHECK_EQ(taken.received_us, 12345u);
@@ -267,7 +268,7 @@ TEST_CASE(a_mount_trace_summarises_the_descriptor_instead) {
 
     const std::uint8_t descriptor[] = {0x05, 0x01, 0x09, 0x02};
     const ReferenceTraceEntry entry = reference_trace_from(
-        reference_make_mount(1, 0, 0x3434, 0xd030, descriptor, 4, 0));
+        reference_make_mount(1, 0, 2, 0x3434, 0xd030, descriptor, 4, 0));
 
     CHECK(entry.kind == ReferenceCallbackKind::Mount);
     CHECK_EQ(entry.length, 4u);

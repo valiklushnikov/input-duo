@@ -54,14 +54,14 @@ void tuh_hid_mount_cb(uint8_t dev_addr,
     uint16_t vid = 0;
     uint16_t pid = 0;
     tuh_vid_pid_get(dev_addr, &vid, &pid);
+    uint8_t const itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
 
-    reference_capture(reference_make_mount(dev_addr, instance, vid, pid,
-                                           desc_report, desc_len,
+    reference_capture(reference_make_mount(dev_addr, instance, itf_protocol,
+                                           vid, pid, desc_report, desc_len,
                                            time_us_32()));
 
     // Upstream arms the report here for boot keyboards and mice, and the stack
     // delivers nothing until it is armed. Keep that, and only that.
-    uint8_t const itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
     if (itf_protocol == HID_ITF_PROTOCOL_KEYBOARD ||
         itf_protocol == HID_ITF_PROTOCOL_MOUSE) {
         tuh_hid_receive_report(dev_addr, instance);

@@ -789,3 +789,28 @@ if(MSVC)
 endif()
 
 add_test(NAME reference_callback_queue COMMAND duo_reference_callback_queue_test)
+
+add_executable(duo_reference_source_adapter_test
+    test_main.cpp
+    test_reference_source_adapter.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_reference/callback_queue.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_reference/source_adapter.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/hid_setup.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/hid/report_descriptor.cpp
+)
+
+target_link_libraries(duo_reference_source_adapter_test PRIVATE duo_common)
+target_include_directories(duo_reference_source_adapter_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_reference
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_compile_definitions(duo_reference_source_adapter_test PRIVATE
+    DUO_TEST_VECTOR_DIR="${CMAKE_SOURCE_DIR}/tests/vectors"
+)
+
+if(MSVC)
+    target_compile_options(duo_reference_source_adapter_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME reference_source_adapter COMMAND duo_reference_source_adapter_test)

@@ -44,6 +44,11 @@ struct ReferenceCallbackRecord {
     ReferenceCallbackKind kind{};
     std::uint8_t dev_addr{};
     std::uint8_t instance{};
+    //: The HID interface protocol byte (0 none, 1 keyboard, 2 mouse). Only the
+    //: callback can ask TinyUSB for it, and the adapter cannot classify an
+    //: interface without it - a descriptor that will not parse leaves this as
+    //: the only thing left to go on.
+    std::uint8_t protocol{};
     std::uint16_t vid{};
     std::uint16_t pid{};
     std::uint16_t descriptor_size{};
@@ -59,6 +64,7 @@ struct ReferenceCallbackRecord {
 // mistake that turns into a buffer overrun in an interrupt-driven path.
 ReferenceCallbackRecord reference_make_mount(std::uint8_t dev_addr,
                                              std::uint8_t instance,
+                                             std::uint8_t protocol,
                                              std::uint16_t vid,
                                              std::uint16_t pid,
                                              const std::uint8_t* descriptor,
@@ -74,6 +80,10 @@ ReferenceCallbackRecord reference_make_report(std::uint8_t dev_addr,
                                               const std::uint8_t* report,
                                               std::uint16_t report_size,
                                               std::uint32_t now_us);
+
+//: The protocol byte belongs to the interface, not to a single report, so a
+//: report record carries the one its mount established. The adapter fills it
+//: from what it already knows about that interface.
 
 //: Returns false when the queue is full; the record is dropped and counted.
 bool reference_capture(const ReferenceCallbackRecord& record);
