@@ -11,11 +11,19 @@
 // clock_get_hz(), pio_usb_host_get_frame_number() and pio_usb_root_port are
 // the settable stand-ins defined at the bottom of this file.
 #include "hardware/clocks.h"
+#include "host/hcd.h"
 #include "pio_usb.h"
 
 #include <array>
 
 namespace {
+
+// What the firmware's recovery reads and writes. Both are real TinyUSB entry
+// points defined in usbh.c; here they are the settable stand-in and the
+// recorder, so a test can see the event the recovery queued and the values it
+// addressed it with.
+hcd_devtree_info_t device_zero_topology{};
+std::vector<duo::test::tinyusb_host::HostEvent> queued_host_events;
 
 struct Device {
     bool present = false;
@@ -95,6 +103,8 @@ void reset() {
     for (endpoint_t& endpoint : pio_usb_ep_pool) {
         endpoint = endpoint_t{};
     }
+    device_zero_topology = hcd_devtree_info_t{};
+    queued_host_events.clear();
 }
 
 void add_hub(std::uint16_t vendor_id, std::uint16_t product_id) {
@@ -168,6 +178,13 @@ void set_endpoint_transfer(std::size_t index, const EndpointTransfer& transfer) 
         pio_usb_ep_pool[index].transfer_aborted = transfer.transfer_aborted;
     }
 }
+
+void set_device_zero_topology(std::uint8_t rhport, std::uint8_t hub_addr,
+                              std::uint8_t hub_port) {
+    device_zero_topology = {rhport, hub_addr, hub_port, 0};
+}
+
+const std::vector<HostEvent>& host_events() { return queued_host_events; }
 
 void set_hub_mounted(bool mounted) { hub_mounted = mounted; }
 
@@ -317,3 +334,17 @@ extern "C" void tuh_task(void) { ++host_tasks; }
 // point of the capture timestamp is that it is read where the report arrives,
 // so the fake lets a test move it between two callbacks that share one pass.
 extern "C" std::uint32_t time_us_32(void) { return now_us; }
+
+extern "C" void hcd_devtree_get_info(std::uint8_t dev_addr,
+                                     hcd_devtree_info_t* devtree_info) {
+    // usbh.c's own behaviour: an unaddressed device has no entry in the device
+    // table, so the answer comes from _dev0 - the port being enumerated.
+    (void)dev_addr;
+    *devtree_info = device_zero_topology;
+}
+
+extern "C" void hcd_event_handler(hcd_event_t const* event, bool in_isr) {
+    queued_host_events.push_back(duo::test::tinyusb_host::HostEvent{
+        event->rhport, event->event_id, event->connection.hub_addr,
+        event->connection.hub_port, in_isr});
+}

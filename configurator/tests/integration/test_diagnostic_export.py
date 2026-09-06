@@ -595,6 +595,7 @@ WEDGED_MID_ENUMERATION = (
     0x20040A40,
     0x00270101,  # slots 0/1 idle; slot2 active SETUP host-out
     41,  # current total is 41 too: no completion after downstream attach
+    0,  # enum_stall_recoveries: the watchdog has not fired
 )
 
 
@@ -669,6 +670,23 @@ def test_endpoint_transfer_state_names_every_live_flag(qtbot, tmp_path):
         "slot2 open active DATA1 host-in PRE stalled aborted | "
         "slot3 open active DATA0 host-out"
     )
+
+
+def test_the_report_says_a_restart_count_of_zero_is_the_healthy_reading(qtbot, tmp_path):
+    """The label carries the verdict, because the number alone does not.
+
+    Zero is what a healthy board reports and also what a board wedged somewhere
+    the watchdog cannot see reports, so a row printing a bare ``0`` would be
+    read as "no problem" by the one person it matters to.
+    """
+    host = _host_rows(qtbot, tmp_path, WEDGED_MID_ENUMERATION)
+
+    assert host["Wedged enumerations restarted by the device (0 is healthy)"] == "0"
+
+    retried = list(WEDGED_MID_ENUMERATION)
+    retried[24] = 3
+    climbing = _host_rows(qtbot, tmp_path, tuple(retried), name="retried")
+    assert climbing["Wedged enumerations restarted by the device (0 is healthy)"] == "3"
 
 
 def test_the_report_subtracts_the_attach_baseline_so_nobody_has_to(qtbot, tmp_path):

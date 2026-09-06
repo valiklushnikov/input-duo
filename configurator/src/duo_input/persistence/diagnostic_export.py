@@ -287,7 +287,22 @@ _HOST_STACK_PACKED_ROWS = (
         "Transfer completions when latest attach was queued (the baseline)",
     ),
     ("xfer_completions_since_attach", _COMPLETIONS_SINCE_ATTACH_LABEL),
+    (
+        "enum_stall_recoveries",
+        "Wedged enumerations restarted by the device (0 is healthy)",
+    ),
 )
+
+
+def host_stack_labels() -> dict[str, str]:
+    """Every host-block reading's label, by field name.
+
+    Exists so a guard can compare one label against the wire documentation
+    without copying it: the label is the operator-facing text and the document
+    is the other copy of it, and the two drifting apart is what this whole
+    family of guards exists to prevent.
+    """
+    return {name: label for name, label in _HOST_STACK_ROWS + _HOST_STACK_PACKED_ROWS}
 
 
 def completions_since_attach_label() -> str:

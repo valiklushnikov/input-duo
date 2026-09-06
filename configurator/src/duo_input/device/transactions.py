@@ -477,6 +477,13 @@ class HostObservation:
     #: completed after that attach. At saturation, the delta is no longer
     #: informative.
     xfer_completions_at_attach: int | None = None
+    #: Wedged enumerations the device restarted by itself, saturating.
+    #:
+    #: ZERO IS THE HEALTHY READING, and it is also what a board wedged
+    #: somewhere the watchdog does not detect reports, so it is never a verdict
+    #: on its own. A value that CLIMBS between two reads says the wedge is
+    #: reproducible and the restart is not curing it.
+    enum_stall_recoveries: int | None = None
     #: That subtraction, done here rather than at a bench.
     #:
     #: DERIVED, not a wire field: the device sends the two numbers above and
@@ -1003,6 +1010,7 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
         "<I",
         "<I",
         "<I",
+        "<I",
     ):
         width = struct.calcsize(field)
         if declared == at:
@@ -1051,6 +1059,7 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
         core1_min_sp=extension[14],
         ep_transfer_flags=extension[15],
         xfer_completions_at_attach=extension[16],
+        enum_stall_recoveries=extension[17],
         xfer_completions_since_attach=_completions_since_attach(
             extension[10], extension[16]
         ),

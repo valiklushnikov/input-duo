@@ -178,6 +178,7 @@ def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
         0x20040A40,
         0x00270101,
         41,
+        0,
     )
     with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
         page.service.connect_device(emulator)
@@ -237,6 +238,9 @@ def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
     assert (
         "Transfer completions since the latest attach (5 of them are the "
         "hub's own): 0" in reported
+    )
+    assert (
+        "Wedged enumerations restarted by the device (0 is healthy): 0" in reported
     )
     # The page must not carry the old derived row either: it called a healthy
     # board faulty and it separated this board from a healthy one not at all.

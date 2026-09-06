@@ -290,12 +290,14 @@ struct HostObservation {
     /// Current host_event_counts completions minus this is the post-attach
     /// control-stage count (until the 16-bit total saturates).
     std::uint32_t xfer_completions_at_attach = 0;
+    /// Wedged enumerations restarted since boot, saturating. Zero is healthy.
+    std::uint32_t enum_stall_recoveries = 0;
 };
 
 /// The observation's own bytes on the wire, without its leading length.
 inline constexpr std::size_t kHostObservationBytes =
     1 + 4 + 4 + 4 + 1 + 2 + 4 + 2 + 2 + 2 + 1 + 1 + 4 + 2 + 2 + 2 + 4 + 4 + 4 +
-    4 + 4 + 4 + 4 + 4;
+    4 + 4 + 4 + 4 + 4 + 4;
 
 /// The appended host block: one length byte, then that many bytes.
 ///

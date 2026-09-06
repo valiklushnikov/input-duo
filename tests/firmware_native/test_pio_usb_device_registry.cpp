@@ -1,4 +1,8 @@
 #include "fakes/tinyusb_host.hpp"
+// For HCD_EVENT_DEVICE_ATTACH: the recovery has to queue that event id and no
+// other, and the enumerator is the library's own (fakes/host/hcd.h mirrors
+// .deps/tinyusb/src/host/hcd.h:56-63).
+#include "host/hcd.h"
 #include "pio_usb/backend.hpp"
 #include "pio_usb/device_registry.hpp"
 #include "test_support.hpp"
@@ -24,6 +28,7 @@ using duo_input::u1::pio_usb::kEpXferHostOut;
 using duo_input::u1::pio_usb::kEpXferNeedPre;
 using duo_input::u1::pio_usb::kEpXferOpen;
 using duo_input::u1::pio_usb::kEpXferSetupStaged;
+using duo_input::u1::pio_usb::kEnumStallTimeoutUs;
 using duo_input::u1::pio_usb::kEpXferStalled;
 using duo_input::u1::pio_usb::LogicalRole;
 using duo_input::u1::pio_usb::PioUsbBackend;
@@ -1284,6 +1289,137 @@ TEST_CASE(xfer_completions_at_attach_count_both_contexts_and_follow_the_latest_a
     tuh_event_hook_cb(1, 2u, true);
     tuh_event_hook_cb(1, 0u, false);
     CHECK_EQ(backend.observe().xfer_completions_at_attach, 3u);
+}
+
+// The round-6 recovery. A control transfer to address 0 that neither completes
+// nor fails leaves TinyUSB's enumeration wedged for ever: _dev0.enumerating
+// stays 1, the hub's status pipe is never re-armed, and not even unplugging the
+// hub clears it, because a root-port disconnect carries hub_addr 0 and does not
+// match _dev0 (usbh.c:981-993). Only a reboot recovers the board.
+//
+// The stack already contains the cure. tuh_task's attach branch treats an
+// attach that matches the device it is already enumerating as a duplicate,
+// aborts the outstanding control transfer and starts the enumeration over
+// (usbh.c:498-508). Nothing on this board will ever raise that event, so the
+// backend raises it - through the two entry points a host controller is
+// published to call, and only after a transfer to address 0 has been
+// outstanding long enough that no legitimate one could be.
+TEST_CASE(a_control_transfer_to_address_zero_that_never_completes_is_restarted) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    // The wedge exactly as the board reported it: the hub's two endpoints
+    // idle, and address 0's control endpoint holding the zero-length status
+    // stage that never completes.
+    duo::test::tinyusb_host::set_endpoint_identity(0, 8u, 5u, 0x00u);
+    duo::test::tinyusb_host::set_endpoint_identity(1, 1u, 5u, 0x81u);
+    duo::test::tinyusb_host::set_endpoint_identity(2, 8u, 0u, 0x00u);
+    duo::test::tinyusb_host::EndpointTransfer status_out;
+    status_out.has_transfer = true;
+    status_out.is_tx = true;
+    status_out.data_id = 1u;
+    duo::test::tinyusb_host::set_endpoint_transfer(2, status_out);
+    duo::test::tinyusb_host::set_device_zero_topology(1u, 5u, 3u);
+
+    backend.task(1000u);
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{0});
+    CHECK_EQ(backend.observe().enum_stall_recoveries, 0u);
+
+    // Still inside the window: a control stage may legitimately be outstanding
+    // for many frames, and a recovery that fired on one would tear down a
+    // healthy enumeration.
+    backend.task(1000u + kEnumStallTimeoutUs - 1u);
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{0});
+
+    backend.task(1000u + kEnumStallTimeoutUs);
+    const auto& events = duo::test::tinyusb_host::host_events();
+    CHECK_EQ(events.size(), std::size_t{1});
+    CHECK_EQ(events[0].event_id, static_cast<std::uint8_t>(HCD_EVENT_DEVICE_ATTACH));
+    // Addressed at the port the stack is already enumerating, which is the
+    // only value tuh_task treats as a duplicate rather than deferring for ever.
+    CHECK_EQ(events[0].rhport, 1u);
+    CHECK_EQ(events[0].hub_addr, 5u);
+    CHECK_EQ(events[0].hub_port, 3u);
+    CHECK_FALSE(events[0].in_isr);
+    CHECK_EQ(backend.observe().enum_stall_recoveries, 1u);
+}
+
+TEST_CASE(a_transfer_that_completes_inside_the_window_never_triggers_a_recovery) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_endpoint_identity(2, 8u, 0u, 0x00u);
+    duo::test::tinyusb_host::EndpointTransfer running;
+    running.has_transfer = true;
+    duo::test::tinyusb_host::set_endpoint_transfer(2, running);
+    backend.task(1000u);
+
+    // The stage completes. The next one starts the clock again from scratch,
+    // so a chain of ordinary stages never adds up to a false recovery.
+    duo::test::tinyusb_host::set_endpoint_transfer(
+        2, duo::test::tinyusb_host::EndpointTransfer{});
+    backend.task(1000u + kEnumStallTimeoutUs);
+    duo::test::tinyusb_host::set_endpoint_transfer(2, running);
+    backend.task(1000u + kEnumStallTimeoutUs + 1u);
+    backend.task(1000u + 2u * kEnumStallTimeoutUs);
+
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{0});
+    CHECK_EQ(backend.observe().enum_stall_recoveries, 0u);
+}
+
+TEST_CASE(an_outstanding_transfer_on_an_addressed_device_is_not_an_enumeration_stall) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    // Address 5's own endpoints. A hub interrupt pipe waits for a port change
+    // indefinitely by design, and tearing an enumeration down over it would
+    // break the one thing on this board that works.
+    duo::test::tinyusb_host::set_endpoint_identity(0, 8u, 5u, 0x00u);
+    duo::test::tinyusb_host::set_endpoint_identity(1, 1u, 5u, 0x81u);
+    duo::test::tinyusb_host::EndpointTransfer armed;
+    armed.has_transfer = true;
+    duo::test::tinyusb_host::set_endpoint_transfer(1, armed);
+
+    backend.task(1000u);
+    backend.task(1000u + 4u * kEnumStallTimeoutUs);
+
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{0});
+    CHECK_EQ(backend.observe().enum_stall_recoveries, 0u);
+}
+
+TEST_CASE(a_wedge_that_survives_its_own_recovery_is_retried_and_counted) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_endpoint_identity(2, 8u, 0u, 0x00u);
+    duo::test::tinyusb_host::EndpointTransfer status_out;
+    status_out.has_transfer = true;
+    status_out.is_tx = true;
+    status_out.data_id = 1u;
+    duo::test::tinyusb_host::set_endpoint_transfer(2, status_out);
+
+    backend.task(0u);
+    backend.task(kEnumStallTimeoutUs);
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{1});
+
+    // ONE PER WINDOW, NOT ONE PER PASS. This loop turns tens of thousands of
+    // times inside one window, and a recovery that fired on each of them would
+    // fill the host stack's sixteen-entry event queue in milliseconds and drop
+    // the very event it exists to deliver. These passes are all inside the
+    // second window and must produce nothing.
+    for (std::uint32_t pass = 1; pass <= 64u; ++pass) {
+        backend.task(kEnumStallTimeoutUs + pass);
+    }
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{1});
+
+    backend.task(2u * kEnumStallTimeoutUs);
+    backend.task(3u * kEnumStallTimeoutUs);
+    CHECK_EQ(duo::test::tinyusb_host::host_events().size(), std::size_t{3});
+    CHECK_EQ(backend.observe().enum_stall_recoveries, 3u);
 }
 
 TEST_CASE(mount_processing_stores_vid_pid_protocol_descriptor_hash_and_neutral_layout) {

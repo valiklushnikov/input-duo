@@ -961,6 +961,7 @@ TEST_CASE(the_diagnostics_carry_what_the_host_stack_and_root_port_are_doing) {
     observation.core1_min_sp = 0x20040A40u;
     observation.ep_transfer_flags = 0x00002F01u;
     observation.xfer_completions_at_attach = 37u;
+    observation.enum_stall_recoveries = 4u;
     link.service.set_host_observation(observation);
 
     const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
@@ -1000,6 +1001,8 @@ TEST_CASE(the_diagnostics_carry_what_the_host_stack_and_root_port_are_doing) {
     // and the completion total at the moment the last attach was queued.
     CHECK_EQ(read_u32(p + at + 63), 0x00002F01u);
     CHECK_EQ(read_u32(p + at + 67), 37u);
+    // The round-6 recovery counter, appended behind the round-5 pair.
+    CHECK_EQ(read_u32(p + at + 71), 4u);
     CHECK_EQ(reply.payload.size, duo_input::u1::kDiagnosticsPayloadSize);
 }
 
@@ -1099,6 +1102,7 @@ TEST_CASE(the_real_host_mapping_reaches_the_wire_without_relabeling_or_overwrite
     observed.core1_min_sp = 0x35363738u;
     observed.ep_transfer_flags = 0x393A3B3Cu;
     observed.xfer_completions_at_attach = 0x3D3E3F40u;
+    observed.enum_stall_recoveries = 0x41424344u;
 
     Link link;
     link.hello();
@@ -1107,14 +1111,14 @@ TEST_CASE(the_real_host_mapping_reaches_the_wire_without_relabeling_or_overwrite
     const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
     const std::size_t at = duo_input::u1::kBackendBlockOffset + 2u;
     const std::uint8_t expected[] = {
-        0x46, 0x0D, 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55,
+        0x4A, 0x0D, 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55,
         0xCC, 0xBB, 0xAA, 0x99, 0x0B, 0x34, 0x12, 0xEF, 0xBE, 0xAD,
         0xDE, 0x02, 0x01, 0x04, 0x03, 0x06, 0x05, 0x07, 0x08, 0x40,
         0x30, 0x20, 0x10, 0x12, 0x11, 0x14, 0x13, 0x16, 0x15, 0x24,
         0x23, 0x22, 0x21, 0x28, 0x27, 0x26, 0x25, 0x2C, 0x2B, 0x2A,
         0x29, 0x30, 0x2F, 0x2E, 0x2D, 0x34, 0x33, 0x32, 0x31, 0x38,
         0x37, 0x36, 0x35, 0x3C, 0x3B, 0x3A, 0x39, 0x40, 0x3F, 0x3E,
-        0x3D,
+        0x3D, 0x44, 0x43, 0x42, 0x41,
     };
     CHECK_EQ(reply.payload.size, at + sizeof(expected));
     for (std::size_t index = 0; index < sizeof(expected); ++index) {

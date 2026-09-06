@@ -508,6 +508,8 @@ std::size_t ConfigService::write_host_observation(std::uint8_t* out) const {
     at += 4;
     put_u32(out + at, host_observation_.xfer_completions_at_attach);
     at += 4;
+    put_u32(out + at, host_observation_.enum_stall_recoveries);
+    at += 4;
     return at;
 }
 

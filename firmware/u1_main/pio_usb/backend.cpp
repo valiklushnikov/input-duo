@@ -1,6 +1,15 @@
 #include "pio_usb/backend.hpp"
 
 #include "hardware/clocks.h"
+// TinyUSB's host-controller interface, not its application API. Two entry
+// points from it are used below, both defined by usbh.c and both published for
+// a host controller to call: hcd_devtree_get_info() to ask which port the
+// stack is enumerating, and hcd_event_handler() to report a connection change.
+// hub.c:466-501 calls the second one for exactly the same purpose. Included
+// rather than hand-declared because hcd_event_t is the library's own record
+// and a second copy of it here could drift; the native build shadows this
+// header from fakes/host/, the same way it shadows pio_usb.h.
+#include "host/hcd.h"
 #include "pico/stdlib.h"
 #include "pio_usb.h"
 #include "tusb.h"
@@ -232,10 +241,20 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     std::uint8_t slots_opened = 0;
     std::uint32_t slot_map = 0;
     std::uint32_t transfer_flags = 0;
+    // Whether the host stack has a control transfer outstanding on the device
+    // it is enumerating. Address 0 is the only address that means that: every
+    // other address belongs to a device that has already been assigned one,
+    // and an outstanding transfer there is ordinary traffic - a hub's status
+    // pipe waits for a port change indefinitely by design, and a watchdog that
+    // counted it would tear down the one thing on this board that works.
+    bool address0_outstanding = false;
     for (std::size_t index = 0; index < PIO_USB_EP_POOL_CNT; ++index) {
         const endpoint_t& endpoint = pio_usb_ep_pool[index];
         if (endpoint.size != 0 && slots_opened != 0xFFu) {
             ++slots_opened;
+        }
+        if (endpoint.size != 0 && endpoint.dev_addr == 0 && endpoint.has_transfer) {
+            address0_outstanding = true;
         }
         // The same scan, one more reading out of it: WHOSE endpoint each of
         // the first four slots holds. The count above says how many; only this
@@ -258,6 +277,32 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     // Live like ep_slot_map: Core 1 is the only pool sampler and publishes one
     // already-packed word for Core 0, which never touches library storage.
     ep_transfer_flags_.store(transfer_flags, std::memory_order_relaxed);
+
+    // The enumeration watchdog, off the same scan. A control transfer to
+    // address 0 that is still outstanding kEnumStallTimeoutUs after it started
+    // is not a transfer that is taking its time: Pico-PIO-USB errors a
+    // transaction after three consecutive frames without a handshake, so the
+    // only branch that can hold one open indefinitely is the one that treats
+    // the answer as a NAK and retries next frame, for ever, without ever
+    // touching failed_count. That is precisely the state this board reports.
+    //
+    // The timer restarts from zero whenever the pool goes quiet, so an
+    // ordinary chain of control stages - each outstanding for a few frames,
+    // each completing - never accumulates towards it.
+    if (address0_outstanding) {
+        if (!address0_transfer_outstanding_) {
+            address0_transfer_since_us_ = now_us;
+        } else if (now_us - address0_transfer_since_us_ >= kEnumStallTimeoutUs) {
+            restart_wedged_enumeration();
+            increment_saturating(enum_stall_recoveries_, 0xFFFFFFFFu);
+            // Re-armed rather than latched: if the restart does not take, the
+            // next attempt is one whole window away. Once per pass would fill
+            // the host stack's sixteen-entry event queue in milliseconds and
+            // drop the very event this exists to deliver.
+            address0_transfer_since_us_ = now_us;
+        }
+    }
+    address0_transfer_outstanding_ = address0_outstanding;
 
     // The attach edge. Nothing below TinyUSB reports one, so it is polled
     // here: four volatile reads a pass, no allocation and no wait. It counts
@@ -329,6 +374,34 @@ void PioUsbBackend::task(std::uint32_t now_us) {
     registry_.retry_pending_arms(now_us);
 }
 
+void PioUsbBackend::restart_wedged_enumeration() {
+    // The cure is already inside the host stack; nothing on this board will
+    // ever raise the event that triggers it. tuh_task()'s attach branch
+    // (usbh.c:498-508) treats an attach whose rhport, hub address and hub port
+    // all match the device it is already enumerating as a DUPLICATE: it aborts
+    // the outstanding control transfer through tuh_edpt_abort_xfer(0, 0) and
+    // calls enum_new_device() again from the top. Every other value takes the
+    // "Defer Attach" branch instead, which re-queues the event for ever and
+    // would make things worse rather than better - so the port has to be the
+    // one the stack is actually enumerating, and only the stack knows it.
+    //
+    // hcd_devtree_get_info(0, ...) is how a host controller asks. For an
+    // address with no entry in the device table - which address 0 always is -
+    // usbh.c answers out of _dev0, the port being enumerated. It is a
+    // read-only getter and mutates nothing.
+    hcd_devtree_info_t topology{};
+    hcd_devtree_get_info(0, &topology);
+
+    hcd_event_t event{};
+    event.rhport = topology.rhport;
+    event.event_id = HCD_EVENT_DEVICE_ATTACH;
+    event.connection.hub_addr = topology.hub_addr;
+    event.connection.hub_port = topology.hub_port;
+    // in_isr false: this runs in Core 1's thread context, inside task(), which
+    // is where the host stack expects a non-interrupt event to be queued from.
+    hcd_event_handler(&event, false);
+}
+
 HostObservability PioUsbBackend::observe() const {
     HostObservability out;
     out.init_flags = static_cast<std::uint8_t>(host_init_flags_.load(std::memory_order_relaxed));
@@ -361,6 +434,7 @@ HostObservability PioUsbBackend::observe() const {
     out.long_pass_total_ms = long_pass_total_ms_.load(std::memory_order_relaxed);
     out.core1_min_sp = callbacks.core1_min_sp;
     out.xfer_completions_at_attach = callbacks.xfer_completions_at_attach;
+    out.enum_stall_recoveries = enum_stall_recoveries_.load(std::memory_order_relaxed);
 
     const root_port_t& root = pio_usb_root_port[0];
     std::uint8_t state = 0;

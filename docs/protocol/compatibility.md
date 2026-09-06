@@ -108,7 +108,7 @@ each self-delimiting so the one behind it can always be found:
   max_sof_gap:u16, root_port_resets:u16, hub_mount_events:u16, ep_slot_map:u32,
   host_event_counts:u32, enum_progress_mask:u32, long_pass_count:u32,
   long_pass_total_ms:u32, core1_min_sp:u32, ep_transfer_flags:u32,
-  xfer_completions_at_attach:u32`. Its length byte plays the same
+  xfer_completions_at_attach:u32, enum_stall_recoveries:u32`. Its length byte plays the same
   role the backend
   block's count does: an image with no host stack sends zero, which is a different fact from an
   older firmware that sends no block at all.
@@ -146,7 +146,7 @@ each self-delimiting so the one behind it can always be found:
   during enumeration and do not mean the SOF ISR was starved. `root_port_resets` is a saturating,
   polled lower bound over connected suspended-to-running cycles.
 
-  The last eight fields read inside the window where enumeration stops. Everything in front of
+  The last nine fields read inside the window where enumeration stops. Everything in front of
   them says whether the host stack started and whether anything ever attached; by the time a
   board reaches this window both answers are yes, and none of the fields above can say which
   step stopped it.
@@ -280,6 +280,19 @@ each self-delimiting so the one behind it can always be found:
 
   A delta of 5 or more with slot 2 CLOSED, or `ep_slot_map` showing an address other than `dev0`
   in it, means the board is no longer in this state at all and the table does not apply.
+
+  `enum_stall_recoveries` counts how many times the device has restarted an enumeration that
+  wedged. It is a saturating count and **zero is the healthy reading** - which is also what a
+  board wedged somewhere this watchdog does not detect reports, so it is never a verdict on its
+  own. The device raises the restart itself: when a control transfer to address 0 has been
+  outstanding for two seconds, which is far longer than any legitimate control stage on this bus,
+  it reports a duplicate attach for the port the host stack is already enumerating, and the host
+  stack's own handling of a duplicate attach aborts the stuck transfer and starts the enumeration
+  again. It is a recovery, not a cure: **a count that CLIMBS between two reads says the wedge is
+  reproducible and the restart is not curing it**, which is a far more useful fact than a board
+  that stopped once and stayed stopped. Before this counter existed, a wedged enumeration could
+  not be cleared by anything short of a reboot - not even by unplugging and re-plugging the hub,
+  because a root-port disconnect is not reported against the port being enumerated.
 
   `clk_hz_now`, `sof_frame_count` and `root_port_state` are sampled once per device main-loop
   pass and held until the request arrives, so a reading can be up to one pass old - far below the

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "pio_usb.h"
 
@@ -65,6 +66,21 @@ struct EndpointTransfer {
     bool transfer_aborted = false;
 };
 void set_endpoint_transfer(std::size_t index, const EndpointTransfer& transfer);
+/// What hcd_devtree_get_info(0, ...) reports - the port the host stack is
+/// enumerating. The recovery has to address its synthetic attach at exactly
+/// this port, because any other value takes tuh_task's "defer" branch instead
+/// of its "duplicated attach" one.
+void set_device_zero_topology(std::uint8_t rhport, std::uint8_t hub_addr,
+                              std::uint8_t hub_port);
+/// One event the firmware handed to hcd_event_handler.
+struct HostEvent {
+    std::uint8_t rhport = 0;
+    std::uint8_t event_id = 0;
+    std::uint8_t hub_addr = 0;
+    std::uint8_t hub_port = 0;
+    bool in_isr = false;
+};
+const std::vector<HostEvent>& host_events();
 void set_hub_mounted(bool mounted);
 /// What tuh_mounted() reports for one downstream address.
 void set_device_mounted(std::uint8_t dev_addr, bool mounted);

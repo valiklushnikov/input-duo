@@ -174,6 +174,14 @@ struct HostObservability {
     /// total to count stages completed after that attach without knowing how
     /// many hub-control transfers preceded it.
     std::uint32_t xfer_completions_at_attach = 0;
+    /// How many times a wedged enumeration has been restarted, saturating.
+    ///
+    /// ZERO IS THE HEALTHY READING and also the reading of a board that wedged
+    /// somewhere this recovery does not detect, so it is never a verdict on its
+    /// own - read it beside ep_transfer_flags. A value that CLIMBS between two
+    /// reads says the wedge is reproducible and the restart is not curing it,
+    /// which is a different and much more useful fact than a dead board.
+    std::uint32_t enum_stall_recoveries = 0;
 };
 
 struct HostCallbackObservability {
@@ -262,6 +270,19 @@ inline constexpr std::uint32_t kHostEventXferLimit = 0xFFFFu;
 /// enum_progress_mask: bit (a-1) is configured, bit 8+(a-1) is descriptor-read.
 inline constexpr int kEnumDescriptorShift = 8;
 
+/// How long a control transfer to address 0 may stay outstanding before the
+/// enumeration behind it is treated as wedged, in microseconds.
+///
+/// Two seconds. Every legitimate control stage on this bus completes or fails
+/// within a handful of USB frames: Pico-PIO-USB retries a transaction three
+/// times and then errors it, and TinyUSB's own enumeration retry budget is
+/// three attempts a hundred milliseconds apart. Two seconds is far above all
+/// of that and far below the point at which an operator concludes the board is
+/// dead. It is deliberately NOT measured against the whole enumeration, which
+/// legitimately blocks for 950 ms inside tuh_task() where this loop cannot
+/// sample at all.
+inline constexpr std::uint32_t kEnumStallTimeoutUs = 2000000u;
+
 /// What counts as a blocked Core 1 pass, in microseconds.
 ///
 /// 20 ms is far above this loop's ordinary tens of microseconds and far below
@@ -328,6 +349,7 @@ public:
                std::is_same_v<decltype(hub_mount_events_), PublishedObservationWord> &&
                std::is_same_v<decltype(ep_slot_map_), PublishedObservationWord> &&
                std::is_same_v<decltype(ep_transfer_flags_), PublishedObservationWord> &&
+               std::is_same_v<decltype(enum_stall_recoveries_), PublishedObservationWord> &&
                std::is_same_v<decltype(enum_progress_mask_), PublishedObservationWord> &&
                std::is_same_v<decltype(long_pass_count_), PublishedObservationWord> &&
                std::is_same_v<decltype(long_pass_total_ms_), PublishedObservationWord> &&
@@ -404,6 +426,14 @@ public:
     HostObservability observe() const;
 
 private:
+    /// Restart the enumeration the host stack is wedged part-way through.
+    ///
+    /// Private because it is not a service anything outside this class may
+    /// ask for: it is only ever correct when task() has just established that
+    /// a control transfer to address 0 has been outstanding for longer than
+    /// any legitimate one could be.
+    void restart_wedged_enumeration();
+
     ClockChangeBarrier clock_change_;
     DeviceRegistry registry_;
     bool host_ready_ = false;
@@ -430,6 +460,13 @@ private:
     // Core 0, which must never touch library-owned mutable storage.
     PublishedObservationWord ep_slot_map_{0};
     PublishedObservationWord ep_transfer_flags_{0};
+
+    // The enumeration watchdog. Core 1's alone: the two booleans and the
+    // timestamp are only ever touched by task(), and Core 0 reads nothing but
+    // the published counter.
+    PublishedObservationWord enum_stall_recoveries_{0};
+    bool address0_transfer_outstanding_ = false;
+    std::uint32_t address0_transfer_since_us_ = 0;
     // Sticky, so an address that reached a state for one pass and lost it
     // before the next GET_DIAGNOSTICS is still a fact about the run.
     PublishedObservationWord enum_progress_mask_{0};
