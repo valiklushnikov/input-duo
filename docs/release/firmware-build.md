@@ -88,14 +88,28 @@ use a native Pico-PIO-USB/TinyUSB host in place of the CH375 chips and are
 pinned to their own toolchain, independent of `PICO_SDK_PATH` and everything
 else CH375 depends on:
 
-| Dependency | Revision |
-|---|---|
-| Pico SDK | `98a542c1a62fb549ffb5d66a3e5892b06276b670` |
-| TinyUSB | `86ad6e56c1700e85f1c5678607a762cfe3aa2f47` |
-| Pico-PIO-USB | `3c1eec341a5232640e4c00628b889b641af34b28` |
+| Dependency | Upstream revision | Built as |
+|---|---|---|
+| Pico SDK | `98a542c1a62fb549ffb5d66a3e5892b06276b670` | unmodified |
+| TinyUSB | `86ad6e56c1700e85f1c5678607a762cfe3aa2f47` | `507766faf14f38a6752401fb4f324cc00cd145dd` (+ `patches/tinyusb/`) |
+| Pico-PIO-USB | `3c1eec341a5232640e4c00628b889b641af34b28` | `a2a076497ab6f373ae1c9e98777bf3a0c6f4a40e` (+ `patches/pico-pio-usb/`) |
 
 These are exact commits, not tags - `cmake/pio_usb_toolchain_lock.cmake` is
 the single source of truth for them.
+
+TinyUSB and Pico-PIO-USB are built one commit past upstream. Four defects in
+those pinned revisions stop this hardware working at all - a second device
+never enumerates, a keyboard never mounts, a control transfer can hang the host
+stack outright, and a single corrupted response ends hub port monitoring for the
+rest of the session. The fixes are in `patches/`, under version control and
+reviewable as a diff; the bootstrap applies them and commits them onto the
+upstream base with a fixed identity, date and message, so the resulting SHA is
+reproducible rather than machine-specific, and the lock verifies that exact SHA
+with a clean working tree. What the defects are and how each was measured is in
+`docs/superpowers/records/2026-09-03-pio-usb-hub-v1-record.md`.
+
+Nothing is hand-edited in `.deps/`: a clone modified in place still fails
+configuration, exactly as before.
 
 ### Bootstrap
 

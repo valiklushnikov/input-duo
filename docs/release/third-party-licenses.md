@@ -35,8 +35,8 @@ exactly the ambiguity this file's table exists to avoid.
 | Component | Revision pinned | Licence | Status |
 |---|---|---|---|
 | Raspberry Pi Pico SDK | 2.1.0 (CH375 build and every shipped U2, environment-provided `PICO_SDK_PATH`) / `98a542c1a62fb549ffb5d66a3e5892b06276b670` (PIO USB U1 build only, `.deps/`) | BSD-3-Clause | 2.1.0 is compiled into every shipped U1 and U2 UF2. The `.deps/` revision is compiled into a shipped U1 only for a `-InputBackend PIO_USB` release, and never into U2. |
-| TinyUSB | CH375 build and every U2: whatever revision Pico SDK 2.1.0's own `lib/tinyusb` submodule pins / PIO USB U1 build: `86ad6e56c1700e85f1c5678607a762cfe3aa2f47` (`.deps/`, overrides the SDK's submodule via `PICO_TINYUSB_PATH`) | MIT | Device stack compiled into every shipped U1/U2 UF2. The `.deps/` revision's host stack is additionally compiled into a shipped U1 only for a `-InputBackend PIO_USB` release. |
-| Pico-PIO-USB | `3c1eec341a5232640e4c00628b889b641af34b28` (`.deps/`) | MIT | Compiled into a shipped U1 UF2 only for a `-InputBackend PIO_USB` release (`tools/build_release.ps1`); never into U2, and not present at all in a default `CH375` release. |
+| TinyUSB | CH375 build and every U2: whatever revision Pico SDK 2.1.0's own `lib/tinyusb` submodule pins / PIO USB U1 build: `86ad6e56c1700e85f1c5678607a762cfe3aa2f47` plus `patches/tinyusb/`, built as `507766faf14f38a6752401fb4f324cc00cd145dd` (`.deps/`, overrides the SDK's submodule via `PICO_TINYUSB_PATH`) | MIT | Device stack compiled into every shipped U1/U2 UF2. The `.deps/` revision's host stack is additionally compiled into a shipped U1 only for a `-InputBackend PIO_USB` release. |
+| Pico-PIO-USB | `3c1eec341a5232640e4c00628b889b641af34b28` plus `patches/pico-pio-usb/`, built as `a2a076497ab6f373ae1c9e98777bf3a0c6f4a40e` (`.deps/`) | MIT | Compiled into a shipped U1 UF2 only for a `-InputBackend PIO_USB` release (`tools/build_release.ps1`); never into U2, and not present at all in a default `CH375` release. |
 
 All three are source-form, permissively licensed and statically linked into
 firmware, not into the configurator installer this file otherwise describes -

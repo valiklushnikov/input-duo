@@ -63,14 +63,83 @@ function Write-Step($message) {
     Write-Host "==> $message" -ForegroundColor Cyan
 }
 
-# name       - subdirectory under .deps/
-# url        - clone source
-# revision   - the exact pinned commit SHA (task-2-brief.md, character for character)
+# name            - subdirectory under .deps/
+# url             - clone source
+# revision        - the exact upstream commit SHA to fetch, character for character
+# patchedRevision - what HEAD must be after patches/<name>/ has been applied and
+#                   committed, or $null for a dependency we do not patch. This is
+#                   the revision the build is actually verified against.
+#
+# The patched SHA is reproducible because everything a git commit hashes is
+# fixed below: the tree (the clone is normalised to LF first), the parent (the
+# pinned upstream revision), the author and committer identity and date, and
+# the message. Change any of those and the SHA changes, which is why they are
+# constants here and asserted by tests/build/test_pio_usb_toolchain_patches.py.
 $Dependencies = @(
-    @{ Name = 'pico-sdk';     Url = 'https://github.com/raspberrypi/pico-sdk';        Revision = '98a542c1a62fb549ffb5d66a3e5892b06276b670' }
-    @{ Name = 'tinyusb';      Url = 'https://github.com/hathach/tinyusb';             Revision = '86ad6e56c1700e85f1c5678607a762cfe3aa2f47' }
-    @{ Name = 'pico-pio-usb'; Url = 'https://github.com/sekigon-gonnoc/Pico-PIO-USB'; Revision = '3c1eec341a5232640e4c00628b889b641af34b28' }
+    @{ Name = 'pico-sdk';     Url = 'https://github.com/raspberrypi/pico-sdk';        Revision = '98a542c1a62fb549ffb5d66a3e5892b06276b670'; PatchedRevision = $null }
+    @{ Name = 'tinyusb';      Url = 'https://github.com/hathach/tinyusb';             Revision = '86ad6e56c1700e85f1c5678607a762cfe3aa2f47'; PatchedRevision = '507766faf14f38a6752401fb4f324cc00cd145dd' }
+    @{ Name = 'pico-pio-usb'; Url = 'https://github.com/sekigon-gonnoc/Pico-PIO-USB'; Revision = '3c1eec341a5232640e4c00628b889b641af34b28'; PatchedRevision = 'a2a076497ab6f373ae1c9e98777bf3a0c6f4a40e' }
 )
+
+# Fixed so the patch commit hashes identically on every machine.
+$PatchCommitName = 'Duo Input toolchain'
+$PatchCommitEmail = 'toolchain@duo-input.invalid'
+$PatchCommitDate = '1788691431 +0000'
+$PatchCommitMessage = 'Duo Input host fixes'
+
+function Invoke-Patches([string]$Dir, [string]$Name, [string]$ExpectedRevision) {
+    $patchDir = Join-Path $RepositoryRoot (Join-Path 'patches' $Name)
+    $patches = @(Get-ChildItem -Path $patchDir -Filter '*.patch' -ErrorAction Stop | Sort-Object Name)
+    if ($patches.Count -eq 0) { throw "no patches found for $Name under $patchDir" }
+
+    Push-Location $Dir
+    try {
+        # A checkout under core.autocrlf=true stores CRLF in the working tree,
+        # so an LF patch will not apply and, worse, a commit made over it would
+        # hash differently than the same patch applied on Linux. Normalise the
+        # clone before touching it.
+        & git config core.autocrlf false
+        & git config core.eol lf
+        & git rm --cached -r -q . | Out-Null
+        & git reset --hard -q HEAD
+        if ($LASTEXITCODE -ne 0) { throw "could not normalise line endings in $Name" }
+
+        foreach ($patch in $patches) {
+            Write-Host "applying $($patch.Name)" -ForegroundColor DarkGray
+            & git apply $patch.FullName
+            if ($LASTEXITCODE -ne 0) { throw "git apply of $($patch.Name) failed for $Name" }
+        }
+
+        $env:GIT_AUTHOR_NAME = $PatchCommitName
+        $env:GIT_AUTHOR_EMAIL = $PatchCommitEmail
+        $env:GIT_AUTHOR_DATE = $PatchCommitDate
+        $env:GIT_COMMITTER_NAME = $PatchCommitName
+        $env:GIT_COMMITTER_EMAIL = $PatchCommitEmail
+        $env:GIT_COMMITTER_DATE = $PatchCommitDate
+        try {
+            & git commit -q -a -m $PatchCommitMessage
+            if ($LASTEXITCODE -ne 0) { throw "committing the patches failed for $Name" }
+        }
+        finally {
+            Remove-Item Env:GIT_AUTHOR_NAME, Env:GIT_AUTHOR_EMAIL, Env:GIT_AUTHOR_DATE, `
+                        Env:GIT_COMMITTER_NAME, Env:GIT_COMMITTER_EMAIL, Env:GIT_COMMITTER_DATE `
+                        -ErrorAction SilentlyContinue
+        }
+    }
+    finally {
+        Pop-Location
+    }
+
+    $actual = Get-CurrentRevision $Dir
+    if ($actual -ne $ExpectedRevision) {
+        # The patches applied but produced a different commit than the one the
+        # lock pins. Building against it would be building against something
+        # nobody reviewed, so stop here and say exactly what differs.
+        throw ("$Name is $actual after applying patches, not the expected " +
+               "$ExpectedRevision. Either the patches changed, or something " +
+               "the commit SHA depends on did (tree, identity, date, message).")
+    }
+}
 
 function Get-CurrentRevision([string]$Dir) {
     if (-not (Test-Path (Join-Path $Dir '.git'))) { return $null }
@@ -106,15 +175,21 @@ foreach ($dependency in $Dependencies) {
     $revision = $dependency.Revision
     $dir = Join-Path $DepsRoot $name
 
-    Write-Step "$name @ $revision"
+    $wanted = if ($dependency.PatchedRevision) { $dependency.PatchedRevision } else { $revision }
+    if ($dependency.PatchedRevision) {
+        Write-Step "$name @ $revision + patches/$name -> $wanted"
+    }
+    else {
+        Write-Step "$name @ $revision"
+    }
 
     $current = Get-CurrentRevision $dir
-    if ($current -eq $revision -and -not $Force) {
+    if ($current -eq $wanted -and -not $Force) {
         if (Test-WorkingTreeClean $dir) {
-            Write-Host "already at the pinned revision - skipping" -ForegroundColor DarkGray
+            Write-Host "already at $wanted - skipping" -ForegroundColor DarkGray
             continue
         }
-        Write-Host "at the pinned revision but has uncommitted changes (git status --porcelain is not empty) - re-cloning" -ForegroundColor DarkGray
+        Write-Host "at $wanted but has uncommitted changes (git status --porcelain is not empty) - re-cloning" -ForegroundColor DarkGray
     }
 
     if (Test-Path $dir) {
@@ -161,7 +236,18 @@ foreach ($dependency in $Dependencies) {
         throw "$name at $dir has uncommitted changes immediately after checkout"
     }
 
-    Write-Host "verified: $name is at $actual (clean)" -ForegroundColor Green
+    if ($dependency.PatchedRevision) {
+        Write-Host "applying tracked patches from patches/$name" -ForegroundColor DarkGray
+        Invoke-Patches -Dir $dir -Name $name -ExpectedRevision $dependency.PatchedRevision
+        $actual = Get-CurrentRevision $dir
+        if (-not (Test-WorkingTreeClean $dir)) {
+            throw "$name at $dir has uncommitted changes after patching"
+        }
+        Write-Host "verified: $name is at $actual (patched, clean)" -ForegroundColor Green
+    }
+    else {
+        Write-Host "verified: $name is at $actual (clean)" -ForegroundColor Green
+    }
 }
 
 Write-Step 'PIO USB toolchain ready'

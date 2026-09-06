@@ -1,0 +1,97 @@
+diff --git a/src/class/hid/hid_host.c b/src/class/hid/hid_host.c
+index eef584d..79bbf0e 100644
+--- a/src/class/hid/hid_host.c
++++ b/src/class/hid/hid_host.c
+@@ -559,13 +559,6 @@ bool hidh_set_config(uint8_t daddr, uint8_t itf_num) {
+ }
+ 
+ static void process_set_config(tuh_xfer_t* xfer) {
+-  // Stall is a valid response for SET_IDLE, sometime SET_PROTOCOL as well
+-  // therefore we could ignore its result
+-  if (!(xfer->setup->bRequest == HID_REQ_CONTROL_SET_IDLE ||
+-        xfer->setup->bRequest == HID_REQ_CONTROL_SET_PROTOCOL)) {
+-    TU_ASSERT(xfer->result == XFER_RESULT_SUCCESS,);
+-  }
+-
+   uintptr_t const state = xfer->user_data;
+   uint8_t const itf_num = (uint8_t) tu_le16toh(xfer->setup->wIndex);
+   uint8_t const daddr = xfer->daddr;
+@@ -574,6 +567,24 @@ static void process_set_config(tuh_xfer_t* xfer) {
+   hidh_interface_t* p_hid = get_hid_itf(daddr, idx);
+   TU_VERIFY(p_hid,);
+ 
++  // Stall is a valid response for SET_IDLE, sometime SET_PROTOCOL as well
++  // therefore we could ignore its result
++  if (!(xfer->setup->bRequest == HID_REQ_CONTROL_SET_IDLE ||
++        xfer->setup->bRequest == HID_REQ_CONTROL_SET_PROTOCOL)) {
++    if (xfer->result != XFER_RESULT_SUCCESS) {
++      // A failed Report Descriptor fetch used to abandon the interface here,
++      // leaving the device configured but never mounted and never reported.
++      // That descriptor is optional for a boot keyboard or mouse: the boot
++      // report layout is fixed by the specification and SET_PROTOCOL has
++      // already been sent. Mount without it, exactly as the "descriptor too
++      // large" path below already does.
++      if (state == CONFIG_COMPLETE && p_hid->itf_protocol != HID_ITF_PROTOCOL_NONE) {
++        config_driver_mount_complete(daddr, idx, NULL, 0);
++      }
++      return;
++    }
++  }
++
+   switch (state) {
+     case CONFG_SET_IDLE: {
+       // Idle rate = 0 mean only report when there is changes
+diff --git a/src/host/hub.c b/src/host/hub.c
+index e970144..ffa58eb 100644
+--- a/src/host/hub.c
++++ b/src/host/hub.c
+@@ -334,7 +334,14 @@ static void connection_port_reset_complete (tuh_xfer_t* xfer);
+ bool hub_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes) {
+   (void) xferred_bytes; // TODO can be more than 1 for hub with lots of ports
+   (void) ep_addr;
+-  TU_VERIFY(result == XFER_RESULT_SUCCESS);
++  if (result != XFER_RESULT_SUCCESS) {
++    // Giving up here ends hub monitoring for the rest of the session: the
++    // status endpoint is never polled again, so no port change is ever
++    // reported and hot-plug stops working entirely. One corrupted response is
++    // enough to trigger it. Re-arm instead, exactly as every other branch of
++    // this function already does.
++    return hub_edpt_status_xfer(dev_addr);
++  }
+ 
+   hub_interface_t* p_hub = get_itf(dev_addr);
+ 
+diff --git a/src/host/usbh.c b/src/host/usbh.c
+index a2994cd..e4b5480 100644
+--- a/src/host/usbh.c
++++ b/src/host/usbh.c
+@@ -1411,11 +1411,10 @@ static void process_enumeration(tuh_xfer_t* xfer) {
+       // Get first 8 bytes of device descriptor for Control Endpoint size
+       TU_LOG_USBH("Get 8 byte of Device Descriptor\r\n");
+       TU_ASSERT(tuh_descriptor_get_device(addr0, _usbh_epbuf.ctrl, 8,
+-                                          process_enumeration, ENUM_SET_ADDR),);
++                                          process_enumeration, ENUM_RESET_2),);
+       break;
+     }
+ 
+-#if 0
+       case ENUM_RESET_2:
+         // TODO not used by now, but may be needed for some devices !?
+         // Reset device again before Set Address
+@@ -1423,7 +1422,7 @@ static void process_enumeration(tuh_xfer_t* xfer) {
+         if (_dev0.hub_addr == 0) {
+           // connected directly to roothub
+           hcd_port_reset( _dev0.rhport );
+-          tusb_time_delay_ms_api(RESET_DELAY); // TODO may not work for no-OS on MCU that require reset_end() since
++          tusb_time_delay_ms_api(ENUM_RESET_DELAY_MS); // TODO may not work for no-OS on MCU that require reset_end() since
+                                         // sof of controller may not running while resetting
+           hcd_port_reset_end(_dev0.rhport);
+           // TODO: fall through to SET ADDRESS, refactor later
+@@ -1437,7 +1436,6 @@ static void process_enumeration(tuh_xfer_t* xfer) {
+         }
+ #endif
+         TU_ATTR_FALLTHROUGH;
+-#endif
+ 
+     case ENUM_SET_ADDR:
+       enum_request_set_addr();

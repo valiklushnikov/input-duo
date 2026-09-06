@@ -1,1 +1,5 @@
 legacy/**/*.ino -text whitespace=cr-at-eol,-blank-at-eol,-blank-at-eof
+
+# Toolchain patches are applied by git apply to LF-normalised dependency
+# clones. Converting them on checkout would make them fail to apply.
+patches/**/*.patch -text

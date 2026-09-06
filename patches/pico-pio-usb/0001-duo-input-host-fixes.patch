@@ -1,0 +1,40 @@
+diff --git a/src/pio_usb_host.c b/src/pio_usb_host.c
+index 7c18e5f..1dc3a7b 100644
+--- a/src/pio_usb_host.c
++++ b/src/pio_usb_host.c
+@@ -551,7 +551,34 @@ static int __no_inline_not_in_flash_func(usb_in_transaction)(pio_port_t *pp,
+       memcpy(ep->app_buf, &pp->usb_rx_buffer[2], receive_len);
+       pio_usb_ll_transfer_continue(ep, receive_len);
+     } else {
+-      // DATA0/1 mismatched, 0 for re-try next frame
++      if ((ep->ep_num & 0x7f) != 0) {
++        // Non-control endpoint. Discarding a packet whose toggle we did not
++        // expect is the specified behaviour and is right for a stale
++        // duplicate. But if host and device genuinely disagree about the
++        // sequence, discarding loses every report the device will ever send.
++        // So discard first and only resync after a run of consecutive
++        // mismatches - recovery, not the normal path. Resyncing on every
++        // mismatch instead accepts an endlessly repeated packet endlessly and
++        // floods the bus, which starves the other endpoints.
++        if (++ep->failed_count >= TRANSACTION_MAX_RETRY) {
++          ep->failed_count = 0;
++          ep->data_id = (receive_pid == USB_PID_DATA1) ? 1 : 0;
++          memcpy(ep->app_buf, &pp->usb_rx_buffer[2], receive_len);
++          pio_usb_ll_transfer_continue(ep, receive_len);
++        } else {
++          res = -1; // discard and retry next frame
++        }
++      } else {
++        // Control endpoint. The packet was already ACKed above, so a device
++        // that never advances its toggle would make us retry this frame for
++        // ever: the transfer neither completes nor fails, and the host stack
++        // waits on it indefinitely with nothing to recover from. Bound it
++        // exactly like the NAK and error paths below.
++        res = -1;
++        if (++ep->failed_count >= TRANSACTION_MAX_RETRY) {
++          pio_usb_ll_transfer_complete(ep, PIO_USB_INTS_ENDPOINT_ERROR_BITS);
++        }
++      }
+     }
+   } else if (receive_pid == USB_PID_NAK) {
+     // NAK try again next frame

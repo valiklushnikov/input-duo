@@ -33,7 +33,11 @@ UPSTREAM_REFERENCE = (
 REFERENCE_PRESET = "pico-pio-usb-reference-release"
 PIO_USB_PRESET = "pico-pio-usb-release"
 FIXED_SOURCE_DATE_EPOCH = "1788691431"
-PINNED_PICO_PIO_USB_REVISION = "3c1eec341a5232640e4c00628b889b641af34b28"
+# The clone is built one commit past upstream, with patches/pico-pio-usb/
+# applied - see cmake/pio_usb_toolchain_lock.cmake. The examples/ directory the
+# reference copies come from is untouched by that patch, so the upstream blob
+# hashes below still hold.
+PINNED_PICO_PIO_USB_REVISION = "a2a076497ab6f373ae1c9e98777bf3a0c6f4a40e"
 REVIEWED_REFERENCE_SHA256 = {
     "main.c": "e8539134690e597be9254ee179f72a2b5cc93becf355e033f994d08955ea8ea1",
     "tusb_config.h": "4ce4ff7a45fc93b5695ddc9375c091995ce19ab078fc32a23d3f4299ee95594c",
@@ -48,6 +52,48 @@ from reference_build_support import (
     rebuild_reference_u1_artifacts,
     rebuild_target_artifacts,
 )
+
+
+#: The reference is a maintained copy of the upstream example, and every
+#: departure from it has to be visible rather than hidden behind a new hash.
+#: Listing the exact before/after lines means an accidental second edit fails
+#: this test just as loudly as an unreviewed first one would.
+#:
+#: CFG_TUH_HID: upstream sizes this for one simple keyboard and one simple
+#: mouse. A single composite 2.4 GHz receiver claims three HID instances, so
+#: two receivers cannot fit in four and the second one's interfaces are
+#: refused with "is not supported". Measured 2026-09-06; see
+#: docs/superpowers/records/2026-09-03-pio-usb-hub-v1-record.md.
+DOCUMENTED_REFERENCE_DEVIATIONS = {
+    "tusb_config.h": [
+        (
+            "#define CFG_TUH_HID                  4",
+            "#define CFG_TUH_HID                  8",
+        ),
+    ],
+}
+
+
+def _assert_only_documented_deviations(
+    maintained: Path, upstream: Path, name: str
+) -> None:
+    maintained_lines = maintained.read_text(encoding="utf-8").splitlines()
+    upstream_lines = upstream.read_text(encoding="utf-8").splitlines()
+    assert len(maintained_lines) == len(upstream_lines), (
+        f"{name} has gained or lost lines relative to the upstream example"
+    )
+
+    expected = dict(DOCUMENTED_REFERENCE_DEVIATIONS[name])
+    actual = {
+        before: after
+        for before, after in zip(upstream_lines, maintained_lines)
+        if before != after
+    }
+    assert actual == expected, (
+        f"{name} deviates from the upstream example in ways that are not "
+        f"documented in DOCUMENTED_REFERENCE_DEVIATIONS: expected {expected}, "
+        f"found {actual}"
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -281,12 +327,15 @@ def test_reference_sources_are_byte_for_byte_the_pinned_upstream_example():
         maintained = ROOT / "firmware" / "u1_reference" / maintained_name
         upstream = UPSTREAM_REFERENCE / upstream_name
         reviewed_hash = REVIEWED_REFERENCE_SHA256[maintained_name]
-        assert _sha256(maintained) == reviewed_hash, (
-            f"{maintained} does not have its immutable reviewed SHA-256"
-        )
         assert _sha256(upstream) == reviewed_hash, (
             f"pinned blob checkout {upstream} does not have its reviewed SHA-256"
         )
+        if maintained_name in DOCUMENTED_REFERENCE_DEVIATIONS:
+            _assert_only_documented_deviations(maintained, upstream, maintained_name)
+        else:
+            assert _sha256(maintained) == reviewed_hash, (
+                f"{maintained} does not have its immutable reviewed SHA-256"
+            )
 
     assert b"tud_cdc_write(" in (ROOT / "firmware" / "u1_reference" / "main.c").read_bytes()
 

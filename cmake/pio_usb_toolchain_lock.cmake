@@ -17,10 +17,27 @@
 
 set(_duo_pio_usb_deps_dir "${CMAKE_SOURCE_DIR}/.deps")
 
-# The three revisions the task brief names, character for character.
+# The three upstream revisions the task brief names, character for character.
+# These are what tools/bootstrap_pio_usb_toolchain.ps1 fetches, and they stay
+# here so the provenance of everything built is visible at a glance.
 set(DUO_PIO_USB_PICO_SDK_REVISION "98a542c1a62fb549ffb5d66a3e5892b06276b670")
-set(DUO_PIO_USB_TINYUSB_REVISION "86ad6e56c1700e85f1c5678607a762cfe3aa2f47")
-set(DUO_PIO_USB_PICO_PIO_USB_REVISION "3c1eec341a5232640e4c00628b889b641af34b28")
+set(DUO_PIO_USB_TINYUSB_BASE_REVISION "86ad6e56c1700e85f1c5678607a762cfe3aa2f47")
+set(DUO_PIO_USB_PICO_PIO_USB_BASE_REVISION "3c1eec341a5232640e4c00628b889b641af34b28")
+
+# TinyUSB and Pico-PIO-USB are built one commit further on, with the four host
+# fixes in patches/ applied. Those defects are measured and recorded in
+# docs/superpowers/records/2026-09-03-pio-usb-hub-v1-record.md; without them
+# this hardware does not enumerate a second device, does not mount a keyboard,
+# and loses hub port events for the rest of the session after a single
+# corrupted response.
+#
+# The bootstrap applies the patches and commits them with a fixed identity,
+# date and message onto the base revision above, so these SHAs are reproducible
+# rather than machine-specific. Verification below is unchanged and just as
+# strict: exact revision, and a clone with no uncommitted changes. A tree
+# hand-edited after bootstrapping still cannot be built against silently.
+set(DUO_PIO_USB_TINYUSB_REVISION "507766faf14f38a6752401fb4f324cc00cd145dd")
+set(DUO_PIO_USB_PICO_PIO_USB_REVISION "a2a076497ab6f373ae1c9e98777bf3a0c6f4a40e")
 
 find_package(Git QUIET)
 if(NOT GIT_FOUND)
@@ -99,11 +116,11 @@ _duo_pio_usb_verify_clone("Pico SDK"
     "${_duo_pio_usb_deps_dir}/pico-sdk"
     "${DUO_PIO_USB_PICO_SDK_REVISION}"
     _duo_pico_sdk_path)
-_duo_pio_usb_verify_clone("TinyUSB"
+_duo_pio_usb_verify_clone("TinyUSB (patched)"
     "${_duo_pio_usb_deps_dir}/tinyusb"
     "${DUO_PIO_USB_TINYUSB_REVISION}"
     _duo_tinyusb_path)
-_duo_pio_usb_verify_clone("Pico-PIO-USB"
+_duo_pio_usb_verify_clone("Pico-PIO-USB (patched)"
     "${_duo_pio_usb_deps_dir}/pico-pio-usb"
     "${DUO_PIO_USB_PICO_PIO_USB_REVISION}"
     _duo_pico_pio_usb_path)
