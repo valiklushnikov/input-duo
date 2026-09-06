@@ -138,7 +138,26 @@ git commit -m "Add the golden PIO USB reference target"
 
 - [ ] **Step 7: Hardware gate the clean-tree golden image and record it**
 
-Present exact size/hash and flash only after approval. PASS requires hub enumeration, keyboard and mouse HID mount lines, keyboard characters, mouse movement/buttons/wheel reports, simultaneous use, and re-enumeration after each device replug. Record the golden hash. A failure stops the plan at Task 1. Commit only the measurement record:
+Present exact size/hash and flash only after approval. PASS requires hub
+enumeration, keyboard and mouse HID mount lines, keyboard characters, mouse
+movement and button reports, simultaneous use, and re-enumeration after each
+device replug. Record the golden hash. A failure stops the plan at Task 1.
+
+**Not a wheel row.** This gate originally demanded wheel reports too. It cannot
+have them: TinyUSB puts HID interfaces in boot protocol by default
+(`hid_host.c`, `_hidh_default_protocol = HID_PROTOCOL_BOOT`) and the upstream
+example never changes that, so the mouse transmits the three-byte boot report -
+buttons, X, Y - and no wheel byte exists to report. Measured 2026-09-06: 1278
+consecutive reports at `len=3`, none with a non-zero fourth byte. The example
+prints `report->wheel` by casting that buffer to a five-field struct, which
+reads past the end of the data; the zeros it printed were an out-of-bounds read,
+not a measurement. In report protocol the same mouse sends eight bytes with the
+wheel at offset 6 and a report ID in byte 0, so reading it correctly requires
+descriptor parsing. Wheel, side buttons and everything else beyond the boot
+layout are therefore verified in Task 3, where the neutral pipeline parses
+report descriptors. See the record for the captured bytes.
+
+Commit only the measurement record:
 
 ```powershell
 git add docs/superpowers/records/2026-09-03-pio-usb-hub-v1-record.md
@@ -626,7 +645,7 @@ git commit -m "Record PIO USB reference acceptance"
 - [ ] Each hardware slice passed before the next task began.
 - [ ] Native CTest, Python suites, protocol/translation checks, all three Pico builds and artifact tests pass.
 - [ ] Sanitizer/fuzzer campaigns and configurator packaging pass.
-- [ ] Keyboard, mouse, wheel, buttons, Fn keys, macros, detach/replug and all routes pass on both PCs.
+- [ ] Keyboard, mouse, wheel, buttons, Fn keys, macros, detach/replug and all routes pass on both PCs. Wheel and side buttons are verified from Task 3 onward, once report descriptors are parsed; the boot-protocol reference in Task 1 cannot carry them.
 - [ ] Shared clipboard pairing, trust, bidirectional transfer, loop prevention, tray/autostart and link recovery pass concurrently with input routing.
 - [ ] U2 source and deployed image remain unchanged unless a separately recorded compatibility defect required action.
 - [ ] No speculative recovery from the failed PIO path is present in the reference target.
