@@ -23,6 +23,9 @@
 
 #include "callback_queue.hpp"
 
+extern "C" void reference_descriptor_unmounted(std::uint8_t dev_addr,
+                                                std::uint8_t instance);
+
 namespace {
 
 const char* kind_name(ReferenceCallbackKind kind) {
@@ -73,6 +76,10 @@ void tuh_hid_mount_cb(uint8_t dev_addr,
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
+    // The pinned host stack cancels an in-flight control transfer on removal
+    // without invoking its application completion callback. Retire the
+    // matching application-side lifetime token here so a replug can retry.
+    reference_descriptor_unmounted(dev_addr, instance);
     reference_capture(reference_make_unmount(dev_addr, instance, time_us_32()));
 }
 

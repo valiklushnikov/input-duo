@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "callback_queue.hpp"
+#include "host_control_state.hpp"
 #include "source_adapter.hpp"
 #include "test_support.hpp"
 
@@ -479,17 +480,29 @@ TEST_CASE(the_post_mount_experiment_is_scoped_to_the_aula_keyboard) {
         ReferenceSourceAdapter::kDescriptorQuietUs, request));
 }
 
-TEST_CASE(a_late_aula_descriptor_reclassifies_the_existing_keyboard) {
+TEST_CASE(a_late_aula_descriptor_releases_boot_state_before_changing_layout) {
     ReferenceSourceAdapter adapter;
     adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0u);
     const Taken boot = take(adapter);
     CHECK(boot.ok);
     CHECK_FALSE(boot.identity.keyboard_layout.report_id);
 
+    // A key may still be held when the quiet-period read completes. The
+    // adapter need not understand held state; Detached is the pipeline's
+    // existing exact instruction to release it before the new layout arrives.
+    adapter.consume(report(2, 0, {0, 0, 0x04, 0, 0, 0, 0, 0}), 1u);
+    CHECK(take(adapter).ok);
+
     const auto descriptor_bytes = aula_keyboard_report();
     adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09,
                           descriptor_bytes),
                     ReferenceSourceAdapter::kDescriptorQuietUs + 100u);
+    const Taken released = take(adapter);
+    CHECK(released.ok);
+    CHECK(released.event.kind == SourceEventKind::Detached);
+    CHECK_EQ(released.event.source_id,
+             adapter.logical_port(DeviceKind::Keyboard));
+
     const Taken upgraded = take(adapter);
     CHECK(upgraded.ok);
     CHECK(upgraded.event.kind == SourceEventKind::Ready);
@@ -501,6 +514,63 @@ TEST_CASE(a_late_aula_descriptor_reclassifies_the_existing_keyboard) {
     CHECK_EQ(protocol.dev_addr, 2u);
     CHECK_EQ(protocol.instance, 0u);
     CHECK_EQ(protocol.protocol, ReferenceSourceAdapter::kHidProtocolReport);
+}
+
+TEST_CASE(unmount_removes_a_queued_late_protocol_change) {
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0u);
+    CHECK(take(adapter).ok);
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09,
+                          aula_keyboard_report()),
+                    ReferenceSourceAdapter::kDescriptorQuietUs);
+    CHECK(take(adapter).ok);
+    CHECK(take(adapter).ok);
+
+    adapter.consume(reference_make_unmount(2, 0, 0u), 0u);
+    CHECK(take(adapter).ok);
+    ReferenceSourceAdapter::ProtocolRequest request{};
+    CHECK_FALSE(adapter.take_protocol_request(request));
+}
+
+TEST_CASE(a_held_protocol_change_is_dropped_when_its_interface_unmounts) {
+    duo_input::u1::reference::ProtocolRequestHold held;
+    ReferenceSourceAdapter::ProtocolRequest request{2, 0,
+        ReferenceSourceAdapter::kHidProtocolReport};
+    CHECK(held.hold(request));
+    CHECK(held.action(false) ==
+          duo_input::u1::reference::ProtocolRequestHold::Action::Dropped);
+    CHECK_FALSE(held.active());
+}
+
+TEST_CASE(a_canceled_descriptor_transfer_does_not_block_a_replug) {
+    duo_input::u1::reference::DescriptorTransferState transfer;
+    CHECK(transfer.start(2, 0));
+    CHECK(transfer.active());
+    CHECK_FALSE(transfer.abandon(2, 1));
+    CHECK(transfer.abandon(2, 0));
+    CHECK_FALSE(transfer.active());
+
+    CHECK(transfer.start(3, 0));
+    const auto stale = transfer.complete(2, true, 77u, true, 256u);
+    CHECK(stale == duo_input::u1::reference::DescriptorTransferState::Completion::Ignored);
+    CHECK(transfer.active());
+    const auto current = transfer.complete(3, true, 77u, true, 256u);
+    CHECK(current == duo_input::u1::reference::DescriptorTransferState::Completion::Success);
+    CHECK_FALSE(transfer.active());
+}
+
+TEST_CASE(descriptor_completion_rejects_failure_short_lifetime_and_overflow) {
+    using State = duo_input::u1::reference::DescriptorTransferState;
+    State transfer;
+    CHECK(transfer.start(2, 0));
+    CHECK(transfer.complete(2, false, 0u, true, 256u) ==
+          State::Completion::Failure);
+    CHECK(transfer.start(2, 0));
+    CHECK(transfer.complete(2, true, 77u, false, 256u) ==
+          State::Completion::Failure);
+    CHECK(transfer.start(2, 0));
+    CHECK(transfer.complete(2, true, 257u, true, 256u) ==
+          State::Completion::Failure);
 }
 
 TEST_CASE(an_ignored_interface_asks_for_no_protocol_change) {

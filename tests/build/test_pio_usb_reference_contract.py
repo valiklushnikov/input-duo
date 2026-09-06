@@ -540,14 +540,45 @@ def test_post_mount_descriptor_retry_uses_the_pinned_async_api_safely():
         encoding="utf-8"
     )
 
+    compact = re.sub(r"\s+", " ", source)
+    exact_call = re.compile(
+        r"tuh_descriptor_get_hid_report\( "
+        r"descriptor_request\.dev_addr, info\.desc\.bInterfaceNumber, "
+        r"HID_DESC_TYPE_REPORT, 0, g_post_mount_descriptor\.data\(\), "
+        r"descriptor_request\.length, post_mount_descriptor_complete, 0\)"
+    )
     assert "tuh_hid_itf_get_info" in source
-    assert ".desc.bInterfaceNumber" in source, (
+    assert exact_call.search(compact), (
         "tuh_descriptor_get_hid_report takes bInterfaceNumber, not HID instance"
     )
-    assert "tuh_descriptor_get_hid_report" in source
-    assert "xfer->actual_len" in source, (
+    assert re.search(
+        r"reference_make_mount\([^;]+static_cast<std::uint16_t>\(xfer->actual_len\)",
+        compact,
+    ), (
         "an async completion must classify only the bytes actually transferred"
     )
     assert "static std::array<std::uint8_t" in source, (
         "the async descriptor buffer must outlive the initiating stack frame"
     )
+
+
+def test_stale_control_work_cannot_hide_an_unmount_forever():
+    source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(
+        encoding="utf-8"
+    )
+    compact = re.sub(r"\s+", " ", source)
+
+    assert re.search(
+        r"protocol_request_held\.action\(tuh_hid_mounted\(\s*"
+        r"protocol_request\.dev_addr, protocol_request\.instance\)\)",
+        compact,
+    )
+    assert "g_descriptor_read.abandon_if_unmounted(" in source
+    callbacks = (ROOT / "firmware" / "u1_reference" / "host_callbacks.cpp").read_text(
+        encoding="utf-8"
+    )
+    umount = callbacks[
+        callbacks.index("void tuh_hid_umount_cb"):
+        callbacks.index("void tuh_hid_report_received_cb")
+    ]
+    assert "reference_descriptor_unmounted(dev_addr, instance)" in umount

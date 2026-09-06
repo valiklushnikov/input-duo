@@ -131,6 +131,8 @@ private:
 
     void request_protocol(std::uint8_t dev_addr, std::uint8_t instance,
                           std::uint8_t protocol);
+    void cancel_protocol_requests(std::uint8_t dev_addr,
+                                  std::uint8_t instance);
     void on_mount(const ReferenceCallbackRecord& record, std::uint32_t now_us);
     void on_unmount(const ReferenceCallbackRecord& record);
     void on_report(const ReferenceCallbackRecord& record, std::uint32_t now_us);

@@ -96,6 +96,24 @@ void ReferenceSourceAdapter::request_protocol(std::uint8_t dev_addr,
     ++protocol_request_count_;
 }
 
+void ReferenceSourceAdapter::cancel_protocol_requests(std::uint8_t dev_addr,
+                                                      std::uint8_t instance) {
+    ProtocolRequest kept[kInterfaceCapacity]{};
+    std::uint8_t kept_count = 0;
+    while (protocol_request_count_ != 0) {
+        ProtocolRequest request{};
+        take_protocol_request(request);
+        if (request.dev_addr != dev_addr || request.instance != instance) {
+            kept[kept_count++] = request;
+        }
+    }
+    protocol_request_head_ = 0;
+    protocol_request_count_ = kept_count;
+    for (std::uint8_t index = 0; index < kept_count; ++index) {
+        protocol_requests_[index] = kept[index];
+    }
+}
+
 void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
                                       std::uint32_t now_us) {
     SourceIdentity identity{};
@@ -146,8 +164,10 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
     // report protocol is requested.
     if (entry->role == Role::Keyboard && keyboard_owned_ &&
         identity.kind == DeviceKind::Keyboard && wants_report_protocol) {
+        const SourceIdentity boot_identity = keyboard_identity_;
         keyboard_identity_ = identity;
         request_protocol(record.dev_addr, record.instance, kHidProtocolReport);
+        push(SourceEventKind::Detached, kKeyboardPort, boot_identity);
         push(SourceEventKind::Ready, kKeyboardPort, identity);
         return;
     }
@@ -195,6 +215,7 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
 }
 
 void ReferenceSourceAdapter::on_unmount(const ReferenceCallbackRecord& record) {
+    cancel_protocol_requests(record.dev_addr, record.instance);
     if (descriptor_request_.active &&
         descriptor_request_.request.dev_addr == record.dev_addr &&
         descriptor_request_.request.instance == record.instance) {

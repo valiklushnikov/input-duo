@@ -38,6 +38,7 @@ extern "C" void reference_drain_one_callback();
 #include "callback_queue.hpp"
 #include "config_profiles.hpp"
 #include "core1_runtime.hpp"
+#include "host_control_state.hpp"
 #include "input/pipeline.hpp"
 #include "output_runtime.hpp"
 #include "source_adapter.hpp"
@@ -101,29 +102,29 @@ ReferenceSourceAdapter g_adapter;
 static std::array<std::uint8_t, kReferenceDescriptorCapacity>
     g_post_mount_descriptor{};
 
-struct ActiveDescriptorRead {
-    bool active = false;
-    std::uint8_t dev_addr = 0;
-    std::uint8_t instance = 0;
-};
-
-ActiveDescriptorRead g_descriptor_read;
+duo_input::u1::reference::DescriptorTransferState g_descriptor_read;
 
 void post_mount_descriptor_complete(tuh_xfer_t* xfer) {
-    const ActiveDescriptorRead completed = g_descriptor_read;
-    g_descriptor_read = ActiveDescriptorRead{};
-    if (!completed.active || xfer == nullptr ||
-        xfer->daddr != completed.dev_addr) {
+    if (xfer == nullptr || !g_descriptor_read.active()) {
         return;
     }
 
-    if (xfer->result != XFER_RESULT_SUCCESS || xfer->actual_len == 0 ||
-        xfer->actual_len > g_post_mount_descriptor.size() ||
-        !tuh_hid_mounted(completed.dev_addr, completed.instance)) {
+    const std::uint8_t dev_addr = g_descriptor_read.dev_addr();
+    const std::uint8_t instance = g_descriptor_read.instance();
+    const auto completion = g_descriptor_read.complete(
+        xfer->daddr, xfer->result == XFER_RESULT_SUCCESS, xfer->actual_len,
+        tuh_hid_mounted(dev_addr, instance), g_post_mount_descriptor.size());
+    if (completion == duo_input::u1::reference::DescriptorTransferState::
+                          Completion::Ignored) {
+        return;
+    }
+
+    if (completion == duo_input::u1::reference::DescriptorTransferState::
+                          Completion::Failure) {
         ReferenceTraceEntry failed{};
         failed.kind = ReferenceCallbackKind::DescriptorFailure;
-        failed.dev_addr = completed.dev_addr;
-        failed.instance = completed.instance;
+        failed.dev_addr = dev_addr;
+        failed.instance = instance;
         failed.length = static_cast<std::uint16_t>(xfer->actual_len);
         reference_trace_push(failed);
         return;
@@ -131,11 +132,11 @@ void post_mount_descriptor_complete(tuh_xfer_t* xfer) {
 
     std::uint16_t vid = 0;
     std::uint16_t pid = 0;
-    tuh_vid_pid_get(completed.dev_addr, &vid, &pid);
+    tuh_vid_pid_get(dev_addr, &vid, &pid);
     const std::uint8_t protocol =
-        tuh_hid_interface_protocol(completed.dev_addr, completed.instance);
+        tuh_hid_interface_protocol(dev_addr, instance);
     reference_capture(reference_make_mount(
-        completed.dev_addr, completed.instance, protocol, vid, pid,
+        dev_addr, instance, protocol, vid, pid,
         g_post_mount_descriptor.data(),
         static_cast<std::uint16_t>(xfer->actual_len), time_us_32()));
 }
@@ -152,6 +153,11 @@ std::uint32_t now_ms() {
 /// drained before it is fed, so nothing it produced is ever dropped for want
 /// of somewhere to put it.
 void service_input(std::uint32_t millis) {
+    if (g_descriptor_read.active()) {
+        g_descriptor_read.abandon_if_unmounted(tuh_hid_mounted(
+            g_descriptor_read.dev_addr(), g_descriptor_read.instance()));
+    }
+
     duo_input::u1::input::SourceEvent event{};
     duo_input::u1::input::SourceIdentity identity{};
     if (g_adapter.take_event(event, identity)) {
@@ -175,22 +181,33 @@ void service_input(std::uint32_t millis) {
     // next pass rather than dropped, because dropping it leaves the interface
     // in boot protocol while the layout describes report protocol - which is
     // silently no input at all.
-    static ReferenceSourceAdapter::ProtocolRequest protocol_request{};
-    static bool protocol_request_held = false;
-    if (!protocol_request_held) {
-        protocol_request_held = g_adapter.take_protocol_request(protocol_request);
-    }
-    if (protocol_request_held) {
-        if (tuh_hid_set_protocol(protocol_request.dev_addr,
-                                 protocol_request.instance,
-                                 protocol_request.protocol)) {
-            protocol_request_held = false;
+    static duo_input::u1::reference::ProtocolRequestHold protocol_request_held;
+    if (!protocol_request_held.active()) {
+        ReferenceSourceAdapter::ProtocolRequest next{};
+        if (g_adapter.take_protocol_request(next)) {
+            protocol_request_held.hold(next);
         }
-        return;
+    }
+    if (protocol_request_held.active()) {
+        const ReferenceSourceAdapter::ProtocolRequest protocol_request =
+            protocol_request_held.request();
+        const auto action = protocol_request_held.action(tuh_hid_mounted(
+            protocol_request.dev_addr, protocol_request.instance));
+        if (action == duo_input::u1::reference::ProtocolRequestHold::Action::Offer) {
+            if (tuh_hid_set_protocol(protocol_request.dev_addr,
+                                     protocol_request.instance,
+                                     protocol_request.protocol)) {
+                protocol_request_held.accepted();
+            }
+            return;
+        }
+        // Dropped means the interface vanished. Do not return: its queued
+        // UMOUNT must be consumed below rather than hidden forever by stale
+        // control work.
     }
 
     ReferenceSourceAdapter::DescriptorRequest descriptor_request{};
-    if (!g_descriptor_read.active &&
+    if (!g_descriptor_read.active() &&
         g_adapter.take_descriptor_request(time_us_32(), descriptor_request)) {
         tuh_itf_info_t info{};
         if (!tuh_hid_mounted(descriptor_request.dev_addr,
@@ -200,8 +217,8 @@ void service_input(std::uint32_t millis) {
             return;
         }
 
-        g_descriptor_read = ActiveDescriptorRead{
-            true, descriptor_request.dev_addr, descriptor_request.instance};
+        g_descriptor_read.start(descriptor_request.dev_addr,
+                                descriptor_request.instance);
         // The public descriptor API takes bInterfaceNumber. The callback gives
         // us TinyUSB's HID instance/index; they are not interchangeable (the
         // Aula logs interfaces 3/4 while their instances are 0/1).
@@ -218,7 +235,7 @@ void service_input(std::uint32_t millis) {
             started.length = descriptor_request.length;
             reference_trace_push(started);
         } else {
-            g_descriptor_read = ActiveDescriptorRead{};
+            g_descriptor_read.refused();
         }
         return;
     }
@@ -234,6 +251,11 @@ void service_input(std::uint32_t millis) {
 }
 
 }  // namespace
+
+extern "C" void reference_descriptor_unmounted(std::uint8_t dev_addr,
+                                                std::uint8_t instance) {
+    g_descriptor_read.abandon(dev_addr, instance);
+}
 
 // core1: the USB host, and everything that reads what it produced
 extern "C" void core1_main() {
