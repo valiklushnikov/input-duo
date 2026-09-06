@@ -1504,3 +1504,134 @@ eight bytes; that localises the defect to receive/assembly/lifetime handling.
 The analyser trace, not CDC, must establish the rest of the 77-byte wire
 document. Preserve the address 1 successful multi-packet descriptor fetch in
 the same trace as the working comparison case.
+
+## The one-packet read returns nothing at all: `actual_len = 0` (2026-09-06)
+
+The next planned software experiment was run: request the Aula's HID Report
+Descriptor once after mount with a requested length of exactly one EP0 packet,
+64 bytes, and compare what comes back against the first 64 bytes of the
+checked-in golden vector. The brief named two outcomes it expected and one it
+did not. The one it did not is what happened.
+
+### The image, and the protocol that put it there
+
+| item | measured value |
+| --- | --- |
+| commit | `9dca052` |
+| UF2 | `build/pico-pio-usb-reference-release/firmware/u1_reference/duo_u1_reference.uf2` |
+| UF2 size | 232448 bytes |
+| UF2 SHA-256 | `9A4A4156B89A8E86DA0FDC0622D65C578436C35FE6A761693F070CDDF3BD5BF2` |
+
+`RPI-RP2` was verified to be exactly one volume before the copy, the board was
+put into BOOTSEL by hand, and the required U1 power cycle followed the flash.
+The image on the board before this one was `6b561a1`, 230912 bytes, SHA-256
+`fe710645c3cb5c970661840b5a61c44673e0f4faf39a4befa379e18ec4437dcf`, so the
+firmware genuinely changed.
+
+### Measured, twice
+
+Two independent boots, each with its own power cycle, produced byte-identical
+CDC output - 238 bytes both times. The serial port dropped between them, so
+the second run is a real re-enumeration and not a retained buffer:
+
+```
+MOUNT a=1 i=0 len=81 05 01 09 02 A1 01 85 03
+MOUNT a=1 i=1 len=115 05 8C 09 01 A1 01 85 B1
+MOUNT a=1 i=2 len=164 05 01 09 06 A1 01 85 01
+MOUNT a=2 i=3 len=0
+MOUNT a=2 i=4 len=0
+DESC64_START
+DESC64_MISMATCH actual=0 first=0 prefix=
+```
+
+Neither the keyboard nor the mouse was touched during either capture.
+
+### What that says, exactly
+
+The control transfer was accepted by the stack, ran, and **completed
+successfully with zero bytes**. `DESC64_MISMATCH` rather than `DESC64_FAIL` is
+what carries that: the failure branch is taken whenever
+`xfer->result != XFER_RESULT_SUCCESS`, the interface has gone away, or
+`actual_len` exceeds the buffer. None of those happened. It did not stall, it
+did not time out, and it did not hang.
+
+The instrument was checked before the number was believed:
+
+- The pinned TinyUSB declares
+  `tuh_descriptor_get_hid_report(daddr, itf_num, desc_type, index, buffer, len,
+  complete_cb, user_data)` (`.deps/tinyusb/src/host/usbh.h:255`), and
+  `wLength = len` (`usbh.c:1094`). The argument order in `main.cpp` matches, so
+  `wLength = 64` really went on the wire; a mis-ordered argument sending 0 is
+  ruled out.
+- `actual_len` is not a field the application left unset. It is zeroed at the
+  start of every control transfer (`usbh.c:641`) and assigned from the HCD's
+  `xferred_bytes` at the DATA stage (`usbh.c:750`), then copied into the
+  application's `tuh_xfer_t` (`usbh.c:708`). A zero therefore means the PIO
+  host controller reported zero bytes transferred for a DATA stage it
+  nonetheless treated as successful.
+
+### Neither hypothesis survived
+
+| requested `wLength` | reported `actual_len` | buffer |
+| --- | --- | --- |
+| 77 | 77 | began with golden bytes 64..71 (`81 00 05 FF 09 03 75 08`) |
+| 64 | **0** | nothing reported |
+
+The brief's first branch - a 64-byte read matching golden bytes 0..63, which
+would have confirmed a defect at the 64+13 assembly boundary - did not occur.
+Nor did its second branch, in which the device begins its answer with the tail
+even for a single packet. This is the third case the brief anticipated only as
+"record it separately and do not mask recovery".
+
+A useful control travelled in the same capture: the device at address 1
+returned three multi-packet Report Descriptors on the same bus in the same
+session (81, 115 and 164 bytes, each beginning with a plausible Usage Page
+item). Multi-packet control IN is therefore not broken in general on this
+hardware.
+
+Two further observations belong to the record rather than to the conclusion:
+
+- `MOUNT a=2 i=3 len=0` and `i=4 len=0`. On these boots TinyUSB obtained no
+  Report Descriptor for either Aula interface during enumeration at all.
+- The thousands of idle `REPORT a=2 i=3 len=8 00 00 ...` records seen in the
+  previous session did not appear. The keyboard was untouched, so silence is
+  not by itself surprising, but the difference from the earlier session is
+  noted rather than explained.
+
+### What is not established
+
+A coherent story exists - a control IN whose length is an exact multiple of the
+64-byte maximum packet size ends without a short packet, and the PIO host
+controller's length accounting mishandles that, which would also explain a
+64+13 transfer whose second packet lands at offset 0. It remains a hypothesis.
+Nothing here distinguishes a device-side response defect from a host-side
+receive, assembly or length-accounting defect. Do not name a cause until the
+wire has been captured, or until the cheaper discriminator below has been run.
+
+### The cheaper discriminator, before the analyser
+
+This image reported only `actual_len`. It never reported what was in the
+buffer when `actual_len` was zero, and it did not poison the buffer before the
+request, so "the stack wrote nothing" and "the stack wrote bytes but counted
+none" are currently indistinguishable from the log. They are not
+indistinguishable in principle, and separating them needs no analyser:
+
+1. Fill the request buffer with a byte that cannot occur in a correct answer
+   (`0xA5`) immediately before every request.
+2. Print the buffer's leading bytes on **every** outcome, including a zero
+   `actual_len` and including a match, rather than only on a mismatch.
+
+If the buffer then shows golden bytes 0..63 under `actual_len = 0`, the data
+arrived and only the count was lost, which localises the defect to length
+accounting and removes the device from suspicion. If it shows `A5 A5 A5 ...`,
+nothing was received and the question moves to the wire. Run that before
+buying an analyser.
+
+### Updated `What to capture`
+
+The earlier trigger stands: `SETUP 80 06 00 22 00 00 4D 00` to address 2,
+endpoint 0. Add the 64-byte form, `SETUP 80 06 00 22 00 00 40 00`, and for it
+record whether the device returns a DATA1 packet at all, whether that packet is
+64 bytes with no short packet following, and what handshake the host sends.
+Keep address 1's successful multi-packet fetches in the same trace as the
+working comparison case.
