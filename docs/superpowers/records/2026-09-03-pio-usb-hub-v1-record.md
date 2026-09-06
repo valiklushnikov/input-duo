@@ -983,8 +983,11 @@ buttons, 59 keyboard characters, 0 unmounts, 0 errors.
 Hot replug without any power cycle: six unmount lines (two complete
 three-interface detach events) and six matching mount lines, 1179 mouse reports
 afterwards at a normal rate, keyboard typing throughout. Both replugs were of
-the receiver at address 1; a replug of the address 2 receiver was not captured
-and that row is still unconfirmed.
+the receiver at address 1. The address 2 receiver was not replugged at all - it
+sits where the dongle is physically hard to reach - so that row is untested
+rather than failed. The mechanism repaired here is the hub's own status poll,
+which is not specific to either downstream device, so the result is expected to
+generalise; it has simply not been measured.
 
 ### The five fixes
 
@@ -1014,7 +1017,7 @@ Plus `CFG_TUH_HID 4 -> 8` in the reference `tusb_config.h`.
 | mouse movement and buttons | pass |
 | mouse wheel | not observable in boot protocol |
 | simultaneous use | pass |
-| re-enumeration after replug | pass for the address 1 receiver; address 2 unconfirmed |
+| re-enumeration after replug | pass for the address 1 receiver; address 2 untested (dongle not reachable) |
 
 Still outstanding: the address 2 replug row; whether fix 5 is necessary on its
 own; why the device disagrees about the data toggle at all; the wired Aula F75
