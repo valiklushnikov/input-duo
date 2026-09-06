@@ -159,6 +159,7 @@ void reference_queue_reset() {
         record = ReferenceCallbackRecord{};
     }
     reference_trace_reset();
+    reference_descriptor_diagnostic_reset();
 }
 
 // --------------------------------------------------------------------------
@@ -233,5 +234,44 @@ void reference_trace_reset() {
     g_trace_overflows.store(0, std::memory_order_relaxed);
     for (auto& entry : g_trace) {
         entry = ReferenceTraceEntry{};
+    }
+}
+
+namespace {
+
+constexpr std::size_t kDescriptorDiagnosticCapacity = 4;
+ReferenceDescriptorDiagnostic g_descriptor_diagnostics[kDescriptorDiagnosticCapacity];
+std::atomic<std::uint32_t> g_descriptor_diagnostic_head{0};
+std::atomic<std::uint32_t> g_descriptor_diagnostic_tail{0};
+
+}  // namespace
+
+bool reference_descriptor_diagnostic_push(const ReferenceDescriptorDiagnostic& entry) {
+    const std::uint32_t head = g_descriptor_diagnostic_head.load(std::memory_order_relaxed);
+    const std::uint32_t tail = g_descriptor_diagnostic_tail.load(std::memory_order_acquire);
+    if (head - tail >= kDescriptorDiagnosticCapacity) {
+        return false;
+    }
+    g_descriptor_diagnostics[head % kDescriptorDiagnosticCapacity] = entry;
+    g_descriptor_diagnostic_head.store(head + 1, std::memory_order_release);
+    return true;
+}
+
+bool reference_descriptor_diagnostic_take(ReferenceDescriptorDiagnostic& entry) {
+    const std::uint32_t tail = g_descriptor_diagnostic_tail.load(std::memory_order_relaxed);
+    const std::uint32_t head = g_descriptor_diagnostic_head.load(std::memory_order_acquire);
+    if (head == tail) {
+        return false;
+    }
+    entry = g_descriptor_diagnostics[tail % kDescriptorDiagnosticCapacity];
+    g_descriptor_diagnostic_tail.store(tail + 1, std::memory_order_release);
+    return true;
+}
+
+void reference_descriptor_diagnostic_reset() {
+    g_descriptor_diagnostic_head.store(0, std::memory_order_relaxed);
+    g_descriptor_diagnostic_tail.store(0, std::memory_order_relaxed);
+    for (auto& entry : g_descriptor_diagnostics) {
+        entry = ReferenceDescriptorDiagnostic{};
     }
 }

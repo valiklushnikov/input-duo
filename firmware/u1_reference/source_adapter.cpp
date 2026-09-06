@@ -16,7 +16,7 @@ using input::SourceIdentity;
 
 constexpr std::uint16_t kAulaVendorId = 0x3554;
 constexpr std::uint16_t kAulaProductId = 0xFA09;
-constexpr std::uint16_t kAulaKeyboardDescriptorLength = 77;
+constexpr std::uint16_t kAulaKeyboardDescriptorLength = 64;
 
 bool time_reached(std::uint32_t now, std::uint32_t deadline) {
     return static_cast<std::int32_t>(now - deadline) >= 0;

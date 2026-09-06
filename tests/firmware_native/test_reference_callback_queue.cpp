@@ -334,6 +334,30 @@ TEST_CASE(a_dropped_trace_line_never_costs_an_input_report) {
     CHECK_EQ(taken.report[0], 0x42u);
 }
 
+TEST_CASE(desc64_diagnostics_bypass_a_full_continuous_report_trace) {
+    reference_queue_reset();
+    for (std::size_t index = 0; index < kReferenceTraceCapacity; ++index) {
+        ReferenceTraceEntry report{};
+        report.kind = ReferenceCallbackKind::Report;
+        CHECK(reference_trace_push(report));
+    }
+
+    ReferenceDescriptorDiagnostic diagnostic{};
+    diagnostic.kind = ReferenceDescriptorDiagnosticKind::Mismatch;
+    diagnostic.actual_len = 63u;
+    diagnostic.first_difference = 63u;
+    diagnostic.prefix[0] = 0x05u;
+    diagnostic.prefix_size = 1u;
+    CHECK(reference_descriptor_diagnostic_push(diagnostic));
+
+    ReferenceDescriptorDiagnostic taken{};
+    CHECK(reference_descriptor_diagnostic_take(taken));
+    CHECK(taken.kind == ReferenceDescriptorDiagnosticKind::Mismatch);
+    CHECK_EQ(taken.actual_len, 63u);
+    CHECK_EQ(taken.first_difference, 63u);
+    CHECK_EQ(taken.prefix[0], 0x05u);
+}
+
 TEST_CASE(the_trace_capacity_is_a_power_of_two) {
     CHECK(kReferenceTraceCapacity > 0);
     CHECK_EQ(kReferenceTraceCapacity & (kReferenceTraceCapacity - 1),

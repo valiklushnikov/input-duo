@@ -164,4 +164,43 @@ void reference_print_one_trace(void) {
     tud_cdc_write_flush();
 }
 
+void reference_print_one_descriptor_diagnostic(void) {
+    ReferenceDescriptorDiagnostic entry{};
+    if (!reference_descriptor_diagnostic_take(entry)) {
+        return;
+    }
+
+    char line[96];
+    int written = 0;
+    switch (entry.kind) {
+        case ReferenceDescriptorDiagnosticKind::Start:
+            written = snprintf(line, sizeof(line), "DESC64_START");
+            break;
+        case ReferenceDescriptorDiagnosticKind::Match:
+            written = snprintf(line, sizeof(line), "DESC64_MATCH actual=%u",
+                               entry.actual_len);
+            break;
+        case ReferenceDescriptorDiagnosticKind::Mismatch:
+            written = snprintf(line, sizeof(line),
+                               "DESC64_MISMATCH actual=%u first=%u prefix=",
+                               entry.actual_len, entry.first_difference);
+            for (uint8_t index = 0; index < entry.prefix_size && written > 0 &&
+                                    written < static_cast<int>(sizeof(line)) - 3;
+                 ++index) {
+                written += snprintf(line + written, sizeof(line) - written, "%02X",
+                                    entry.prefix[index]);
+            }
+            break;
+        case ReferenceDescriptorDiagnosticKind::Failure:
+            written = snprintf(line, sizeof(line), "DESC64_FAIL");
+            break;
+    }
+    if (written > 0 && written < static_cast<int>(sizeof(line)) - 2) {
+        line[written++] = '\r';
+        line[written++] = '\n';
+    }
+    tud_cdc_write(line, static_cast<uint32_t>(written));
+    tud_cdc_write_flush();
+}
+
 }  // extern "C"

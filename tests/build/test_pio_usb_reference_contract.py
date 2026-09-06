@@ -552,14 +552,27 @@ def test_post_mount_descriptor_retry_uses_the_pinned_async_api_safely():
         "tuh_descriptor_get_hid_report takes bInterfaceNumber, not HID instance"
     )
     assert re.search(
-        r"reference_make_mount\([^;]+static_cast<std::uint16_t>\(xfer->actual_len\)",
+        r"descriptor_diagnostic_complete\([^;]+xfer->actual_len",
         compact,
-    ), (
-        "an async completion must classify only the bytes actually transferred"
-    )
+    ), "an async completion must compare only the bytes actually transferred"
     assert "static std::array<std::uint8_t" in source, (
         "the async descriptor buffer must outlive the initiating stack frame"
     )
+
+
+def test_desc64_measurement_requests_and_compares_one_packet_only():
+    source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(
+        encoding="utf-8"
+    )
+    adapter = (ROOT / "firmware" / "u1_reference" / "source_adapter.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert "kAulaKeyboardDescriptorLength = 64" in adapter
+    assert "descriptor_diagnostic_complete" in source, (
+        "the 64-byte experiment must compare its actual completion bytes"
+    )
+    assert "xfer->actual_len" in source
 
 
 def test_stale_control_work_cannot_hide_an_unmount_forever():

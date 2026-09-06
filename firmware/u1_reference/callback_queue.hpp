@@ -135,3 +135,26 @@ std::uint32_t reference_trace_overflows();
 
 //: Tests only.
 void reference_trace_reset();
+
+enum class ReferenceDescriptorDiagnosticKind : std::uint8_t {
+    Start,
+    Match,
+    Mismatch,
+    Failure,
+};
+
+struct ReferenceDescriptorDiagnostic {
+    ReferenceDescriptorDiagnosticKind kind{};
+    std::uint8_t dev_addr{};
+    std::uint8_t instance{};
+    std::uint16_t actual_len{};
+    std::uint16_t first_difference{};
+    std::uint8_t prefix_size{};
+    std::array<std::uint8_t, kReferenceTracePrefix> prefix{};
+};
+
+// Descriptor measurements bypass the ordinary report trace queue. They remain
+// bounded and non-blocking, but continuous report traffic cannot hide them.
+bool reference_descriptor_diagnostic_push(const ReferenceDescriptorDiagnostic& entry);
+bool reference_descriptor_diagnostic_take(ReferenceDescriptorDiagnostic& entry);
+void reference_descriptor_diagnostic_reset();

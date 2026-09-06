@@ -15,7 +15,9 @@
 // descriptor path is exercised with a real report descriptor, and the files are
 // used only where the point is that a descriptor cannot be read at all.
 
+#include <algorithm>
 #include <cstdint>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -97,6 +99,23 @@ std::vector<std::uint8_t> aula_keyboard_report() {
         0x75, 0x08, 0x95, 0x05, 0x81, 0x00, 0x05, 0xFF, 0x09, 0x03,
         0x75, 0x08, 0x95, 0x01, 0x81, 0x02, 0xC0,
     };
+}
+
+std::vector<std::uint8_t> aula_keyboard_descriptor_vector() {
+    std::ifstream stream(std::string{DUO_TEST_VECTOR_DIR} +
+                         "/usb_descriptors/aula_f75_keyboard_report.hex");
+    std::string hex{std::istreambuf_iterator<char>{stream},
+                    std::istreambuf_iterator<char>{}};
+    hex.erase(std::remove_if(hex.begin(), hex.end(), [](char value) {
+                  return !std::isxdigit(static_cast<unsigned char>(value));
+              }),
+              hex.end());
+    std::vector<std::uint8_t> bytes;
+    for (std::size_t index = 0; index < hex.size(); index += 2) {
+        bytes.push_back(static_cast<std::uint8_t>(
+            std::stoul(hex.substr(index, 2), nullptr, 16)));
+    }
+    return bytes;
 }
 
 ReferenceCallbackRecord mount(std::uint8_t dev_addr,
@@ -426,7 +445,7 @@ TEST_CASE(the_aula_keyboard_gets_one_delayed_post_mount_descriptor_request) {
     CHECK(adapter.take_descriptor_request(1000100u, request));
     CHECK_EQ(request.dev_addr, 2u);
     CHECK_EQ(request.instance, 0u);
-    CHECK_EQ(request.length, 77u);
+    CHECK_EQ(request.length, 64u);
 
     adapter.descriptor_request_accepted();
     CHECK_FALSE(adapter.take_descriptor_request(
@@ -557,6 +576,14 @@ TEST_CASE(a_canceled_descriptor_transfer_does_not_block_a_replug) {
     const auto current = transfer.complete(3, true, 77u, true, 256u);
     CHECK(current == duo_input::u1::reference::DescriptorTransferState::Completion::Success);
     CHECK_FALSE(transfer.active());
+
+    CHECK(transfer.start(2, 0));
+    const std::uint32_t old_token = transfer.lifetime_token();
+    CHECK(transfer.abandon(2, 0));
+    CHECK(transfer.start(2, 0));
+    CHECK(transfer.complete(2, true, 64u, true, 256u, old_token) ==
+          duo_input::u1::reference::DescriptorTransferState::Completion::Ignored);
+    CHECK(transfer.active());
 }
 
 TEST_CASE(descriptor_completion_rejects_failure_short_lifetime_and_overflow) {
@@ -571,6 +598,34 @@ TEST_CASE(descriptor_completion_rejects_failure_short_lifetime_and_overflow) {
     CHECK(transfer.start(2, 0));
     CHECK(transfer.complete(2, true, 257u, true, 256u) ==
           State::Completion::Failure);
+}
+
+TEST_CASE(desc64_comparison_uses_actual_length_and_the_independent_golden_prefix) {
+    using Result = duo_input::u1::reference::DescriptorDiagnosticResult;
+    const auto golden = aula_keyboard_descriptor_vector();
+    CHECK_EQ(golden.size(), 77u);
+
+    const auto match = duo_input::u1::reference::descriptor_diagnostic_complete(
+        true, 64u, golden.data(), golden.size());
+    CHECK(match.kind == Result::Kind::Match);
+    CHECK_EQ(match.actual_len, 64u);
+
+    const auto short_completion =
+        duo_input::u1::reference::descriptor_diagnostic_complete(
+            true, 63u, golden.data(), golden.size());
+    CHECK(short_completion.kind == Result::Kind::Mismatch);
+    CHECK_EQ(short_completion.first_difference, 63u);
+
+    auto wrong = golden;
+    wrong[17] ^= 0x01u;
+    const auto mismatch = duo_input::u1::reference::descriptor_diagnostic_complete(
+        true, 64u, wrong.data(), wrong.size());
+    CHECK(mismatch.kind == Result::Kind::Mismatch);
+    CHECK_EQ(mismatch.first_difference, 17u);
+
+    const auto failed = duo_input::u1::reference::descriptor_diagnostic_complete(
+        false, 64u, golden.data(), golden.size());
+    CHECK(failed.kind == Result::Kind::Failure);
 }
 
 TEST_CASE(an_ignored_interface_asks_for_no_protocol_change) {

@@ -21,6 +21,7 @@
 // callback record from the host callbacks, and an output command from the
 // runtime. Neither core waits on the other.
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 
@@ -33,6 +34,7 @@
 #include "tusb.h"
 
 extern "C" void reference_print_one_trace();
+extern "C" void reference_print_one_descriptor_diagnostic();
 extern "C" void reference_drain_one_callback();
 
 #include "callback_queue.hpp"
@@ -113,32 +115,37 @@ void post_mount_descriptor_complete(tuh_xfer_t* xfer) {
     const std::uint8_t instance = g_descriptor_read.instance();
     const auto completion = g_descriptor_read.complete(
         xfer->daddr, xfer->result == XFER_RESULT_SUCCESS, xfer->actual_len,
-        tuh_hid_mounted(dev_addr, instance), g_post_mount_descriptor.size());
+        tuh_hid_mounted(dev_addr, instance), g_post_mount_descriptor.size(),
+        xfer->user_data);
     if (completion == duo_input::u1::reference::DescriptorTransferState::
                           Completion::Ignored) {
         return;
     }
 
+    ReferenceDescriptorDiagnostic diagnostic{};
+    diagnostic.dev_addr = dev_addr;
+    diagnostic.instance = instance;
+    diagnostic.actual_len = static_cast<std::uint16_t>(xfer->actual_len);
     if (completion == duo_input::u1::reference::DescriptorTransferState::
                           Completion::Failure) {
-        ReferenceTraceEntry failed{};
-        failed.kind = ReferenceCallbackKind::DescriptorFailure;
-        failed.dev_addr = dev_addr;
-        failed.instance = instance;
-        failed.length = static_cast<std::uint16_t>(xfer->actual_len);
-        reference_trace_push(failed);
+        diagnostic.kind = ReferenceDescriptorDiagnosticKind::Failure;
+        reference_descriptor_diagnostic_push(diagnostic);
         return;
     }
 
-    std::uint16_t vid = 0;
-    std::uint16_t pid = 0;
-    tuh_vid_pid_get(dev_addr, &vid, &pid);
-    const std::uint8_t protocol =
-        tuh_hid_interface_protocol(dev_addr, instance);
-    reference_capture(reference_make_mount(
-        dev_addr, instance, protocol, vid, pid,
-        g_post_mount_descriptor.data(),
-        static_cast<std::uint16_t>(xfer->actual_len), time_us_32()));
+    const auto result = duo_input::u1::reference::descriptor_diagnostic_complete(
+        xfer->result == XFER_RESULT_SUCCESS, xfer->actual_len,
+        g_post_mount_descriptor.data(), g_post_mount_descriptor.size());
+    diagnostic.first_difference = result.first_difference;
+    diagnostic.kind = result.kind == duo_input::u1::reference::
+                               DescriptorDiagnosticResult::Kind::Match
+                          ? ReferenceDescriptorDiagnosticKind::Match
+                          : ReferenceDescriptorDiagnosticKind::Mismatch;
+    diagnostic.prefix_size = static_cast<std::uint8_t>(
+        std::min<std::uint32_t>(xfer->actual_len, diagnostic.prefix.size()));
+    std::copy_n(g_post_mount_descriptor.begin(), diagnostic.prefix_size,
+                diagnostic.prefix.begin());
+    reference_descriptor_diagnostic_push(diagnostic);
 }
 
 std::uint32_t now_ms() {
@@ -225,15 +232,15 @@ void service_input(std::uint32_t millis) {
         const bool accepted = tuh_descriptor_get_hid_report(
             descriptor_request.dev_addr, info.desc.bInterfaceNumber,
             HID_DESC_TYPE_REPORT, 0, g_post_mount_descriptor.data(),
-            descriptor_request.length, post_mount_descriptor_complete, 0);
+            descriptor_request.length, post_mount_descriptor_complete,
+            g_descriptor_read.lifetime_token());
         if (accepted) {
             g_adapter.descriptor_request_accepted();
-            ReferenceTraceEntry started{};
-            started.kind = ReferenceCallbackKind::DescriptorStart;
+            ReferenceDescriptorDiagnostic started{};
+            started.kind = ReferenceDescriptorDiagnosticKind::Start;
             started.dev_addr = descriptor_request.dev_addr;
             started.instance = descriptor_request.instance;
-            started.length = descriptor_request.length;
-            reference_trace_push(started);
+            reference_descriptor_diagnostic_push(started);
         } else {
             g_descriptor_read.refused();
         }
@@ -299,6 +306,7 @@ int main() {
 
     while (true) {
         g_usb.task();
+        reference_print_one_descriptor_diagnostic();
         reference_print_one_trace();
 
         const std::uint32_t millis = now_ms();
