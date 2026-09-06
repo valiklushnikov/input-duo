@@ -1,6 +1,7 @@
 #include "callback_queue.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <atomic>
 #include <cstring>
 
@@ -284,4 +285,28 @@ void reference_descriptor_diagnostic_reset() {
     for (auto& entry : g_descriptor_diagnostics) {
         entry = ReferenceDescriptorDiagnostic{};
     }
+}
+
+bool reference_deliver_one_descriptor_diagnostic(IReferenceCdcWriter& writer) {
+    ReferenceDescriptorDiagnostic entry{};
+    if (!reference_descriptor_diagnostic_peek(entry)) return false;
+    char line[96];
+    int written = 0;
+    switch (entry.kind) {
+        case ReferenceDescriptorDiagnosticKind::Start: written = std::snprintf(line, sizeof(line), "DESC64_START\r\n"); break;
+        case ReferenceDescriptorDiagnosticKind::Match: written = std::snprintf(line, sizeof(line), "DESC64_MATCH actual=%u\r\n", entry.actual_len); break;
+        case ReferenceDescriptorDiagnosticKind::Mismatch:
+            written = std::snprintf(line, sizeof(line), "DESC64_MISMATCH actual=%u first=%u prefix=", entry.actual_len, entry.first_difference);
+            for (std::uint8_t i = 0; i < entry.prefix_size && written > 0 && written < static_cast<int>(sizeof(line)) - 4; ++i)
+                written += std::snprintf(line + written, sizeof(line) - written, "%02X", entry.prefix[i]);
+            if (written > 0 && written < static_cast<int>(sizeof(line)) - 2) { line[written++]='\r'; line[written++]='\n'; }
+            break;
+        case ReferenceDescriptorDiagnosticKind::Failure: written = std::snprintf(line, sizeof(line), "DESC64_FAIL\r\n"); break;
+    }
+    if (written <= 0 || writer.available() < static_cast<std::size_t>(written)) return true;
+    if (writer.write(line, static_cast<std::size_t>(written)) != static_cast<std::size_t>(written)) return true;
+    ReferenceDescriptorDiagnostic consumed{};
+    reference_descriptor_diagnostic_take(consumed);
+    writer.flush();
+    return true;
 }

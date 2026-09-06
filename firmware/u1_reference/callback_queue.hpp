@@ -159,3 +159,15 @@ bool reference_descriptor_diagnostic_push(const ReferenceDescriptorDiagnostic& e
 bool reference_descriptor_diagnostic_peek(ReferenceDescriptorDiagnostic& entry);
 bool reference_descriptor_diagnostic_take(ReferenceDescriptorDiagnostic& entry);
 void reference_descriptor_diagnostic_reset();
+
+class IReferenceCdcWriter {
+public:
+    virtual ~IReferenceCdcWriter() = default;
+    virtual std::size_t available() const = 0;
+    virtual std::size_t write(const char* data, std::size_t size) = 0;
+    virtual void flush() = 0;
+};
+
+// True while a descriptor diagnostic owns CDC, including when it could not be
+// completely queued this pass. The entry is removed only after a full write.
+bool reference_deliver_one_descriptor_diagnostic(IReferenceCdcWriter& writer);
