@@ -745,3 +745,113 @@ HID interfaces do not mount, because the report-descriptor fetch cannot complete
 while the device and host disagree about the data toggle. That single unresolved
 question — why a full-speed device behind this hub misses the host's ACK on a
 64-byte packet — is what a focused bug plan should start from.
+
+## Both receivers work: the toggle resync closes it (2026-09-06)
+
+Continuing with permission to modify the pinned dependencies, two further
+defects were found and the hardware now runs both wireless receivers at once.
+
+### Third defect: a failed Report Descriptor abandons a mountable interface
+
+`hid_host.c` fetches the HID Report Descriptor after `SET_IDLE`/`SET_PROTOCOL`.
+If that control transfer fails, `process_set_config` returns at its opening
+`TU_ASSERT` and the interface is never mounted, never reported, and
+`usbh_driver_set_config_complete` is never called.
+
+That descriptor is optional for a boot keyboard or mouse: the boot report layout
+is fixed by the specification and `SET_PROTOCOL` has already been sent. The same
+function already mounts without it when the descriptor is too large for
+`CFG_TUH_ENUMERATION_BUFSIZE`. The fix routes a failed fetch into that same
+path, for boot-protocol interfaces only:
+
+```c
+if (xfer->result != XFER_RESULT_SUCCESS) {
+  if (state == CONFIG_COMPLETE && p_hid->itf_protocol != HID_ITF_PROTOCOL_NONE) {
+    config_driver_mount_complete(daddr, idx, NULL, 0);
+  }
+  return;
+}
+```
+
+Measured effect: `3554:FA09` mounted for the first time
+(`HID Interface0, Protocol = Keyboard` / `Interface1, Protocol = Mouse`) and
+delivered one character. Then it went silent again.
+
+### Fourth defect: a toggle mismatch discards every report for ever
+
+The interrupt IN endpoint accepted exactly one report and then stopped: `ok`
+frozen at 11 while the mismatch counter climbed by ~1500/s. Host and device
+disagreed about the data toggle, and the mismatch branch discards the packet —
+so every report the device would ever send was thrown away.
+
+Discarding is right for a stale duplicate on a control transfer. It is wrong for
+an interrupt IN carrying input reports: a duplicated report is harmless, a
+permanently deaf endpoint is not. The fix resyncs to the device on non-control
+endpoints and takes the data; control endpoints keep the bounded-retry
+behaviour recorded above.
+
+```c
+if ((ep->ep_num & 0x7f) != 0) {
+  ep->data_id = (receive_pid == USB_PID_DATA1) ? 1 : 0;
+  memcpy(ep->app_buf, &pp->usb_rx_buffer[2], receive_len);
+  pio_usb_ll_transfer_continue(ep, receive_len);
+} else { /* bounded retry, as before */ }
+```
+
+### Result on hardware
+
+Image `c0fd6306839828cd1f1532ed2b1d922fee7138023d7ac3a9f9b574069ea98a3b`
+(102400 bytes, no diagnostics), hub `1A86:8091`, both receivers, one power cycle:
+
+```
+[3434:d030][1] HID Interface0, Protocol = Mouse
+[3434:d030][1] HID Interface1, Protocol = None
+[3434:d030][1] HID Interface2, Protocol = Keyboard
+[3554:fa09][2] HID Interface3, Protocol = Keyboard
+[3554:fa09][2] HID Interface4, Protocol = Mouse
+```
+
+35 s of simultaneous use: **3463 mouse reports** (addresses stable, `L` and `R`
+button states observed) and **85 keyboard characters** of coherent typed text
+(`ffddgsgssd123456777889812345678901qwertyqwerty...`). Both devices work at the
+same time, through the hub, on the PIO host.
+
+### What the wheel column means
+
+Wheel stays zero in every capture. That is the reference example working as
+designed, not a defect: TinyUSB puts these interfaces in **boot protocol**, and
+the boot mouse report is three bytes — buttons, X, Y, with no wheel field. The
+example prints a fourth byte the device never sends. Wheel, side buttons and
+anything else beyond boot layout require report-descriptor parsing, which is
+what the production firmware does and what Task 3 of the plan restores.
+
+### The change set
+
+Two patches against the pinned clones, carried outside the tree:
+
+- `tinyusb-enum-and-bootmount.patch` — enables `ENUM_RESET_2` (second port reset
+  before `SET_ADDRESS`, with `RESET_DELAY` corrected to `ENUM_RESET_DELAY_MS`),
+  and mounts a boot-protocol interface when the Report Descriptor fetch fails.
+- `pico-pio-usb-toggle-and-turnaround.patch` — bounds the control-endpoint
+  toggle retry, resyncs the toggle on non-control endpoints, and applies the
+  1 bit-time inter-packet delay before the handshake at full speed as well as
+  low speed.
+
+Plus `CFG_TUH_HID 4 -> 8` in the reference `tusb_config.h`; a single composite
+receiver consumes three HID instances, so two of them cannot fit in four.
+
+### What is not yet established
+
+- The 1 bit-time full-speed turnaround has **not** been shown to be necessary on
+  its own. It measurably reduced early toggle mismatches (1018 to 6 in the first
+  window) but the resync is what actually fixed reporting. A minimisation pass
+  should test the candidate without it before adoption.
+- Why this device disagrees about the toggle at all is still unexplained. The
+  resync makes the endpoint work; it does not identify the cause.
+- Adoption still requires forked dependencies and new pinned revisions in
+  `cmake/pio_usb_toolchain_lock.cmake`. Every image in this session was built
+  with the temporary, reverted `DUO_PIO_USB_DIAGNOSTIC_ALLOW_DIRTY` bypass and
+  none is a release candidate.
+- Task 1's remaining gate rows are untested: replug/re-enumeration of each
+  device, keyboard and mouse under rapid simultaneous load, and detach while
+  held.
