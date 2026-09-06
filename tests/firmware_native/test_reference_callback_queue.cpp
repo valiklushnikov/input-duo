@@ -15,13 +15,51 @@
 // visible Overflow event; losing reports silently is what this queue exists to
 // rule out.
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 #include "callback_queue.hpp"
 #include "test_support.hpp"
 
 namespace {
+
+//: The wire-visible "no compared byte disagreed" sentinel, written as a
+//: literal so the rendering test does not borrow the implementation's own
+//: idea of what "none" is.
+constexpr std::uint16_t kNoDifferenceSentinel = 0xFFFFu;
+
+struct CdcWriter final : IReferenceCdcWriter {
+    std::size_t space = 512;
+    std::size_t write_limit = 512;
+    std::size_t write_calls = 0;
+    std::size_t flush_calls = 0;
+    std::string output;
+
+    std::size_t available() const override { return space; }
+
+    std::size_t write(const char* data, std::size_t size) override {
+        ++write_calls;
+        const std::size_t count = std::min(size, write_limit);
+        output.append(data, count);
+        return count;
+    }
+
+    void flush() override { ++flush_calls; }
+};
+
+//: Push one diagnostic and return exactly what a CDC service writes for it.
+//: The tokens below carry the whole result of the experiment, so they are
+//: asserted as literal lines rather than through the formatter.
+std::string render_one(const ReferenceDescriptorDiagnostic& entry) {
+    reference_queue_reset();
+    CHECK(reference_descriptor_diagnostic_push(entry));
+    CdcWriter writer;
+    reference_service_cdc(writer);
+    return writer.output;
+}
 
 ReferenceCallbackRecord report_record(std::uint8_t dev_addr,
                                       std::uint8_t instance,
@@ -339,23 +377,136 @@ TEST_CASE(desc64_diagnostics_bypass_a_full_continuous_report_trace) {
     for (std::size_t index = 0; index < kReferenceTraceCapacity; ++index) {
         ReferenceTraceEntry report{};
         report.kind = ReferenceCallbackKind::Report;
+        report.dev_addr = 9;
+        report.instance = 1;
+        report.length = 8;
         CHECK(reference_trace_push(report));
     }
 
     ReferenceDescriptorDiagnostic diagnostic{};
     diagnostic.kind = ReferenceDescriptorDiagnosticKind::Mismatch;
-    diagnostic.actual_len = 63u;
-    diagnostic.first_difference = 63u;
-    diagnostic.prefix[0] = 0x05u;
-    diagnostic.prefix_size = 1u;
+    diagnostic.actual_len = 0u;
+    diagnostic.prefix.fill(0xA5u);
+    diagnostic.prefix_size = 8u;
     CHECK(reference_descriptor_diagnostic_push(diagnostic));
 
-    ReferenceDescriptorDiagnostic taken{};
-    CHECK(reference_descriptor_diagnostic_take(taken));
-    CHECK(taken.kind == ReferenceDescriptorDiagnosticKind::Mismatch);
-    CHECK_EQ(taken.actual_len, 63u);
-    CHECK_EQ(taken.first_difference, 63u);
-    CHECK_EQ(taken.prefix[0], 0x05u);
+    // The property this test is named for is a property of the CDC service,
+    // so it has to be the CDC service that is asked: with the trace queue
+    // saturated and staying saturated, the measurement is still what the very
+    // next write carries. Taking from the diagnostic queue directly would
+    // pass with the priority branch deleted.
+    CdcWriter writer;
+    reference_service_cdc(writer);
+    CHECK_EQ(writer.output,
+             std::string{
+                 "DESC64_MISMATCH actual=0 first=none "
+                 "prefix=A5A5A5A5A5A5A5A5\r\n"});
+    CHECK_EQ(writer.flush_calls, 1u);
+    CHECK_EQ(reference_trace_overflows(), 0u);
+}
+
+TEST_CASE(every_desc64_token_renders_exactly_as_the_output_contract_states) {
+    const std::array<std::uint8_t, kReferenceTracePrefix> golden = {
+        0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x05, 0x08};
+
+    ReferenceDescriptorDiagnostic start{};
+    start.kind = ReferenceDescriptorDiagnosticKind::Start;
+    CHECK_EQ(render_one(start), std::string{"DESC64_START\r\n"});
+
+    ReferenceDescriptorDiagnostic match{};
+    match.kind = ReferenceDescriptorDiagnosticKind::Match;
+    match.actual_len = 64u;
+    match.prefix = golden;
+    match.prefix_size = 8u;
+    CHECK_EQ(render_one(match),
+             std::string{"DESC64_MATCH actual=64 prefix=05010906A1010508\r\n"});
+
+    ReferenceDescriptorDiagnostic mismatch{};
+    mismatch.kind = ReferenceDescriptorDiagnosticKind::Mismatch;
+    mismatch.actual_len = 64u;
+    mismatch.first_difference = 17u;
+    mismatch.prefix = golden;
+    mismatch.prefix_size = 8u;
+    CHECK_EQ(render_one(mismatch),
+             std::string{"DESC64_MISMATCH actual=64 first=17 "
+                         "prefix=05010906A1010508\r\n"});
+
+    // The measured case, and the discriminator this round exists to add: a
+    // successful transfer of zero bytes. No byte was compared, so there is no
+    // first difference, and the poison says nothing was written either.
+    ReferenceDescriptorDiagnostic empty{};
+    empty.kind = ReferenceDescriptorDiagnosticKind::Mismatch;
+    empty.actual_len = 0u;
+    empty.first_difference = kNoDifferenceSentinel;
+    empty.prefix.fill(0xA5u);
+    empty.prefix_size = 8u;
+    CHECK_EQ(render_one(empty),
+             std::string{"DESC64_MISMATCH actual=0 first=none "
+                         "prefix=A5A5A5A5A5A5A5A5\r\n"});
+
+    ReferenceDescriptorDiagnostic failure{};
+    failure.kind = ReferenceDescriptorDiagnosticKind::Failure;
+    failure.actual_len = 0u;
+    failure.reason = ReferenceDescriptorReason::Transfer;
+    CHECK_EQ(render_one(failure), std::string{"DESC64_FAIL actual=0 r=xfer\r\n"});
+
+    ReferenceDescriptorDiagnostic skip{};
+    skip.kind = ReferenceDescriptorDiagnosticKind::Skip;
+    skip.reason = ReferenceDescriptorReason::NoOffer;
+    CHECK_EQ(render_one(skip), std::string{"DESC64_SKIP r=nooffers\r\n"});
+}
+
+TEST_CASE(a_full_width_desc64_line_still_ends_in_crlf_and_fits) {
+    ReferenceDescriptorDiagnostic widest{};
+    widest.kind = ReferenceDescriptorDiagnosticKind::Mismatch;
+    widest.actual_len = 65535u;
+    // One below the sentinel: the widest index that is still a real index.
+    widest.first_difference = 65534u;
+    widest.prefix.fill(0xFFu);
+    widest.prefix_size = static_cast<std::uint8_t>(widest.prefix.size());
+    const std::string line = render_one(widest);
+    CHECK_EQ(line,
+             std::string{"DESC64_MISMATCH actual=65535 first=65534 "
+                         "prefix=FFFFFFFFFFFFFFFF\r\n"});
+}
+
+TEST_CASE(an_unrenderable_diagnostic_is_dropped_rather_than_stopping_cdc) {
+    reference_queue_reset();
+
+    ReferenceDescriptorDiagnostic broken{};
+    broken.kind = static_cast<ReferenceDescriptorDiagnosticKind>(0xFEu);
+    CHECK(reference_descriptor_diagnostic_push(broken));
+
+    ReferenceTraceEntry report{};
+    report.kind = ReferenceCallbackKind::Report;
+    report.dev_addr = 3;
+    report.instance = 1;
+    report.length = 8;
+    CHECK(reference_trace_push(report));
+
+    CdcWriter first;
+    reference_service_cdc(first);
+    CHECK(first.output.empty());
+
+    // Retaining an entry nothing can render would stop every CDC line for
+    // ever, which is the loudest possible way to lose the measurement.
+    CdcWriter second;
+    reference_service_cdc(second);
+    CHECK_EQ(second.output, std::string{"REPORT a=3 i=1 len=8\r\n"});
+}
+
+TEST_CASE(the_diagnostic_capacity_is_a_power_of_two) {
+    reference_queue_reset();
+    ReferenceDescriptorDiagnostic entry{};
+    std::size_t accepted = 0;
+    while (reference_descriptor_diagnostic_push(entry)) {
+        ++accepted;
+        if (accepted > 64) {
+            break;
+        }
+    }
+    CHECK(accepted > 0);
+    CHECK_EQ(accepted & (accepted - 1), static_cast<std::size_t>(0));
 }
 
 TEST_CASE(the_trace_capacity_is_a_power_of_two) {

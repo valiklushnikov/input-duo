@@ -583,6 +583,60 @@ def test_desc64_measurement_requests_and_compares_one_packet_only():
     assert "reference_service_one_cdc();" in source
 
 
+def test_desc64_completion_pins_the_lifetime_token_it_was_handed():
+    """The token is the only thing separating a stale callback from a live one.
+
+    A mutation replacing ``xfer->user_data`` with ``0`` or with the
+    coordinator's always-current token cannot be caught natively, because the
+    call site is the TinyUSB wrapper. Pin it here.
+    """
+    source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(
+        encoding="utf-8"
+    )
+    compact = re.sub(r"\s+", " ", source)
+
+    assert re.search(
+        r"g_descriptor_diagnostic\.complete\([^;]*xfer->actual_len[^;]*"
+        r"xfer->user_data\)",
+        compact,
+    ), (
+        "the completion must carry the token TinyUSB handed back, not 0 and "
+        "not the coordinator's current token"
+    )
+
+
+def test_the_desc64_request_buffer_is_poisoned_before_every_attempt():
+    """A reused buffer turns a transfer that writes nothing into a MATCH."""
+    source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(
+        encoding="utf-8"
+    )
+    compact = re.sub(r"\s+", " ", source)
+
+    assert re.search(
+        r"poison_descriptor_buffer\(g_post_mount_descriptor\); "
+        r"const bool accepted = tuh_descriptor_get_hid_report\(",
+        compact,
+    ), (
+        "the request buffer must be poisoned immediately before every on-wire "
+        "attempt, with nothing between the two"
+    )
+
+
+def test_a_desc64_give_up_is_reported_rather_than_leaving_silence():
+    """Silence is indistinguishable from a board that was never flashed."""
+    source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    assert "g_adapter.take_descriptor_giveup(" in source
+    assert "g_descriptor_diagnostic.skipped(" in source
+    assert "ReferenceDescriptorReason::NoInterface" in source, (
+        "a failed tuh_hid_itf_get_info() must name itself rather than drain "
+        "the offer budget in silence"
+    )
+    assert "ReferenceDescriptorReason::Unmounted" in source
+
+
 def test_stale_control_work_cannot_hide_an_unmount_forever():
     source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(
         encoding="utf-8"

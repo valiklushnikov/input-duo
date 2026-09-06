@@ -80,6 +80,21 @@ public:
                                  DescriptorRequest& request);
     void descriptor_request_accepted();
 
+    /// Take the one give-up this attempt produced, if it produced one.
+    ///
+    /// A scheduled measurement that never reaches the wire used to end in
+    /// complete silence: the offer budget drains in about a second and
+    /// nothing is printed. An operator then cannot tell "never scheduled"
+    /// from "not flashed". One line per attempt, never one per pass.
+    bool take_descriptor_giveup(ReferenceDescriptorReason& reason,
+                                DescriptorRequest& request);
+
+    /// Give up on the scheduled measurement now, naming why. The host core
+    /// calls this for the failures only it can see, such as being unable to
+    /// read bInterfaceNumber.
+    void abandon_descriptor_request(ReferenceDescriptorReason reason,
+                                    const DescriptorRequest& request);
+
     /// Whether an event is waiting. The caller drains before consuming again,
     /// so nothing this adapter produced is ever dropped for want of room.
     bool has_pending() const { return pending_count_ != 0; }
@@ -135,6 +150,7 @@ private:
                                   std::uint8_t instance);
     void cancel_descriptor_request(std::uint8_t dev_addr,
                                    std::uint8_t instance);
+    void note_descriptor_giveup(ReferenceDescriptorReason reason);
     void on_mount(const ReferenceCallbackRecord& record, std::uint32_t now_us);
     void on_unmount(const ReferenceCallbackRecord& record);
     void on_report(const ReferenceCallbackRecord& record, std::uint32_t now_us);
@@ -162,6 +178,12 @@ private:
         std::uint32_t next_offer_us = 0;
         std::uint32_t offers = 0;
     } descriptor_request_{};
+
+    //: At most one give-up is retained per attempt; the request it names is
+    //: kept because the request itself is cleared when it is abandoned.
+    ReferenceDescriptorReason descriptor_giveup_ =
+        ReferenceDescriptorReason::None;
+    DescriptorRequest descriptor_giveup_request_{};
 };
 
 }  // namespace duo_input::u1::reference

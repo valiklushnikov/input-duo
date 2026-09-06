@@ -17,10 +17,30 @@ const char* kind_name(ReferenceCallbackKind kind) {
             return "REPORT";
         case ReferenceCallbackKind::Overflow:
             return "OVERFLOW";
-        case ReferenceCallbackKind::DescriptorStart:
-            return "DESC_START";
-        case ReferenceCallbackKind::DescriptorFailure:
-            return "DESC_FAIL";
+    }
+    return "?";
+}
+
+const char* reason_name(ReferenceDescriptorReason reason) {
+    switch (reason) {
+        case ReferenceDescriptorReason::None:
+            return "none";
+        case ReferenceDescriptorReason::Transfer:
+            return "xfer";
+        case ReferenceDescriptorReason::Gone:
+            return "gone";
+        case ReferenceDescriptorReason::TooLong:
+            return "toolong";
+        case ReferenceDescriptorReason::NoBuffer:
+            return "nobuf";
+        case ReferenceDescriptorReason::Unmounted:
+            return "unmounted";
+        case ReferenceDescriptorReason::NoInterface:
+            return "noitf";
+        case ReferenceDescriptorReason::NoOffer:
+            return "nooffers";
+        case ReferenceDescriptorReason::Overflow:
+            return "overflow";
     }
     return "?";
 }
@@ -258,7 +278,14 @@ void reference_trace_reset() {
 
 namespace {
 
+//: Power of two, and masked rather than divided, like the other two queues.
 constexpr std::size_t kDescriptorDiagnosticCapacity = 4;
+constexpr std::size_t kDescriptorDiagnosticMask =
+    kDescriptorDiagnosticCapacity - 1;
+static_assert((kDescriptorDiagnosticCapacity & kDescriptorDiagnosticMask) == 0,
+              "the diagnostic capacity must be a power of two: indices are "
+              "masked");
+
 ReferenceDescriptorDiagnostic g_descriptor_diagnostics[kDescriptorDiagnosticCapacity];
 std::atomic<std::uint32_t> g_descriptor_diagnostic_head{0};
 std::atomic<std::uint32_t> g_descriptor_diagnostic_tail{0};
@@ -272,7 +299,7 @@ bool reference_descriptor_diagnostic_push(const ReferenceDescriptorDiagnostic& e
     if (head - tail >= kDescriptorDiagnosticCapacity) {
         return false;
     }
-    g_descriptor_diagnostics[head % kDescriptorDiagnosticCapacity] = entry;
+    g_descriptor_diagnostics[head & kDescriptorDiagnosticMask] = entry;
     g_descriptor_diagnostic_head.store(head + 1, std::memory_order_release);
     return true;
 }
@@ -283,7 +310,7 @@ bool reference_descriptor_diagnostic_take(ReferenceDescriptorDiagnostic& entry) 
     if (head == tail) {
         return false;
     }
-    entry = g_descriptor_diagnostics[tail % kDescriptorDiagnosticCapacity];
+    entry = g_descriptor_diagnostics[tail & kDescriptorDiagnosticMask];
     g_descriptor_diagnostic_tail.store(tail + 1, std::memory_order_release);
     g_descriptor_delivery_offset = 0;
     return true;
@@ -295,7 +322,7 @@ bool reference_descriptor_diagnostic_peek(ReferenceDescriptorDiagnostic& entry) 
     if (head == tail) {
         return false;
     }
-    entry = g_descriptor_diagnostics[tail % kDescriptorDiagnosticCapacity];
+    entry = g_descriptor_diagnostics[tail & kDescriptorDiagnosticMask];
     return true;
 }
 
@@ -316,45 +343,80 @@ bool deliver_one_descriptor_diagnostic(IReferenceCdcWriter& writer) {
         return false;
     }
 
-    char line[96];
+    // The widest line this can produce is
+    //   DESC64_MISMATCH actual=65535 first=65535 prefix=<16 hex>\r\n
+    // which is 66 characters. 128 leaves room the arithmetic below never
+    // needs, and every append is bounded regardless of that.
+    char line[128];
     int written = 0;
+    bool renders_prefix = false;
     switch (entry.kind) {
         case ReferenceDescriptorDiagnosticKind::Start:
             written = std::snprintf(line, sizeof(line), "DESC64_START\r\n");
             break;
         case ReferenceDescriptorDiagnosticKind::Match:
+            // prefix= on a match too: what the buffer holds is reported on
+            // every completion outcome, not only on a disagreement.
             written = std::snprintf(line, sizeof(line),
-                                    "DESC64_MATCH actual=%u\r\n",
+                                    "DESC64_MATCH actual=%u prefix=",
                                     entry.actual_len);
+            renders_prefix = true;
             break;
         case ReferenceDescriptorDiagnosticKind::Mismatch:
-            written = std::snprintf(
-                line, sizeof(line),
-                "DESC64_MISMATCH actual=%u first=%u prefix=", entry.actual_len,
-                entry.first_difference);
-            for (std::uint8_t index = 0;
-                 index < entry.prefix_size && written > 0 &&
-                 written < static_cast<int>(sizeof(line)) - 4;
-                 ++index) {
-                written += std::snprintf(line + written,
-                                         sizeof(line) - written, "%02X",
-                                         entry.prefix[index]);
+            if (entry.first_difference == kReferenceNoDifference) {
+                written = std::snprintf(
+                    line, sizeof(line),
+                    "DESC64_MISMATCH actual=%u first=none prefix=",
+                    entry.actual_len);
+            } else {
+                written = std::snprintf(
+                    line, sizeof(line),
+                    "DESC64_MISMATCH actual=%u first=%u prefix=",
+                    entry.actual_len, entry.first_difference);
             }
-            if (written > 0 &&
-                written < static_cast<int>(sizeof(line)) - 2) {
-                line[written++] = '\r';
-                line[written++] = '\n';
-            }
+            renders_prefix = true;
             break;
         case ReferenceDescriptorDiagnosticKind::Failure:
-            written = std::snprintf(line, sizeof(line), "DESC64_FAIL\r\n");
+            written = std::snprintf(line, sizeof(line),
+                                    "DESC64_FAIL actual=%u r=%s\r\n",
+                                    entry.actual_len, reason_name(entry.reason));
+            break;
+        case ReferenceDescriptorDiagnosticKind::Skip:
+            written = std::snprintf(line, sizeof(line), "DESC64_SKIP r=%s\r\n",
+                                    reason_name(entry.reason));
             break;
     }
 
-    if (written <= 0) {
+    // snprintf reports what it *would* have written, so clamp to what fits -
+    // keeping two bytes in hand, so the CRLF below always has room whatever
+    // the header cost. used <= sizeof(line) - 2 holds from here on.
+    std::size_t used =
+        written > 0 ? std::min<std::size_t>(static_cast<std::size_t>(written),
+                                            sizeof(line) - 2)
+                    : 0;
+    if (used != 0 && renders_prefix) {
+        for (std::uint8_t index = 0; index < entry.prefix_size; ++index) {
+            // Two hex digits, and the CRLF that must still fit after them.
+            if (used + 2 > sizeof(line) - 2) {
+                break;
+            }
+            std::snprintf(line + used, 3, "%02X", entry.prefix[index]);
+            used += 2;
+        }
+        // Both the clamp above and the loop guard keep used at or below
+        // sizeof(line) - 2, so these two writes are always in bounds.
+        line[used++] = '\r';
+        line[used++] = '\n';
+    }
+
+    if (used == 0) {
+        // Nothing renders this entry. Retaining it would stop every CDC line
+        // for ever, which is the loudest possible way to lose a measurement.
+        ReferenceDescriptorDiagnostic unrenderable{};
+        reference_descriptor_diagnostic_take(unrenderable);
         return true;
     }
-    const std::size_t line_size = static_cast<std::size_t>(written);
+    const std::size_t line_size = used;
     if (g_descriptor_delivery_offset > line_size) {
         g_descriptor_delivery_offset = 0;
     }

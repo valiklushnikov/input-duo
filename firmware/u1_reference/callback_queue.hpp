@@ -25,8 +25,6 @@ enum class ReferenceCallbackKind : std::uint8_t {
     Unmount,
     Report,
     Overflow,
-    DescriptorStart,
-    DescriptorFailure,
 };
 
 //: CFG_TUH_ENUMERATION_BUFSIZE is 256, so a report descriptor TinyUSB was able
@@ -141,14 +139,53 @@ enum class ReferenceDescriptorDiagnosticKind : std::uint8_t {
     Match,
     Mismatch,
     Failure,
+    //: The measurement gave up before anything reached the wire. Without this
+    //: the give-up paths print nothing at all, and an experiment that never
+    //: scheduled looks exactly like a board that was never flashed.
+    Skip,
 };
+
+//: Why a measurement failed or gave up, rendered as the `r=` field. Short
+//: enough to stay greppable on a CDC line, and named so the answer says what
+//: happened rather than only that something did.
+enum class ReferenceDescriptorReason : std::uint8_t {
+    None,
+    //: The control transfer itself did not complete successfully.
+    Transfer,
+    //: The interface went away before its answer arrived.
+    Gone,
+    //: The reported length was larger than the request buffer.
+    TooLong,
+    //: No buffer reached the comparison. An internal fault, not a device
+    //: measurement, and it must never be reported as a mismatch.
+    NoBuffer,
+    //: The interface vanished before an on-wire attempt was made.
+    Unmounted,
+    //: bInterfaceNumber could not be read, so no request could be formed.
+    NoInterface,
+    //: The offer budget drained without the host stack ever accepting one.
+    NoOffer,
+    //: A refused capture retired everything downstream, this request with it.
+    Overflow,
+};
+
+//: Every compared byte agreed, so there is no first difference to report.
+//: Rendered as `first=none` rather than as a byte index nothing computed: a
+//: fabricated index reads as "those bytes were golden", which is the very
+//: claim this measurement exists to test.
+inline constexpr std::uint16_t kReferenceNoDifference = 0xFFFFu;
 
 struct ReferenceDescriptorDiagnostic {
     ReferenceDescriptorDiagnosticKind kind{};
+    ReferenceDescriptorReason reason{};
     std::uint8_t dev_addr{};
     std::uint8_t instance{};
     std::uint16_t actual_len{};
-    std::uint16_t first_difference{};
+    std::uint16_t first_difference = kReferenceNoDifference;
+    //: The first bytes of the *request buffer*, not of what the transfer said
+    //: it delivered. With the buffer poisoned before every attempt this is
+    //: what separates "nothing arrived" from "bytes arrived and only the
+    //: count was lost", and it is reported on every completion outcome.
     std::uint8_t prefix_size{};
     std::array<std::uint8_t, kReferenceTracePrefix> prefix{};
 };

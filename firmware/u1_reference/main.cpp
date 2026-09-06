@@ -93,6 +93,7 @@ RuntimeInput g_input;
 duo_input::u1::input::InputPipeline g_keyboard_pipeline(g_input);
 duo_input::u1::input::InputPipeline g_mouse_pipeline(g_input);
 
+using duo_input::u1::reference::poison_descriptor_buffer;
 using duo_input::u1::reference::ReferenceSourceAdapter;
 ReferenceSourceAdapter g_adapter;
 
@@ -134,6 +135,16 @@ void service_input(std::uint32_t millis) {
         g_descriptor_diagnostic.abandon_if_unmounted(tuh_hid_mounted(
             g_descriptor_diagnostic.dev_addr(),
             g_descriptor_diagnostic.instance()));
+    }
+
+    // A measurement that gave up before reaching the wire has to say so. The
+    // offer budget drains in about a second, and an experiment that ends in
+    // silence cannot be told apart from a board that was never flashed.
+    ReferenceDescriptorReason giveup_reason = ReferenceDescriptorReason::None;
+    ReferenceSourceAdapter::DescriptorRequest giveup_request{};
+    if (g_adapter.take_descriptor_giveup(giveup_reason, giveup_request)) {
+        g_descriptor_diagnostic.skipped(giveup_reason, giveup_request.dev_addr,
+                                        giveup_request.instance);
     }
 
     duo_input::u1::input::SourceEvent event{};
@@ -187,11 +198,19 @@ void service_input(std::uint32_t millis) {
     ReferenceSourceAdapter::DescriptorRequest descriptor_request{};
     if (!g_descriptor_diagnostic.active() &&
         g_adapter.take_descriptor_request(time_us_32(), descriptor_request)) {
+        // Both give-ups below used to consume an offer and return with
+        // nothing printed, which drained the budget in silence.
         tuh_itf_info_t info{};
         if (!tuh_hid_mounted(descriptor_request.dev_addr,
-                             descriptor_request.instance) ||
-            !tuh_hid_itf_get_info(descriptor_request.dev_addr,
+                             descriptor_request.instance)) {
+            g_adapter.abandon_descriptor_request(
+                ReferenceDescriptorReason::Unmounted, descriptor_request);
+            return;
+        }
+        if (!tuh_hid_itf_get_info(descriptor_request.dev_addr,
                                   descriptor_request.instance, &info)) {
+            g_adapter.abandon_descriptor_request(
+                ReferenceDescriptorReason::NoInterface, descriptor_request);
             return;
         }
 
@@ -200,6 +219,12 @@ void service_input(std::uint32_t millis) {
         // The public descriptor API takes bInterfaceNumber. The callback gives
         // us TinyUSB's HID instance/index; they are not interchangeable (the
         // Aula logs interfaces 3/4 while their instances are 0/1).
+        //
+        // Poison immediately before the attempt, with nothing in between. The
+        // buffer is static and reused, so a transfer that reports a length
+        // while writing nothing would otherwise compare clean against the
+        // previous attempt's bytes and print MATCH.
+        poison_descriptor_buffer(g_post_mount_descriptor);
         const bool accepted = tuh_descriptor_get_hid_report(
             descriptor_request.dev_addr, info.desc.bInterfaceNumber,
             HID_DESC_TYPE_REPORT, 0, g_post_mount_descriptor.data(),

@@ -300,6 +300,7 @@ void ReferenceSourceAdapter::on_overflow() {
     for (Interface& entry : interfaces_) {
         entry = Interface{};
     }
+    note_descriptor_giveup(ReferenceDescriptorReason::Overflow);
     descriptor_request_ = PendingDescriptorRequest{};
 }
 
@@ -317,9 +318,6 @@ void ReferenceSourceAdapter::consume(const ReferenceCallbackRecord& record,
             return;
         case ReferenceCallbackKind::Overflow:
             on_overflow();
-            return;
-        case ReferenceCallbackKind::DescriptorStart:
-        case ReferenceCallbackKind::DescriptorFailure:
             return;
     }
 }
@@ -347,12 +345,49 @@ bool ReferenceSourceAdapter::take_descriptor_request(std::uint32_t now_us,
     ++descriptor_request_.offers;
     descriptor_request_.next_offer_us = now_us + kDescriptorOfferIntervalUs;
     if (descriptor_request_.offers >= kDescriptorMaxOffers) {
+        // This last offer may still be accepted, in which case
+        // descriptor_request_accepted() withdraws the give-up again.
+        note_descriptor_giveup(ReferenceDescriptorReason::NoOffer);
         descriptor_request_.active = false;
     }
     return true;
 }
 
 void ReferenceSourceAdapter::descriptor_request_accepted() {
+    descriptor_request_ = PendingDescriptorRequest{};
+    descriptor_giveup_ = ReferenceDescriptorReason::None;
+    descriptor_giveup_request_ = DescriptorRequest{};
+}
+
+void ReferenceSourceAdapter::note_descriptor_giveup(
+    ReferenceDescriptorReason reason) {
+    if (!descriptor_request_.active ||
+        descriptor_giveup_ != ReferenceDescriptorReason::None) {
+        // Nothing was scheduled, or this attempt has already named its reason.
+        // One line per attempt: a give-up repeated every pass is noise that
+        // buries the measurement it is meant to explain.
+        return;
+    }
+    descriptor_giveup_ = reason;
+    descriptor_giveup_request_ = descriptor_request_.request;
+}
+
+bool ReferenceSourceAdapter::take_descriptor_giveup(
+    ReferenceDescriptorReason& reason, DescriptorRequest& request) {
+    if (descriptor_giveup_ == ReferenceDescriptorReason::None) {
+        return false;
+    }
+    reason = descriptor_giveup_;
+    request = descriptor_giveup_request_;
+    descriptor_giveup_ = ReferenceDescriptorReason::None;
+    descriptor_giveup_request_ = DescriptorRequest{};
+    return true;
+}
+
+void ReferenceSourceAdapter::abandon_descriptor_request(
+    ReferenceDescriptorReason reason, const DescriptorRequest& request) {
+    descriptor_giveup_ = reason;
+    descriptor_giveup_request_ = request;
     descriptor_request_ = PendingDescriptorRequest{};
 }
 
@@ -361,6 +396,7 @@ void ReferenceSourceAdapter::cancel_descriptor_request(std::uint8_t dev_addr,
     if (descriptor_request_.active &&
         descriptor_request_.request.dev_addr == dev_addr &&
         descriptor_request_.request.instance == instance) {
+        note_descriptor_giveup(ReferenceDescriptorReason::Unmounted);
         descriptor_request_ = PendingDescriptorRequest{};
     }
 }

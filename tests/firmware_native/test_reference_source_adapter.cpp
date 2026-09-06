@@ -38,6 +38,12 @@ using duo_input::u1::reference::ReferenceSourceAdapter;
 namespace {
 
 constexpr std::uint8_t kProtocolNone = 0;
+//: The wire-visible "no compared byte disagreed" sentinel, written here
+//: as a literal rather than taken from the production constant. A
+//: first-difference index that was never computed is precisely the answer
+//: this measurement exists to test, so the test must not borrow the
+//: implementation's own idea of it.
+constexpr std::uint16_t kNoDifferenceSentinel = 0xFFFFu;
 constexpr std::uint8_t kProtocolKeyboard = 1;
 constexpr std::uint8_t kProtocolMouse = 2;
 
@@ -589,10 +595,12 @@ TEST_CASE(a_canceled_descriptor_transfer_does_not_block_a_replug) {
     CHECK_FALSE(transfer.active());
 
     CHECK(transfer.start(3, 0));
-    const auto stale = transfer.complete(2, true, 77u, true, 256u);
+    const auto stale =
+        transfer.complete(2, true, 77u, true, 256u, transfer.lifetime_token());
     CHECK(stale == duo_input::u1::reference::DescriptorTransferState::Completion::Ignored);
     CHECK(transfer.active());
-    const auto current = transfer.complete(3, true, 77u, true, 256u);
+    const auto current =
+        transfer.complete(3, true, 77u, true, 256u, transfer.lifetime_token());
     CHECK(current == duo_input::u1::reference::DescriptorTransferState::Completion::Success);
     CHECK_FALSE(transfer.active());
 
@@ -609,16 +617,20 @@ TEST_CASE(descriptor_completion_rejects_failure_short_lifetime_and_overflow) {
     using State = duo_input::u1::reference::DescriptorTransferState;
     State transfer;
     CHECK(transfer.start(2, 0));
-    CHECK(transfer.complete(2, false, 0u, true, 256u) ==
+    CHECK(transfer.complete(2, false, 0u, true, 256u,
+                            transfer.lifetime_token()) ==
           State::Completion::Failure);
     CHECK(transfer.start(2, 0));
-    CHECK(transfer.complete(2, true, 77u, false, 256u) ==
+    CHECK(transfer.complete(2, true, 77u, false, 256u,
+                            transfer.lifetime_token()) ==
           State::Completion::Failure);
     CHECK(transfer.start(2, 0));
-    CHECK(transfer.complete(2, true, 257u, true, 256u) ==
+    CHECK(transfer.complete(2, true, 257u, true, 256u,
+                            transfer.lifetime_token()) ==
           State::Completion::Failure);
     CHECK(transfer.start(2, 0));
-    CHECK(transfer.complete(2, true, 0u, true, 256u) ==
+    CHECK(transfer.complete(2, true, 0u, true, 256u,
+                            transfer.lifetime_token()) ==
           State::Completion::Success);
 }
 
@@ -631,12 +643,43 @@ TEST_CASE(desc64_comparison_uses_actual_length_and_the_independent_golden_prefix
         true, 64u, golden.data(), golden.size());
     CHECK(match.kind == Result::Kind::Match);
     CHECK_EQ(match.actual_len, 64u);
+    CHECK_EQ(match.first_difference, kNoDifferenceSentinel);
 
+    // Every compared byte agreed but the length was wrong. There is no first
+    // difference to report, and reporting min(actual_len, 64) as one claims
+    // those bytes were golden without having looked at a single one of them.
     const auto short_completion =
         duo_input::u1::reference::descriptor_diagnostic_complete(
             true, 63u, golden.data(), golden.size());
     CHECK(short_completion.kind == Result::Kind::Mismatch);
-    CHECK_EQ(short_completion.first_difference, 63u);
+    CHECK_EQ(short_completion.first_difference, kNoDifferenceSentinel);
+
+    // A short completion that does disagree reports where it disagreed, not
+    // how long it was.
+    auto short_wrong = golden;
+    short_wrong[3] ^= 0x01u;
+    const auto short_mismatch =
+        duo_input::u1::reference::descriptor_diagnostic_complete(
+            true, 10u, short_wrong.data(), short_wrong.size());
+    CHECK(short_mismatch.kind == Result::Kind::Mismatch);
+    CHECK_EQ(short_mismatch.first_difference, 3u);
+
+    // The case the hardware actually produced: a successful transfer of zero
+    // bytes. Nothing was compared, so nothing differed.
+    const std::vector<std::uint8_t> poisoned(64u, 0xA5u);
+    const auto empty = duo_input::u1::reference::descriptor_diagnostic_complete(
+        true, 0u, poisoned.data(), poisoned.size());
+    CHECK(empty.kind == Result::Kind::Mismatch);
+    CHECK_EQ(empty.actual_len, 0u);
+    CHECK_EQ(empty.first_difference, kNoDifferenceSentinel);
+
+    // Poison is not golden, so a full-length completion into a buffer nothing
+    // wrote to is a mismatch at byte zero rather than a match.
+    const auto poison_full =
+        duo_input::u1::reference::descriptor_diagnostic_complete(
+            true, 64u, poisoned.data(), poisoned.size());
+    CHECK(poison_full.kind == Result::Kind::Mismatch);
+    CHECK_EQ(poison_full.first_difference, 0u);
 
     auto wrong = golden;
     wrong[17] ^= 0x01u;
@@ -648,6 +691,265 @@ TEST_CASE(desc64_comparison_uses_actual_length_and_the_independent_golden_prefix
     const auto failed = duo_input::u1::reference::descriptor_diagnostic_complete(
         false, 64u, golden.data(), golden.size());
     CHECK(failed.kind == Result::Kind::Failure);
+
+    // No buffer is an internal fault, not a device measurement.
+    const auto no_buffer =
+        duo_input::u1::reference::descriptor_diagnostic_complete(
+            true, 64u, nullptr, 64u);
+    CHECK(no_buffer.kind == Result::Kind::Failure);
+}
+
+TEST_CASE(a_descriptor_completion_without_the_live_token_is_ignored) {
+    using State = duo_input::u1::reference::DescriptorTransferState;
+    State transfer;
+    CHECK(transfer.start(2, 0));
+    // start() pre-increments from zero, so zero is never a live token: a
+    // completion carrying it is one whose user_data was lost on the way, and
+    // it must not be allowed to answer for the attempt that is in flight.
+    CHECK(transfer.complete(2, true, 64u, true, 256u, 0u) ==
+          State::Completion::Ignored);
+    CHECK(transfer.active());
+    CHECK(transfer.complete(2, true, 64u, true, 256u,
+                            transfer.lifetime_token()) ==
+          State::Completion::Success);
+    CHECK_FALSE(transfer.active());
+}
+
+TEST_CASE(the_request_buffer_is_poisoned_so_a_stale_answer_cannot_read_as_golden) {
+    using Result = duo_input::u1::reference::DescriptorDiagnosticResult;
+    const auto golden = aula_keyboard_descriptor_vector();
+
+    std::array<std::uint8_t, 64> buffer{};
+    std::copy_n(golden.data(), buffer.size(), buffer.begin());
+
+    // Left holding the previous attempt's bytes, a transfer that reports 64
+    // bytes while writing none compares clean and prints MATCH - the exact
+    // failure under investigation, reported as its own opposite.
+    CHECK(duo_input::u1::reference::descriptor_diagnostic_complete(
+              true, 64u, buffer.data(), buffer.size())
+              .kind == Result::Kind::Match);
+
+    duo_input::u1::reference::poison_descriptor_buffer(buffer);
+    for (const std::uint8_t value : buffer) {
+        CHECK_EQ(value, 0xA5u);
+    }
+    // 0xA5 cannot begin a valid report descriptor and is not a golden byte,
+    // so the same transfer is now visible as having written nothing.
+    const auto after = duo_input::u1::reference::descriptor_diagnostic_complete(
+        true, 64u, buffer.data(), buffer.size());
+    CHECK(after.kind == Result::Kind::Mismatch);
+    CHECK_EQ(after.first_difference, 0u);
+    CHECK(golden[0] != 0xA5u);
+}
+
+TEST_CASE(a_completion_reports_the_buffer_prefix_whatever_the_outcome) {
+    using Coordinator =
+        duo_input::u1::reference::DescriptorDiagnosticCoordinator;
+    using Completion =
+        duo_input::u1::reference::DescriptorTransferState::Completion;
+
+    reference_queue_reset();
+    ReferenceSourceAdapter adapter;
+    Coordinator coordinator(adapter);
+
+    std::array<std::uint8_t, 64> poisoned{};
+    duo_input::u1::reference::poison_descriptor_buffer(poisoned);
+
+    // A successful transfer of zero bytes. Printing the buffer only when
+    // actual_len is non-zero is what made the measured run unable to say
+    // whether anything arrived at all.
+    CHECK(coordinator.start(2, 0));
+    CHECK(coordinator.complete(2, true, 0u, true, poisoned.data(),
+                               poisoned.size(),
+                               coordinator.lifetime_token()) ==
+          Completion::Success);
+
+    ReferenceDescriptorDiagnostic entry{};
+    CHECK(reference_descriptor_diagnostic_take(entry));
+    CHECK(entry.kind == ReferenceDescriptorDiagnosticKind::Mismatch);
+    CHECK_EQ(entry.actual_len, 0u);
+    CHECK_EQ(entry.first_difference, kNoDifferenceSentinel);
+    CHECK_EQ(entry.prefix_size, 8u);
+    for (std::size_t index = 0; index < entry.prefix.size(); ++index) {
+        CHECK_EQ(entry.prefix[index], 0xA5u);
+    }
+
+    // And on a match, where the old image printed no bytes at all.
+    const auto golden = aula_keyboard_descriptor_vector();
+    CHECK(coordinator.start(2, 0));
+    CHECK(coordinator.complete(2, true, 64u, true, golden.data(), golden.size(),
+                               coordinator.lifetime_token()) ==
+          Completion::Success);
+    CHECK(reference_descriptor_diagnostic_take(entry));
+    CHECK(entry.kind == ReferenceDescriptorDiagnosticKind::Match);
+    CHECK_EQ(entry.prefix_size, 8u);
+    CHECK_EQ(entry.prefix[0], 0x05u);
+    CHECK_EQ(entry.prefix[7], 0x08u);
+}
+
+TEST_CASE(a_failed_completion_says_why_and_is_never_a_device_measurement) {
+    using Coordinator =
+        duo_input::u1::reference::DescriptorDiagnosticCoordinator;
+    using Completion =
+        duo_input::u1::reference::DescriptorTransferState::Completion;
+
+    reference_queue_reset();
+    ReferenceSourceAdapter adapter;
+    Coordinator coordinator(adapter);
+    std::array<std::uint8_t, 64> poisoned{};
+    duo_input::u1::reference::poison_descriptor_buffer(poisoned);
+
+    struct Expectation {
+        bool transfer_succeeded;
+        std::uint32_t actual_len;
+        bool still_mounted;
+        bool with_buffer;
+        ReferenceDescriptorReason reason;
+    };
+    const Expectation expectations[] = {
+        {false, 0u, true, true, ReferenceDescriptorReason::Transfer},
+        {true, 64u, false, true, ReferenceDescriptorReason::Gone},
+        {true, 65u, true, true, ReferenceDescriptorReason::TooLong},
+        {true, 64u, true, false, ReferenceDescriptorReason::NoBuffer},
+    };
+
+    for (const Expectation& expectation : expectations) {
+        CHECK(coordinator.start(2, 0));
+        CHECK(coordinator.complete(
+                  2, expectation.transfer_succeeded, expectation.actual_len,
+                  expectation.still_mounted,
+                  expectation.with_buffer ? poisoned.data() : nullptr,
+                  poisoned.size(), coordinator.lifetime_token()) ==
+              Completion::Failure);
+        ReferenceDescriptorDiagnostic entry{};
+        CHECK(reference_descriptor_diagnostic_take(entry));
+        // An internal fault must not be dressed up as a mismatch: that is a
+        // device measurement, and no device produced it.
+        CHECK(entry.kind == ReferenceDescriptorDiagnosticKind::Failure);
+        CHECK(entry.reason == expectation.reason);
+    }
+}
+
+TEST_CASE(an_abandoned_in_flight_measurement_reports_a_skip) {
+    using Coordinator =
+        duo_input::u1::reference::DescriptorDiagnosticCoordinator;
+
+    reference_queue_reset();
+    ReferenceSourceAdapter adapter;
+    Coordinator coordinator(adapter);
+
+    CHECK(coordinator.start(2, 0));
+    CHECK(coordinator.abandon_if_unmounted(false));
+    ReferenceDescriptorDiagnostic entry{};
+    CHECK(reference_descriptor_diagnostic_take(entry));
+    CHECK(entry.kind == ReferenceDescriptorDiagnosticKind::Skip);
+    CHECK(entry.reason == ReferenceDescriptorReason::Unmounted);
+
+    // The same one line is what the host core emits for a give-up the adapter
+    // reports: an experiment that ends in silence cannot be told apart from a
+    // board that was never flashed.
+    coordinator.skipped(ReferenceDescriptorReason::NoInterface, 2, 0);
+    CHECK(reference_descriptor_diagnostic_take(entry));
+    CHECK(entry.kind == ReferenceDescriptorDiagnosticKind::Skip);
+    CHECK(entry.reason == ReferenceDescriptorReason::NoInterface);
+}
+
+TEST_CASE(a_drained_offer_budget_is_reported_rather_than_leaving_silence) {
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0u);
+    CHECK(take(adapter).ok);
+
+    ReferenceSourceAdapter::DescriptorRequest request{};
+    std::uint32_t now = ReferenceSourceAdapter::kDescriptorQuietUs;
+    std::uint32_t offers = 0;
+    while (adapter.take_descriptor_request(now, request)) {
+        ++offers;
+        now += ReferenceSourceAdapter::kDescriptorOfferIntervalUs;
+    }
+    CHECK_EQ(offers, ReferenceSourceAdapter::kDescriptorMaxOffers);
+
+    ReferenceDescriptorReason reason = ReferenceDescriptorReason::None;
+    ReferenceSourceAdapter::DescriptorRequest abandoned{};
+    CHECK(adapter.take_descriptor_giveup(reason, abandoned));
+    CHECK(reason == ReferenceDescriptorReason::NoOffer);
+    CHECK_EQ(abandoned.dev_addr, 2u);
+    CHECK_EQ(abandoned.instance, 0u);
+    // One line per attempt, not one per pass.
+    CHECK_FALSE(adapter.take_descriptor_giveup(reason, abandoned));
+}
+
+TEST_CASE(an_unmount_before_the_wire_is_reported_rather_than_leaving_silence) {
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0u);
+    CHECK(take(adapter).ok);
+    adapter.consume(reference_make_unmount(2, 0, 1u), 1u);
+
+    ReferenceDescriptorReason reason = ReferenceDescriptorReason::None;
+    ReferenceSourceAdapter::DescriptorRequest abandoned{};
+    CHECK(adapter.take_descriptor_giveup(reason, abandoned));
+    CHECK(reason == ReferenceDescriptorReason::Unmounted);
+    CHECK_FALSE(adapter.take_descriptor_giveup(reason, abandoned));
+}
+
+TEST_CASE(a_host_side_give_up_names_its_own_reason) {
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0u);
+    CHECK(take(adapter).ok);
+
+    ReferenceSourceAdapter::DescriptorRequest request{};
+    CHECK(adapter.take_descriptor_request(
+        ReferenceSourceAdapter::kDescriptorQuietUs, request));
+    // tuh_hid_itf_get_info() failing is the give-up that used to consume an
+    // offer and return with nothing printed.
+    adapter.abandon_descriptor_request(ReferenceDescriptorReason::NoInterface,
+                                       request);
+
+    ReferenceSourceAdapter::DescriptorRequest again{};
+    CHECK_FALSE(adapter.take_descriptor_request(
+        ReferenceSourceAdapter::kDescriptorQuietUs +
+            ReferenceSourceAdapter::kDescriptorOfferIntervalUs,
+        again));
+
+    ReferenceDescriptorReason reason = ReferenceDescriptorReason::None;
+    ReferenceSourceAdapter::DescriptorRequest abandoned{};
+    CHECK(adapter.take_descriptor_giveup(reason, abandoned));
+    CHECK(reason == ReferenceDescriptorReason::NoInterface);
+    CHECK_EQ(abandoned.dev_addr, 2u);
+}
+
+TEST_CASE(a_refused_capture_retires_the_measurement_and_says_so) {
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0u);
+    CHECK(take(adapter).ok);
+
+    // An overflow retires every role downstream, and this request with them.
+    ReferenceCallbackRecord overflow{};
+    overflow.kind = ReferenceCallbackKind::Overflow;
+    adapter.consume(overflow, 1u);
+
+    ReferenceSourceAdapter::DescriptorRequest request{};
+    CHECK_FALSE(adapter.take_descriptor_request(
+        ReferenceSourceAdapter::kDescriptorQuietUs, request));
+
+    ReferenceDescriptorReason reason = ReferenceDescriptorReason::None;
+    ReferenceSourceAdapter::DescriptorRequest abandoned{};
+    CHECK(adapter.take_descriptor_giveup(reason, abandoned));
+    CHECK(reason == ReferenceDescriptorReason::Overflow);
+}
+
+TEST_CASE(an_accepted_request_reports_no_give_up) {
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09, {}), 0u);
+    CHECK(take(adapter).ok);
+
+    ReferenceSourceAdapter::DescriptorRequest request{};
+    CHECK(adapter.take_descriptor_request(
+        ReferenceSourceAdapter::kDescriptorQuietUs, request));
+    adapter.descriptor_request_accepted();
+
+    ReferenceDescriptorReason reason = ReferenceDescriptorReason::None;
+    ReferenceSourceAdapter::DescriptorRequest abandoned{};
+    CHECK_FALSE(adapter.take_descriptor_giveup(reason, abandoned));
 }
 
 TEST_CASE(descriptor_completion_owns_cdc_until_one_full_write) {
@@ -689,13 +991,15 @@ TEST_CASE(descriptor_completion_owns_cdc_until_one_full_write) {
     reference_service_cdc(writer);
     CHECK_EQ(writer.write_calls, 2u);
     CHECK_EQ(writer.flush_calls, 1u);
-    CHECK_EQ(writer.output, std::string{"DESC64_MATCH actual=64\r\n"});
+    CHECK_EQ(
+        writer.output,
+        std::string{"DESC64_MATCH actual=64 prefix=05010906A1010508\r\n"});
 
     reference_service_cdc(writer);
     CHECK_EQ(writer.write_calls, 3u);
     CHECK_EQ(writer.flush_calls, 2u);
     CHECK_EQ(writer.output,
-             std::string{"DESC64_MATCH actual=64\r\n"
+             std::string{"DESC64_MATCH actual=64 prefix=05010906A1010508\r\n"
                          "REPORT a=7 i=1 len=8\r\n"});
 
     reference_service_cdc(writer);
