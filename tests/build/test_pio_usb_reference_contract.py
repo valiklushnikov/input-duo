@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,6 +37,8 @@ UPSTREAM_REFERENCE = (
     PICO_PIO_USB_ROOT / "examples" / "host_hid_to_device_cdc"
 )
 REFERENCE_PRESET = "pico-pio-usb-reference-release"
+PIO_USB_PRESET = "pico-pio-usb-release"
+FIXED_SOURCE_DATE_EPOCH = "1788691431"
 PINNED_PICO_PIO_USB_REVISION = "3c1eec341a5232640e4c00628b889b641af34b28"
 REVIEWED_REFERENCE_SHA256 = {
     "main.c": "e8539134690e597be9254ee179f72a2b5cc93becf355e033f994d08955ea8ea1",
@@ -42,20 +47,23 @@ REVIEWED_REFERENCE_SHA256 = {
 }
 
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tests" / "build"))
+
+from reference_build_support import rebuild_reference_u1_artifacts
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _reference_symbols() -> dict:
+def _reference_symbols(elf: Path) -> dict:
     from dump_usb_descriptors import Elf32
 
-    assert REFERENCE_ELF.is_file(), (
-        f"missing reference ELF: {REFERENCE_ELF}; build "
+    assert elf.is_file(), (
+        f"missing reference ELF: {elf}; build "
         "pico-pio-usb-reference-release first"
     )
-    return Elf32(REFERENCE_ELF.read_bytes()).symbols()
+    return Elf32(elf.read_bytes()).symbols()
 
 
 def _configured_make_program() -> str:
@@ -67,6 +75,44 @@ def _configured_make_program() -> str:
         f"CMAKE_MAKE_PROGRAM is absent from {REFERENCE_BUILD / 'CMakeCache.txt'}"
     )
     return match.group(1).strip()
+
+
+def _configure_and_build_u2(preset: str) -> None:
+    env = os.environ.copy()
+    env["SOURCE_DATE_EPOCH"] = FIXED_SOURCE_DATE_EPOCH
+    make_program = _configured_make_program()
+
+    configure = subprocess.run(
+        [
+            "cmake",
+            "--preset",
+            preset,
+            f"-DCMAKE_MAKE_PROGRAM={make_program}",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert configure.returncode == 0, configure.stdout + configure.stderr
+
+    build = subprocess.run(
+        ["cmake", "--build", "--preset", preset, "--target", "duo_u2_endpoint"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert build.returncode == 0, build.stdout + build.stderr
+
+
+@pytest.fixture
+def fresh_reference_artifacts(tmp_path):
+    return rebuild_reference_u1_artifacts(
+        root=ROOT,
+        build_dir=REFERENCE_BUILD,
+        backup_dir=tmp_path / "prior-reference-artifacts",
+    )
 
 
 def test_reference_preset_selects_only_the_reference_backend():
@@ -107,6 +153,30 @@ def test_invalid_backend_configuration_is_rejected_by_cmake(tmp_path):
     assert result.returncode != 0
     output = result.stdout + result.stderr
     assert "Unknown DUO_INPUT_BACKEND 'NOT_A_DUO_BACKEND'" in output
+
+
+def test_failed_reference_rebuild_restores_exact_prior_artifacts(tmp_path):
+    build_dir = tmp_path / "build"
+    elf = build_dir / "firmware" / "u1_reference" / "duo_u1_reference.elf"
+    uf2 = build_dir / "firmware" / "u1_reference" / "duo_u1_reference.uf2"
+    elf.parent.mkdir(parents=True)
+    elf.write_bytes(b"prior ELF")
+    uf2.write_bytes(b"prior UF2")
+
+    def fail_build(*_args, **_kwargs):
+        elf.write_bytes(b"partial new ELF")
+        return subprocess.CompletedProcess([], 1, "partial stdout", "build failed")
+
+    with pytest.raises(AssertionError, match="build failed"):
+        rebuild_reference_u1_artifacts(
+            root=ROOT,
+            build_dir=build_dir,
+            backup_dir=tmp_path / "backup",
+            run_build=fail_build,
+        )
+
+    assert elf.read_bytes() == b"prior ELF"
+    assert uf2.read_bytes() == b"prior UF2"
 
 
 def test_reference_sources_are_maintained_outside_build_output():
@@ -159,8 +229,12 @@ def test_reference_sources_are_byte_for_byte_the_pinned_upstream_example():
     assert b"tud_cdc_write(" in (ROOT / "firmware" / "u1_reference" / "main.c").read_bytes()
 
 
-def test_reference_elf_contains_only_the_upstream_host_device_path():
-    symbols = _reference_symbols()
+def test_reference_elf_contains_only_the_upstream_host_device_path(
+    fresh_reference_artifacts,
+):
+    freshly_built_elf, freshly_built_uf2 = fresh_reference_artifacts
+    assert freshly_built_uf2.is_file()
+    symbols = _reference_symbols(freshly_built_elf)
 
     for required in ("tuh_task", "tuh_hid_receive_report", "tud_task"):
         assert any(required in name for name in symbols), (
@@ -184,30 +258,10 @@ def test_reference_elf_contains_only_the_upstream_host_device_path():
         )
 
 
-def test_current_build_graph_recreates_reference_artifacts_from_named_target():
-    for artifact in (REFERENCE_ELF, REFERENCE_UF2):
-        artifact.unlink(missing_ok=True)
-
-    result = subprocess.run(
-        [
-            "cmake",
-            "--build",
-            "--preset",
-            REFERENCE_PRESET,
-            "--target",
-            "duo_u1_reference",
-        ],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert REFERENCE_ELF.is_file(), "named target did not recreate its ELF"
-    assert REFERENCE_UF2.is_file(), "named target did not recreate its UF2"
-
-
 def test_reference_u2_matches_the_same_toolchain_pio_usb_u2():
+    _configure_and_build_u2(PIO_USB_PRESET)
+    _configure_and_build_u2(REFERENCE_PRESET)
+
     assert REFERENCE_U2_UF2.is_file(), f"missing reference-preset U2: {REFERENCE_U2_UF2}"
     assert PIO_USB_U2_UF2.is_file(), f"missing PIO_USB-preset U2: {PIO_USB_U2_UF2}"
     assert REFERENCE_U2_UF2.read_bytes() == PIO_USB_U2_UF2.read_bytes()

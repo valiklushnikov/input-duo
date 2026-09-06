@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -43,6 +42,9 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "tools"))
+sys.path.insert(0, str(REPOSITORY_ROOT / "tests" / "build"))
+
+from reference_build_support import rebuild_reference_u1_artifacts
 
 #: Present only in a CH375 image: firmware/u1_main/ch375/device.cpp.
 CH375_ONLY_SYMBOL_FRAGMENT = "Ch375Device4tick"
@@ -160,19 +162,16 @@ def test_a_pio_usb_declared_build_actually_links_pio_usb_and_not_ch375():
     )
 
 
-def test_a_reference_declared_build_links_only_the_upstream_host_device_path():
+def test_a_reference_declared_build_links_only_the_upstream_host_device_path(tmp_path):
     if declared_backend(BUILD_DIR) != "PIO_USB_REFERENCE":
         pytest.skip("this build directory is not configured for PIO_USB_REFERENCE")
 
-    build = subprocess.run(
-        ["cmake", "--build", str(BUILD_DIR), "--target", "duo_u1_reference"],
-        cwd=REPOSITORY_ROOT,
-        capture_output=True,
-        text=True,
+    freshly_built_elf, _ = rebuild_reference_u1_artifacts(
+        root=REPOSITORY_ROOT,
+        build_dir=BUILD_DIR,
+        backup_dir=tmp_path / "prior-reference-artifacts",
     )
-    assert build.returncode == 0, build.stdout + build.stderr
-
-    symbols = linked_symbols(U1_ELF)
+    symbols = linked_symbols(freshly_built_elf)
 
     required_fragments = (
         *PIO_USB_ONLY_SYMBOL_FRAGMENTS,
