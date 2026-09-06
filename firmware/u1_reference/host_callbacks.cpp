@@ -102,6 +102,25 @@ void tud_cdc_rx_cb(uint8_t itf) {
 // Core 1, after each tuh_task() returns. At most one record per pass, so a
 // burst can never turn a service loop into a long one.
 void reference_drain_one_callback(void) {
+    // A refused capture is the one thing that must never pass unnoticed: it is
+    // input this firmware was handed and did not keep. Counting it is not
+    // enough on its own - nobody reads a counter - so a change is turned into
+    // an ordinary trace entry, in line with the reports around it, carrying how
+    // many were lost.
+    static uint32_t reported_overflows = 0;
+    const uint32_t overflows = reference_overflows();
+    if (overflows != reported_overflows) {
+        ReferenceTraceEntry lost{};
+        lost.kind = ReferenceCallbackKind::Overflow;
+        lost.length = static_cast<uint16_t>(overflows - reported_overflows);
+        if (reference_trace_push(lost)) {
+            reported_overflows = overflows;
+        }
+        // If even that push was refused, leave reported_overflows alone and
+        // try again next pass rather than losing the fact that input was lost.
+        return;
+    }
+
     ReferenceCallbackRecord record{};
     if (!reference_take(record)) {
         return;

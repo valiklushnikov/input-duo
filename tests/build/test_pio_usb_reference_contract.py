@@ -488,3 +488,25 @@ def test_reference_u2_matches_the_same_toolchain_pio_usb_u2(tmp_path):
         )
 
         assert reference_u2_uf2.read_bytes() == pio_usb_u2_uf2.read_bytes()
+
+
+def test_a_refused_capture_is_surfaced_and_not_merely_counted():
+    """Input the firmware dropped has to be visible, not just countable.
+
+    The gate for this task is that no capture is ever refused. That is only
+    checkable if a refusal reaches the trace at all - a counter nobody prints
+    would let the gate pass by saying nothing.
+    """
+    source = (ROOT / "firmware" / "u1_reference" / "host_callbacks.cpp").read_text(
+        encoding="utf-8"
+    )
+    drain_start = source.index("void reference_drain_one_callback")
+    drain = source[drain_start:source.index("void reference_print_one_trace")]
+
+    assert "reference_overflows()" in drain, (
+        "the drain never looks at the overflow count, so a refused capture "
+        "can never appear in the trace"
+    )
+    assert "ReferenceCallbackKind::Overflow" in drain, (
+        "an overflow is not turned into a trace entry"
+    )
