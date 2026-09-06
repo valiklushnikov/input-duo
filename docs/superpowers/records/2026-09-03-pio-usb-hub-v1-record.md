@@ -1231,3 +1231,113 @@ entry, so the criterion cannot silently become unobservable again.
 Verification alongside: 44 native tests (18 of them new, with the queue's bounds
 and the lifecycle assertions mutation-verified), 117 build tests, all three Pico
 presets.
+
+## Task 3: the input path runs, and what still blocks it (2026-09-06)
+
+`08d07dc` routes the reference host through the production PC1 runtime. The
+image (`0e61f7a0e2a09b5f7cc15c45b1567b78499965f54b20390616e61c3291f8e75b`,
+227840 bytes) enumerates on PC1 as the real device - `1209:D101`, HID keyboard,
+HID mouse, consumer control and CDC - and **the keyboard types**. The whole path
+from a USB callback to a keystroke on PC1 works.
+
+**The mouse does not move the cursor**, and the reason is exact.
+
+### The layout must match the protocol, and it does not
+
+`classify_hid` takes the layout from the report descriptor whenever a
+descriptor is present, without asking which protocol the interface is actually
+in. TinyUSB puts keyboards and mice in **boot protocol** by default
+(`hid_host.c`, `_hidh_default_protocol = HID_PROTOCOL_BOOT`) and neither the
+reference nor the production backend ever changes that.
+
+So for the Keychron receiver, whose descriptors declare Report ID 3, the
+pipeline expects every report to begin `03` while boot protocol delivers three
+bytes with no identifier. Measured on the running firmware:
+
+```
+REPORT a=1 i=0 len=3  00 C9 03     <- movement arriving: dX -55, dY 3
+```
+
+Every one of them is dropped downstream. The keyboard works only by accident:
+its receiver's descriptor fetch fails, so it falls back to the boot layout,
+which is what it actually sends.
+
+**This is not confined to the reference target.** `classify_hid` is shared, and
+the production PIO USB backend has the same mismatch. It is a plausible part of
+why that path never worked properly in this project.
+
+### The decision taken
+
+Everything is to be read through report protocol and report descriptors, not
+boot protocol - the shipped firmware has to work for devices nobody here owns,
+and boot protocol describes nothing, it guesses. Boot stays only as an explicit,
+documented fallback for a device that refuses its descriptor.
+
+That is blocked: a descriptor that cannot be fetched cannot be read from. The
+Aula receiver `3554:FA09` mounts with `len=0` on both interfaces and stays in
+the system only through the `hid_host.c` fix recorded above.
+
+### The descriptor fetch, measured again and narrowed
+
+Its 77-byte fetch fails on the second packet, as recorded earlier. What is new:
+
+- **Multi-packet control IN is not broken in general.** In the same run, the
+  Keychron receiver's descriptors of 81, 115 and 164 bytes were fetched
+  successfully - eleven packets and more, at `EP0 = 8`. Only `EP0 = 64` with
+  more than one packet fails, and only on that one device.
+- **The host answers in time.** An instrument placed *after* the handshake, so
+  it cannot itself delay it, measured the gap from the start of a received
+  packet to the ACK:
+
+  | payload | worst | wire time |
+  | --- | --- | --- |
+  | 0 | 6 us | ~2.7 us |
+  | 8 | 12 us | ~8 us |
+  | 25 | 24 us | ~19 us |
+  | 64 | 52 us | ~45 us |
+
+  The overhead is a roughly constant 5-7 us and does **not** grow with packet
+  size. A 64-byte packet is therefore not answered later, relative to its own
+  EOP, than an 8-byte one. The theory that the receive loop falls progressively
+  behind on long packets - which motivated this measurement - is **refuted**.
+
+  A first attempt at this instrument computed its buckets *before* sending the
+  ACK and stopped enumeration outright, which is its own small piece of
+  evidence about how little slack there is.
+
+### Four hypotheses tested and retired
+
+| hypothesis | result |
+| --- | --- |
+| 2 bit-time inter-packet delay at full speed | worse: the hub stopped enumerating |
+| ACK sent before CRC validation | no effect |
+| 1 bit-time delay at full speed | fewer early toggle mismatches, fetch still fails |
+| receive loop falls behind on long packets | refuted by the measurement above |
+
+Blind search is exhausted, and two of those four attempts made things worse.
+**The next step needs a logic analyser on D+/D-**, not another build.
+
+### What to capture, so that session is short
+
+Trigger on the failing transfer: `SETUP 80 06 00 22 00 00 4D 00` to address 2,
+endpoint 0. Then answer three questions in order:
+
+1. Does our ACK appear on the wire at all after the device's first 64-byte
+   DATA1 packet? If it does not, the fault is in transmitting it, not in timing.
+2. If it does, how many bit times after the packet's EOP? The window is 2 to 7.5
+   at full speed. The firmware-side measurement says the *host-side* overhead is
+   constant, but it cannot see the wire.
+3. Is the ACK well formed - SYNC, PID `D2`, correct idle before and after?
+
+The comparison case is on the same bus and needs no separate setup: the same
+capture will contain address 1's successful multi-packet fetches at `EP0 = 8`,
+so the failing and working handshakes can be measured against each other in one
+trace.
+
+### State
+
+Repository clean at the Task 3 commit, both dependency clones back at their
+pinned patched revisions, and the reference artifact rebuilds to the recorded
+hash. Every diagnostic build in this section has been reverted. Task 3's gate is
+not attempted: its wheel, side-button and macro rows all depend on descriptor
+reading, which is what is blocked.
