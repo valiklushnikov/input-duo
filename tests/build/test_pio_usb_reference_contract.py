@@ -15,22 +15,16 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 REFERENCE_BUILD = ROOT / "build" / "pico-pio-usb-reference-release"
+PIO_USB_BUILD = ROOT / "build" / "pico-pio-usb-release"
 REFERENCE_ELF = (
     REFERENCE_BUILD / "firmware" / "u1_reference" / "duo_u1_reference.elf"
 )
 REFERENCE_UF2 = (
     REFERENCE_BUILD / "firmware" / "u1_reference" / "duo_u1_reference.uf2"
 )
-REFERENCE_U2_UF2 = (
-    REFERENCE_BUILD / "firmware" / "u2_endpoint" / "duo_u2_endpoint.uf2"
-)
-PIO_USB_U2_UF2 = (
-    ROOT
-    / "build"
-    / "pico-pio-usb-release"
-    / "firmware"
-    / "u2_endpoint"
-    / "duo_u2_endpoint.uf2"
+U2_RELATIVE_ARTIFACTS = (
+    Path("firmware/u2_endpoint/duo_u2_endpoint.elf"),
+    Path("firmware/u2_endpoint/duo_u2_endpoint.uf2"),
 )
 PICO_PIO_USB_ROOT = ROOT / ".deps" / "pico-pio-usb"
 UPSTREAM_REFERENCE = (
@@ -49,7 +43,11 @@ REVIEWED_REFERENCE_SHA256 = {
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests" / "build"))
 
-from reference_build_support import rebuild_reference_u1_artifacts
+from reference_build_support import (
+    firmware_artifact_lock,
+    rebuild_reference_u1_artifacts,
+    rebuild_target_artifacts,
+)
 
 
 def _sha256(path: Path) -> str:
@@ -77,9 +75,9 @@ def _configured_make_program() -> str:
     return match.group(1).strip()
 
 
-def _configure_and_build_u2(preset: str) -> None:
-    env = os.environ.copy()
-    env["SOURCE_DATE_EPOCH"] = FIXED_SOURCE_DATE_EPOCH
+def _configure_and_rebuild_u2(
+    *, preset: str, build_dir: Path, backup_dir: Path, env: dict[str, str]
+) -> tuple[Path, Path]:
     make_program = _configured_make_program()
 
     configure = subprocess.run(
@@ -96,14 +94,16 @@ def _configure_and_build_u2(preset: str) -> None:
     )
     assert configure.returncode == 0, configure.stdout + configure.stderr
 
-    build = subprocess.run(
-        ["cmake", "--build", "--preset", preset, "--target", "duo_u2_endpoint"],
-        cwd=ROOT,
+    artifacts = rebuild_target_artifacts(
+        root=ROOT,
+        build_dir=build_dir,
+        backup_dir=backup_dir,
+        target="duo_u2_endpoint",
+        relative_artifacts=U2_RELATIVE_ARTIFACTS,
         env=env,
-        capture_output=True,
-        text=True,
+        lock_held=True,
     )
-    assert build.returncode == 0, build.stdout + build.stderr
+    return artifacts[0], artifacts[1]
 
 
 @pytest.fixture
@@ -177,6 +177,68 @@ def test_failed_reference_rebuild_restores_exact_prior_artifacts(tmp_path):
 
     assert elf.read_bytes() == b"prior ELF"
     assert uf2.read_bytes() == b"prior UF2"
+
+
+def test_backup_copy_failure_preserves_all_prior_artifacts(tmp_path):
+    root = tmp_path / "repo"
+    build_dir = root / "build" / "reference"
+    elf = build_dir / "firmware" / "u1_reference" / "duo_u1_reference.elf"
+    uf2 = build_dir / "firmware" / "u1_reference" / "duo_u1_reference.uf2"
+    elf.parent.mkdir(parents=True)
+    elf.write_bytes(b"prior ELF")
+    uf2.write_bytes(b"prior UF2")
+
+    def fail_second_copy(source, destination):
+        if Path(source) == uf2:
+            raise OSError("injected second backup copy failure")
+        Path(destination).write_bytes(Path(source).read_bytes())
+
+    def unexpected_build(*_args, **_kwargs):
+        pytest.fail("build must not start before every backup is verified")
+
+    with pytest.raises(OSError, match="injected second backup copy failure"):
+        rebuild_reference_u1_artifacts(
+            root=root,
+            build_dir=build_dir,
+            backup_dir=tmp_path / "backup",
+            run_build=unexpected_build,
+            copy_artifact=fail_second_copy,
+        )
+
+    assert elf.read_bytes() == b"prior ELF"
+    assert uf2.read_bytes() == b"prior UF2"
+
+
+def test_incomplete_u2_rebuild_rejects_stale_uf2_and_restores_prior_artifacts(
+    tmp_path,
+):
+    root = tmp_path / "repo"
+    build_dir = root / "build" / "pio"
+    relative_artifacts = (
+        Path("firmware/u2_endpoint/duo_u2_endpoint.elf"),
+        Path("firmware/u2_endpoint/duo_u2_endpoint.uf2"),
+    )
+    elf, uf2 = (build_dir / relative for relative in relative_artifacts)
+    elf.parent.mkdir(parents=True)
+    elf.write_bytes(b"prior ELF")
+    uf2.write_bytes(b"stale matching UF2")
+
+    def link_without_uf2(*_args, **_kwargs):
+        elf.write_bytes(b"fresh current-graph ELF")
+        return subprocess.CompletedProcess([], 0, "linked ELF only", "")
+
+    with pytest.raises(AssertionError, match=r"did not recreate: .*\.uf2"):
+        rebuild_target_artifacts(
+            root=root,
+            build_dir=build_dir,
+            backup_dir=tmp_path / "backup",
+            target="duo_u2_endpoint",
+            relative_artifacts=relative_artifacts,
+            run_build=link_without_uf2,
+        )
+
+    assert elf.read_bytes() == b"prior ELF"
+    assert uf2.read_bytes() == b"stale matching UF2"
 
 
 def test_reference_sources_are_maintained_outside_build_output():
@@ -258,10 +320,24 @@ def test_reference_elf_contains_only_the_upstream_host_device_path(
         )
 
 
-def test_reference_u2_matches_the_same_toolchain_pio_usb_u2():
-    _configure_and_build_u2(PIO_USB_PRESET)
-    _configure_and_build_u2(REFERENCE_PRESET)
+def test_reference_u2_matches_the_same_toolchain_pio_usb_u2(tmp_path):
+    env = os.environ.copy()
+    env["SOURCE_DATE_EPOCH"] = FIXED_SOURCE_DATE_EPOCH
 
-    assert REFERENCE_U2_UF2.is_file(), f"missing reference-preset U2: {REFERENCE_U2_UF2}"
-    assert PIO_USB_U2_UF2.is_file(), f"missing PIO_USB-preset U2: {PIO_USB_U2_UF2}"
-    assert REFERENCE_U2_UF2.read_bytes() == PIO_USB_U2_UF2.read_bytes()
+    # Hold the same repository-wide interprocess lock used by U1 freshness
+    # while both shared U2 graphs are configured, rebuilt, and compared.
+    with firmware_artifact_lock(ROOT):
+        _, pio_usb_u2_uf2 = _configure_and_rebuild_u2(
+            preset=PIO_USB_PRESET,
+            build_dir=PIO_USB_BUILD,
+            backup_dir=tmp_path / "pio-usb-u2-backup",
+            env=env,
+        )
+        _, reference_u2_uf2 = _configure_and_rebuild_u2(
+            preset=REFERENCE_PRESET,
+            build_dir=REFERENCE_BUILD,
+            backup_dir=tmp_path / "reference-u2-backup",
+            env=env,
+        )
+
+        assert reference_u2_uf2.read_bytes() == pio_usb_u2_uf2.read_bytes()
