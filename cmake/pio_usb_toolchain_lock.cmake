@@ -25,9 +25,9 @@ set(DUO_PIO_USB_TINYUSB_BASE_REVISION "86ad6e56c1700e85f1c5678607a762cfe3aa2f47"
 set(DUO_PIO_USB_PICO_PIO_USB_BASE_REVISION "3c1eec341a5232640e4c00628b889b641af34b28")
 
 # TinyUSB and Pico-PIO-USB are built one commit further on, with everything in
-# patches/ applied: the four host fixes, and - for now - one diagnostic patch
-# that instruments Pico-PIO-USB's control transfers. Those defects are measured
-# and recorded in
+# patches/ applied: four host fixes in TinyUSB, then Pico-PIO-USB's upstream
+# ACK-turnaround fix, Duo Input host guards, and the temporary control-transfer
+# diagnostic patch. Those defects are measured and recorded in
 # docs/superpowers/records/2026-09-03-pio-usb-hub-v1-record.md; without them
 # this hardware does not enumerate a second device, does not mount a keyboard,
 # and loses hub port events for the rest of the session after a single

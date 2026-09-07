@@ -73,7 +73,8 @@ function Write-Step($message) {
 # The patched SHA is reproducible because everything a git commit hashes is
 # fixed below: the tree (the clone is normalised to LF first), the parent (the
 # pinned upstream revision), the author and committer identity and date, and
-# the message. Change any of those and the SHA changes, which is why they are
+# the message, with signing disabled and hooks redirected to repository
+# metadata. Change any hashed input and the SHA changes, which is why these are
 # constants here and asserted by tests/build/test_pio_usb_toolchain_patches.py.
 $Dependencies = @(
     @{ Name = 'pico-sdk';     Url = 'https://github.com/raspberrypi/pico-sdk';        Revision = '98a542c1a62fb549ffb5d66a3e5892b06276b670'; PatchedRevision = $null }
@@ -117,7 +118,15 @@ function Invoke-Patches([string]$Dir, [string]$Name, [string]$ExpectedRevision) 
         $env:GIT_COMMITTER_EMAIL = $PatchCommitEmail
         $env:GIT_COMMITTER_DATE = $PatchCommitDate
         try {
-            & git commit -q -a -m $PatchCommitMessage
+            # A signed commit has a different object ID, and user/global hooks
+            # may reject or mutate this generated commit. Point Git at a known
+            # empty directory inside its own metadata and disable signing for
+            # this invocation so the pinned SHA is a pure function of the
+            # reviewed tree, parent, identity, date and message.
+            $emptyHooksDir = Join-Path (Join-Path $Dir '.git') 'duo-input-empty-hooks'
+            New-Item -ItemType Directory -Path $emptyHooksDir -Force | Out-Null
+            & git -c 'commit.gpgSign=false' -c "core.hooksPath=$emptyHooksDir" `
+                commit -q -a -m $PatchCommitMessage
             if ($LASTEXITCODE -ne 0) { throw "committing the patches failed for $Name" }
         }
         finally {

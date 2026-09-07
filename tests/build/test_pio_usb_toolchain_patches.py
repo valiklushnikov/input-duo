@@ -204,6 +204,20 @@ def test_the_bootstrap_fixes_everything_the_commit_sha_depends_on():
         assert required in bootstrap, f"bootstrap does not fix {required}"
 
 
+def test_the_bootstrap_commit_ignores_global_signing_and_hooks():
+    bootstrap = _bootstrap_text()
+    assert "& git -c 'commit.gpgSign=false'" in bootstrap, (
+        "a global commit.gpgSign=true adds a signature and changes the pinned SHA"
+    )
+    assert '-c "core.hooksPath=$emptyHooksDir"' in bootstrap, (
+        "global hooks can reject or mutate the generated patch commit"
+    )
+    assert "$emptyHooksDir = Join-Path (Join-Path $Dir '.git')" in bootstrap
+    assert "New-Item -ItemType Directory -Path $emptyHooksDir" in bootstrap, (
+        "the hooks path must name a known-empty directory created by bootstrap"
+    )
+
+
 def test_the_bootstrap_normalises_line_endings_before_patching():
     bootstrap = _bootstrap_text()
     assert "core.autocrlf" in bootstrap, (
