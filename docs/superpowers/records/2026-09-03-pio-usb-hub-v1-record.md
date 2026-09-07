@@ -1743,7 +1743,9 @@ enumeration; no such absent outcome is invented here.
 
 After this capture, the operator manually confirmed on the same flashed image
 that the Aula keyboard types, the Trust mouse moves the cursor, and its wheel
-scrolls. This is only basic functional confirmation, not the complete Task 3
+scrolls in both directions. The operator answered `Все работает` to the test
+requiring wheel-up and wheel-down scrolling. This is only basic functional
+confirmation, not the complete Task 3
 Step 7 parity gate: modifiers, Fn F9-F12, five/side buttons, macros,
 simultaneous input, detach-held release, and counters remain outstanding. It
 does not change the strict timing FAIL/PARTIAL verdict above.
