@@ -1028,7 +1028,7 @@ class DeployResult:
     """What one deployment did, in the order it did it."""
 
     generation_before: int
-    previous_package: bytes
+    previous_package: bytes | None
     written_package: bytes
     read_back_package: bytes
 
@@ -1091,8 +1091,15 @@ def deploy(link, package: bytes, *, timeout_ms: int = 5000, step_timeout_ms: int
         info = _await(
             service, lambda: service.connect_device(link), step_timeout_ms, "connect_device"
         )
-        previous = _await(service, service.read_config, step_timeout_ms, "read_config (backup)")
-        if not isinstance(previous, (bytes, bytearray)) or not previous:
+        blank = info.active_generation == 0 and info.active_hash == b"\0" * 32
+        previous = (
+            None
+            if blank
+            else _await(service, service.read_config, step_timeout_ms, "read_config (backup)")
+        )
+        if previous is not None and (
+            not isinstance(previous, (bytes, bytearray)) or not previous
+        ):
             raise DeployError("the device returned an empty configuration; refusing to overwrite")
         _await(
             service, lambda: service.write_config(package), step_timeout_ms, "write_config"
@@ -1102,7 +1109,7 @@ def deploy(link, package: bytes, *, timeout_ms: int = 5000, step_timeout_ms: int
         service.disconnect_device()
     return DeployResult(
         generation_before=info.active_generation,
-        previous_package=bytes(previous),
+        previous_package=None if previous is None else bytes(previous),
         written_package=bytes(package),
         read_back_package=bytes(read_back),
     )
@@ -1181,22 +1188,25 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
         print(str(error), file=sys.stderr)
         return 1
 
-    backup_directory = Path(args.backup_dir)
-    backup_directory.mkdir(parents=True, exist_ok=True)
-    backup = backup_directory / (
-        f"u1-config-generation-{result.generation_before}-{label}.b64"
-    )
-    backup.write_text(
-        backup_document(
-            result.previous_package,
-            serial_number=serial_number,
-            generation=result.generation_before,
-            reason=reason,
-            taken_at=datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-        ),
-        encoding="utf-8",
-    )
-    print(f"backup: {backup} ({len(result.previous_package)} bytes)")
+    if result.previous_package is None:
+        print("backup: none (device reported no installed configuration)")
+    else:
+        backup_directory = Path(args.backup_dir)
+        backup_directory.mkdir(parents=True, exist_ok=True)
+        backup = backup_directory / (
+            f"u1-config-generation-{result.generation_before}-{label}.b64"
+        )
+        backup.write_text(
+            backup_document(
+                result.previous_package,
+                serial_number=serial_number,
+                generation=result.generation_before,
+                reason=reason,
+                taken_at=datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+            ),
+            encoding="utf-8",
+        )
+        print(f"backup: {backup} ({len(result.previous_package)} bytes)")
     print(f"written: {len(result.written_package)} bytes, "
           f"sha256 {hashlib.sha256(result.written_package).hexdigest()}")
     print(f"read back: {len(result.read_back_package)} bytes, "

@@ -424,7 +424,8 @@ void service_input(std::uint32_t millis) {
              g_adapter.logical_port(DeviceKind::Keyboard))
                 ? &g_keyboard_pipeline
                 : &g_mouse_pipeline;
-        pipeline->on_event(event, identity, millis);
+        duo_input::u1::reference::dispatch_source_event(
+            g_runtime, *pipeline, event, identity, millis);
         return;
     }
 

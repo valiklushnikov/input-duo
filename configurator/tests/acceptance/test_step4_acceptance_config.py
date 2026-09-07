@@ -37,6 +37,7 @@ from step4_acceptance_config import (  # noqa: E402
     REPEAT_TEXT,
     TARGET_TEXT,
     DeployError,
+    _cmd_deploy,
     backup_document,
     build_package,
     build_session,
@@ -54,6 +55,7 @@ from duo_input.domain.config_binary import decode_device_config  # noqa: E402
 from duo_input.generated.protocol import (  # noqa: E402
     PROFILES,
     ActionKind,
+    ErrorCode,
     KeyboardRoute,
     MacroStepType,
     MouseRoute,
@@ -286,14 +288,66 @@ def test_deploy_backs_up_writes_and_reads_back(qapp, emulator: U1Emulator, packa
     assert [check.field for check in verify_round_trip(result.read_back_package) if not check.matches] == []
 
 
-def test_deploy_refuses_to_overwrite_a_device_it_could_not_read(qapp, package: bytes):
-    # No install_active: the device has no configuration to hand back.
+def test_deploy_installs_the_first_configuration_on_an_explicitly_blank_device(
+    qapp, package: bytes
+):
+    # Generation zero plus the all-zero digest is the protocol's unambiguous
+    # "no configuration installed" state, not an unreadable existing profile.
     blank = U1Emulator()
 
-    with pytest.raises(DeployError):
-        deploy(SynchronousTransportLink(blank), package)
+    result = deploy(SynchronousTransportLink(blank), package)
 
-    assert blank.active_hash == b"\0" * 32
+    assert result.previous_package is None
+    assert result.read_back_package == package
+    assert blank.active_generation == 1
+    assert blank.active_hash == hashlib.sha256(package).digest()
+
+
+def test_deploy_still_refuses_to_overwrite_an_unreadable_nonblank_device(qapp, package: bytes):
+    class UnreadableDevice(U1Emulator):
+        def _handle_read_config_chunk(self, payload: bytes) -> bytes:
+            return bytes((ErrorCode.BAD_STATE,)) + payload[:4]
+
+    device = UnreadableDevice()
+    previous = build_previous_configuration()
+    device.install_active(previous)
+
+    with pytest.raises(DeployError, match=r"read_config \(backup\) failed"):
+        deploy(SynchronousTransportLink(device), package)
+
+    assert device.active_generation == 1
+    assert device.active_hash == hashlib.sha256(previous).digest()
+
+
+def test_cli_does_not_invent_an_unrestorable_backup_for_a_blank_device(
+    qapp, monkeypatch, tmp_path, capsys
+):
+    from types import SimpleNamespace
+
+    from duo_input.device import discovery, qt_transport
+
+    blank = U1Emulator()
+    monkeypatch.setattr(
+        discovery,
+        "find_u1_ports",
+        lambda: [SimpleNamespace(port_name="COM_TEST", serial_number="DIU1-TEST")],
+    )
+    monkeypatch.setattr(
+        qt_transport,
+        "QSerialPortTransport",
+        lambda _port: SynchronousTransportLink(blank),
+    )
+    args = SimpleNamespace(
+        config="step4",
+        restore_from=None,
+        package=None,
+        port="COM_TEST",
+        backup_dir=str(tmp_path),
+    )
+
+    assert _cmd_deploy(args) == 0
+    assert list(tmp_path.glob("*.b64")) == []
+    assert "backup: none (device reported no installed configuration)" in capsys.readouterr().out
 
 
 def test_the_written_configuration_is_still_there_after_a_power_cycle(

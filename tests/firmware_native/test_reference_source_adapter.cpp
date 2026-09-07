@@ -42,6 +42,27 @@ using duo_input::u1::reference::ReferenceSourceAdapter;
 
 namespace {
 
+struct OriginRuntime {
+    std::uint32_t current = 0;
+    std::vector<std::uint32_t> writes;
+
+    void set_event_origin_us(std::uint32_t value) {
+        current = value;
+        writes.push_back(value);
+    }
+};
+
+struct OriginObservingPipeline {
+    explicit OriginObservingPipeline(OriginRuntime& runtime) : runtime(runtime) {}
+
+    void on_event(const SourceEvent&, const SourceIdentity&, std::uint32_t) {
+        observed = runtime.current;
+    }
+
+    OriginRuntime& runtime;
+    std::uint32_t observed = 0;
+};
+
 constexpr std::uint8_t kProtocolNone = 0;
 //: The wire-visible "no compared byte disagreed" sentinel, written here
 //: as a literal rather than taken from the production constant. A
@@ -1364,4 +1385,20 @@ TEST_CASE(a_follow_up_completion_reports_the_widened_buffer_prefix) {
     CHECK_EQ(entry.prefix[12], 0xC0u);
     CHECK_EQ(entry.prefix[13], 0xA5u);
     CHECK_EQ(entry.prefix[23], 0xA5u);
+}
+
+TEST_CASE(reference_dispatch_stamps_the_source_timestamp_and_clears_it_afterwards) {
+    OriginRuntime runtime;
+    OriginObservingPipeline pipeline(runtime);
+    SourceEvent event{};
+    event.received_us = 0x12345678u;
+    SourceIdentity identity{};
+
+    duo_input::u1::reference::dispatch_source_event(runtime, pipeline, event, identity, 99u);
+
+    CHECK_EQ(pipeline.observed, 0x12345678u);
+    CHECK_EQ(runtime.current, 0u);
+    CHECK_EQ(runtime.writes.size(), 2u);
+    CHECK_EQ(runtime.writes[0], 0x12345678u);
+    CHECK_EQ(runtime.writes[1], 0u);
 }

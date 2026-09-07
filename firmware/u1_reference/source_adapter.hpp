@@ -22,6 +22,17 @@
 
 namespace duo_input::u1::reference {
 
+template <typename Runtime, typename Pipeline>
+void dispatch_source_event(Runtime& runtime,
+                           Pipeline& pipeline,
+                           const input::SourceEvent& event,
+                           const input::SourceIdentity& identity,
+                           std::uint32_t now_ms) {
+    runtime.set_event_origin_us(event.received_us);
+    pipeline.on_event(event, identity, now_ms);
+    runtime.set_event_origin_us(0);
+}
+
 class ReferenceSourceAdapter {
 public:
     //: The pipeline instance each role's events are addressed to. The
