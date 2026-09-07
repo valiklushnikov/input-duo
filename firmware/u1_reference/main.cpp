@@ -17,9 +17,15 @@
 // stacks.
 //
 // Core 1 does host work and input work. Core 0 does device work and output
-// work. Nothing crosses between them except through the bounded queues: a
-// callback record from the host callbacks, and an output command from the
-// runtime. Neither core waits on the other.
+// work - PC1's USB device and PC2's SPI link both. Nothing crosses between
+// them except through the bounded queues: a callback record from the host
+// callbacks, and an output command from the runtime. Neither core waits on the
+// other.
+//
+// The link is Core 0's alone. A 64-byte frame occupies 512 us of the bus, and
+// Core 1 has a tuh_task() to run inside every millisecond; an SPI transfer
+// there would be a host stall and a second writer on a peripheral nothing
+// locks.
 
 #include <array>
 #include <cstdint>
@@ -40,8 +46,10 @@ extern "C" void reference_drain_one_callback();
 #include "core1_runtime.hpp"
 #include "host_control_state.hpp"
 #include "input/pipeline.hpp"
+#include "link_reconnect.hpp"
 #include "output_runtime.hpp"
 #include "source_adapter.hpp"
+#include "spi_master.hpp"
 #include "usb_service.hpp"
 
 namespace {
@@ -53,6 +61,12 @@ using duo_input::u1::input::DeviceKind;
 duo_input::u1::OutputRuntime g_outputs;
 
 duo_input::u1::UsbService g_usb;
+
+/// PC2, over four wires. Core 0 only - see the note at the top of this file.
+duo_input::u1::SpiMaster g_link;
+
+/// Whether U2 has just come back and has to be told to let go.
+duo_input::u1::reference::LinkReconnect g_link_reconnect;
 
 /// Core 1's only reach into the output: the queue, and nothing else. A full
 /// queue is refused rather than waited on, because Core 1 cannot block on
@@ -308,6 +322,13 @@ int main() {
     // init device stack on native usb (roothub port0)
     g_usb.begin();
 
+    // After the device stack, and after set_sys_clock_khz above: begin()
+    // computes the PL022 prescalers against clk_peri as it is at that moment,
+    // and nothing here moves the clock again. This target has no pio_usb
+    // backend reparenting clk_peri underneath it, so one begin() is enough and
+    // the old clock handoff barrier is deliberately not recreated.
+    g_link.begin();
+
     while (true) {
         g_usb.task();
         reference_service_one_cdc();
@@ -315,6 +336,20 @@ int main() {
         const std::uint32_t millis = now_ms();
         g_outputs.drain(millis, time_us_32());
         g_usb.publish(g_outputs);
+
+        // U2 releases everything after 100 ms of silence; U1 keeps no such
+        // clock and the link sends on change, so a link that has come back
+        // disagrees with this side about what PC2 is holding and nothing
+        // afterwards corrects it. Once per reconnection, before the poll that
+        // then re-sends the state send_release_all just invalidated.
+        if (g_link_reconnect.should_release(g_link.status().answered)) {
+            g_link.send_release_all(millis);
+        }
+
+        // PC2's half of the state. It sends on change and otherwise
+        // heartbeats, so a quiet device neither saturates the bus nor looks
+        // severed.
+        g_link.poll(millis, g_outputs);
     }
 
     return 0;

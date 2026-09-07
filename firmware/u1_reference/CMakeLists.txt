@@ -11,10 +11,13 @@
 # output the CH375 and PIO USB builds use, so a report that means one thing
 # there cannot mean another here.
 #
-# Deliberately NOT linked at this slice: SPI and the core bridge, the
-# configuration service, flash and the A/B store, the watchdog, and the current
-# pio_usb/backend.cpp. Task 4 admits routing, Task 5 configuration. Adding them
-# early is exactly what this rebuild exists to avoid.
+# Task 4 admits the link to U2: the same spi_master.cpp and spi_master_poll.cpp
+# the shipping backends link, driven from Core 0 only.
+#
+# Deliberately NOT linked at this slice: the configuration service and its core
+# bridge, flash and the A/B store, the watchdog, and the current
+# pio_usb/backend.cpp. Task 5 admits configuration. Adding them early is
+# exactly what this rebuild exists to avoid.
 #
 # See docs/superpowers/plans/2026-09-06-pio-usb-reference-first-rebuild.md.
 if(NOT TARGET pico_pio_usb)
@@ -38,6 +41,10 @@ target_sources(duo_u1_reference PRIVATE
     ${_duo_u1_main_dir}/usb_descriptors.cpp
     ${_duo_u1_main_dir}/usb_service.cpp
     ${_duo_u1_main_dir}/output_runtime.cpp
+
+    # PC2's half: what U1 decides to tell it, and the four wires that carry it.
+    ${_duo_u1_main_dir}/spi_master.cpp
+    ${_duo_u1_main_dir}/spi_master_poll.cpp
     ${_duo_u1_main_dir}/config_profiles.cpp
     ${_duo_u1_main_dir}/core1_runtime.cpp
     ${_duo_u1_main_dir}/input/pipeline.cpp
@@ -73,6 +80,7 @@ target_link_libraries(duo_u1_reference PRIVATE
     pico_multicore
     pico_unique_id
     hardware_clocks
+    hardware_spi
     tinyusb_device
     tinyusb_host
 )

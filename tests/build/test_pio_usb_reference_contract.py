@@ -471,19 +471,27 @@ def test_reference_elf_contains_only_the_upstream_host_device_path(
 
     # Task 3 admits the input path, so the pipeline is now required rather
     # than forbidden. What stays out is the old host backend, CH375, and
-    # everything Task 4 and Task 5 have yet to admit.
+    # everything Task 5 has yet to admit.
     for required_symbol in ("InputPipeline8on_event", "OutputRuntime",
                             "Core1Runtime", "ReferenceSourceAdapter"):
         assert any(required_symbol in name for name in symbols), (
             f"{REFERENCE_ELF} contains no {required_symbol}"
         )
 
+    # SpiMaster left this list in Task 4, which admits the link to U2; what it
+    # must now contain is asserted in test_reference_routing_contract.py.
+    #
+    # "CoreBridge" left it because no such symbol exists anywhere in this
+    # project - the core bridge is a free function template and a handoff
+    # class, so the old entry excluded a name nothing could ever produce and
+    # would have passed with the whole bridge linked. These two are the names
+    # the linker actually emits.
     for excluded in (
         "Ch375Device4tick",
         "PioUsbBackend4task",
-        "SpiMaster",
         "ConfigService",
-        "CoreBridge",
+        "ConfigHandoff",
+        "pump_core_bridge",
     ):
         assert not any(excluded in name for name in symbols), (
             f"{REFERENCE_ELF} unexpectedly contains {excluded}"

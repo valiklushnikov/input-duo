@@ -790,6 +790,21 @@ endif()
 
 add_test(NAME reference_callback_queue COMMAND duo_reference_callback_queue_test)
 
+add_executable(duo_reference_link_reconnect_test
+    test_main.cpp
+    test_reference_link_reconnect.cpp
+)
+
+target_include_directories(duo_reference_link_reconnect_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_reference
+)
+
+if(MSVC)
+    target_compile_options(duo_reference_link_reconnect_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME reference_link_reconnect COMMAND duo_reference_link_reconnect_test)
+
 add_executable(duo_reference_source_adapter_test
     test_main.cpp
     test_reference_source_adapter.cpp
