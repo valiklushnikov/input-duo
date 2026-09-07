@@ -9,6 +9,7 @@ which is where they are meant to bite.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -193,8 +194,6 @@ def test_the_licence_notices_ship(files):
 def test_the_executable_carries_the_project_version(dist):
     # The version is read from the built exe rather than trusted from the
     # source tree, so a stale build cannot pass as a current one.
-    import subprocess
-
     output = subprocess.run(
         [
             "powershell",
@@ -238,3 +237,23 @@ def test_no_macro_project_is_bundled(files):
 
 def test_the_build_does_not_carry_the_repository_with_it(files):
     assert not any(".git" in path.parts for path in files)
+
+
+# ------------------------------------------------------------- what it can do
+
+
+def test_the_built_program_can_actually_open_a_tls_connection(dist: Path):
+    """TLS должен работать внутри сборки, а не только в среде разработки.
+
+    Недостающая криптографическая библиотека выглядит у пользователя как "нет
+    связи" и никак иначе, поэтому её отсутствие ловится здесь, а не в отзывах.
+    """
+    executable = dist / "DuoInput.exe"
+    result = subprocess.run(
+        [str(executable), "--self-check-tls"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert "tls: ok" in result.stdout.lower(), result.stdout + result.stderr

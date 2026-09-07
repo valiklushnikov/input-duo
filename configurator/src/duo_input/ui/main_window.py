@@ -37,6 +37,7 @@ from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.domain.validation import ValidationIssue
 from duo_input.i18n import TranslationManager
 from duo_input.ui.bindings import BindingsPage
+from duo_input.ui.clipboard_page import ClipboardPage
 from duo_input.ui.diagnostics import DiagnosticsPage
 from duo_input.ui.macros import MacrosPage
 from duo_input.ui.models.binding_table import MouseCapabilities
@@ -104,15 +105,17 @@ class MainWindow(QMainWindow):
         PAGE_BINDINGS,
         PAGE_MACROS,
         PAGE_MOUSE,
+        PAGE_CLIPBOARD,
         PAGE_DIAGNOSTICS,
         PAGE_SETTINGS,
-    ) = range(7)
+    ) = range(8)
     PAGE_ORDER = (
         PAGE_OVERVIEW,
         PAGE_PROFILES,
         PAGE_BINDINGS,
         PAGE_MACROS,
         PAGE_MOUSE,
+        PAGE_CLIPBOARD,
         PAGE_DIAGNOSTICS,
         PAGE_SETTINGS,
     )
@@ -196,6 +199,7 @@ class MainWindow(QMainWindow):
         self.bindings = BindingsPage(self._service, self.pages)
         self.macros = MacrosPage(self._service, self.pages)
         self.mouse = MouseSwitchPage(self._service, self.pages)
+        self.clipboard_page = ClipboardPage(self.pages)
         self.diagnostics = DiagnosticsPage(self._service, self.pages)
         self.settings = SettingsPage(self.translations, parent=self.pages)
         sections = (
@@ -204,6 +208,7 @@ class MainWindow(QMainWindow):
             (self.tr("Bindings"), self.bindings),
             (self.tr("Macros"), self.macros),
             (self.tr("Mouse"), self.mouse),
+            (self.tr("Общий буфер"), self.clipboard_page),
             (self.tr("Diagnostics"), self.diagnostics),
             (self.tr("Settings"), self.settings),
         )
@@ -906,14 +911,18 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ close
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
-        """Close without asking. The configuration lives on the device.
+        """Закрыть окно - значит спрятать его в трей, а не завершить программу.
 
-        There was a prompt here about unsaved changes. It belonged to a
-        document model where the file was the truth; now an edit that was
-        never written to the board is simply an edit that was never written,
-        and the title bar says so while the window is open.
+        Конфигурация живёт на устройстве, поэтому спрашивать о несохранённом
+        нечего. Резидентность больше не зависит от общего буфера обмена -
+        решение владельца продукта от 2026-09-03 (§4 спецификации) сделало её
+        свойством самой программы, а не следствием включённой фичи: окно
+        всегда уходит в трей, общий буфер включён или нет. Единственный выход
+        из программы - пункт "Выход" в меню трея, который значок в трее
+        предоставляет всегда (см. ``app._ClipboardRuntime``).
         """
-        event.accept()
+        self.hide()
+        event.ignore()
 
 
 def _command_name(command: object) -> str:

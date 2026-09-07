@@ -284,6 +284,57 @@
     </message>
 </context>
 <context>
+    <name>ClipboardPage</name>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="43"/>
+        <location filename="../../ui/clipboard_page.py" line="121"/>
+        <source>Компьютер не выбран</source>
+        <extracomment>Сколько последних событий держим на экране - не журнал целиком, а то, что помогает понять, что произошло только что (§12).</extracomment>
+        <translation>Компьютер не выбран</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="47"/>
+        <source>Связать компьютеры</source>
+        <translation>Связать компьютеры</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="50"/>
+        <source>Забыть компьютер</source>
+        <translation>Забыть компьютер</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="54"/>
+        <source>Общий буфер обмена</source>
+        <translation>Общий буфер обмена</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="57"/>
+        <source>Запускать вместе с Windows</source>
+        <translation>Запускать вместе с Windows</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="61"/>
+        <source>Адрес второго компьютера, если поиск не нашёл</source>
+        <translation>Адрес второго компьютера, если поиск не нашёл</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="74"/>
+        <source>Второй компьютер</source>
+        <translation>Второй компьютер</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="126"/>
+        <source>Отпечаток: {0}</source>
+        <translation>Отпечаток: {0}</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="68"/>
+        <location filename="../../ui/clipboard_page.py" line="70"/>
+        <source>Последние события</source>
+        <translation>Последние события</translation>
+    </message>
+</context>
+<context>
     <name>CountdownRing</name>
     <message>
         <location filename="../../ui/theme.py" line="411"/>
@@ -811,73 +862,78 @@
 <context>
     <name>MainWindow</name>
     <message>
-        <location filename="../../ui/main_window.py" line="188"/>
+        <location filename="../../ui/main_window.py" line="191"/>
         <source>Sections</source>
         <extracomment>How often the shell looks for a device that is not attached yet. Short enough that plugging a board in feels immediate, long enough that the retry costs nothing while the socket stays empty. Navigation rows, in the order the sections appear. Mouse buttons the attached device has actually reported. Set while a device-initiated read is in flight, so its answer - which arrives on ``operation_succeeded`` several chunks later - is only adopted when it is actually the read this window asked for. The project a write is currently sending, held from the moment it was compiled until the device confirms it. A write is chunks, then WRITE_COMMIT, then a read-back - every step a full event-loop turn, with the editor pages live throughout. What the board ends up holding is this project, not whatever is on screen when the last turn lands, so this is what the baseline becomes. Set once ``try_autoconnect`` has told the operator no device answered, so that message is said once rather than on every retry.</extracomment>
         <translation>Разделы</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="202"/>
+        <location filename="../../ui/main_window.py" line="206"/>
         <source>Overview</source>
         <translation>Обзор</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="203"/>
+        <location filename="../../ui/main_window.py" line="207"/>
         <source>Profiles</source>
         <translation>Профили</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="204"/>
+        <location filename="../../ui/main_window.py" line="208"/>
         <source>Bindings</source>
         <translation>Назначения</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="205"/>
+        <location filename="../../ui/main_window.py" line="209"/>
         <source>Macros</source>
         <translation>Макросы</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="206"/>
+        <location filename="../../ui/main_window.py" line="210"/>
         <source>Mouse</source>
         <translation>Мышь</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="207"/>
+        <location filename="../../ui/main_window.py" line="211"/>
+        <source>Общий буфер</source>
+        <translation>Общий буфер</translation>
+    </message>
+    <message>
+        <location filename="../../ui/main_window.py" line="212"/>
         <source>Diagnostics</source>
         <translation>Диагностика</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="208"/>
+        <location filename="../../ui/main_window.py" line="213"/>
         <source>Settings</source>
         <translation>Настройки</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="258"/>
+        <location filename="../../ui/main_window.py" line="263"/>
         <source>Load a copy...</source>
         <translation>Загрузить копию…</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="259"/>
+        <location filename="../../ui/main_window.py" line="264"/>
         <source>Load a configuration from a file</source>
         <translation>Загрузить конфигурацию из файла</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="262"/>
+        <location filename="../../ui/main_window.py" line="267"/>
         <source>Save a copy...</source>
         <translation>Сохранить копию…</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="264"/>
+        <location filename="../../ui/main_window.py" line="269"/>
         <source>Save a copy of the configuration to a file</source>
         <translation>Сохранить копию конфигурации в файл</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="579"/>
+        <location filename="../../ui/main_window.py" line="584"/>
         <source>Save a copy</source>
         <translation>Сохранение копии</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="613"/>
+        <location filename="../../ui/main_window.py" line="618"/>
         <source>Load a copy</source>
         <translation>Загрузка копии</translation>
     </message>
@@ -890,32 +946,32 @@
         <translation type="vanished">Открыть файл проекта</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="333"/>
+        <location filename="../../ui/main_window.py" line="338"/>
         <source>Problems that block a write</source>
         <translation>Проблемы, мешающие записи</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="343"/>
+        <location filename="../../ui/main_window.py" line="348"/>
         <source>Transfer progress</source>
         <translation>Ход передачи</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="228"/>
+        <location filename="../../ui/main_window.py" line="233"/>
         <source>Ready</source>
         <translation>Готово</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="245"/>
+        <location filename="../../ui/main_window.py" line="250"/>
         <source>Profile:</source>
         <translation>Профиль:</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="248"/>
+        <location filename="../../ui/main_window.py" line="253"/>
         <source>Active profile</source>
         <translation>Активный профиль</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="254"/>
+        <location filename="../../ui/main_window.py" line="259"/>
         <source>Device connection</source>
         <translation>Подключение устройства</translation>
     </message>
@@ -936,12 +992,12 @@
         <translation type="vanished">Сохранить файл проекта</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="271"/>
+        <location filename="../../ui/main_window.py" line="276"/>
         <source>Write to device</source>
         <translation>Записать в устройство</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="272"/>
+        <location filename="../../ui/main_window.py" line="277"/>
         <source>Write the configuration to the device</source>
         <translation>Записать конфигурацию в устройство</translation>
     </message>
@@ -954,12 +1010,12 @@
         <translation type="vanished">Файл проекта</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="305"/>
+        <location filename="../../ui/main_window.py" line="310"/>
         <source>Configuration on the device</source>
         <translation>Конфигурация в устройстве</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="324"/>
+        <location filename="../../ui/main_window.py" line="329"/>
         <source>Fix these before writing to the device.</source>
         <translation>Исправьте это перед записью в устройство.</translation>
     </message>
@@ -980,7 +1036,7 @@
         <translation type="vanished">Безымянный проект</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="501"/>
+        <location filename="../../ui/main_window.py" line="506"/>
         <source>Device: {0}</source>
         <translation>Устройство: {0}</translation>
     </message>
@@ -1005,17 +1061,17 @@
         <translation type="vanished">Файл проекта: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="518"/>
+        <location filename="../../ui/main_window.py" line="523"/>
         <source>Written to device: no link</source>
         <translation>Записано в устройство: нет связи</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="524"/>
+        <location filename="../../ui/main_window.py" line="529"/>
         <source>Written to device: matches the project</source>
         <translation>Записано в устройство: совпадает с проектом</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="521"/>
+        <location filename="../../ui/main_window.py" line="526"/>
         <source>Written to device: differs from the project</source>
         <translation>Записано в устройство: отличается от проекта</translation>
     </message>
@@ -1024,12 +1080,12 @@
         <translation type="vanished">Сохранить проект</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="602"/>
+        <location filename="../../ui/main_window.py" line="607"/>
         <source>Save failed</source>
         <translation>Сохранить не удалось</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="605"/>
+        <location filename="../../ui/main_window.py" line="610"/>
         <source>Project saved</source>
         <translation>Проект сохранён</translation>
     </message>
@@ -1038,37 +1094,37 @@
         <translation type="vanished">Открыть проект</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="636"/>
+        <location filename="../../ui/main_window.py" line="641"/>
         <source>That project could not be opened: {0}</source>
         <translation>Не удалось открыть проект: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="640"/>
+        <location filename="../../ui/main_window.py" line="645"/>
         <source>Project opened</source>
         <translation>Проект открыт</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="652"/>
+        <location filename="../../ui/main_window.py" line="657"/>
         <source>No Duo Input device was found</source>
         <translation>Устройство Duo Input не найдено</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="695"/>
+        <location filename="../../ui/main_window.py" line="700"/>
         <source>No device found. Load a copy from a file, or plug the device in.</source>
         <translation>Устройство не найдено. Загрузите копию из файла или подключите устройство.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="877"/>
+        <location filename="../../ui/main_window.py" line="882"/>
         <source>The device has a different configuration; your edits were kept.</source>
         <translation>На устройстве другая конфигурация; ваши правки сохранены.</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="885"/>
+        <location filename="../../ui/main_window.py" line="890"/>
         <source>The device&apos;s configuration could not be read: {0}</source>
         <translation>Не удалось прочитать конфигурацию устройства: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/main_window.py" line="889"/>
+        <location filename="../../ui/main_window.py" line="894"/>
         <source>Configuration read from the device</source>
         <translation>Конфигурация прочитана с устройства</translation>
     </message>
@@ -1423,6 +1479,34 @@
     </message>
 </context>
 <context>
+    <name>PairingDialog</name>
+    <message>
+        <location filename="../../app.py" line="144"/>
+        <source>Подтвердите связывание</source>
+        <extracomment>Console script target declared in ``pyproject.toml``. Аргумент командной строки, которым автозапуск просит не показывать окно - см. persistence/autostart.py и §4 спецификации.</extracomment>
+        <translation>Подтвердите связывание</translation>
+    </message>
+    <message>
+        <location filename="../../app.py" line="145"/>
+        <source>Компьютер «{0}» показывает тот же код?
+
+Код: {1}</source>
+        <translation>Компьютер «{0}» показывает тот же код?
+
+Код: {1}</translation>
+    </message>
+    <message>
+        <location filename="../../app.py" line="155"/>
+        <source>Связать</source>
+        <translation>Связать</translation>
+    </message>
+    <message>
+        <location filename="../../app.py" line="159"/>
+        <source>Отказать</source>
+        <translation>Отказать</translation>
+    </message>
+</context>
+<context>
     <name>ProfilesPage</name>
     <message>
         <location filename="../../ui/profiles.py" line="76"/>
@@ -1688,6 +1772,59 @@
         <location filename="../../ui/macros.py" line="803"/>
         <source>Confirm that you expect real key presses.</source>
         <translation>Подтвердите, что вы ожидаете настоящих нажатий клавиш.</translation>
+    </message>
+</context>
+<context>
+    <name>TrayIcon</name>
+    <message>
+        <location filename="../../ui/tray.py" line="15"/>
+        <source>Второй компьютер на связи</source>
+        <translation>Второй компьютер на связи</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="16"/>
+        <source>Нет связи со вторым компьютером</source>
+        <translation>Нет связи со вторым компьютером</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="17"/>
+        <source>Компьютеры не связаны</source>
+        <translation>Компьютеры не связаны</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="18"/>
+        <source>Поиск второго компьютера</source>
+        <translation>Поиск второго компьютера</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="21"/>
+        <source>Windows не разрешила подключение — проверьте брандмауэр</source>
+        <translation>Windows не разрешила подключение — проверьте брандмауэр</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="26"/>
+        <source>Обновите вторую машину — версии протокола различаются</source>
+        <translation>Обновите вторую машину — версии протокола различаются</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="46"/>
+        <source>Открыть Duo Input</source>
+        <translation>Открыть Duo Input</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="56"/>
+        <source>Общий буфер обмена</source>
+        <translation>Общий буфер обмена</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="61"/>
+        <source>Передача файлов</source>
+        <translation>Передача файлов</translation>
+    </message>
+    <message>
+        <location filename="../../ui/tray.py" line="68"/>
+        <source>Выход</source>
+        <translation>Выход</translation>
     </message>
 </context>
 </TS>

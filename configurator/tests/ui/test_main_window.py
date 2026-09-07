@@ -1241,12 +1241,19 @@ def test_a_disconnect_during_a_write_lets_go_of_what_it_was_sending(
 
 
 def test_closing_never_asks_about_saving(window):
-    """There is no document to lose: the configuration lives on the board."""
+    """There is no document to lose: the configuration lives on the board.
+
+    A dirty session used to close the window for real (accept()) with no
+    confirmation dialog. Since the product owner's 2026-09-03 decision (§4),
+    every close - dirty or not - hides the window into the tray instead, so
+    the assertion below is False rather than True; what stays true is that
+    no confirmation dialog exists either way.
+    """
     window.set_session(window.session.apply(RenameProfile(1, "Unwritten")))
     assert window.session.dirty is True
     assert not hasattr(window, "_confirm_close")
 
-    assert _close(window) is True
+    assert _close(window) is False
 
 
 # ------------------------------------------------- the three project states
