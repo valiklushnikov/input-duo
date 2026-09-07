@@ -92,6 +92,39 @@ void record(BitField& field, std::uint32_t bit_offset, std::uint32_t bits) {
     field.bits = bits;
 }
 
+/// Take one more Input item's worth of buttons into the run already found.
+///
+/// A run of buttons does not have to arrive in one Input item. `Usage Minimum
+/// 1 / Usage Maximum 3` followed by `Usage Minimum 4 / Usage Maximum 5`
+/// describes the same five bits as one run of five, and mice ship it: the
+/// device on the bench does, which is why buttons 4 and 5 reached neither the
+/// PC nor the capture dialog while 1-3 worked. Treated as a redeclaration the
+/// second item is discarded and the field stays three bits wide, and the
+/// normalizer masks the button byte to exactly that width.
+///
+/// Only a piece that begins where the previous one ended is the same run.
+/// Buttons declared somewhere else in the report - after the axes, in another
+/// collection - are a different field, and moving the buttons there would lose
+/// the ones that do work; the first declaration still wins for those.
+void extend_buttons(BitField& field, std::uint32_t bit_offset, std::uint32_t bits) {
+    if (!field.present) {
+        record(field, bit_offset, bits);
+        return;
+    }
+    if (bits == 0 || bit_offset != field.bit_offset + field.bits) {
+        return;
+    }
+    const std::uint32_t grown = field.bits + bits;
+    if (grown > 8) {
+        // More buttons than fit the byte the normalizer reads. Growing past
+        // eight would make to_bytes refuse the field outright and take the
+        // axes and the wheel down with it, so the run keeps the byte it can
+        // actually route.
+        return;
+    }
+    field.bits = grown;
+}
+
 /// Turn a run of bits into the span the normalizer can read, or refuse it.
 ///
 /// RP2040 can cheaply extract at most sixteen signed bits from the three bytes
@@ -261,10 +294,11 @@ ReportDescriptorError parse_mouse_report_descriptor(protocol::ByteView descripto
 
             if ((data & kInputConstant) == 0 && (data & kInputVariable) != 0) {
                 if (usage_page == kPageButton) {
-                    // Every button in one field. Which button is which is the
-                    // bit position inside it, which is what the normalizer
-                    // already walks.
-                    record(current.buttons, input_bits, bits);
+                    // Every button in one field, however many Input items
+                    // the device took to declare them. Which button is which
+                    // is the bit position inside it, which is what the
+                    // normalizer already walks.
+                    extend_buttons(current.buttons, input_bits, bits);
                 } else {
                     for (std::uint32_t index = 0; index < report_count && index < kMaxUsages;
                          ++index) {

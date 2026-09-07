@@ -505,6 +505,173 @@ TEST_CASE(a_refused_descriptor_leaves_the_caller_nothing_half_filled) {
     CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{3});
 }
 
+// ------------------------------------------------ a button run in two pieces
+
+namespace {
+
+/// A five-button mouse that declares its buttons in two Input items.
+///
+/// SYNTHETIC, written to the shape the mouse on the bench must have. Its
+/// measured report is `03 00 08 00 FC FF 00 00` - Report ID 3, one button
+/// byte, sixteen-bit X and Y, a wheel byte - and buttons 1-3 work through the
+/// device while 4 and 5 reach nothing at all.
+///
+/// Nothing in HID says a run of buttons has to arrive in one Input item.
+/// `Usage Minimum 1 / Usage Maximum 3` followed by `Usage Minimum 4 /
+/// Usage Maximum 5` describes exactly the same five bits as one run of five,
+/// and a parser that keeps only the first item sees a three-button mouse.
+std::vector<std::uint8_t> split_button_run_mouse() {
+    return {
+        0x05, 0x01,        // Usage Page (Generic Desktop)
+        0x09, 0x02,        // Usage (Mouse)
+        0xA1, 0x01,        // Collection (Application)
+        0x85, 0x03,        //   Report ID (3)
+        0x09, 0x01,        //   Usage (Pointer)
+        0xA1, 0x00,        //   Collection (Physical)
+        0x05, 0x09,        //     Usage Page (Button)
+        0x15, 0x00,        //     Logical Minimum (0)
+        0x25, 0x01,        //     Logical Maximum (1)
+        0x75, 0x01,        //     Report Size (1)
+        0x19, 0x01,        //     Usage Minimum (Button 1)
+        0x29, 0x03,        //     Usage Maximum (Button 3)
+        0x95, 0x03,        //     Report Count (3)
+        0x81, 0x02,        //     Input (Data,Var,Abs) - bits 0-2
+        0x19, 0x04,        //     Usage Minimum (Button 4)
+        0x29, 0x05,        //     Usage Maximum (Button 5)
+        0x95, 0x02,        //     Report Count (2)
+        0x81, 0x02,        //     Input (Data,Var,Abs) - bits 3-4
+        0x95, 0x03,        //     Report Count (3)
+        0x81, 0x03,        //     Input (Cnst,Var,Abs) - padding to a byte
+        0x05, 0x01,        //     Usage Page (Generic Desktop)
+        0x09, 0x30,        //     Usage (X)
+        0x09, 0x31,        //     Usage (Y)
+        0x16, 0x00, 0x80,  //     Logical Minimum (-32768)
+        0x26, 0xFF, 0x7F,  //     Logical Maximum (32767)
+        0x75, 0x10,        //     Report Size (16)
+        0x95, 0x02,        //     Report Count (2)
+        0x81, 0x06,        //     Input (Data,Var,Rel)
+        0x09, 0x38,        //     Usage (Wheel)
+        0x15, 0x81,        //     Logical Minimum (-127)
+        0x25, 0x7F,        //     Logical Maximum (127)
+        0x75, 0x08,        //     Report Size (8)
+        0x95, 0x01,        //     Report Count (1)
+        0x81, 0x06,        //     Input (Data,Var,Rel)
+        0xC0,              //   End Collection
+        0xC0,              // End Collection
+    };
+}
+
+}  // namespace
+
+TEST_CASE(a_button_run_declared_in_two_input_items_is_one_field) {
+    // The whole of the side-button defect is this number. Five bits declared
+    // as 3 + 2 have to come out as one five-bit field, because the normalizer
+    // masks the button byte to exactly this width: a three-bit field erases
+    // buttons 4 and 5 on the way to both consumers, which is what the bench
+    // reported.
+    const std::vector<std::uint8_t> bytes = split_button_run_mouse();
+    MouseReportLayout layout;
+
+    CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::None));
+    CHECK(layout.report_id);
+    CHECK_EQ(layout.report_id_value, std::uint8_t{3});
+    CHECK(layout.buttons.present);
+    CHECK_EQ(layout.buttons.offset, std::uint8_t{0});
+    CHECK_EQ(layout.buttons.bytes, std::uint8_t{1});
+    CHECK_EQ(layout.buttons.bit_offset, std::uint8_t{0});
+    CHECK_EQ(layout.buttons.bits, std::uint8_t{5});
+
+    // The second Input item widens the buttons without moving anything behind
+    // them: the axes are counted from the report, not from the button field,
+    // and they were never wrong.
+    CHECK_EQ(layout.x.offset, std::uint8_t{1});
+    CHECK_EQ(layout.x.bytes, std::uint8_t{2});
+    CHECK_EQ(layout.x.bits, std::uint8_t{16});
+    CHECK_EQ(layout.y.offset, std::uint8_t{3});
+    CHECK_EQ(layout.y.bits, std::uint8_t{16});
+    CHECK_EQ(layout.wheel.offset, std::uint8_t{5});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{5});
+}
+
+TEST_CASE(a_second_button_declaration_somewhere_else_does_not_move_the_field) {
+    // Only a piece that begins exactly where the previous one ended is the
+    // same run. A Button item declared after the axes is a different field -
+    // a device's extra keys, a second collection's worth - and taking it would
+    // move the buttons to wherever that sits, losing the ones that do work.
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x01,        // Usage Page (Generic Desktop)
+        0x09, 0x02,        // Usage (Mouse)
+        0xA1, 0x01,        // Collection (Application)
+        0x05, 0x09,        //   Usage Page (Button)
+        0x19, 0x01,        //   Usage Minimum (Button 1)
+        0x29, 0x03,        //   Usage Maximum (Button 3)
+        0x75, 0x01,        //   Report Size (1)
+        0x95, 0x03,        //   Report Count (3)
+        0x81, 0x02,        //   Input (Data,Var,Abs) - bits 0-2
+        0x95, 0x05,        //   Report Count (5)
+        0x81, 0x03,        //   Input (Cnst,Var,Abs) - padding, bits 3-7
+        0x05, 0x01,        //   Usage Page (Generic Desktop)
+        0x09, 0x30,        //   Usage (X)
+        0x09, 0x31,        //   Usage (Y)
+        0x75, 0x08,        //   Report Size (8)
+        0x95, 0x02,        //   Report Count (2)
+        0x81, 0x06,        //   Input (Data,Var,Rel)
+        0x05, 0x09,        //   Usage Page (Button)
+        0x19, 0x04,        //   Usage Minimum (Button 4)
+        0x29, 0x05,        //   Usage Maximum (Button 5)
+        0x75, 0x01,        //   Report Size (1)
+        0x95, 0x02,        //   Report Count (2)
+        0x81, 0x02,        //   Input (Data,Var,Abs) - bits 24-25
+        0xC0,              // End Collection
+    };
+    MouseReportLayout layout;
+
+    CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::None));
+    CHECK_EQ(layout.buttons.offset, std::uint8_t{0});
+    CHECK_EQ(layout.buttons.bits, std::uint8_t{3});
+    CHECK_EQ(layout.x.offset, std::uint8_t{1});
+    CHECK_EQ(layout.y.offset, std::uint8_t{2});
+}
+
+TEST_CASE(a_button_run_wider_than_one_byte_keeps_the_byte_it_can_read) {
+    // Sixteen buttons declared as 8 + 8. A merged sixteen-bit field is one the
+    // packed reader refuses outright - to_bytes caps a packed field at eight
+    // bits - and refusing takes the axes and the wheel down with it. The first
+    // byte is the part this firmware routes, so that is what it keeps.
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x01,        // Usage Page (Generic Desktop)
+        0x09, 0x02,        // Usage (Mouse)
+        0xA1, 0x01,        // Collection (Application)
+        0x05, 0x09,        //   Usage Page (Button)
+        0x19, 0x01,        //   Usage Minimum (Button 1)
+        0x29, 0x08,        //   Usage Maximum (Button 8)
+        0x75, 0x01,        //   Report Size (1)
+        0x95, 0x08,        //   Report Count (8)
+        0x81, 0x02,        //   Input (Data,Var,Abs) - bits 0-7
+        0x19, 0x09,        //   Usage Minimum (Button 9)
+        0x29, 0x10,        //   Usage Maximum (Button 16)
+        0x95, 0x08,        //   Report Count (8)
+        0x81, 0x02,        //   Input (Data,Var,Abs) - bits 8-15
+        0x05, 0x01,        //   Usage Page (Generic Desktop)
+        0x09, 0x30,        //   Usage (X)
+        0x09, 0x31,        //   Usage (Y)
+        0x75, 0x08,        //   Report Size (8)
+        0x95, 0x02,        //   Report Count (2)
+        0x81, 0x06,        //   Input (Data,Var,Rel)
+        0xC0,              // End Collection
+    };
+    MouseReportLayout layout;
+
+    CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::None));
+    CHECK_EQ(layout.buttons.bits, std::uint8_t{8});
+    CHECK_EQ(layout.buttons.bytes, std::uint8_t{1});
+    CHECK_EQ(layout.x.offset, std::uint8_t{2});
+    CHECK_EQ(layout.y.offset, std::uint8_t{3});
+}
+
 // --------------------------------------------------------------- bounding
 
 TEST_CASE(a_descriptor_of_nothing_but_collection_openers_still_terminates) {

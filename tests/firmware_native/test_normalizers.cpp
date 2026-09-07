@@ -18,6 +18,7 @@
 #include "input/mouse_normalizer.hpp"
 #include "test_support.hpp"
 
+#include <cstdint>
 #include <vector>
 
 using duo_input::u1::input::InputEvent;
@@ -30,6 +31,8 @@ using duo_input::u1::input::hid::boot_mouse_layout;
 using duo_input::u1::input::hid::KeyboardFieldKind;
 using duo_input::u1::input::hid::KeyboardReportLayout;
 using duo_input::u1::input::hid::MouseReportLayout;
+using duo_input::u1::input::hid::parse_mouse_report_descriptor;
+using duo_input::u1::input::hid::ReportDescriptorError;
 using duo_input::u1::input::hid::ReportField;
 
 namespace {
@@ -1261,4 +1264,104 @@ TEST_CASE(a_three_button_field_does_not_invent_two_side_buttons_when_button_thre
     CHECK_EQ(out.count, 1u);
     CHECK_EQ(out.events[0].kind, InputEventKind::MouseButtonDown);
     CHECK_EQ(out.events[0].code, std::uint16_t{2});
+}
+
+
+// ============================== the side buttons, from descriptor to events
+//
+// The two halves of the field defect reported on 2026-09-07 meet here. The
+// parser reads a button run that the device declared in two Input items, and
+// the normalizer masks the button byte to whatever width the parser produced.
+// Either half alone looks correct; together they decided that buttons 4 and 5
+// did not exist, and every consumer behind this point - the PC and the capture
+// dialog both - was told the truth as this layout knew it.
+
+TEST_CASE(side_buttons_declared_in_a_second_input_item_reach_the_events) {
+    // The descriptor shape: `Usage Minimum 1 / Usage Maximum 3` in one Input
+    // item and `4 / 5` in the next, then sixteen-bit axes behind a Report ID.
+    const std::vector<std::uint8_t> descriptor = {
+        0x05, 0x01,        // Usage Page (Generic Desktop)
+        0x09, 0x02,        // Usage (Mouse)
+        0xA1, 0x01,        // Collection (Application)
+        0x85, 0x03,        //   Report ID (3)
+        0x09, 0x01,        //   Usage (Pointer)
+        0xA1, 0x00,        //   Collection (Physical)
+        0x05, 0x09,        //     Usage Page (Button)
+        0x15, 0x00,        //     Logical Minimum (0)
+        0x25, 0x01,        //     Logical Maximum (1)
+        0x75, 0x01,        //     Report Size (1)
+        0x19, 0x01,        //     Usage Minimum (Button 1)
+        0x29, 0x03,        //     Usage Maximum (Button 3)
+        0x95, 0x03,        //     Report Count (3)
+        0x81, 0x02,        //     Input (Data,Var,Abs) - bits 0-2
+        0x19, 0x04,        //     Usage Minimum (Button 4)
+        0x29, 0x05,        //     Usage Maximum (Button 5)
+        0x95, 0x02,        //     Report Count (2)
+        0x81, 0x02,        //     Input (Data,Var,Abs) - bits 3-4
+        0x95, 0x03,        //     Report Count (3)
+        0x81, 0x03,        //     Input (Cnst,Var,Abs) - padding to a byte
+        0x05, 0x01,        //     Usage Page (Generic Desktop)
+        0x09, 0x30,        //     Usage (X)
+        0x09, 0x31,        //     Usage (Y)
+        0x16, 0x00, 0x80,  //     Logical Minimum (-32768)
+        0x26, 0xFF, 0x7F,  //     Logical Maximum (32767)
+        0x75, 0x10,        //     Report Size (16)
+        0x95, 0x02,        //     Report Count (2)
+        0x81, 0x06,        //     Input (Data,Var,Rel)
+        0x09, 0x38,        //     Usage (Wheel)
+        0x15, 0x81,        //     Logical Minimum (-127)
+        0x25, 0x7F,        //     Logical Maximum (127)
+        0x75, 0x08,        //     Report Size (8)
+        0x95, 0x01,        //     Report Count (1)
+        0x81, 0x06,        //     Input (Data,Var,Rel)
+        0xC0,              //   End Collection
+        0xC0,              // End Collection
+    };
+    MouseReportLayout layout;
+    CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(descriptor), layout)),
+             static_cast<int>(ReportDescriptorError::None));
+
+    MouseNormalizer normalizer;
+    normalizer.set_layout(layout);
+    Collected out;
+
+    // Report ID 3, buttons 4 and 5 down (bits 3 and 4), no movement, no wheel.
+    // The same eight-byte shape the bench measured.
+    const std::vector<std::uint8_t> report{0x03, 0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 2u);
+    CHECK(out.has(InputEventKind::MouseButtonDown, 3));
+    CHECK(out.has(InputEventKind::MouseButtonDown, 4));
+}
+
+TEST_CASE(the_first_three_buttons_of_a_split_run_still_work) {
+    // The half that was never broken, kept honest: a wider button field must
+    // not move or reinterpret the buttons that already reached the PC.
+    const std::vector<std::uint8_t> descriptor = {
+        0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x03, 0x09, 0x01,
+        0xA1, 0x00, 0x05, 0x09, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01,
+        0x19, 0x01, 0x29, 0x03, 0x95, 0x03, 0x81, 0x02,
+        0x19, 0x04, 0x29, 0x05, 0x95, 0x02, 0x81, 0x02,
+        0x95, 0x03, 0x81, 0x03,
+        0x05, 0x01, 0x09, 0x30, 0x09, 0x31,
+        0x16, 0x00, 0x80, 0x26, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x02, 0x81, 0x06,
+        0x09, 0x38, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06,
+        0xC0, 0xC0,
+    };
+    MouseReportLayout layout;
+    CHECK_EQ(static_cast<int>(parse_mouse_report_descriptor(view(descriptor), layout)),
+             static_cast<int>(ReportDescriptorError::None));
+
+    MouseNormalizer normalizer;
+    normalizer.set_layout(layout);
+    Collected out;
+
+    // Button 3 alone. Three bits wide it sign-extends to 0xFC and invents both
+    // side buttons; five bits wide it is one event.
+    const std::vector<std::uint8_t> report{0x03, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 1u);
+    CHECK(out.has(InputEventKind::MouseButtonDown, 2));
 }
