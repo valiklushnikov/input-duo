@@ -188,6 +188,7 @@ class U1Emulator(AbstractByteTransport):
         self._timeout_once = False
         self._disconnect_once = False
         self._bad_crc_response_once = False
+        self._leading_noise = b""
 
     @property
     def last_sequence(self) -> int | None:
@@ -273,6 +274,9 @@ class U1Emulator(AbstractByteTransport):
             self._last_response_wire = None
             self._capture_event = None
             self._capture_active = False
+        if self._leading_noise and responses:
+            responses[:0] = self._leading_noise
+            self._leading_noise = b""
         return bytes(responses)
 
     def exchange(self, frame: CdcFrame) -> CdcFrame:
@@ -321,6 +325,18 @@ class U1Emulator(AbstractByteTransport):
 
     def inject_bad_crc_response(self) -> None:
         self._bad_crc_response_once = True
+
+    def inject_leading_noise(self, noise: bytes) -> None:
+        """Put non-frame bytes ahead of the next reply.
+
+        The reference target writes its plain-text trace to the same CDC
+        endpoint as the protocol, so a line of it can land in front of a
+        reply. Nothing else in this emulator can produce that shape, and it
+        is the shape two hardware gates in this project actually measured.
+        """
+        if not isinstance(noise, bytes):
+            raise TypeError("noise must be bytes")
+        self._leading_noise = noise
 
     def _active(self) -> _Slot | None:
         return self._slots[self._active_slot] if self._active_slot is not None else None

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from PySide6.QtCore import QByteArray
 from PySide6.QtSerialPort import QSerialPort
 
 from duo_input.device.qt_transport import (
@@ -11,6 +12,8 @@ from duo_input.device.qt_transport import (
     SynchronousTransportLink,
 )
 from duo_input.device.transport import AbstractByteTransport
+from duo_input.generated.protocol import CdcMessageType
+from duo_input.protocol.frame import CdcFrame, decode_cdc_frame, encode_cdc_frame
 
 
 class _EchoTransport(AbstractByteTransport):
@@ -108,29 +111,6 @@ def test_opening_a_port_that_fails_to_open_clears_nothing(qtbot, monkeypatch):
     assert cleared == []
 
 
-def test_sending_a_request_clears_whatever_arrived_since_the_last_one(qtbot, monkeypatch):
-    """Fails if QSerialPortTransport.send() stops calling
-    ``self._port.clear(QSerialPort.Direction.Input)`` before writing. Covers
-    the gap open()'s own clear cannot: bytes that arrive after the port
-    opens but before (or, if the device is slow to react, briefly after) the
-    first request reaches it."""
-    cleared: list[QSerialPort.Direction] = []
-    monkeypatch.setattr(QSerialPort, "isOpen", lambda self: True)
-    monkeypatch.setattr(
-        QSerialPort,
-        "clear",
-        lambda self, direction=QSerialPort.Direction.AllDirections: (
-            cleared.append(direction) or True
-        ),
-    )
-    monkeypatch.setattr(QSerialPort, "write", lambda self, data: len(data))
-
-    transport = QSerialPortTransport("COM_FAKE")
-    transport.send(b"\x01")
-
-    assert cleared == [QSerialPort.Direction.Input]
-
-
 def test_sending_on_a_closed_port_clears_nothing(qtbot, monkeypatch):
     cleared: list[QSerialPort.Direction] = []
     monkeypatch.setattr(QSerialPort, "isOpen", lambda self: False)
@@ -149,10 +129,20 @@ def test_sending_on_a_closed_port_clears_nothing(qtbot, monkeypatch):
     assert cleared == []
 
 
-def test_each_send_clears_input_again_not_only_the_first(qtbot, monkeypatch):
-    """The gap this closes reopens after every reply - a stray byte between
-    request N's answer and request N+1 is exactly as capable of corrupting
-    N+1 as one before request 1."""
+# ------------------------------------- what a request may never throw away
+#
+# This link is not request/response only. `docs/protocol/compatibility.md`
+# documents CAPTURE_EVENT as device-initiated, the firmware writes it from
+# ConfigService::emit_capture_event with no request behind it, and the
+# service handles it as such. A key the operator has already pressed can
+# therefore be sitting in the port's input buffer at the moment the next
+# request goes out - and the device has already cleared its own capture
+# state, so it will never send that answer again. Discarding the input
+# buffer on the way out is how that keypress is lost for good.
+
+
+def test_sending_a_request_never_discards_the_input_buffer(qtbot, monkeypatch):
+    """Fails the moment ``send()`` clears input again."""
     cleared: list[QSerialPort.Direction] = []
     monkeypatch.setattr(QSerialPort, "isOpen", lambda self: True)
     monkeypatch.setattr(
@@ -167,9 +157,41 @@ def test_each_send_clears_input_again_not_only_the_first(qtbot, monkeypatch):
     transport = QSerialPortTransport("COM_FAKE")
     transport.send(b"\x01")
     transport.send(b"\x02")
-    transport.send(b"\x03")
 
-    assert cleared == [QSerialPort.Direction.Input] * 3
+    assert cleared == []
+
+
+def test_a_device_initiated_frame_survives_the_next_request(qtbot, monkeypatch):
+    """The behaviour, not just the call: a frame the device wrote on its own
+    is still delivered after a request has gone out on top of it."""
+    buffered = bytearray(
+        encode_cdc_frame(CdcFrame(CdcMessageType.CAPTURE_EVENT, 12, b"\x01\x02\x03"))
+    )
+
+    def _clear(self, direction=QSerialPort.Direction.AllDirections):
+        if direction is not QSerialPort.Direction.Output:
+            buffered.clear()
+        return True
+
+    def _read_all(self):
+        data = QByteArray(bytes(buffered))
+        buffered.clear()
+        return data
+
+    monkeypatch.setattr(QSerialPort, "isOpen", lambda self: True)
+    monkeypatch.setattr(QSerialPort, "clear", _clear)
+    monkeypatch.setattr(QSerialPort, "write", lambda self, data: len(data))
+    monkeypatch.setattr(QSerialPort, "readAll", _read_all)
+
+    transport = QSerialPortTransport("COM_FAKE")
+    reads: list[bytes] = []
+    transport.bytes_received.connect(lambda data: reads.append(bytes(data)))
+
+    transport.send(encode_cdc_frame(CdcFrame(CdcMessageType.PING, 1, b"")))
+    transport._port.readyRead.emit()
+
+    assert reads, "the device-initiated frame was discarded by the request"
+    assert decode_cdc_frame(b"".join(reads)).type is CdcMessageType.CAPTURE_EVENT
 
 
 def test_synchronous_link_delivers_the_reply_through_the_event_loop(qtbot):

@@ -24,6 +24,7 @@ from duo_input.generated.protocol import (
     InputBackend,
     TriggerKind,
 )
+from duo_input.protocol.frame import CdcFrame, FrameError, decode_cdc_frame
 
 _FRAME_DELIMITER = 0
 
@@ -612,12 +613,39 @@ class SequenceGenerator:
         self._next = (sequence + 1) & 0xFFFF
 
 
+@dataclass(frozen=True)
+class FrameScan:
+    """What one read of the byte stream yielded.
+
+    ``frames`` are in arrival order. ``discarded`` holds one decoder message
+    per candidate that turned out not to be a frame - kept rather than thrown
+    away because it is the only description of what the device actually sent,
+    and every hardware gate in this project has been read off exactly that
+    sentence.
+    """
+
+    frames: tuple[CdcFrame, ...] = ()
+    discarded: tuple[str, ...] = ()
+
+
 class FrameAssembler:
-    """Splits a byte stream into COBS frames, retaining partial bytes.
+    """Reassembles a byte stream into frames, retaining partial bytes.
 
     ``readyRead`` hands over whatever the driver happened to buffer, so a frame
     may be split across any number of reads and several frames may arrive in
     one. Everything after the last delimiter is kept for the next read.
+
+    The stream is not frames alone. The reference target writes its plain-text
+    trace to the same CDC endpoint as the protocol, a board that rebooted
+    mid-reply leaves a half frame behind, and neither is worth losing a good
+    frame over. So each delimited candidate is decoded here: the ones that
+    decode are frames, and the ones that do not are dropped and named, with
+    the scan continuing into the next candidate either way.
+
+    Deciding *where a frame ends* is this class's job. Deciding *whether the
+    bytes inside one are a legal frame* stays with the strict decoder in
+    :mod:`duo_input.protocol.frame`, which is why the candidate goes to it
+    whole and is believed unconditionally.
     """
 
     def __init__(self) -> None:
@@ -631,23 +659,29 @@ class FrameAssembler:
     def clear(self) -> None:
         self._buffer.clear()
 
-    def push(self, data: bytes) -> list[bytes]:
-        """Append ``data`` and return every complete delimited frame.
+    def push(self, data: bytes) -> FrameScan:
+        """Append ``data`` and return the frames it completed.
 
         Raises :class:`FrameOverflowError`, having discarded the buffer, when
-        the retained bytes can no longer become a legal frame.
+        the retained bytes can no longer become a legal frame - a stream of
+        junk carrying no delimiter at all must not grow this buffer for ever.
         """
         if not isinstance(data, (bytes, bytearray, memoryview)):
             raise TypeError("data must be bytes-like")
         self._buffer.extend(data)
-        frames: list[bytes] = []
+        frames: list[CdcFrame] = []
+        discarded: list[str] = []
         while True:
             try:
                 end = self._buffer.index(_FRAME_DELIMITER)
             except ValueError:
                 break
-            frames.append(bytes(self._buffer[: end + 1]))
+            candidate = bytes(self._buffer[: end + 1])
             del self._buffer[: end + 1]
+            try:
+                frames.append(decode_cdc_frame(candidate))
+            except FrameError as error:
+                discarded.append(str(error))
         if len(self._buffer) > MAX_PENDING_FRAME_BYTES:
             retained = len(self._buffer)
             self._buffer.clear()
@@ -655,7 +689,7 @@ class FrameAssembler:
                 f"discarded {retained} undelimited bytes, "
                 f"cap is {MAX_PENDING_FRAME_BYTES}"
             )
-        return frames
+        return FrameScan(tuple(frames), tuple(discarded))
 
 
 def reply_error(payload: bytes) -> ErrorCode:
@@ -1253,6 +1287,7 @@ __all__ = [
     "FailureReason",
     "FrameAssembler",
     "FrameOverflowError",
+    "FrameScan",
     "InputBackendReport",
     "LatencyHistogram",
     "HostObservation",

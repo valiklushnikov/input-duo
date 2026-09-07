@@ -103,12 +103,14 @@ class QSerialPortTransport(QObject):
         if not self._port.isOpen():
             self.link_lost.emit("serial port is not open")
             return
-        # Same reasoning as open()'s own clear, and needed independently of
-        # it: trace text (or anything else stale) can still arrive in the
-        # gap between opening the port and this first request, or - if the
-        # device's own conversation-start guard has not yet run - in the
-        # instant before it does.
-        self._port.clear(QSerialPort.Direction.Input)
+        # Deliberately no clear() here, unlike open(). This link is not
+        # request/response only: CAPTURE_EVENT is device-initiated (see
+        # docs/protocol/compatibility.md and ConfigService::emit_capture_event),
+        # so the input buffer at this moment can hold a key the operator has
+        # already pressed. The device has flipped its capture state off by
+        # then and will never send it again, so a clear here loses that answer
+        # for good. Bytes that are not frames are the stream reassembler's
+        # problem, and it drops them without taking a frame with them.
         if self._port.write(bytes(data)) < 0:
             self.link_lost.emit(self._port.errorString())
 

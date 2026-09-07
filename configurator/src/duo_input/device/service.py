@@ -25,7 +25,7 @@ from duo_input.generated.protocol import (
     Capability,
     CdcMessageType,
 )
-from duo_input.protocol.frame import CdcFrame, FrameError, decode_cdc_frame, encode_cdc_frame
+from duo_input.protocol.frame import CdcFrame, encode_cdc_frame
 
 from .qt_transport import SynchronousTransportLink
 from .transactions import (
@@ -306,19 +306,22 @@ class DeviceService(QObject):
 
     def _on_bytes_received(self, data: bytes) -> None:
         try:
-            wires = self._assembler.push(bytes(data))
+            scan = self._assembler.push(bytes(data))
         except FrameOverflowError as error:
             self._fail(FailureReason.BAD_FRAME, detail=str(error))
             return
-        for wire in wires:
-            try:
-                frame = decode_cdc_frame(wire)
-            except FrameError as error:
-                self._fail(FailureReason.BAD_FRAME, detail=str(error))
-            else:
-                self._handle_frame(frame)
+        for frame in scan.frames:
+            self._handle_frame(frame)
             if self._link is None:
                 return
+        if scan.discarded and not scan.frames and self._pending is not None:
+            # Bytes that are not a frame are only noise while they sit beside
+            # one: a trace line ahead of a reply costs nothing once the reply
+            # behind it has been read. With no frame in this read at all and a
+            # request still outstanding, the same bytes are the reply - damaged
+            # - and the caller is owed the decoder's reason now rather than a
+            # bare timeout two seconds later.
+            self._fail(FailureReason.BAD_FRAME, detail=scan.discarded[-1])
 
     def _handle_frame(self, frame: CdcFrame) -> None:
         if frame.type is CdcMessageType.CAPTURE_EVENT:

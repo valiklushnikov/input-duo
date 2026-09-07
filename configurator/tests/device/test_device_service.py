@@ -364,6 +364,41 @@ def test_bad_crc_response_fails_the_operation(qtbot, service, emulator, config_a
     assert failure.reason is FailureReason.BAD_FRAME
 
 
+def test_a_trace_line_ahead_of_a_reply_does_not_lose_the_reply(
+    qtbot, service, emulator, config_a
+):
+    """The reference target shares one CDC endpoint between its plain-text
+    trace and the protocol. Finding the reply behind the trace is the
+    stream's job; failing the operation instead throws away a reply that is
+    right there, intact, behind a delimiter."""
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+    emulator.inject_leading_noise(b"MOUNT a=1 i=0 len=8\r\n\0")
+
+    result = _succeed(qtbot, service, service.get_diagnostics)
+
+    assert result.operation == "get_diagnostics"
+    assert service.diagnostics is not None
+
+
+def test_a_reply_that_is_only_junk_still_fails_the_operation_at_once(
+    qtbot, service, emulator, config_a
+):
+    """Tolerating junk around a frame must not become tolerating a reply that
+    never arrived: with nothing decodable in the read and a request
+    outstanding, the operation fails now, with the decoder's own reason,
+    rather than waiting out the timeout with no explanation."""
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+    emulator.inject_leading_noise(b"MOUNT a=1 i=0 len=8\r\n")  # fuses with the reply
+
+    failure = _fail(qtbot, service, service.get_diagnostics)
+
+    assert failure.operation == "get_diagnostics"
+    assert failure.reason is FailureReason.BAD_FRAME
+    assert failure.detail
+
+
 def test_device_reported_bad_sequence_fails_the_connection(qtbot, service, emulator, config_a):
     emulator.install_active(config_a)
     emulator.open()

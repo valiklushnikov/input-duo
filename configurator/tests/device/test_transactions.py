@@ -10,59 +10,132 @@ from duo_input.device.transactions import (
     FrameOverflowError,
     SequenceGenerator,
 )
-from duo_input.generated.protocol import CDC_MAX_PAYLOAD, CdcMessageType
-from duo_input.protocol.frame import CdcFrame, decode_cdc_frame, encode_cdc_frame
+from duo_input.generated.protocol import (
+    CDC_MAX_PAYLOAD,
+    PROTOCOL_VERSION_MAJOR,
+    PROTOCOL_VERSION_MINOR,
+    CdcMessageType,
+)
+from duo_input.protocol.cobs import cobs_encode
+from duo_input.protocol.frame import CdcFrame, encode_cdc_frame
 
 
-def _frame(sequence: int, payload: bytes) -> bytes:
+def _wire(sequence: int, payload: bytes) -> bytes:
     return encode_cdc_frame(CdcFrame(CdcMessageType.PING, sequence, payload))
+
+
+def _ping(sequence: int, payload: bytes) -> CdcFrame:
+    """The frame ``_wire`` encodes, as the assembler must hand it back."""
+    return CdcFrame(CdcMessageType.PING, sequence, payload)
 
 
 def test_assembler_returns_nothing_until_the_delimiter_arrives():
     assembler = FrameAssembler()
-    wire = _frame(1, b"hello")
+    wire = _wire(1, b"hello")
 
-    assert assembler.push(wire[:-1]) == []
+    assert assembler.push(wire[:-1]).frames == ()
     assert assembler.pending == len(wire) - 1
-    assert assembler.push(wire[-1:]) == [wire]
+    assert assembler.push(wire[-1:]).frames == (_ping(1, b"hello"),)
     assert assembler.pending == 0
 
 
 def test_assembler_retains_partial_cobs_bytes_across_single_byte_reads():
     assembler = FrameAssembler()
-    wire = _frame(9, bytes(range(200)))
+    wire = _wire(9, bytes(range(200)))
 
-    collected: list[bytes] = []
+    collected: list[CdcFrame] = []
     for index in range(len(wire)):
-        collected.extend(assembler.push(wire[index : index + 1]))
+        collected.extend(assembler.push(wire[index : index + 1]).frames)
 
-    assert collected == [wire]
-    assert decode_cdc_frame(collected[0]).payload == bytes(range(200))
+    assert collected == [_ping(9, bytes(range(200)))]
+    assert collected[0].payload == bytes(range(200))
 
 
 def test_assembler_splits_multiple_frames_delivered_in_one_read():
     assembler = FrameAssembler()
-    first, second = _frame(1, b"a"), _frame(2, b"bb")
 
-    assert assembler.push(first + second) == [first, second]
+    scan = assembler.push(_wire(1, b"a") + _wire(2, b"bb"))
+
+    assert scan.frames == (_ping(1, b"a"), _ping(2, b"bb"))
+    assert scan.discarded == ()
 
 
 def test_assembler_keeps_the_tail_of_a_split_pair_of_frames():
     assembler = FrameAssembler()
-    first, second = _frame(3, b"abc"), _frame(4, b"defgh")
+    first, second = _wire(3, b"abc"), _wire(4, b"defgh")
     stream = first + second
     cut = len(first) + 3
 
-    assert assembler.push(stream[:cut]) == [first]
-    assert assembler.push(stream[cut:]) == [second]
+    assert assembler.push(stream[:cut]).frames == (_ping(3, b"abc"),)
+    assert assembler.push(stream[cut:]).frames == (_ping(4, b"defgh"),)
 
 
 def test_assembler_clear_drops_retained_bytes():
     assembler = FrameAssembler()
-    assembler.push(_frame(1, b"partial")[:-1])
+    assembler.push(_wire(1, b"partial")[:-1])
     assembler.clear()
 
     assert assembler.pending == 0
+
+
+# ------------------------------------------------------- junk in the stream
+#
+# The device's CDC endpoint is shared with things that are not frames: the
+# reference target's plain-text trace, and the tail of whatever the previous
+# session left behind. Finding a frame's boundaries in that stream is this
+# class's job. The decoder stays strict - a candidate that does not decode is
+# not a frame, is dropped, and must not take the frame behind it with it.
+
+
+def test_assembler_drops_junk_ahead_of_a_frame_and_keeps_the_frame():
+    assembler = FrameAssembler()
+    wire = _wire(7, b"payload")
+
+    scan = assembler.push(b"MOUNT a=1 i=0\r\n\0" + wire)
+
+    assert scan.frames == (_ping(7, b"payload"),)
+    assert len(scan.discarded) == 1
+    assert scan.discarded[0]
+
+
+def test_assembler_drops_junk_between_two_frames():
+    assembler = FrameAssembler()
+
+    scan = assembler.push(_wire(1, b"a") + b"REPORT len=8\r\n\0" + _wire(2, b"b"))
+
+    assert scan.frames == (_ping(1, b"a"), _ping(2, b"b"))
+    assert len(scan.discarded) == 1
+
+
+def test_assembler_drops_a_frame_whose_crc_is_wrong_and_keeps_scanning():
+    """Built by hand rather than by damaging an encoded frame: COBS output
+    never contains the delimiter, so a flipped byte could otherwise split the
+    candidate instead of corrupting it."""
+    assembler = FrameAssembler()
+    raw = bytearray(b"DI")
+    raw.extend((PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR, int(CdcMessageType.PING), 0))
+    raw.extend((1).to_bytes(2, "little"))
+    raw.extend((4).to_bytes(2, "little"))
+    raw.extend(b"abcd")
+    raw.extend(b"\xde\xad\xbe\xef")  # not the CRC of anything
+    damaged = cobs_encode(bytes(raw)) + b"\0"
+
+    scan = assembler.push(damaged + _wire(2, b"efgh"))
+
+    assert scan.frames == (_ping(2, b"efgh"),)
+    assert len(scan.discarded) == 1
+
+
+def test_assembler_returns_a_device_initiated_frame_with_no_request_outstanding():
+    """Nothing about a frame's arrival depends on a request having been sent:
+    CAPTURE_EVENT is written by the device on its own."""
+    assembler = FrameAssembler()
+    wire = encode_cdc_frame(CdcFrame(CdcMessageType.CAPTURE_EVENT, 12, b"\x00\x01\x02"))
+
+    scan = assembler.push(b"LINK ans=1\r\n\0" + wire)
+
+    assert scan.frames == (CdcFrame(CdcMessageType.CAPTURE_EVENT, 12, b"\x00\x01\x02"),)
+    assert len(scan.discarded) == 1
 
 
 def test_sequence_generator_increments_and_wraps_within_u16():
@@ -108,15 +181,28 @@ def test_assembler_discards_noise_accumulated_over_many_reads():
     assert assembler.pending == 0
 
 
+def test_assembler_bound_survives_discarding_junk_candidate_after_candidate():
+    """Junk that *is* delimited must not accumulate either: each candidate is
+    dropped as it completes, so an endless trace never reaches the bound."""
+    assembler = FrameAssembler()
+
+    for _ in range(64):
+        scan = assembler.push(b"REPORT a=1 i=0 len=8 00 00\r\n\0")
+        assert scan.frames == ()
+        assert len(scan.discarded) == 1
+        assert assembler.pending == 0
+
+
 def test_assembler_still_accepts_a_maximum_length_frame_split_across_reads():
     assembler = FrameAssembler()
-    wire = _frame(1, bytes(range(256)) * (CDC_MAX_PAYLOAD // 256))
+    payload = bytes(range(256)) * (CDC_MAX_PAYLOAD // 256)
+    wire = _wire(1, payload)
 
-    collected: list[bytes] = []
+    collected: list[CdcFrame] = []
     for index in range(len(wire)):
-        collected.extend(assembler.push(wire[index : index + 1]))
+        collected.extend(assembler.push(wire[index : index + 1]).frames)
         assert assembler.pending <= MAX_PENDING_FRAME_BYTES
 
     assert len(wire) <= MAX_PENDING_FRAME_BYTES
-    assert collected == [wire]
-    assert len(decode_cdc_frame(collected[0]).payload) == CDC_MAX_PAYLOAD
+    assert collected == [_ping(1, payload)]
+    assert len(collected[0].payload) == CDC_MAX_PAYLOAD
