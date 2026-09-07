@@ -1745,7 +1745,19 @@ After this capture, the operator manually confirmed on the same flashed image
 that the Aula keyboard types, the Trust mouse moves the cursor, and its wheel
 scrolls in both directions. The operator answered `Все работает` to the test
 requiring wheel-up and wheel-down scrolling. This is only basic functional
-confirmation, not the complete Task 3
-Step 7 parity gate: modifiers, Fn F9-F12, five/side buttons, macros,
-simultaneous input, detach-held release, and counters remain outstanding. It
+confirmation, not the complete Task 3 Step 7 parity gate. The later partial
+Step 7 evidence below still leaves mouse five buttons/side buttons, macros,
+rapid simultaneous input, detach-held release, and counters outstanding. It
 does not change the strict timing FAIL/PARTIAL verdict above.
+
+### Task 3 Step 7 partial hardware-gate evidence
+
+On the same flashed U1 image, the operator confirmed Shift-modified typing
+(`aA`), Ctrl+A, arrow keys, and all four Fn+F9/F10/F11/F12 combinations work.
+For those Fn combinations, this records only that their intended/labeled
+actions worked; it does not assign a specific action to any individual
+combination.
+
+Task 3 Step 7 remains incomplete: mouse five buttons/side buttons, macros,
+rapid simultaneous input, detach-held release, and counters are still
+outstanding. The strict ACK timing FAIL/PARTIAL verdict is unchanged.
