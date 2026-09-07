@@ -115,6 +115,25 @@ public:
         return kind == input::DeviceKind::Keyboard ? kKeyboardPort : kMousePort;
     }
 
+    /// Whether the keyboard role currently has an owner - a device that
+    /// mounted, classified as a keyboard and has not since unmounted.
+    ///
+    /// This is what makes a route selected for the keyboard (PC1-only,
+    /// PC2-only, both) something an operator can tell apart from a route
+    /// nothing is actually reaching: a route with no ready device behind it
+    /// looks identical to a route that is silently misconfigured unless this
+    /// is read alongside it.
+    bool keyboard_ready() const { return keyboard_owned_; }
+    /// The same reading for the mouse role.
+    bool mouse_ready() const { return mouse_owned_; }
+
+    /// Interfaces that mounted and earned no logical role, for any reason:
+    /// nothing here could classify them, or the role they wanted was already
+    /// held by another interface. A second keyboard behind the hub is the
+    /// harmless case; this count is the only place that says either happened
+    /// at all, the same reason the shipping PIO USB backend keeps one.
+    std::uint32_t ignored_interface_count() const { return ignored_interface_count_; }
+
 private:
     enum class Role : std::uint8_t {
         /// Known, and deliberately carrying nothing.
@@ -204,6 +223,12 @@ private:
     bool descriptor_attempted_ = false;
     DescriptorRequest descriptor_attempted_request_{};
     bool descriptor_followup_armed_ = false;
+
+    //: Every interface that mounted and was left in Role::Ignored, counted at
+    //: the two places that decide it: an interface classify_hid could not
+    //: read at all, and a second claimant for a role another interface
+    //: already holds.
+    std::uint32_t ignored_interface_count_ = 0;
 };
 
 }  // namespace duo_input::u1::reference

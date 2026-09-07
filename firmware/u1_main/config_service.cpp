@@ -421,7 +421,8 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
     out[at++] = static_cast<std::uint8_t>(backend_);
     if (!backend_publishes_counters_) {
         out[at++] = 0;
-        return at + write_host_observation(out + at);
+        at += write_host_observation(out + at);
+        return at + write_reference_counters(out + at);
     }
     out[at++] = static_cast<std::uint8_t>(kBackendCounterCount);
     // Written out one by one, in the order BackendCounters declares them,
@@ -446,8 +447,17 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
         at += 4;
     }
     at += write_host_observation(out + at);
+    at += write_reference_counters(out + at);
     return at;
 #endif
+}
+
+std::size_t ConfigService::write_reference_counters(std::uint8_t* out) const {
+    put_u32(out, reference_counters_.callback_overflows);
+    put_u32(out + 4, reference_counters_.ignored_interfaces);
+    out[8] = reference_counters_.keyboard_ready ? 1 : 0;
+    out[9] = reference_counters_.mouse_ready ? 1 : 0;
+    return kReferenceCounterBlockBytes;
 }
 
 std::size_t ConfigService::write_host_observation(std::uint8_t* out) const {

@@ -142,6 +142,42 @@ def test_the_reason_an_interface_was_ignored_reaches_the_page(page, emulator, qt
     assert "ignored_role_already_claimed 1" in reported
 
 
+def test_the_reference_counters_reach_the_page(page, emulator, qtbot):
+    """Task 3's bounded queue overflow count and how many of the reference
+    target's own interfaces earned no role were both readable in the firmware
+    from the day each was added, and neither had ever reached this page until
+    this block existed. Whether each role is ready is what tells a selected
+    route apart from one nothing is actually reaching."""
+    emulator.input_backend = 3
+    emulator.reference_counters = (6, 2, 1, 0)
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.service.connect_device(emulator)
+
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.refresh_button.click()
+
+    assert page.value("reference_callback_overflows") == "6"
+    assert page.value("reference_ignored_interfaces") == "2"
+    assert page.value("reference_keyboard_ready") == "yes"
+    assert page.value("reference_mouse_ready") == "no"
+
+
+def test_older_firmware_that_predates_the_reference_counters_leaves_the_rows_empty(
+    page, emulator, qtbot
+):
+    """The emulator sends the payload older firmware sends. Nothing may
+    invent a reading for a block that firmware never claimed to have."""
+    emulator.input_backend = 2
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.service.connect_device(emulator)
+
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.refresh_button.click()
+
+    assert page.value("reference_callback_overflows") == UNKNOWN
+    assert page.value("reference_keyboard_ready") == UNKNOWN
+
+
 def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
     page, emulator, qtbot
 ):

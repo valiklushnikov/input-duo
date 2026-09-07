@@ -130,6 +130,7 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
         // Nothing here this firmware can read. Deliberately not given a role:
         // an interface that cannot be parsed must not keep the real device
         // that follows it from ever claiming one.
+        ++ignored_interface_count_;
         return;
     }
 
@@ -216,6 +217,7 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
     // bus and ignored, deterministically, rather than displacing the device
     // that is already routing.
     entry->role = Role::Ignored;
+    ++ignored_interface_count_;
 }
 
 void ReferenceSourceAdapter::on_unmount(const ReferenceCallbackRecord& record) {

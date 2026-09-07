@@ -453,72 +453,92 @@
         <translation>Хост-стек ввода</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="115"/>
+        <location filename="../../ui/diagnostics.py" line="122"/>
+        <source>Reference queue overflows</source>
+        <translation>Переполнения очереди эталона</translation>
+    </message>
+    <message>
+        <location filename="../../ui/diagnostics.py" line="126"/>
+        <source>Reference ignored interfaces</source>
+        <translation>Игнорированные интерфейсы эталона</translation>
+    </message>
+    <message>
+        <location filename="../../ui/diagnostics.py" line="130"/>
+        <source>Reference keyboard role ready</source>
+        <translation>Роль клавиатуры готова (эталон)</translation>
+    </message>
+    <message>
+        <location filename="../../ui/diagnostics.py" line="134"/>
+        <source>Reference mouse role ready</source>
+        <translation>Роль мыши готова (эталон)</translation>
+    </message>
+    <message>
+        <location filename="../../ui/diagnostics.py" line="136"/>
         <source>Peripherals</source>
         <translation>Периферия</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="135"/>
+        <location filename="../../ui/diagnostics.py" line="156"/>
         <source>Diagnostics</source>
         <translation>Диагностика</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="137"/>
+        <location filename="../../ui/diagnostics.py" line="158"/>
         <source>What the device reports about itself, and how to send it on.</source>
         <translation>Что устройство сообщает о себе и как передать это дальше.</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="208"/>
+        <location filename="../../ui/diagnostics.py" line="229"/>
         <source>A report never contains your macro text. Including the saved project adds that file, and everything you typed into it.</source>
         <translation>Отчёт никогда не содержит текст ваших макросов. Включение сохранённого проекта добавляет этот файл и всё, что вы в нём набрали.</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="220"/>
+        <location filename="../../ui/diagnostics.py" line="241"/>
         <source>Refresh</source>
         <translation>Обновить</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="221"/>
+        <location filename="../../ui/diagnostics.py" line="242"/>
         <source>Ask the device for its counters</source>
         <translation>Запросить счётчики у устройства</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="224"/>
+        <location filename="../../ui/diagnostics.py" line="245"/>
         <source>Include the saved project</source>
         <translation>Включить сохранённый проект</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="226"/>
+        <location filename="../../ui/diagnostics.py" line="247"/>
         <source>Include the saved project in the report</source>
         <translation>Включить сохранённый проект в отчёт</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="230"/>
+        <location filename="../../ui/diagnostics.py" line="251"/>
         <source>Export report...</source>
         <translation>Экспорт отчёта...</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="231"/>
+        <location filename="../../ui/diagnostics.py" line="252"/>
         <source>Save a diagnostic report</source>
         <translation>Сохранить диагностический отчёт</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="308"/>
+        <location filename="../../ui/diagnostics.py" line="329"/>
         <source>Export diagnostic report</source>
         <translation>Экспорт диагностического отчёта</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="315"/>
+        <location filename="../../ui/diagnostics.py" line="336"/>
         <source>Export failed</source>
         <translation>Экспорт не выполнен</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="318"/>
+        <location filename="../../ui/diagnostics.py" line="339"/>
         <source>Report saved</source>
         <translation>Отчёт сохранён</translation>
     </message>
     <message>
-        <location filename="../../ui/diagnostics.py" line="318"/>
+        <location filename="../../ui/diagnostics.py" line="339"/>
         <source>Saved to {0}</source>
         <translation>Сохранено в {0}</translation>
     </message>

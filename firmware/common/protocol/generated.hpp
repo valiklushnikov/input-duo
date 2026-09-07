@@ -138,6 +138,7 @@ enum class ActionKind : std::uint8_t {
 enum class InputBackend : std::uint8_t {
     CH375 = 0x01,
     PIO_USB = 0x02,
+    PIO_USB_REFERENCE = 0x03,
     UNKNOWN = 0x00,
 };
 

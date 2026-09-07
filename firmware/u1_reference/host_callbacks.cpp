@@ -151,10 +151,14 @@ void tuh_hid_report_received_cb(uint8_t dev_addr,
 //--------------------------------------------------------------------+
 
 void tud_cdc_rx_cb(uint8_t itf) {
+    // Deliberately does not read: Task 5's ConfigService drains the CDC RX
+    // FIFO by polling tud_cdc_available()/tud_cdc_read() from main()'s Core 0
+    // loop, the same way u1_main's does. Reading (and discarding) bytes here
+    // as an earlier revision of this target did would steal them out from
+    // under that poll before ConfigService ever saw them - every configurator
+    // request would be consumed and silently dropped before this callback's
+    // caller returned.
     (void)itf;
-    char buf[64];
-    uint32_t count = tud_cdc_read(buf, sizeof(buf));
-    (void)count;
 }
 
 //--------------------------------------------------------------------+

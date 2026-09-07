@@ -5,6 +5,7 @@
 // byte for byte, because the configurator was written against it and cannot
 // tell the two apart.
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -660,11 +661,15 @@ TEST_CASE(diagnostics_carry_every_counter_the_host_expects) {
 
     CHECK_EQ(error_of(reply), CdcError::Ok);
     // Every fixed block, plus the appended backend block's own two-byte head,
-    // plus the host block's one-byte length. The reply is no longer one fixed
-    // length: a backend that publishes no counters and an image that publishes
-    // no host observation both send a shorter one, and kDiagnosticsPayloadSize
-    // is the ceiling rather than the length. Both ends of that are checked here.
-    CHECK_EQ(reply.payload.size, duo_input::u1::kBackendBlockOffset + 2 + 1);
+    // plus the host block's one-byte length, plus the reference-counters
+    // block's own fixed ten bytes - unconditional, unlike the two blocks in
+    // front of it. The reply is no longer one fixed length: a backend that
+    // publishes no counters and an image that publishes no host observation
+    // both send a shorter one, and kDiagnosticsPayloadSize is the ceiling
+    // rather than the length. Both ends of that are checked here.
+    CHECK_EQ(reply.payload.size,
+             duo_input::u1::kBackendBlockOffset + 2 + 1 +
+                 duo_input::u1::kReferenceCounterBlockBytes);
     CHECK(reply.payload.size <= duo_input::u1::kDiagnosticsPayloadSize);
     // Appended, never rearranged: a host reading only the first 43 bytes still
     // reads exactly what it always read.
@@ -818,9 +823,12 @@ TEST_CASE(the_diagnostics_name_which_backend_read_the_peripherals) {
     // backend that keeps none says so with a count of zero rather than
     // sending twelve zeros a reader would take for measurements.
     CHECK_EQ(p[at + 1], 0u);
-    // Two for the backend head, one for the host block's length byte: nothing
-    // has published a host observation here either.
-    CHECK_EQ(reply.payload.size, at + 2 + 1);
+    // Two for the backend head, one for the host block's length byte, and the
+    // reference-counters block's own fixed ten bytes behind it - nothing has
+    // published a host observation or reference counters here either, and the
+    // latter has no "publishes none" shape to fall back to.
+    CHECK_EQ(reply.payload.size,
+             at + 2 + 1 + duo_input::u1::kReferenceCounterBlockBytes);
 }
 
 // The counters the PIO USB host keeps, in the one fixed order the wire has.
@@ -857,10 +865,12 @@ TEST_CASE(the_pio_usb_backend_publishes_its_own_counters) {
     for (std::size_t index = 0; index < duo_input::u1::kBackendCounterCount; ++index) {
         CHECK_EQ(read_u32(p + at + 2 + 4 * index), expected[index]);
     }
-    // Every counter, and an empty host block behind them - this test publishes
+    // Every counter, an empty host block behind them, and the reference-
+    // counters block's own fixed ten bytes behind that - this test publishes
     // no observation, so the ceiling is one field-block short of reached.
     CHECK_EQ(reply.payload.size,
-             duo_input::u1::kBackendBlockOffset + duo_input::u1::kBackendBlockBytes + 1);
+             duo_input::u1::kBackendBlockOffset + duo_input::u1::kBackendBlockBytes + 1 +
+                 duo_input::u1::kReferenceCounterBlockBytes);
 }
 
 // V1 accepts exactly one logical keyboard and one logical mouse, and ignores
@@ -899,7 +909,8 @@ TEST_CASE(the_backend_block_leaves_the_prefix_byte_for_byte_unchanged) {
     const CdcFrame published = after.send(CdcMessageType::GET_DIAGNOSTICS);
 
     CHECK_EQ(published.payload.size,
-             duo_input::u1::kBackendBlockOffset + duo_input::u1::kBackendBlockBytes + 1);
+             duo_input::u1::kBackendBlockOffset + duo_input::u1::kBackendBlockBytes + 1 +
+                 duo_input::u1::kReferenceCounterBlockBytes);
     for (std::size_t index = 0; index < sizeof(kFrozenLegacyDiagnosticsPrefix); ++index) {
         CHECK_EQ(published.payload.data[index], kFrozenLegacyDiagnosticsPrefix[index]);
     }
@@ -1042,7 +1053,7 @@ TEST_CASE(an_image_with_no_host_stack_publishes_an_empty_host_block) {
     const std::size_t at = duo_input::u1::kBackendBlockOffset + 2;
 
     CHECK_EQ(reply.payload.data[at], 0u);
-    CHECK_EQ(reply.payload.size, at + 1);
+    CHECK_EQ(reply.payload.size, at + 1 + duo_input::u1::kReferenceCounterBlockBytes);
 }
 
 // The same rule the backend block was appended under, checked the same way:
@@ -1120,10 +1131,97 @@ TEST_CASE(the_real_host_mapping_reaches_the_wire_without_relabeling_or_overwrite
         0x37, 0x36, 0x35, 0x3C, 0x3B, 0x3A, 0x39, 0x40, 0x3F, 0x3E,
         0x3D, 0x44, 0x43, 0x42, 0x41,
     };
-    CHECK_EQ(reply.payload.size, at + sizeof(expected));
+    CHECK_EQ(reply.payload.size,
+             at + sizeof(expected) + duo_input::u1::kReferenceCounterBlockBytes);
     for (std::size_t index = 0; index < sizeof(expected); ++index) {
         CHECK_EQ(reply.payload.data[at + index], expected[index]);
     }
+}
+
+// ------------------------------------------------------ reference counters
+//
+// Task 3's bounded callback queue overflow count and how many of the
+// reference target's own USB interfaces earned no logical role were both
+// readable in the firmware from the day each was added, and neither had ever
+// been read on hardware - there was no CDC path to ask a board for them until
+// this block existed. Whether each of the two roles has an owner is what
+// tells a route selected by a freshly loaded profile (PC1-only, PC2-only,
+// both) apart from one nothing is actually reaching.
+//
+// Unlike the backend and host blocks, this one carries no leading count or
+// length byte of its own: every build that links ConfigService at all knows
+// these two counters and knows whether each role is owned, so there is no
+// "this image predates the field" shape to fall back to the way CH375's empty
+// host block does.
+
+TEST_CASE(the_reference_counters_default_to_zero_and_not_ready) {
+    Link link;
+    link.hello();
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    // Backend head (identifier + zero count) plus the host block's own
+    // length-of-zero byte: nothing has published either here.
+    const std::size_t at = duo_input::u1::kBackendBlockOffset + 2 + 1;
+
+    CHECK_EQ(read_u32(reply.payload.data + at), 0u);
+    CHECK_EQ(read_u32(reply.payload.data + at + 4), 0u);
+    CHECK_EQ(reply.payload.data[at + 8], 0u);
+    CHECK_EQ(reply.payload.data[at + 9], 0u);
+    CHECK_EQ(reply.payload.size, at + duo_input::u1::kReferenceCounterBlockBytes);
+}
+
+TEST_CASE(the_reference_counters_reach_the_wire_at_their_fixed_offset) {
+    Link link;
+    link.hello();
+
+    duo_input::u1::ReferenceCounters counters;
+    counters.callback_overflows = 6;
+    counters.ignored_interfaces = 2;
+    counters.keyboard_ready = true;
+    counters.mouse_ready = false;
+    link.service.set_reference_counters(counters);
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::size_t at = duo_input::u1::kBackendBlockOffset + 2 + 1;
+
+    CHECK_EQ(read_u32(reply.payload.data + at), 6u);
+    CHECK_EQ(read_u32(reply.payload.data + at + 4), 2u);
+    CHECK_EQ(reply.payload.data[at + 8], 1u);
+    CHECK_EQ(reply.payload.data[at + 9], 0u);
+    CHECK_EQ(reply.payload.size, at + duo_input::u1::kReferenceCounterBlockBytes);
+}
+
+// The compatibility contract this block has to keep, checked the way the
+// backend and host block tests above check their own: a reply naming the
+// reference backend and carrying this block still begins with exactly the
+// literal bytes a configurator that predates every appended block has always
+// read, appends the new fields only after everything that came before them,
+// and never grows past what one CDC frame can carry.
+TEST_CASE(reference_diagnostics_begin_with_the_old_reply_and_stay_under_one_frame) {
+    Link link;
+    link.hello();
+
+    // What the reference target's own main loop actually publishes: the
+    // PIO_USB_REFERENCE identifier with no legacy backend counters (it keeps
+    // none of DeviceRegistry's twelve), no host observation (it has no
+    // DeviceRegistry to read one from), and its own four counters.
+    link.service.set_backend(duo_input::protocol::InputBackend::PIO_USB_REFERENCE);
+    duo_input::u1::ReferenceCounters counters;
+    counters.callback_overflows = 6;
+    counters.ignored_interfaces = 2;
+    counters.keyboard_ready = true;
+    counters.mouse_ready = true;
+    link.service.set_reference_counters(counters);
+
+    const CdcFrame reference_reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+
+    CHECK(std::equal(std::begin(kFrozenLegacyDiagnosticsPrefix),
+                      std::end(kFrozenLegacyDiagnosticsPrefix),
+                      reference_reply.payload.data));
+    CHECK(reference_reply.payload.size <= 1024u);
+    CHECK_EQ(reference_reply.payload.size,
+             duo_input::u1::kBackendBlockOffset + 2 + 1 +
+                 duo_input::u1::kReferenceCounterBlockBytes);
 }
 
 TEST_CASE(the_diagnostics_say_whether_the_output_queue_is_overflowing_now) {

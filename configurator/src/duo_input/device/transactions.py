@@ -216,6 +216,7 @@ class PeripheralPort:
 _INPUT_BACKENDS = {
     int(InputBackend.CH375): InputBackend.CH375.name,
     int(InputBackend.PIO_USB): InputBackend.PIO_USB.name,
+    int(InputBackend.PIO_USB_REFERENCE): InputBackend.PIO_USB_REFERENCE.name,
 }
 
 #: The backend counters, in the fixed order the wire carries them. Append only:
@@ -572,6 +573,11 @@ class DeviceDiagnostics:
     # has no host stack to observe reports ``state == "none"``.
     host_observation: HostObservation | None = None
 
+    # The reference target's own counters, appended after the host block for
+    # the same reason it was appended after the backend block. ``None`` means
+    # the firmware predates Task 5 - a valid older payload, not a parse error.
+    reference_counters: ReferenceCounters | None = None
+
 
 @dataclass(frozen=True)
 class Transaction:
@@ -726,7 +732,8 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
     keyboard_latency, mouse_latency = _parse_latency(rest[:latency_bytes])
     peripherals, appended = _parse_peripherals(rest[latency_bytes:])
     backend, after_backend = _parse_backend(appended)
-    host_observation = _parse_host_observation(after_backend)
+    host_observation, after_host = _parse_host_observation(after_backend)
+    reference_counters = _parse_reference_counters(after_host)
 
     return DeviceDiagnostics(
         bad_crc,
@@ -748,6 +755,7 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
         peripherals=peripherals,
         backend=backend,
         host_observation=host_observation,
+        reference_counters=reference_counters,
     )
 
 
@@ -920,6 +928,68 @@ def _parse_backend(block: bytes) -> tuple[InputBackendReport | None, bytes]:
     return (report, bytes(block[expected:]))
 
 
+#: The reference-counters block: two u32 counters and two single-byte flags,
+#: little-endian, in the wire's own order.
+_REFERENCE_COUNTERS = struct.Struct("<IIBB")
+
+
+@dataclass(frozen=True)
+class ReferenceCounters:
+    """The reference target's own diagnostics.
+
+    Task 3's bounded callback queue overflow count, and how many of U1's own
+    USB interfaces earned no logical role, were both readable in the firmware
+    from the day each was added but never read on real hardware - there was
+    no CDC path to ask a board for them. Whether each of the two roles
+    currently has an owner is what makes a route selected by a freshly loaded
+    profile (PC1-only, PC2-only, both) something an operator can tell apart
+    from one that never took effect, because a route with nothing ready
+    behind it produces the same silence as a route that is misconfigured.
+    """
+
+    #: ``None`` means the firmware sent no block at all - a valid older
+    #: payload, since this was appended after everything above it for the
+    #: same reason the backend and host blocks were.
+    callback_overflows: int | None = None
+    ignored_interfaces: int | None = None
+    keyboard_ready: bool | None = None
+    mouse_ready: bool | None = None
+    #: Set only when a block arrived and could not be read - too short for
+    #: its own fixed shape. Everything in front of it in the reply is still
+    #: complete and correct, the same rule the backend and host blocks follow.
+    unreadable_reason: str | None = None
+
+
+def _parse_reference_counters(block: bytes) -> ReferenceCounters | None:
+    """Read the appended reference-counters block, in both compatibility
+    directions.
+
+    Unlike the backend and host blocks, this one carries no leading count or
+    length byte: it is a fixed ten bytes, unconditionally, from every
+    firmware that links ConfigService at all. ``None`` still means "the
+    firmware predates this block" - the compatibility direction that matters
+    for firmware built before Task 5.
+    """
+    if not block:
+        return None
+    if len(block) < _REFERENCE_COUNTERS.size:
+        return ReferenceCounters(
+            unreadable_reason=(
+                f"the reference-counters block needs {_REFERENCE_COUNTERS.size} "
+                f"bytes and {len(block)} arrived"
+            )
+        )
+    callback_overflows, ignored_interfaces, keyboard_ready, mouse_ready = (
+        _REFERENCE_COUNTERS.unpack_from(block, 0)
+    )
+    return ReferenceCounters(
+        callback_overflows=callback_overflows,
+        ignored_interfaces=ignored_interfaces,
+        keyboard_ready=bool(keyboard_ready),
+        mouse_ready=bool(mouse_ready),
+    )
+
+
 def _completions_since_attach(
     host_event_counts: int | None, at_attach: int | None
 ) -> int | None:
@@ -937,7 +1007,7 @@ def _completions_since_attach(
     return max(0, total - at_attach)
 
 
-def _parse_host_observation(block: bytes) -> HostObservation | None:
+def _parse_host_observation(block: bytes) -> tuple[HostObservation | None, bytes]:
     """Read the appended host block, in both compatibility directions.
 
     ``None`` means the firmware sent no block. That is a valid older payload -
@@ -958,30 +1028,43 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
 
     The length byte is also what lets a later firmware append more fields here
     without this reader changing: it reads the fields it knows and ignores the
-    rest.
+    rest. Whatever follows the declared body is handed back untouched, so this
+    stopped being the last block on the wire the moment the reference-counters
+    block was appended behind it - the same way ``_parse_backend`` already
+    hands its own trailing bytes back.
     """
     if not block:
-        return None
+        return (None, b"")
     declared = block[0]
     if declared == 0:
-        return HostObservation("none")
+        return (HostObservation("none"), bytes(block[1:]))
     body = block[1:]
     if len(body) < declared:
-        return HostObservation(
-            "unreadable",
-            unreadable_reason=(
-                f"the host block declares {declared} bytes of fields and "
-                f"{len(body)} arrived"
+        return (
+            HostObservation(
+                "unreadable",
+                unreadable_reason=(
+                    f"the host block declares {declared} bytes of fields and "
+                    f"{len(body)} arrived"
+                ),
             ),
+            b"",
         )
     if declared < _HOST_OBSERVATION_BASE.size:
-        return HostObservation(
-            "unreadable",
-            unreadable_reason=(
-                f"the host block declares {declared} bytes of fields, fewer "
-                f"than the {_HOST_OBSERVATION_BASE.size} base this configurator reads"
+        return (
+            HostObservation(
+                "unreadable",
+                unreadable_reason=(
+                    f"the host block declares {declared} bytes of fields, fewer "
+                    f"than the {_HOST_OBSERVATION_BASE.size} base this configurator reads"
+                ),
             ),
+            b"",
         )
+    # Whatever follows the declared body, handed back untouched. Computed
+    # here rather than at the top: only once ``declared`` has passed the
+    # length check above is ``1 + declared`` known to be within ``block``.
+    rest = bytes(block[1 + declared :])
     (
         init_flags,
         clock_at_begin,
@@ -1018,52 +1101,58 @@ def _parse_host_observation(block: bytes) -> HostObservation | None:
             extension_values.append(None)
             continue
         if declared < at + width:
-            return HostObservation(
-                "unreadable",
-                unreadable_reason=(
-                    f"the host block declares {declared} bytes of fields, which "
-                    f"cuts through a {width}-byte field beginning at byte {at}"
+            return (
+                HostObservation(
+                    "unreadable",
+                    unreadable_reason=(
+                        f"the host block declares {declared} bytes of fields, which "
+                        f"cuts through a {width}-byte field beginning at byte {at}"
+                    ),
                 ),
+                b"",
             )
         extension_values.append(struct.unpack_from(field, body, at)[0])
         at += width
     extension = tuple(extension_values)
-    return HostObservation(
-        "reported",
-        host_already_active=bool(init_flags & _HOST_ALREADY_ACTIVE),
-        host_configured=bool(init_flags & _HOST_CONFIGURED),
-        host_initialized=bool(init_flags & _HOST_INITIALIZED),
-        host_inited=bool(init_flags & _HOST_INITED),
-        clock_hz_before_core1_change=clock_at_begin,
-        clock_hz_now=clock_now,
-        sof_frame_count=sof_frames,
-        root_port_initialized=bool(root_state & _ROOT_INITIALIZED),
-        root_port_connected=bool(root_state & _ROOT_CONNECTED),
-        root_port_suspended=bool(root_state & _ROOT_SUSPENDED),
-        root_port_fullspeed=bool(root_state & _ROOT_FULLSPEED),
-        root_port_connects=root_connects,
-        core1_passes=core1_passes,
-        mount_events=extension[0],
-        umount_events=extension[1],
-        hid_mount_events=extension[2],
-        ep_slots_opened=extension[3],
-        ep_max_failed_count=extension[4],
-        max_pass_gap_us=extension[5],
-        max_sof_gap=extension[6],
-        root_port_resets=extension[7],
-        hub_mount_events=extension[8],
-        ep_slot_map=extension[9],
-        host_event_counts=extension[10],
-        enum_progress_mask=extension[11],
-        long_pass_count=extension[12],
-        long_pass_total_ms=extension[13],
-        core1_min_sp=extension[14],
-        ep_transfer_flags=extension[15],
-        xfer_completions_at_attach=extension[16],
-        enum_stall_recoveries=extension[17],
-        xfer_completions_since_attach=_completions_since_attach(
-            extension[10], extension[16]
+    return (
+        HostObservation(
+            "reported",
+            host_already_active=bool(init_flags & _HOST_ALREADY_ACTIVE),
+            host_configured=bool(init_flags & _HOST_CONFIGURED),
+            host_initialized=bool(init_flags & _HOST_INITIALIZED),
+            host_inited=bool(init_flags & _HOST_INITED),
+            clock_hz_before_core1_change=clock_at_begin,
+            clock_hz_now=clock_now,
+            sof_frame_count=sof_frames,
+            root_port_initialized=bool(root_state & _ROOT_INITIALIZED),
+            root_port_connected=bool(root_state & _ROOT_CONNECTED),
+            root_port_suspended=bool(root_state & _ROOT_SUSPENDED),
+            root_port_fullspeed=bool(root_state & _ROOT_FULLSPEED),
+            root_port_connects=root_connects,
+            core1_passes=core1_passes,
+            mount_events=extension[0],
+            umount_events=extension[1],
+            hid_mount_events=extension[2],
+            ep_slots_opened=extension[3],
+            ep_max_failed_count=extension[4],
+            max_pass_gap_us=extension[5],
+            max_sof_gap=extension[6],
+            root_port_resets=extension[7],
+            hub_mount_events=extension[8],
+            ep_slot_map=extension[9],
+            host_event_counts=extension[10],
+            enum_progress_mask=extension[11],
+            long_pass_count=extension[12],
+            long_pass_total_ms=extension[13],
+            core1_min_sp=extension[14],
+            ep_transfer_flags=extension[15],
+            xfer_completions_at_attach=extension[16],
+            enum_stall_recoveries=extension[17],
+            xfer_completions_since_attach=_completions_since_attach(
+                extension[10], extension[16]
+            ),
         ),
+        rest,
     )
 
 
@@ -1136,6 +1225,7 @@ __all__ = [
     "LatencyHistogram",
     "HostObservation",
     "PeripheralPort",
+    "ReferenceCounters",
     "OperationFailure",
     "OperationResult",
     "PayloadError",

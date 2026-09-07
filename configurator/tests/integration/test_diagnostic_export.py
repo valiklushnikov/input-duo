@@ -115,6 +115,10 @@ def test_the_archive_records_every_field_the_report_needs(tmp_path):
         "watchdog_count",
         "input_backend",
         "input_backend_counters",
+        "reference_callback_overflows",
+        "reference_ignored_interfaces",
+        "reference_keyboard_ready",
+        "reference_mouse_ready",
         "peripherals",
         "spi_crc_errors",
         "spi_timeouts",
@@ -134,6 +138,10 @@ def test_a_field_protocol_v1_does_not_carry_says_so(tmp_path):
     assert report["reset_reason"] == UNKNOWN
     assert report["input_backend"] == UNKNOWN
     assert report["input_backend_counters"] == {}
+    assert report["reference_callback_overflows"] == UNKNOWN
+    assert report["reference_ignored_interfaces"] == UNKNOWN
+    assert report["reference_keyboard_ready"] == UNKNOWN
+    assert report["reference_mouse_ready"] == UNKNOWN
     assert report["peripherals"] == []
 
 
@@ -345,6 +353,48 @@ def test_the_report_names_the_backend_and_its_counters(qtbot, emulator):
     assert snapshot.input_backend == "PIO_USB"
     assert snapshot.input_backend_counters["ignored_interfaces"] == 2
     assert snapshot.input_backend_counters["ignored_role_already_claimed"] == 1
+
+
+def test_the_report_carries_the_reference_targets_own_counters(qtbot, emulator):
+    """Task 3's bounded queue overflow count and how many interfaces earned
+    no role were both readable in the firmware from the day each was added,
+    and neither had ever reached a report until this block existed. Whether
+    each role is ready is what tells a selected route apart from one nothing
+    is actually reaching."""
+    emulator.input_backend = 3
+    emulator.reference_counters = (6, 2, 1, 0)
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    snapshot = DiagnosticSnapshot.from_service(service)
+
+    assert snapshot.reference_callback_overflows == 6
+    assert snapshot.reference_ignored_interfaces == 2
+    assert snapshot.reference_keyboard_ready == "yes"
+    assert snapshot.reference_mouse_ready == "no"
+
+
+def test_a_report_from_firmware_that_predates_the_reference_counters_says_unknown(
+    qtbot, emulator
+):
+    """The compatibility direction that matters most: an older firmware sends
+    no such block, and that must read as unknown rather than as a guess."""
+    emulator.input_backend = 2
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    snapshot = DiagnosticSnapshot.from_service(service)
+
+    assert snapshot.reference_callback_overflows == UNKNOWN
+    assert snapshot.reference_ignored_interfaces == UNKNOWN
+    assert snapshot.reference_keyboard_ready == UNKNOWN
+    assert snapshot.reference_mouse_ready == UNKNOWN
 
 
 def test_the_report_names_the_two_role_slots_neutrally(qtbot, emulator, tmp_path):

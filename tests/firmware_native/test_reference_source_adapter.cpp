@@ -235,6 +235,8 @@ TEST_CASE(the_first_claimant_owns_a_role_and_a_second_is_ignored) {
                           descriptor("boot_keyboard.bin")),
                     0);
     CHECK(take(adapter).ok);
+    CHECK(adapter.keyboard_ready());
+    CHECK_EQ(adapter.ignored_interface_count(), 0u);
 
     // A second keyboard-shaped interface, on a different device, must not
     // displace the one already routing.
@@ -242,6 +244,9 @@ TEST_CASE(the_first_claimant_owns_a_role_and_a_second_is_ignored) {
                           descriptor("boot_keyboard.bin")),
                     0);
     CHECK_FALSE(take(adapter).ok);
+    // The diagnostics reply's only record that a second keyboard behind the
+    // hub was seen at all - nothing downstream is ever told about it.
+    CHECK_EQ(adapter.ignored_interface_count(), 1u);
 }
 
 TEST_CASE(reports_from_the_owning_interface_carry_their_bytes_unchanged) {
@@ -391,6 +396,9 @@ TEST_CASE(a_descriptor_that_will_not_parse_does_not_take_a_role_on_its_shape) {
                           descriptor("truncated_item.bin")),
                     0);
     CHECK_FALSE(take(adapter).ok);
+    // Nothing here could classify it - the same fact GET_DIAGNOSTICS'
+    // ignored-interfaces field exists to report.
+    CHECK_EQ(adapter.ignored_interface_count(), 1u);
 
     adapter.consume(mount(2, 0, kProtocolMouse, 0x1BCF, 0x0005,
                           descriptor("boot_mouse.bin")),
@@ -398,6 +406,8 @@ TEST_CASE(a_descriptor_that_will_not_parse_does_not_take_a_role_on_its_shape) {
     const Taken taken = take(adapter);
     CHECK(taken.ok);
     CHECK(taken.identity.kind == DeviceKind::Mouse);
+    CHECK(adapter.mouse_ready());
+    CHECK_FALSE(adapter.keyboard_ready());
 }
 
 TEST_CASE(a_vendor_only_interface_is_ignored_rather_than_given_a_role) {
@@ -406,6 +416,27 @@ TEST_CASE(a_vendor_only_interface_is_ignored_rather_than_given_a_role) {
                           descriptor("vendor_only.bin")),
                     0);
     CHECK_FALSE(take(adapter).ok);
+    CHECK_EQ(adapter.ignored_interface_count(), 1u);
+}
+
+TEST_CASE(keyboard_and_mouse_ready_reflect_whether_a_role_is_currently_owned) {
+    // What makes a route selected by a freshly loaded profile (PC1-only,
+    // PC2-only, both) something an operator can tell apart from one nothing
+    // is actually reaching: whether the role it names has an owner at all.
+    ReferenceSourceAdapter adapter;
+    CHECK_FALSE(adapter.keyboard_ready());
+    CHECK_FALSE(adapter.mouse_ready());
+
+    adapter.consume(mount(1, 0, kProtocolKeyboard, 0x1111, 0x2222,
+                          descriptor("boot_keyboard.bin")),
+                    0);
+    CHECK(take(adapter).ok);
+    CHECK(adapter.keyboard_ready());
+    CHECK_FALSE(adapter.mouse_ready());
+
+    adapter.consume(reference_make_unmount(1, 0, 0), 0);
+    CHECK(take(adapter).ok);
+    CHECK_FALSE(adapter.keyboard_ready());
 }
 
 TEST_CASE(pending_events_are_visible_before_they_are_taken) {

@@ -14,10 +14,17 @@
 # Task 4 admits the link to U2: the same spi_master.cpp and spi_master_poll.cpp
 # the shipping backends link, driven from Core 0 only.
 #
-# Deliberately NOT linked at this slice: the configuration service and its core
-# bridge, flash and the A/B store, the watchdog, and the current
-# pio_usb/backend.cpp. Task 5 admits configuration. Adding them early is
-# exactly what this rebuild exists to avoid.
+# Task 5 admits configuration, storage and diagnostics: config_service.cpp and
+# its core bridge, pico_flash.cpp and the A/B store (the latter already lives
+# in duo_common and needs no source of its own here). Driven the same way
+# u1_main drives them - Core 0 owns the CDC conversation and any flash write,
+# Core 1 adopts a configuration through the handoff rather than having it
+# rewritten underneath a binding table or macro it is halfway through.
+#
+# Deliberately still NOT linked: the watchdog, and the current
+# pio_usb/backend.cpp - this target's own host_callbacks.cpp and
+# source_adapter.cpp are its host lifecycle and input decision, not that
+# backend's DeviceRegistry.
 #
 # See docs/superpowers/plans/2026-09-06-pio-usb-reference-first-rebuild.md.
 if(NOT TARGET pico_pio_usb)
@@ -47,6 +54,14 @@ target_sources(duo_u1_reference PRIVATE
     ${_duo_u1_main_dir}/spi_master_poll.cpp
     ${_duo_u1_main_dir}/config_profiles.cpp
     ${_duo_u1_main_dir}/core1_runtime.cpp
+
+    # Configuration, storage and diagnostics - Task 5. AbStore itself lives in
+    # duo_common (see target_link_libraries below); this is the hardware flash
+    # behind it, the CDC-facing service, and the handshake that carries a
+    # configuration change to Core 1.
+    ${_duo_u1_main_dir}/pico_flash.cpp
+    ${_duo_u1_main_dir}/config_service.cpp
+    ${_duo_u1_main_dir}/core_bridge.cpp
     ${_duo_u1_main_dir}/input/pipeline.cpp
     ${_duo_u1_main_dir}/input/keyboard_normalizer.cpp
     ${_duo_u1_main_dir}/input/mouse_normalizer.cpp
@@ -81,6 +96,11 @@ target_link_libraries(duo_u1_reference PRIVATE
     pico_unique_id
     hardware_clocks
     hardware_spi
+    # pico_flash.cpp's erase/program: hardware_flash for the SDK's flash
+    # routines, hardware_sync for the interrupt save/restore around them - the
+    # same pair u1_main links for the same file.
+    hardware_flash
+    hardware_sync
     tinyusb_device
     tinyusb_host
 )

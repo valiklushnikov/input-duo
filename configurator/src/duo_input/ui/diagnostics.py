@@ -112,6 +112,27 @@ class DiagnosticsPage(QWidget):
                 # enumerated was not read, and none of them says anything when
                 # nothing enumerates - which is the state this row exists for.
                 ("host_stack", QT_TRANSLATE_NOOP("DiagnosticsPage", "Input host stack")),
+                # The reference target's own counters: Task 3's bounded queue
+                # overflow count, how many of its own USB interfaces earned no
+                # role, and whether each role currently has an owner ready to
+                # route - the reading that tells a selected route (PC1-only,
+                # PC2-only, both) apart from one nothing is actually reaching.
+                (
+                    "reference_callback_overflows",
+                    QT_TRANSLATE_NOOP("DiagnosticsPage", "Reference queue overflows"),
+                ),
+                (
+                    "reference_ignored_interfaces",
+                    QT_TRANSLATE_NOOP("DiagnosticsPage", "Reference ignored interfaces"),
+                ),
+                (
+                    "reference_keyboard_ready",
+                    QT_TRANSLATE_NOOP("DiagnosticsPage", "Reference keyboard role ready"),
+                ),
+                (
+                    "reference_mouse_ready",
+                    QT_TRANSLATE_NOOP("DiagnosticsPage", "Reference mouse role ready"),
+                ),
                 ("peripherals", QT_TRANSLATE_NOOP("DiagnosticsPage", "Peripherals")),
             ),
         ),

@@ -132,6 +132,7 @@ class ActionKind(IntEnum):
 class InputBackend(IntEnum):
     CH375 = 0x01
     PIO_USB = 0x02
+    PIO_USB_REFERENCE = 0x03
     UNKNOWN = 0x00
 
 class Capability(IntFlag):

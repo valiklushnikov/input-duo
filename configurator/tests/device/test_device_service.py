@@ -1826,3 +1826,121 @@ def test_the_emulator_can_speak_the_whole_current_host_block() -> None:
     assert observation.ep_transfer_flags == 0x00270101
     assert observation.xfer_completions_at_attach == 41
     assert observation.enum_stall_recoveries == 2
+
+
+# ------------------------------------------------- the reference target's own counters
+#
+# Task 3's bounded callback queue overflow count and how many of the
+# reference target's own USB interfaces earned no logical role were both
+# readable in the firmware from the day each was added, and neither had ever
+# been read on hardware - there was no CDC path to ask a board for them until
+# this block existed. Whether each of the two roles has an owner is what
+# tells a route selected by a freshly loaded profile (PC1-only, PC2-only,
+# both) apart from one nothing is actually reaching.
+
+
+def _reference_counters_block(
+    callback_overflows: int, ignored_interfaces: int, keyboard_ready: int, mouse_ready: int
+) -> bytes:
+    """The appended suffix: two u32 counters and two single-byte flags, with
+    no leading count or length byte of its own - unlike the backend and host
+    blocks, every firmware that links ConfigService at all sends exactly this
+    fixed shape."""
+    import struct
+
+    return struct.pack(
+        "<IIBB", callback_overflows, ignored_interfaces, keyboard_ready, mouse_ready
+    )
+
+
+def test_the_reference_counters_reach_the_configurator() -> None:
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        _diagnostics_head()
+        + _full_latency()
+        + _both_ports()
+        + _twelve(backend=3)
+        + _empty_host_block()
+        + _reference_counters_block(6, 2, 1, 0)
+    )
+
+    counters = parse_diagnostics(payload).reference_counters
+
+    assert counters is not None
+    assert counters.callback_overflows == 6
+    assert counters.ignored_interfaces == 2
+    assert counters.keyboard_ready is True
+    assert counters.mouse_ready is False
+    assert counters.unreadable_reason is None
+
+
+def test_firmware_that_predates_the_reference_counters_block_still_parses() -> None:
+    """The compatibility direction that matters most here: every U1 built
+    before this block existed answers with the host block as its last block,
+    exactly as it always did."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        _diagnostics_head() + _full_latency() + _both_ports() + _twelve() + _empty_host_block()
+    )
+
+    counters = parse_diagnostics(payload)
+
+    assert counters.reference_counters is None
+    # And everything in front of it is still read exactly as before.
+    assert counters.host_observation is not None
+    assert counters.host_observation.state == "none"
+    assert counters.backend is not None
+    assert counters.backend.name == "PIO_USB"
+
+
+def test_a_short_reference_counters_block_is_unreadable_rather_than_raised() -> None:
+    """A block that IS there but cannot be read is reported as such, not
+    raised - everything complete and correct in front of it must not be
+    thrown away over a broken trailing block."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        _diagnostics_head()
+        + _full_latency()
+        + _both_ports()
+        + _twelve()
+        + _empty_host_block()
+        + bytes((1, 2, 3))  # three bytes, not the fixed ten
+    )
+
+    counters = parse_diagnostics(payload)
+
+    assert counters.reference_counters is not None
+    assert counters.reference_counters.callback_overflows is None
+    assert counters.reference_counters.unreadable_reason is not None
+    # Everything in front of it is still complete and correct.
+    assert counters.backend is not None
+    assert counters.backend.name == "PIO_USB"
+
+
+def test_the_emulator_and_the_parser_agree_about_the_reference_counters() -> None:
+    """The emulator is the reference payload the firmware is written against.
+
+    A parser that agreed only with a payload this test file built itself
+    would prove nothing about either.
+    """
+    from duo_input.device.emulator import U1Emulator
+    from duo_input.device.transactions import parse_diagnostics
+
+    emulator = U1Emulator()
+    emulator.input_backend = 3
+    emulator.reference_counters = (6, 2, 1, 1)
+
+    counters = parse_diagnostics(emulator._handle_get_diagnostics(b"")).reference_counters
+
+    assert counters is not None
+    assert counters.callback_overflows == 6
+    assert counters.ignored_interfaces == 2
+    assert counters.keyboard_ready is True
+    assert counters.mouse_ready is True
+
+    emulator.reference_counters = None
+    absent = parse_diagnostics(emulator._handle_get_diagnostics(b"")).reference_counters
+    assert absent is None

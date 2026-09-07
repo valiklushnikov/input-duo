@@ -177,6 +177,14 @@ class U1Emulator(AbstractByteTransport):
         #: real CH375 image does, and a different fact from an older firmware
         #: that sends no host block at all.
         self.host_observation: tuple[int, ...] | None = None
+        #: The reference target's own counters, appended after the host
+        #: block: (callback_overflows, ignored_interfaces, keyboard_ready,
+        #: mouse_ready), the shape write_reference_counters() puts on the
+        #: wire. ``None`` means this emulated firmware predates Task 5 and
+        #: sends no such block - the default, so this emulator answers byte
+        #: for byte the way firmware without the block answers, same as
+        #: ``input_backend`` being ``None`` above.
+        self.reference_counters: tuple[int, int, int, int] | None = None
         self._timeout_once = False
         self._disconnect_once = False
         self._bad_crc_response_once = False
@@ -665,7 +673,16 @@ class U1Emulator(AbstractByteTransport):
             layout = _HOST_OBSERVATION_LAYOUTS[len(self.host_observation)]
             fields = struct.pack(layout, *self.host_observation)
             host = bytes((len(fields),)) + fields
-        return latency + ports + backend + host
+        # No leading length or count: this block is a fixed shape from every
+        # firmware that sends it at all, unlike the two blocks in front of
+        # it. ``None`` leaves it off entirely, so this emulator can still
+        # answer exactly the way firmware built before Task 5 answers.
+        reference = (
+            b""
+            if self.reference_counters is None
+            else struct.pack("<IIBB", *self.reference_counters)
+        )
+        return latency + ports + backend + host + reference
 
     def _handle_factory_reset_arm(self, payload: bytes) -> bytes:
         if not self.physical_confirmation:

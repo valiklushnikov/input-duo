@@ -96,6 +96,22 @@ class DiagnosticSnapshot:
     #: a firmware that predates the block, and an image with no host stack to
     #: observe, both genuinely measured none of this.
     host_stack: dict[str, str] = field(default_factory=dict)
+    #: Task 3's bounded callback queue overflow count. Readable in the
+    #: firmware from the day the queue was added, never asked for on real
+    #: hardware until Task 5 gave the configurator a service to ask through.
+    reference_callback_overflows: int | str = UNKNOWN
+    #: How many of U1's own USB interfaces mounted and earned no logical
+    #: role - nothing here could classify them, or the role they wanted was
+    #: already held. Only meaningful on the reference target; see
+    #: ``input_backend``.
+    reference_ignored_interfaces: int | str = UNKNOWN
+    #: Whether each of the two roles currently has an owner ready to route.
+    #: This is what makes a route selected by a freshly loaded profile
+    #: (PC1-only, PC2-only, both) something an operator can tell apart from
+    #: one that never took effect: a route with nothing ready behind it
+    #: produces the same silence as a route that is misconfigured.
+    reference_keyboard_ready: str = UNKNOWN
+    reference_mouse_ready: str = UNKNOWN
     peripherals: tuple[PeripheralIdentity, ...] = ()
     advertised_capabilities: tuple[str, ...] = ()
     device_generation: str = UNKNOWN
@@ -161,6 +177,10 @@ class DiagnosticSnapshot:
             input_backend=_backend_name(counters),
             input_backend_counters=_backend_counters(counters),
             host_stack=_host_stack(counters),
+            reference_callback_overflows=_reference_counter(counters, "callback_overflows"),
+            reference_ignored_interfaces=_reference_counter(counters, "ignored_interfaces"),
+            reference_keyboard_ready=_reference_ready(counters, "keyboard_ready"),
+            reference_mouse_ready=_reference_ready(counters, "mouse_ready"),
             peripherals=_peripherals(counters),
         )
 
@@ -205,6 +225,27 @@ def _backend_counters(counters: object) -> dict[str, int]:
     if backend is None or not hasattr(backend, "counters"):
         return {}
     return dict(backend.counters())
+
+
+def _reference_counter(counters: object, name: str) -> int | str:
+    """One field from the reference-counters block, or ``unknown``.
+
+    ``None`` reaches here for two different reasons that both mean the same
+    thing to a report: the connected firmware predates Task 5, or nothing is
+    connected at all. Either way there is no reading to show.
+    """
+    reference = getattr(counters, "reference_counters", None)
+    value = getattr(reference, name, None) if reference is not None else None
+    return UNKNOWN if value is None else int(value)
+
+
+def _reference_ready(counters: object, name: str) -> str:
+    """The same field, read as yes/no rather than as a count."""
+    reference = getattr(counters, "reference_counters", None)
+    value = getattr(reference, name, None) if reference is not None else None
+    if value is None:
+        return UNKNOWN
+    return "yes" if value else "no"
 
 
 #: The host block's fields in the order a person reads them: did the stack

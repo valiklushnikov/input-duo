@@ -90,9 +90,21 @@ def test_reference_elf_links_routing_but_not_the_old_host_backends(
             f"{freshly_built_elf} contains no {required}"
         )
 
-    # Task 5 admits configuration and its core bridge; the failed PIO path and
-    # CH375 are never coming back to this target.
-    for excluded in ("Ch375Device", "PioUsbBackend", "ConfigService"):
+    # Task 5 admits configuration: ConfigService is now linked, and what has
+    # to be in this image is the code that reads a CDC frame, publishes the
+    # reply and lets go on disconnect - the same "method, not just a vtable"
+    # standard the SpiMaster and OutputRuntime checks above apply.
+    for required in (
+        "ConfigService12on_cdc_bytes",
+        "ConfigService13on_disconnect",
+        "ConfigService24take_release_all_request",
+    ):
+        assert any(required in name for name in symbols), (
+            f"{freshly_built_elf} contains no {required}"
+        )
+
+    # The failed PIO path and CH375 are never coming back to this target.
+    for excluded in ("Ch375Device", "PioUsbBackend"):
         assert not any(excluded in name for name in symbols), (
             f"{freshly_built_elf} unexpectedly contains {excluded}"
         )

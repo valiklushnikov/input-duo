@@ -43,11 +43,14 @@ extern "C" void reference_drain_one_callback();
 
 #include "callback_queue.hpp"
 #include "config_profiles.hpp"
+#include "config_service.hpp"
 #include "core1_runtime.hpp"
+#include "core_bridge.hpp"
 #include "host_control_state.hpp"
 #include "input/pipeline.hpp"
 #include "link_reconnect.hpp"
 #include "output_runtime.hpp"
+#include "pico_flash.hpp"
 #include "source_adapter.hpp"
 #include "spi_master.hpp"
 #include "usb_service.hpp"
@@ -85,16 +88,166 @@ public:
 
 QueuedCommands g_commands;
 
-/// Deliberately never loaded on this target.
+/// The stored configuration, pointed at where it lies in flash.
 ///
-/// StoredProfiles reads bytes it is handed, not flash; leaving it unloaded is
-/// how this slice gets the real profile source without the flash, config and
-/// A/B store that Task 5 admits. An unloaded source answers "no such profile",
-/// which leaves the runtime in its default routes - PC1, which is all this
-/// slice routes to.
+/// StoredProfiles reads bytes it is handed, not flash itself; main() hands it
+/// the active slot's bytes once at boot, before Core 1 is launched, and a
+/// configuration write hands it a new package through adopt_configuration
+/// below. Task 5 is what makes that boot-time load real - see main()'s
+/// startup scan.
 duo_input::u1::StoredProfiles g_profiles;
 
 duo_input::u1::Core1Runtime g_runtime(g_commands, g_profiles);
+
+// ---------------------------------------------------------------------------
+// Configuration, storage and diagnostics - Task 5.
+//
+// The same config, profile, flash and diagnostics services u1_main links,
+// wired the same way and for the same reasons: Core 0 owns the CDC
+// conversation and the flash it may write, and Core 1 adopts a configuration
+// change through the handoff below rather than having it rewritten
+// underneath whatever binding table or macro it is halfway through. See
+// core_bridge.hpp's own comment for why that is a handshake and not a
+// multicore_lockout.
+
+/// The real flash behind the A/B store. Core 0 only - see PicoFlash's own
+/// comment about a core executing from the chip currently being erased, which
+/// is why core1_main below arms multicore_lockout_victim_init() before doing
+/// anything else.
+duo_input::u1::PicoFlash g_flash;
+duo_input::storage::AbStore g_store(g_flash);
+
+/// A host that has just enumerated (or just come back after being unplugged)
+/// knows nothing about what PC1 was holding before. This is what tells it:
+/// the same release_pc1() u1_main's main.cpp builds on the mounted-state
+/// transition.
+duo_input::runtime::OutputCommand release_pc1() {
+    duo_input::runtime::OutputCommand command;
+    command.kind = duo_input::runtime::CommandKind::ReleaseRoute;
+    command.route = duo_input::runtime::Route::Pc1;
+    return command;
+}
+
+/// Sends the configurator's replies back down the CDC pipe GET_DIAGNOSTICS and
+/// friends travel over.
+///
+/// A second, independent wrapper around the same tud_cdc_write the reference
+/// target's own trace writer already uses (host_callbacks.cpp's
+/// TinyUsbCdcWriter, which serves reference_service_one_cdc's descriptor and
+/// report trace lines) - two objects serving two different queues of bytes
+/// out of the one physical CDC endpoint, exactly as u1_main's CdcWriter does
+/// beside its own trace-free CDC use.
+class CdcWriter final : public duo_input::u1::CdcSink {
+public:
+    void write(const std::uint8_t* data, std::size_t size) override {
+        // Written whether or not the host has raised DTR - see u1_main's
+        // CdcWriter for why: a host that never sets the line still has to be
+        // answered, and QSerialPort does not raise it on open.
+        tud_cdc_write(data, static_cast<std::uint32_t>(size));
+        tud_cdc_write_flush();
+    }
+};
+
+CdcWriter g_cdc_writer;
+
+/// Where Core 0 leaves a configuration for Core 1 to pick up, and Core 1
+/// leaves the answer.
+duo_input::u1::ConfigHandoff g_config_handoff;
+
+/// Install a profile's macros, indexed by the slot a binding names.
+///
+/// Runs on Core 1, mirroring u1_main's own install_macros exactly: the
+/// definitions point into the step pool inside StoredProfiles, which this
+/// rewrites, and nothing may be mid-macro reading what it replaces while this
+/// runs - see adopt_configuration below, the only caller.
+void install_macros(std::uint8_t profile) {
+    // Static: Core 1's stack is small and the binding table sits below this
+    // on the same path, the same reason u1_main's own copy is static.
+    static duo_input::u1::macros::MacroDefinition
+        definitions[duo_input::u1::kMaxProfileMacros];
+    g_profiles.macros_for(profile, definitions, duo_input::u1::kMaxProfileMacros);
+    for (std::size_t slot = 0; slot < duo_input::u1::kMaxProfileMacros; ++slot) {
+        g_runtime.define_macro(static_cast<std::uint8_t>(slot), definitions[slot]);
+    }
+}
+
+/// Switch every flash-backed runtime view. Runs on Core 1.
+///
+/// Let go of everything first, exactly as u1_main's adopt_configuration does
+/// and for the same reason: what was held was held under the old
+/// configuration's meaning, and release_all is what stops and drains the
+/// scheduler before the step pool underneath it is safe to rewrite. This is
+/// also this target's half of "a configuration write sends release-all
+/// before the flash lockout": g_runtime.release_all() runs here, queuing the
+/// release for Core 0 to apply, and Core 0's own loop sends
+/// g_link.send_release_all() the same pass it drains that queue - the same
+/// pair firmware/u1_main/main.cpp uses on its own release-all request path.
+bool adopt_configuration(duo_input::protocol::ByteView package) {
+    g_runtime.release_all();
+    const bool loaded = g_profiles.load(package);
+    // A package that is not a configuration leaves StoredProfiles empty,
+    // which is also what a factory reset asks for. Profile zero is what an
+    // empty configuration answers to.
+    const std::uint8_t profile = loaded ? g_profiles.active_profile_id() : 0;
+    g_runtime.set_profile_now(profile);
+    install_macros(profile);
+    return loaded;
+}
+
+/// How long Core 0 waits for Core 1 to adopt a configuration. Same value and
+/// the same reasoning as u1_main's kConfigHandoffTimeoutMs: orders of
+/// magnitude longer than a pass round Core 1, still far short of any
+/// watchdog this target might grow later.
+constexpr std::uint32_t kConfigHandoffTimeoutMs = 250;
+
+/// Hand a configuration to Core 1 and wait to be told it was adopted.
+///
+/// Returns false only when Core 1 never answered. Whether the package was a
+/// configuration comes back in ``loaded``.
+bool hand_configuration_to_core1(duo_input::protocol::ByteView package, bool& loaded) {
+    if (!duo_input::u1::core1_running()) {
+        // Nothing else is executing yet, so there is nobody to hand it to and
+        // nothing to race with - and nobody to answer a handshake either.
+        loaded = adopt_configuration(package);
+        return true;
+    }
+
+    const std::uint32_t ticket = g_config_handoff.post(package);
+    const absolute_time_t deadline = make_timeout_time_ms(kConfigHandoffTimeoutMs);
+    while (!g_config_handoff.finished(ticket)) {
+        if (time_reached(deadline)) {
+            return false;
+        }
+        tight_loop_contents();
+    }
+    loaded = g_config_handoff.succeeded();
+    return true;
+}
+
+/// Switch every flash-backed runtime view, from Core 0's side. Mirrors
+/// u1_main's own RuntimeConfig exactly - see its comment for why this asks
+/// Core 1 and waits rather than stopping it and doing the work itself.
+class RuntimeConfig final : public duo_input::u1::IRuntimeConfig {
+public:
+    bool activate(duo_input::protocol::ByteView package) override {
+        bool loaded = false;
+        if (!hand_configuration_to_core1(package, loaded)) {
+            return false;
+        }
+        return loaded;
+    }
+
+    bool clear() override {
+        // Nothing to load: the point is that Core 1 stops reading the slots
+        // that are about to be erased.
+        bool loaded = false;
+        return hand_configuration_to_core1(duo_input::protocol::ByteView{nullptr, 0}, loaded);
+    }
+};
+
+RuntimeConfig g_runtime_config;
+
+duo_input::u1::ConfigService g_config(g_store, g_cdc_writer, g_runtime_config);
 
 /// Where a normalized event goes.
 class RuntimeInput final : public duo_input::u1::input::IInputHandler {
@@ -288,6 +441,19 @@ extern "C" bool reference_descriptor_unmounted(std::uint8_t dev_addr,
 
 // core1: the USB host, and everything that reads what it produced
 extern "C" void core1_main() {
+    // Core 0 erases and programs flash, and it cannot do that while this core
+    // might be fetching instructions from the chip being erased. This is what
+    // lets it stop us; without it a flash write would wait forever.
+    //
+    // Announced from here rather than from Core 0, and only after arming -
+    // the same reason u1_main's core1_entry announces it here: between
+    // launching a core and that core arming itself there is a window where it
+    // is running from flash and cannot yet be stopped, and a write landing in
+    // it would be a request that never returns. Before anything else below
+    // touches tuh_task or a clock this target does not own.
+    multicore_lockout_victim_init();
+    duo_input::u1::set_core1_running(true);
+
     sleep_ms(10);
 
     // Use tuh_configure() to pass pio configuration to the host stack
@@ -299,7 +465,27 @@ extern "C" void core1_main() {
     // port1) on core1
     tuh_init(1);
 
+    // Whatever main()'s boot-time flash scan already loaded into g_profiles
+    // is what this core starts running - the bindings and macros a
+    // configuration write only ever changes from here on, through
+    // adopt_configuration below.
+    std::uint8_t installed_profile = g_profiles.active_profile_id();
+    g_runtime.set_profile_now(installed_profile);
+    install_macros(installed_profile);
+
     while (true) {
+        // First thing in the pass, between one whole turn and the next: not
+        // inside a binding table, not inside the macro definitions, not
+        // holding an event half-processed. Mirrors u1_main's core1_entry -
+        // see its comment for why that placement is the one that matters.
+        {
+            duo_input::protocol::ByteView package{nullptr, 0};
+            if (g_config_handoff.take(package)) {
+                g_config_handoff.complete(adopt_configuration(package));
+                installed_profile = g_runtime.active_profile();
+            }
+        }
+
         tuh_task();  // tinyusb host task
 
         // Refused captures are input this firmware did not keep, and have to
@@ -309,6 +495,14 @@ extern "C" void core1_main() {
         const std::uint32_t millis = now_ms();
         service_input(millis);
         g_runtime.tick(millis);
+
+        // A swap happened - a binding, a macro, or the host asked for one.
+        // The bindings moved with it and the macros have to follow, exactly
+        // as u1_main's core1_entry keeps its own installed_profile current.
+        if (g_runtime.active_profile() != installed_profile) {
+            installed_profile = g_runtime.active_profile();
+            install_macros(installed_profile);
+        }
     }
 }
 
@@ -318,6 +512,21 @@ int main() {
     set_sys_clock_khz(120000, true);
 
     sleep_ms(10);
+
+    // Whatever was stored last time is what this target runs now.
+    //
+    // Read before Core 1 is launched, exactly as u1_main does: Core 1 reads
+    // the bindings out of g_profiles the moment it starts. The bytes are not
+    // copied - they are pointed at where they lie in flash, which outlives
+    // everything that reads them.
+    const duo_input::storage::ScanResult stored = g_store.scan();
+    if (stored.has_active) {
+        const duo_input::protocol::ByteView package =
+            g_store.payload_view(stored.active, stored.active_slot().size);
+        if (package.data != nullptr && g_profiles.load(package)) {
+            g_config.set_initial_active_profile(g_profiles.active_profile_id());
+        }
+    }
 
     multicore_reset_core1();
     // all USB host task run in core1
@@ -333,11 +542,54 @@ int main() {
     // the old clock handoff barrier is deliberately not recreated.
     g_link.begin();
 
+    // A host that has just enumerated (or just vanished) knows nothing about
+    // what was held before, or is watching a device that stopped answering.
+    // Tracked here, mirroring u1_main's own was_mounted, so the transition is
+    // caught exactly once per change rather than every pass.
+    bool was_mounted = false;
+
     while (true) {
+        const std::uint32_t millis = now_ms();
+
         g_usb.task();
+
+        const bool mounted = g_usb.mounted();
+        if (mounted != was_mounted) {
+            // A host that has just enumerated knows nothing about the reports
+            // sent before, and anything held while unplugged was never
+            // released as far as it is concerned. Start from nothing - the
+            // same release_pc1/forget_sent_state pair u1_main's main loop
+            // uses on this exact transition.
+            g_outputs.process(release_pc1());
+            g_usb.forget_sent_state();
+            if (!mounted) {
+                // The host went away. Anything it had staged is abandoned.
+                g_config.on_disconnect();
+            }
+            was_mounted = mounted;
+        }
+
+        // The configurator's side of the conversation.
+        if (tud_cdc_available()) {
+            std::uint8_t incoming[64];
+            const std::uint32_t read = tud_cdc_read(incoming, sizeof(incoming));
+            g_config.on_cdc_bytes(incoming, read);
+        }
+        if (g_config.take_release_all_request()) {
+            g_outputs.release_all();
+            g_link.send_release_all(millis);
+            // Asked for rather than done here: the command queue has exactly
+            // one producer and this core is not it.
+            g_runtime.request_release_all();
+        }
+
+        // What the host asked of Core 1, and what Core 1 has to say back -
+        // the capture and profile handshakes and the dropped-command count.
+        // In core_bridge.cpp rather than here, and tested there.
+        duo_input::u1::pump_core_bridge(g_config, g_runtime);
+
         reference_service_one_cdc();
 
-        const std::uint32_t millis = now_ms();
         g_outputs.drain(millis, time_us_32());
         g_usb.publish(g_outputs);
 
@@ -354,6 +606,49 @@ int main() {
         // heartbeats, so a quiet device neither saturates the bus nor looks
         // severed.
         g_link.poll(millis, g_outputs);
+
+        // Published every pass, so GET_DIAGNOSTICS can see the link rather
+        // than infer it from an absence of errors - the same fields the LINK
+        // trace line below is built from, fed to the CDC reply instead of the
+        // trace queue.
+        {
+            duo_input::u1::LinkState state;
+            state.answered = g_link.status().answered;
+            state.mounted = g_link.status().mounted;
+            state.frames_sent = g_link.frames_sent();
+            state.crc_errors = g_link.status().crc_errors;
+            state.echoed_frames = g_link.status().echoed_frames;
+            state.endpoint_drops = g_link.status().endpoint_drops;
+            state.endpoint_release_ms = g_link.status().endpoint_release_ms;
+            g_config.set_link_state(state);
+        }
+
+        // Published every pass for the same reason: dropped_commands says
+        // input was lost at some point, runtime_fault says the queue is
+        // overflowing right now.
+        g_config.set_dropped_commands(g_runtime.dropped_commands());
+        g_config.set_runtime_fault(g_outputs.fault());
+        g_config.set_input_latency(g_outputs.keyboard_latency(), g_outputs.mouse_latency());
+
+        // Which host stack read the two roles, and this target's own
+        // counters behind it. PIO_USB_REFERENCE names this target apart from
+        // the shipping PIO_USB backend, because the two do not share a
+        // DeviceRegistry and a diagnostic that named them the same would
+        // claim counters this target never measures. The four fields behind
+        // it are what closes the two gaps Task 3 and Task 4 left open: the
+        // callback queue's overflow count was never read on hardware, and
+        // whether a role is ready is what makes a route selected by a freshly
+        // loaded profile something an operator can tell apart from one that
+        // never took effect.
+        g_config.set_backend(duo_input::protocol::InputBackend::PIO_USB_REFERENCE);
+        {
+            duo_input::u1::ReferenceCounters counters;
+            counters.callback_overflows = reference_overflows();
+            counters.ignored_interfaces = g_adapter.ignored_interface_count();
+            counters.keyboard_ready = g_adapter.keyboard_ready();
+            counters.mouse_ready = g_adapter.mouse_ready();
+            g_config.set_reference_counters(counters);
+        }
 
         // And what the link had to say, once a second. Often enough to watch
         // U2 come and go while somebody pulls a cable, rare enough that it

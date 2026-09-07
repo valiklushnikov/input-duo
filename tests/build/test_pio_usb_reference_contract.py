@@ -481,17 +481,33 @@ def test_reference_elf_contains_only_the_upstream_host_device_path(
     # SpiMaster left this list in Task 4, which admits the link to U2; what it
     # must now contain is asserted in test_reference_routing_contract.py.
     #
-    # "CoreBridge" left it because no such symbol exists anywhere in this
-    # project - the core bridge is a free function template and a handoff
-    # class, so the old entry excluded a name nothing could ever produce and
-    # would have passed with the whole bridge linked. These two are the names
-    # the linker actually emits.
+    # Task 5 admits configuration, storage and diagnostics: ConfigService,
+    # its handoff to Core 1 and the bridge function that pumps requests and
+    # answers across it are all now required rather than excluded. Mangled
+    # method substrings rather than the bare class names, the same standard
+    # test_reference_routing_contract.py applies - a bare name is satisfied
+    # by a vtable or a debug string and proves nothing was actually called.
+    for required_symbol in (
+        "ConfigService12on_cdc_bytes",
+        "ConfigHandoff4post",
+        "ConfigHandoff8complete",
+        # A free function template, not a class - no method to scope it to,
+        # and this is the name the linker actually emits for its
+        # instantiation. See below for why "CoreBridge" itself never
+        # appears anywhere in this project.
+        "pump_core_bridge",
+    ):
+        assert any(required_symbol in name for name in symbols), (
+            f"{REFERENCE_ELF} contains no {required_symbol}"
+        )
+
+    # "CoreBridge" is not excluded here because no such symbol exists
+    # anywhere in this project - the core bridge is the free function
+    # template and handoff class required above, not a class of its own.
+    # Ch375Device and PioUsbBackend are never coming back to this target.
     for excluded in (
         "Ch375Device4tick",
         "PioUsbBackend4task",
-        "ConfigService",
-        "ConfigHandoff",
-        "pump_core_bridge",
     ):
         assert not any(excluded in name for name in symbols), (
             f"{REFERENCE_ELF} unexpectedly contains {excluded}"

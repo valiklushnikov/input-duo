@@ -310,12 +310,37 @@ inline constexpr std::size_t kHostObservationBytes =
 /// host that does not recognise a longer block still find its end.
 inline constexpr std::size_t kHostBlockBytes = 1 + kHostObservationBytes;
 
+/// The reference target's own diagnostics: the bounded callback queue's
+/// overflow count, how many interfaces on U1's own bus earned no logical
+/// role, and whether each of the two roles currently has an owner ready to
+/// route.
+///
+/// Appended after every block above it, for the same append-only reason as
+/// the backend and host blocks: a configurator that stops reading at the end
+/// of the host block still reads exactly what it always read. Unlike those
+/// two, this one carries no presence marker of its own - every build that
+/// links ConfigService knows these two counters and knows whether each role
+/// is owned, so there is no equivalent of "this image has no host stack" to
+/// say nothing about.
+struct ReferenceCounters {
+    std::uint32_t callback_overflows = 0;
+    std::uint32_t ignored_interfaces = 0;
+    bool keyboard_ready = false;
+    bool mouse_ready = false;
+};
+
+/// The reference-counters block's own bytes on the wire: two u32 counters and
+/// two single-byte flags.
+inline constexpr std::size_t kReferenceCounterBlockBytes = 4 + 4 + 1 + 1;
+
 /// The longest a GET_DIAGNOSTICS reply can be: a backend publishing every
-/// counter and a host block with every field. A backend publishing none sends
-/// 4 * kBackendCounterCount fewer bytes and an image with no host stack sends
-/// kHostObservationBytes fewer, so this is a ceiling and not a length.
+/// counter, a host block with every field, and the reference-counters block
+/// behind them. A backend publishing none sends 4 * kBackendCounterCount
+/// fewer bytes and an image with no host stack sends kHostObservationBytes
+/// fewer, so this is a ceiling and not a length.
 inline constexpr std::size_t kDiagnosticsPayloadSize =
-    kBackendBlockOffset + kBackendBlockBytes + kHostBlockBytes;
+    kBackendBlockOffset + kBackendBlockBytes + kHostBlockBytes +
+    kReferenceCounterBlockBytes;
 
 static_assert(kDiagnosticsPayloadSize <= protocol::ProtocolLimits::CDC_MAX_PAYLOAD,
               "the diagnostics reply has to fit in one frame");
@@ -423,6 +448,15 @@ public:
         host_publishes_observation_ = true;
     }
 
+    /// Publish the reference target's own counters: the callback queue's
+    /// overflow count, how many interfaces earned no role, and whether each
+    /// of the two roles currently has an owner. Unconditional - see
+    /// ReferenceCounters above for why there is no "publishes none" overload
+    /// here the way set_backend and set_host_observation have one.
+    void set_reference_counters(const ReferenceCounters& counters) {
+        reference_counters_ = counters;
+    }
+
     /// Which profile the device is running.
     ///
     /// Set by the main loop when Core 1 confirms a swap, not when the host
@@ -527,6 +561,10 @@ private:
     /// The appended host block, written at ``out``. Returns its length, which
     /// is one byte when this image publishes no observation.
     std::size_t write_host_observation(std::uint8_t* out) const;
+    /// The appended reference-counters block, written at ``out``. Returns
+    /// its length, which is always kReferenceCounterBlockBytes - see
+    /// ReferenceCounters for why this block has no "publishes none" shape.
+    std::size_t write_reference_counters(std::uint8_t* out) const;
 
     storage::AbStore& store_;
     CdcSink& sink_;
@@ -605,6 +643,9 @@ private:
     /// never does, and the block then carries a length of zero rather than
     /// seven zeroed readings of hardware it does not have.
     bool host_publishes_observation_ = false;
+    /// Zero and not-ready until the main loop publishes otherwise - the
+    /// truthful default for a build that has not yet run a single pass.
+    ReferenceCounters reference_counters_{};
 
 #if DUO_SPI_DEBUG || DUO_CH375_PROBE
     // One byte short of what a CDC reply can carry, because the payload leads
