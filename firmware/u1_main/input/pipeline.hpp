@@ -39,11 +39,17 @@ public:
 
     /// What this device turned out to be, and where it keeps its fields.
     ///
-    /// Told once, when the device has been configured. The layout is the one
-    /// its report descriptor declared, or boot protocol's for a device that
-    /// would not give one up - see ch375/descriptor_setup.hpp. It is ignored
-    /// for a keyboard, whose boot report is fixed by the specification.
-    void set_kind(ch375::DeviceKind kind, const ch375::MouseReportLayout& mouse_layout);
+    /// Told once, when the device has been configured. Each layout is the one
+    /// that device's report descriptor declared, or boot protocol's for a
+    /// device that would not give one up - see ch375/descriptor_setup.hpp.
+    ///
+    /// Both go in on every Ready, whichever kind it is. A pipeline is reused
+    /// across devices, and a layout left behind from the last one is read into
+    /// the next: a keyboard whose reports are all dropped because they do not
+    /// carry an identifier the keyboard before it used.
+    void set_kind(ch375::DeviceKind kind,
+                  const ch375::KeyboardReportLayout& keyboard_layout,
+                  const ch375::MouseReportLayout& mouse_layout);
 
     /// A report arrived from the device.
     void on_report(protocol::ByteView report, std::uint32_t now_ms);
@@ -55,6 +61,7 @@ public:
 
     /// Turn one controller event into whatever it means.
     void on_event(const ch375::Ch375Event& event, ch375::DeviceKind kind,
+                  const ch375::KeyboardReportLayout& keyboard_layout,
                   const ch375::MouseReportLayout& mouse_layout, std::uint32_t now_ms,
                   std::uint16_t vendor_id = 0, std::uint16_t product_id = 0);
 
@@ -63,6 +70,8 @@ public:
     /// kind of device they came from.
     std::uint32_t unclaimed_reports() const { return unclaimed_; }
 #if DUO_CH375_PROBE
+    /// What the keyboard normalizer made of the reports it was handed.
+    const KeyboardNormalizer& keyboard_normalizer() const { return keyboard_; }
     std::uint32_t keychron_side_presses() const {
         return keychron_side_presses_.load(std::memory_order_relaxed);
     }

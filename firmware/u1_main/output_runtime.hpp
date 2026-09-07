@@ -97,6 +97,13 @@ public:
     ///
     /// The condition the drain waits on, readable from outside: a computer
     /// that is behind is a computer whose keys are not what this holds.
+    /// How many times the publish grace ran out and pacing was abandoned.
+    ///
+    /// Each one is a drain that then applied its whole budget at once, which
+    /// is where a press can collapse against its own release and a letter
+    /// never reach the computer at all.
+    std::uint16_t keyboard_unpaced() const { return keyboard_unpaced_; }
+
     bool keyboard_unreported(hid::Target target) const {
         return outputs_.keyboard_unreported(target);
     }
@@ -175,6 +182,7 @@ private:
     /// while ``waiting_`` is set.
     std::uint32_t waiting_since_ms_ = 0;
     bool waiting_ = false;
+    std::uint16_t keyboard_unpaced_ = 0;
 };
 
 }  // namespace duo_input::u1

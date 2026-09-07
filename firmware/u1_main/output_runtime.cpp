@@ -89,6 +89,9 @@ bool OutputRuntime::may_change_keyboard(std::uint32_t now_ms) {
             stalled_[index] = true;
         }
     }
+    if (keyboard_unpaced_ != 0xFFFF) {
+        ++keyboard_unpaced_;
+    }
     waiting_ = false;
     return true;
 }

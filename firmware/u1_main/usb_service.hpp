@@ -55,12 +55,18 @@ public:
             if (send_keyboard(current.keyboard)) {
                 last_keyboard_ = current.keyboard;
                 keyboard_valid_ = true;
+                if (keyboard_sent_ != 0xFFFF) {
+                    ++keyboard_sent_;
+                }
                 // PC1 has it. Until this is said the source holds the state,
                 // because a state replaced before it was reported is a
                 // keystroke the host never saw - or a release it never saw,
                 // which leaves a key down on a computer nobody is watching.
                 source.keyboard_reported(hid::Target::Pc1);
                 sent = true;
+            }
+            else if (keyboard_busy_ != 0xFFFF) {
+                ++keyboard_busy_;
             }
             // An endpoint that was busy has cost the report a frame, not the
             // state: nothing is acknowledged, so the state stays put and the
@@ -69,6 +75,9 @@ public:
             // Already knows. That is the other way of being up to date, and it
             // has to be said too, or an unchanged state would look unpublished
             // for as long as the grace lasts.
+            if (keyboard_same_ != 0xFFFF) {
+                ++keyboard_same_;
+            }
             source.keyboard_reported(hid::Target::Pc1);
         }
 
@@ -103,6 +112,17 @@ public:
         last_buttons_ = 0;
     }
 
+    /// Keyboard states that actually went out to this computer.
+    std::uint16_t keyboard_sent() const { return keyboard_sent_; }
+    /// States the host already had, so nothing was sent.
+    ///
+    /// This is where a press that collapsed against its own release ends up:
+    /// the state came back to what was last reported, so there was nothing
+    /// left to say - and the keystroke in between was never told to anyone.
+    std::uint16_t keyboard_same() const { return keyboard_same_; }
+    /// Times the endpoint was busy and the state had to wait a frame.
+    std::uint16_t keyboard_busy() const { return keyboard_busy_; }
+
 private:
     // Only these two touch TinyUSB, which is why they are the only two defined
     // out of line. What decides *whether* to send is here, where the whole
@@ -130,6 +150,9 @@ private:
     hid::KeyboardSnapshot last_keyboard_{};
     std::uint8_t last_buttons_ = 0;
     bool keyboard_valid_ = false;
+    std::uint16_t keyboard_sent_ = 0;
+    std::uint16_t keyboard_same_ = 0;
+    std::uint16_t keyboard_busy_ = 0;
 };
 
 }  // namespace duo_input::u1

@@ -25,7 +25,10 @@ using duo_input::u1::input::InputEventKind;
 using duo_input::u1::input::KeyboardNormalizer;
 using duo_input::u1::input::kMaxEventsPerReport;
 using duo_input::u1::input::MouseNormalizer;
+using duo_input::u1::ch375::boot_keyboard_layout;
 using duo_input::u1::ch375::boot_mouse_layout;
+using duo_input::u1::ch375::KeyboardFieldKind;
+using duo_input::u1::ch375::KeyboardReportLayout;
 using duo_input::u1::ch375::MouseReportLayout;
 using duo_input::u1::ch375::ReportField;
 
@@ -52,6 +55,100 @@ std::vector<std::uint8_t> mouse(std::uint8_t buttons, std::int8_t dx, std::int8_
 
 duo_input::protocol::ByteView view(const std::vector<std::uint8_t>& bytes) {
     return duo_input::protocol::ByteView{bytes.data(), bytes.size()};
+}
+
+/// The layout of a keyboard that leads every report with an identifier.
+///
+/// Report 2 of a device that also has a consumer-control report on the same
+/// endpoint: one modifier byte and six slots behind the identifier, so the
+/// packet is eight bytes and the body is seven. Every offset below is measured
+/// from the byte after the identifier, which is the whole point of stripping
+/// it before anything else is read.
+KeyboardReportLayout report_id_keyboard_layout() {
+    KeyboardReportLayout layout;
+    for (std::uint16_t bit = 0; bit < 8; ++bit) {
+        layout.modifier_bits[bit] = bit;
+    }
+    layout.report_id = true;
+    layout.report_id_value = 2;
+    layout.key_kind = KeyboardFieldKind::Array;
+    layout.key_bit_offset = 8;
+    layout.key_element_bits = 8;
+    layout.key_element_count = 6;
+    layout.key_usage_minimum = 0;
+    layout.key_usage_maximum = 0x00FF;
+    layout.minimum_body_bytes = 7;
+    return layout;
+}
+
+/// What the Aula F75 actually declares, read off its captured descriptor.
+///
+/// Five key slots, not six, and a vendor byte in the eighth position where a
+/// boot report's sixth slot would be. Boot protocol reads that vendor byte as
+/// a key; the descriptor is the only thing that says it is not one.
+KeyboardReportLayout aula_keyboard_layout() {
+    KeyboardReportLayout layout = boot_keyboard_layout();
+    layout.key_element_count = 5;
+    layout.minimum_body_bytes = 7;
+    return layout;
+}
+
+/// An NKRO keyboard: one bit per usage, 0x04 through 0x73.
+///
+/// No slots at all, so nothing about it is six of anything. A modifier byte,
+/// then 112 bits - fifteen bytes of body.
+KeyboardReportLayout nkro_keyboard_layout() {
+    KeyboardReportLayout layout;
+    for (std::uint16_t bit = 0; bit < 8; ++bit) {
+        layout.modifier_bits[bit] = bit;
+    }
+    layout.key_kind = KeyboardFieldKind::Bitmap;
+    layout.key_bit_offset = 8;
+    layout.key_element_bits = 1;
+    layout.key_element_count = 112;
+    layout.key_usage_minimum = 0x04;
+    layout.key_usage_maximum = 0x73;
+    layout.minimum_body_bytes = 15;
+    return layout;
+}
+
+/// A report from the keyboard above: identifier, modifiers, six slots.
+std::vector<std::uint8_t> id_keys(std::uint8_t id, std::uint8_t modifiers,
+                                  std::initializer_list<std::uint8_t> down) {
+    std::vector<std::uint8_t> report{id, modifiers, 0, 0, 0, 0, 0, 0};
+    std::size_t slot = 2;
+    for (std::uint8_t usage : down) {
+        if (slot < report.size()) {
+            report[slot++] = usage;
+        }
+    }
+    return report;
+}
+
+/// An Aula report: modifiers, a reserved byte, five slots, a vendor byte.
+std::vector<std::uint8_t> aula_keys(std::uint8_t modifiers,
+                                    std::initializer_list<std::uint8_t> down,
+                                    std::uint8_t vendor = 0) {
+    std::vector<std::uint8_t> report{modifiers, 0, 0, 0, 0, 0, 0, vendor};
+    std::size_t slot = 2;
+    for (std::uint8_t usage : down) {
+        if (slot < 7) {
+            report[slot++] = usage;
+        }
+    }
+    return report;
+}
+
+/// An NKRO report with the named usages' bits set.
+std::vector<std::uint8_t> nkro_keys(std::uint8_t modifiers,
+                                    std::initializer_list<std::uint8_t> down) {
+    std::vector<std::uint8_t> report(15, 0);
+    report[0] = modifiers;
+    for (std::uint8_t usage : down) {
+        const std::size_t bit = 8u + (usage - 0x04u);
+        report[bit / 8] = static_cast<std::uint8_t>(report[bit / 8] | (1u << (bit % 8)));
+    }
+    return report;
 }
 
 /// A layout shaped like a boot report with an identifier bolted on the front.
@@ -347,6 +444,376 @@ TEST_CASE(releasing_everything_twice_releases_it_once) {
     out.count = normalizer.release_all(out.events, kMaxEventsPerReport);
 
     CHECK_EQ(out.count, 0u);
+}
+
+// ============================== the keyboard, in its own declared protocol
+
+TEST_CASE(a_report_id_keyboard_presses_and_releases_behind_its_identifier) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(report_id_keyboard_layout());
+
+    out.count = normalizer.apply(view(id_keys(2, 0, {0x04})), out.events, kMaxEventsPerReport);
+    CHECK_EQ(out.count, 1u);
+    CHECK_EQ(static_cast<int>(out.events[0].kind), static_cast<int>(InputEventKind::KeyDown));
+    CHECK_EQ(out.events[0].code, std::uint16_t{0x04});
+
+    out.count = normalizer.apply(view(id_keys(2, 0, {})), out.events, kMaxEventsPerReport);
+    CHECK_EQ(out.count, 1u);
+    CHECK_EQ(static_cast<int>(out.events[0].kind), static_cast<int>(InputEventKind::KeyUp));
+    CHECK_EQ(out.events[0].code, std::uint16_t{0x04});
+}
+
+TEST_CASE(a_report_carrying_another_identifier_is_not_this_keyboards_report) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(report_id_keyboard_layout());
+    normalizer.apply(view(id_keys(2, 0, {0x04})), out.events, kMaxEventsPerReport);
+
+    // Report 1 on the same endpoint is the consumer collection's - a volume
+    // key, not a keyboard state. Read as one it would release 0x04, and the
+    // release that really comes would then say nothing at all.
+    out.count = normalizer.apply(view(id_keys(1, 0, {})), out.events, kMaxEventsPerReport);
+    CHECK_EQ(out.count, 0u);
+
+    out.count = normalizer.apply(view(id_keys(2, 0, {})), out.events, kMaxEventsPerReport);
+    CHECK_EQ(out.count, 1u);
+    CHECK(out.has(InputEventKind::KeyUp, 0x04));
+}
+
+TEST_CASE(a_native_report_shorter_than_its_layout_leaves_the_held_keys_alone) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(nkro_keyboard_layout());
+    normalizer.apply(view(nkro_keys(0, {0x04})), out.events, kMaxEventsPerReport);
+
+    std::vector<std::uint8_t> stub = nkro_keys(0, {});
+    stub.resize(9);
+    out.count = normalizer.apply(view(stub), out.events, kMaxEventsPerReport);
+    CHECK_EQ(out.count, 0u);
+
+    // Nine bytes of a fifteen-byte report cover only the first sixty-four
+    // usages. Read as a whole report they say every key past that came up.
+    out.count = normalizer.apply(view(nkro_keys(0, {})), out.events, kMaxEventsPerReport);
+    CHECK_EQ(out.count, 1u);
+    CHECK(out.has(InputEventKind::KeyUp, 0x04));
+}
+
+TEST_CASE(native_modifier_bits_are_read_where_the_descriptor_put_them) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(report_id_keyboard_layout());
+
+    out.count = normalizer.apply(view(id_keys(2, 0x05, {})), out.events, kMaxEventsPerReport);
+
+    // Bits 0 and 2 of the byte after the identifier: left control and left
+    // alt. Measured from the start of the packet they would be bits of the
+    // identifier itself, which is 2 - and would deliver left shift instead.
+    CHECK_EQ(out.count, 2u);
+    CHECK_EQ(out.events[0].code, std::uint16_t{0xE0});
+    CHECK_EQ(out.events[1].code, std::uint16_t{0xE2});
+}
+
+TEST_CASE(a_reordered_native_array_says_nobody_did_anything) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(aula_keyboard_layout());
+    normalizer.apply(view(aula_keys(0, {0x04, 0x05, 0x06, 0x07, 0x08})), out.events,
+                     kMaxEventsPerReport);
+
+    out.count = normalizer.apply(view(aula_keys(0, {0x08, 0x07, 0x06, 0x05, 0x04})), out.events,
+                                 kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 0u);
+}
+
+TEST_CASE(a_native_report_releases_before_it_presses_and_modifiers_come_last) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(aula_keyboard_layout());
+    normalizer.apply(view(aula_keys(0, {0x04})), out.events, kMaxEventsPerReport);
+
+    out.count = normalizer.apply(view(aula_keys(0x01, {0x05})), out.events, kMaxEventsPerReport);
+
+    // A key swapped for another under a modifier going down. The release has
+    // to precede the press: a computer handed the press first sees both keys
+    // held, and an autorepeat can start on the one that was already leaving.
+    CHECK_EQ(out.count, 3u);
+    CHECK_EQ(static_cast<int>(out.events[0].kind), static_cast<int>(InputEventKind::KeyUp));
+    CHECK_EQ(out.events[0].code, std::uint16_t{0x04});
+    CHECK_EQ(static_cast<int>(out.events[1].kind), static_cast<int>(InputEventKind::KeyDown));
+    CHECK_EQ(out.events[1].code, std::uint16_t{0x05});
+    CHECK_EQ(static_cast<int>(out.events[2].kind), static_cast<int>(InputEventKind::KeyDown));
+    CHECK_EQ(out.events[2].code, std::uint16_t{0xE0});
+}
+
+TEST_CASE(native_modifiers_are_delivered_lowest_bit_first) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(aula_keyboard_layout());
+
+    out.count = normalizer.apply(view(aula_keys(0xFF, {})), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 8u);
+    for (std::size_t index = 0; index < 8; ++index) {
+        CHECK_EQ(static_cast<int>(out.events[index].kind),
+                 static_cast<int>(InputEventKind::KeyDown));
+        CHECK_EQ(out.events[index].code, static_cast<std::uint16_t>(0xE0 + index));
+    }
+}
+
+TEST_CASE(the_vendor_byte_past_a_native_array_is_never_a_key) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(aula_keyboard_layout());
+
+    // The Aula declares five slots and puts a vendor byte in the eighth
+    // position. Boot protocol reads that byte as a sixth slot, which is a key
+    // nobody pressed - and one nothing will ever release.
+    out.count = normalizer.apply(view(aula_keys(0, {0x04}, 0x1E)), out.events,
+                                 kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 1u);
+    CHECK(out.has(InputEventKind::KeyDown, 0x04));
+    CHECK_FALSE(out.has(InputEventKind::KeyDown, 0x1E));
+}
+
+TEST_CASE(zero_and_error_usages_in_a_native_array_never_become_keys) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(aula_keyboard_layout());
+    normalizer.apply(view(aula_keys(0, {0x0F})), out.events, kMaxEventsPerReport);
+
+    // One 0x01 among five slots is the Aula's receiver saying nothing is held,
+    // not that it has lost count: HID 1.11 8.3 puts ErrorRollOver in every
+    // array field. Freezing on it strands the key that was down.
+    out.count = normalizer.apply(view(aula_keys(0, {0x01})), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 1u);
+    CHECK(out.has(InputEventKind::KeyUp, 0x0F));
+}
+
+TEST_CASE(six_error_slots_are_still_the_only_rollover) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(report_id_keyboard_layout());
+    normalizer.apply(view(id_keys(2, 0, {0x04})), out.events, kMaxEventsPerReport);
+
+    out.count = normalizer.apply(view(id_keys(2, 0, {0x01, 0x01, 0x01, 0x01, 0x01, 0x01})),
+                                 out.events, kMaxEventsPerReport);
+    CHECK_EQ(out.count, 0u);
+
+    out.count = normalizer.apply(view(id_keys(2, 0, {})), out.events, kMaxEventsPerReport);
+    CHECK(out.has(InputEventKind::KeyUp, 0x04));
+}
+
+TEST_CASE(release_all_lets_go_of_keys_found_through_a_native_layout) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(nkro_keyboard_layout());
+    normalizer.apply(view(nkro_keys(0x01, {0x04, 0x50})), out.events, kMaxEventsPerReport);
+
+    out.count = normalizer.release_all(out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 3u);
+    CHECK(out.has(InputEventKind::KeyUp, 0x04));
+    CHECK(out.has(InputEventKind::KeyUp, 0x50));
+    CHECK(out.has(InputEventKind::KeyUp, 0xE0));
+}
+
+TEST_CASE(an_nkro_bitmap_delivers_the_bits_that_are_set_wherever_they_are) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(nkro_keyboard_layout());
+
+    // The lowest usage in the range, one in the middle of a byte, and the
+    // highest. A scan that stops at a byte boundary or runs one usage short
+    // loses the outer two and nobody notices until those keys stop working.
+    out.count = normalizer.apply(view(nkro_keys(0, {0x04, 0x3A, 0x73})), out.events,
+                                 kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 3u);
+    CHECK(out.has(InputEventKind::KeyDown, 0x04));
+    CHECK(out.has(InputEventKind::KeyDown, 0x3A));
+    CHECK(out.has(InputEventKind::KeyDown, 0x73));
+}
+
+TEST_CASE(clearing_one_nkro_bit_releases_only_that_key) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(nkro_keyboard_layout());
+    normalizer.apply(view(nkro_keys(0, {0x04, 0x3A, 0x73})), out.events, kMaxEventsPerReport);
+
+    out.count = normalizer.apply(view(nkro_keys(0, {0x04, 0x73})), out.events,
+                                 kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 1u);
+    CHECK(out.has(InputEventKind::KeyUp, 0x3A));
+}
+
+TEST_CASE(a_seventh_key_holds_the_previous_state_rather_than_being_truncated) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(nkro_keyboard_layout());
+    normalizer.apply(view(nkro_keys(0, {0x04, 0x05})), out.events, kMaxEventsPerReport);
+
+    // An NKRO keyboard can hold more keys than this firmware's six-key output
+    // contract can carry. Six of the seven is not a state anybody's hands were
+    // in, and the seventh would be silently dropped for as long as it is held.
+    // The modifier is refused with them: the report is applied whole or not.
+    out.count = normalizer.apply(
+        view(nkro_keys(0x01, {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16})), out.events,
+        kMaxEventsPerReport);
+    CHECK_EQ(out.count, 0u);
+
+    // Still exactly the two keys from before, so a release of them is still a
+    // release of them.
+    out.count = normalizer.apply(view(nkro_keys(0, {})), out.events, kMaxEventsPerReport);
+    CHECK_EQ(out.count, 2u);
+    CHECK(out.has(InputEventKind::KeyUp, 0x04));
+    CHECK(out.has(InputEventKind::KeyUp, 0x05));
+}
+
+TEST_CASE(the_representable_report_after_an_overflow_is_applied_whole) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(nkro_keyboard_layout());
+    normalizer.apply(view(nkro_keys(0, {0x04, 0x05})), out.events, kMaxEventsPerReport);
+    normalizer.apply(view(nkro_keys(0x01, {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16})),
+                     out.events, kMaxEventsPerReport);
+
+    // The hand comes off one key. Six is representable again, and what arrives
+    // is measured against the two that were really held - not against the
+    // seven that were refused.
+    out.count = normalizer.apply(view(nkro_keys(0x01, {0x10, 0x11, 0x12, 0x13, 0x14, 0x15})),
+                                 out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 9u);
+    CHECK(out.has(InputEventKind::KeyUp, 0x04));
+    CHECK(out.has(InputEventKind::KeyUp, 0x05));
+    CHECK(out.has(InputEventKind::KeyDown, 0x10));
+    CHECK(out.has(InputEventKind::KeyDown, 0x15));
+    CHECK(out.has(InputEventKind::KeyDown, 0xE0));
+    CHECK_FALSE(out.has(InputEventKind::KeyDown, 0x16));
+}
+
+TEST_CASE(a_layout_that_declares_no_key_field_is_not_read_for_keys) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    KeyboardReportLayout layout = boot_keyboard_layout();
+    layout.key_kind = KeyboardFieldKind::None;
+    normalizer.set_layout(layout);
+
+    // Nothing says where the keys are. Reading the boot offsets anyway is a
+    // guess, and the guess is wrong for exactly the devices this path exists
+    // to serve.
+    out.count = normalizer.apply(view(keys(0x01, {0x04})), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 0u);
+}
+
+TEST_CASE(the_same_usage_in_two_slots_is_one_key) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+
+    // Keyboards do repeat themselves across slots, and a set has no room for
+    // the same member twice. Two entries for one key press it twice on the far
+    // computer and then need two releases to lift it - so the second one stays
+    // down when only one arrives.
+    out.count = normalizer.apply(view(keys(0, {0x04, 0x04})), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 1u);
+    CHECK(out.has(InputEventKind::KeyDown, 0x04));
+}
+
+TEST_CASE(a_layout_whose_keys_reach_past_its_declared_minimum_needs_the_longer_report) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    KeyboardReportLayout layout = nkro_keyboard_layout();
+    // Says eight bytes; its own bitmap runs to fifteen.
+    layout.minimum_body_bytes = 8;
+    normalizer.set_layout(layout);
+
+    // A layout is a struct built out of a stranger's bytes, and its declared
+    // length is one of those bytes. Believing it over the offsets beside it
+    // reads the last seven bytes of this bitmap out of whatever follows the
+    // report in memory.
+    std::vector<std::uint8_t> report = nkro_keys(0, {0x04});
+    report.resize(8);
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 0u);
+}
+
+TEST_CASE(a_modifier_bit_past_the_end_of_the_body_refuses_the_report) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    KeyboardReportLayout layout = boot_keyboard_layout();
+    // Bit 200 is inside a 26-byte report and nowhere near an 8-byte one.
+    layout.modifier_bits[0] = 200;
+    normalizer.set_layout(layout);
+
+    out.count = normalizer.apply(view(keys(0, {0x04})), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 0u);
+}
+
+TEST_CASE(modifiers_are_read_at_their_declared_bits_not_at_the_front) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    KeyboardReportLayout layout;
+    // Six slots first, then the modifier byte behind them: a seven-byte body
+    // with nothing at all where boot protocol keeps its modifiers.
+    for (std::uint16_t bit = 0; bit < 8; ++bit) {
+        layout.modifier_bits[bit] = static_cast<std::uint16_t>(48 + bit);
+    }
+    layout.key_kind = KeyboardFieldKind::Array;
+    layout.key_bit_offset = 0;
+    layout.key_element_bits = 8;
+    layout.key_element_count = 6;
+    layout.key_usage_minimum = 0;
+    layout.key_usage_maximum = 0x00FF;
+    layout.minimum_body_bytes = 7;
+    normalizer.set_layout(layout);
+
+    // Byte 0 is a key, byte 6 is the modifiers. Reading bit 0 of the report
+    // for left control instead reads the low bit of usage 0x04 - which is set,
+    // so a keyboard nobody touched a modifier on shifts every letter typed.
+    const std::vector<std::uint8_t> report{0x04, 0, 0, 0, 0, 0, 0x01};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 2u);
+    CHECK(out.has(InputEventKind::KeyDown, 0x04));
+    CHECK(out.has(InputEventKind::KeyDown, 0xE0));
+    CHECK_FALSE(out.has(InputEventKind::KeyDown, 0xE2));
+}
+
+TEST_CASE(a_bitmap_counts_its_keys_up_from_its_own_declared_usage_minimum) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    KeyboardReportLayout layout;
+    for (std::uint16_t bit = 0; bit < 8; ++bit) {
+        layout.modifier_bits[bit] = bit;
+    }
+    // Eight bits covering usages 0x50 through 0x57 - the arrow-key end of the
+    // page, not the 0x04 an NKRO bitmap usually starts at.
+    layout.key_kind = KeyboardFieldKind::Bitmap;
+    layout.key_bit_offset = 8;
+    layout.key_element_bits = 1;
+    layout.key_element_count = 8;
+    layout.key_usage_minimum = 0x50;
+    layout.key_usage_maximum = 0x57;
+    layout.minimum_body_bytes = 2;
+    normalizer.set_layout(layout);
+
+    // Bits 0 and 2 of the second byte. Counting up from a minimum this layout
+    // did not declare delivers two keys from the other end of the keyboard.
+    const std::vector<std::uint8_t> report{0x00, 0x05};
+    out.count = normalizer.apply(view(report), out.events, kMaxEventsPerReport);
+
+    CHECK_EQ(out.count, 2u);
+    CHECK(out.has(InputEventKind::KeyDown, 0x50));
+    CHECK(out.has(InputEventKind::KeyDown, 0x52));
 }
 
 // ============================================================== the mouse

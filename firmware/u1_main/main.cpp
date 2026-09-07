@@ -44,6 +44,9 @@ namespace {
 // Core 0 owns this. Core 1 only ever submits commands to it, so there is
 // exactly one writer and no locking between a keypress and a USB report.
 duo_input::u1::OutputRuntime g_outputs;
+// At namespace scope rather than in main's frame so the diagnostic reply can
+// read its counters. Same lifetime either way - it outlives every call.
+duo_input::u1::UsbService usb;
 
 /// Core 1's only reach into the output: the queue, and nothing else.
 ///
@@ -400,6 +403,7 @@ void core1_entry() {
                 // the backlog worth knowing about.
                 g_runtime.set_event_origin_us(event.received_us);
                 pipelines[index]->on_event(event, setups[index]->kind(),
+                                           setups[index]->keyboard_layout(),
                                            setups[index]->mouse_layout(), now_ms,
                                            setups[index]->vendor_id(),
                                            setups[index]->product_id());
@@ -665,6 +669,38 @@ namespace {
         static_cast<unsigned long>(g_mouse_pipeline.keychron_side_presses()),
         static_cast<unsigned long>(g_mouse_pipeline.keychron_side_releases()),
         g_mouse_pipeline.keychron_side_held() ? 1u : 0u);
+
+    // What the keyboard normalizer made of what it was handed.
+    //
+    // kerr is a histogram: how many reports carried exactly N ErrorRollOver
+    // values in their key field, for N of 0 through 5. HID 1.11 8.3 has a
+    // keyboard that has lost count put ErrorRollOver in *every* array field,
+    // and this firmware treats six of them as that signal - so a keyboard
+    // that declares five slots can never raise it. If the fifth bucket is
+    // climbing while somebody types, reports meaning "I cannot say what is
+    // held" are being read as "nothing is held", and that releases keys
+    // nobody let go of.
+    for (int side = 0; side < 2 && used < static_cast<int>(sizeof(text)) - 1; ++side) {
+        const auto& normalizer = (side == 0 ? g_keyboard_pipeline : g_mouse_pipeline)
+                                     .keyboard_normalizer();
+        used += snprintf(
+            text + used, sizeof(text) - static_cast<std::size_t>(used),
+            "kerr %s=%u/%u/%u/%u/%u/%u roll=%u ref=%u rej=%u down=%u/%u up=%u unpaced=%u\n"
+            "kusb sent=%u same=%u busy=%u\n",
+            side == 0 ? "k" : "m",
+            normalizer.probe_error_slots(0), normalizer.probe_error_slots(1),
+            normalizer.probe_error_slots(2), normalizer.probe_error_slots(3),
+            normalizer.probe_error_slots(4), normalizer.probe_error_slots(5),
+            normalizer.probe_rollovers(), normalizer.probe_refused(),
+            normalizer.probe_rejected(),
+            normalizer.probe_key_downs(), normalizer.probe_modifier_downs(),
+            normalizer.probe_key_ups(), g_outputs.keyboard_unpaced(),
+            usb.keyboard_sent(), usb.keyboard_same(), usb.keyboard_busy());
+        if (used < 0 || used > static_cast<int>(sizeof(text)) - 1) {
+            used = static_cast<int>(sizeof(text)) - 1;
+            break;
+        }
+    }
     const char* names[2] = {"keyboard", "mouse"};
     for (int index = 0; index < 2 && used < static_cast<int>(sizeof(text)) - 1; ++index) {
         const duo_input::u1::ch375::Ch375Device& device = *devices[index];
@@ -673,10 +709,11 @@ namespace {
         used += snprintf(
             text + used, sizeof(text) - static_cast<std::size_t>(used),
             "%s st=%s rate=%s life=%u/%u/%u reports=%u int=%u/%u\n"
-            " bus ce=%s usb=%02X status=%u/%u/%u/%u/%u enumfail=%u modefail=%u polls=%u\n"
+            " bus ce=%s usb=%02X status=%u/%u/%u/%u/%u enumfail=%u modefail=%u polls=%u/%u\n"
             " hid=%s ep=%u pkt=%u boot=%s/%s setup=%u last=%02X cfgerr=%u\n"
             " rd=%02X err=%u got/want=%u/%u layout=%s id=%s/%u "
             "b=%u x=%u/%u+%u:%u y=%u/%u+%u:%u w=%u p=%u min=%u\n"
+            " klayout=%s kkind=%u kbits=%u/%u@%u kid=%s/%u kmin=%u\n"
             " last=%u:%02X %02X %02X %02X port=%u refused=%u "
             "recover=%u/%u/%u/%u/%u slow=%u drop=%u\n",
             names[index], state < 7 ? kStates[state] : "?",
@@ -692,7 +729,7 @@ namespace {
             device.status_connect(), device.status_disconnect(), device.status_success(),
             device.status_failure(), device.status_impossible(),
             device.enumerate_failures(), device.mode_failures(),
-            device.polls_issued(),
+            device.polls_issued(), device.primary_polls(),
             setups[index]->kind() == duo_input::u1::ch375::DeviceKind::Keyboard
                 ? "keyboard"
                 : (setups[index]->kind() == duo_input::u1::ch375::DeviceKind::Mouse
@@ -718,6 +755,17 @@ namespace {
             setups[index]->mouse_layout().wheel.offset,
             setups[index]->mouse_layout().pan.offset,
             setups[index]->mouse_layout().minimum_body_bytes,
+            // Whether this keyboard is being read in its own protocol or in
+            // boot's. The one field that says which of the two paths a run of
+            // the compatibility matrix was actually on.
+            setups[index]->has_keyboard_layout() ? "report" : "boot",
+            static_cast<unsigned>(setups[index]->keyboard_layout().key_kind),
+            setups[index]->keyboard_layout().key_element_bits,
+            setups[index]->keyboard_layout().key_element_count,
+            setups[index]->keyboard_layout().key_bit_offset,
+            setups[index]->keyboard_layout().report_id ? "yes" : "no",
+            setups[index]->keyboard_layout().report_id_value,
+            setups[index]->keyboard_layout().minimum_body_bytes,
             tally.last_size, tally.last[0], tally.last[1], tally.last[2], tally.last[3],
             (index == 0 ? g_keyboard_port : g_mouse_port).baud(),
             device.baud_change_failures(), device.setup_mode_failures(),
@@ -790,11 +838,28 @@ namespace {
             }
         }
 
+        const duo_input::protocol::ByteView raw = setups[index]->report_descriptor();
+        if (setups[index]->kind() == duo_input::u1::ch375::DeviceKind::Keyboard &&
+            used < static_cast<int>(sizeof(text)) - 24) {
+            used += snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used),
+                             "kbd-desc=%u/%u:", setups[index]->report_descriptor_bytes(),
+                             setups[index]->report_descriptor_wanted());
+            for (std::size_t byte = 0;
+                 byte < raw.size && used < static_cast<int>(sizeof(text)) - 3; ++byte) {
+                used += snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used),
+                                 "%02X", raw.data[byte]);
+            }
+            if (used < static_cast<int>(sizeof(text)) - 1) {
+                text[used++] = '\n';
+                text[used] = '\0';
+            }
+        }
+
         // A parser failure without its bytes is still a guess.  Keep this in
         // the same reply so the exact real descriptor can become a native
         // regression vector before the parser is changed.
-        const duo_input::protocol::ByteView raw = setups[index]->report_descriptor();
-        if (raw.size != 0 && !setups[index]->has_mouse_layout()) {
+        if (setups[index]->kind() == duo_input::u1::ch375::DeviceKind::Mouse &&
+            raw.size != 0 && !setups[index]->has_mouse_layout()) {
             used += snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used),
                              " rdhex=");
             for (std::size_t byte = 0;
@@ -842,7 +907,6 @@ int main() {
     // to fit in core 0's two-kilobyte stack, and ConfigService alone carries
     // three wire-frame buffers and the diagnostic payload - over four
     // kilobytes that outlive every call anyway.
-    static duo_input::u1::UsbService usb;
     static duo_input::u1::SpiMaster link;
     static duo_input::u1::PicoFlash flash;
     static duo_input::storage::AbStore store(flash);

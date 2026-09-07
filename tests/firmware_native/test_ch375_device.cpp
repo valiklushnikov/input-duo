@@ -1550,6 +1550,88 @@ TEST_CASE(a_ready_device_is_actually_polled_at_the_interval_it_earned) {
     CHECK(issued > window_us / kSlowestReportPollUs + 2);
 }
 
+TEST_CASE(the_token_interval_is_the_endpoints_own_interval_split_among_its_slots) {
+    // The interval is derived so a keystroke cannot fall between two polls of
+    // the endpoint the keystrokes arrive on. A device with a service endpoint
+    // spends every other token elsewhere, so that endpoint is sampled at twice
+    // the interval it earned - and nothing said so.
+    //
+    // Measured on the bench: an Aula F75 issuing 521 tokens a second, its
+    // keyboard endpoint seeing 260 of them - one every 3.86 ms against the
+    // 2 ms derived for it. The same receiver loses letters from fast typing at
+    // that rate and none at 2 ms, which is recorded beside kFastestReportPollUs.
+    //
+    // So the token clock runs at the endpoint's interval divided by however
+    // many endpoints share it, and the service endpoint keeps its every-other
+    // turn - the receiver family that wedges without it is unaffected, because
+    // its share of the tokens is unchanged.
+    Rig one;
+    one.setup.set_interrupt_endpoint(1);
+    bring_up(one);
+    CHECK_EQ(one.device.token_interval_us(), one.device.poll_interval_us());
+
+    Rig two;
+    two.setup.set_interrupt_endpoint(1);
+    two.setup.set_auxiliary_endpoint(2, 8);
+    bring_up(two);
+    CHECK_EQ(two.device.token_interval_us(), two.device.poll_interval_us() / 2);
+
+    Rig three;
+    three.setup.set_interrupt_endpoint(1);
+    three.setup.set_auxiliary_endpoint(2, 8);
+    three.setup.set_secondary_auxiliary_endpoint(3, 8);
+    bring_up(three);
+    CHECK_EQ(three.device.token_interval_us(), three.device.poll_interval_us() / 3);
+}
+
+TEST_CASE(a_service_endpoint_is_paid_for_with_extra_tokens_not_with_the_reports) {
+    // The rule above is worth nothing if the polling loop goes on using the
+    // undivided interval, and that is this project's most common defect:
+    // correct code with a passing test that production never reaches. Asking
+    // the device for its token interval proves the arithmetic, not the use.
+    //
+    // So this compares two devices over the same window: one with only its
+    // report endpoint, one that also has a service endpoint. If the service
+    // endpoint is paid for out of the report endpoint's turns, both issue the
+    // same number of tokens and the reports are sampled half as often. If it
+    // is paid for with extra tokens, the second issues about twice as many and
+    // the reports keep their interval.
+    //
+    // Measured on the bench before this: an Aula F75 issuing 521 tokens a
+    // second with its keyboard endpoint seeing 260 of them - one every 3.86 ms
+    // against the 2 ms derived for it, which is the band where that receiver
+    // drops letters from fast typing.
+    const std::uint32_t window_us = 100000;
+
+    Rig alone;
+    alone.setup.set_interrupt_endpoint(1);
+    bring_up(alone);
+    const unsigned before_alone = alone.chip.tokens_to(1);
+    alone.run(window_us, 50);
+    const unsigned reports_alone = alone.chip.tokens_to(1) - before_alone;
+
+    Rig shared;
+    shared.setup.set_interrupt_endpoint(1);
+    shared.setup.set_auxiliary_endpoint(2, 8);
+    bring_up(shared);
+    const unsigned before_reports = shared.chip.tokens_to(1);
+    const unsigned before_service = shared.chip.tokens_to(2);
+    shared.run(window_us, 50);
+    const unsigned reports_shared = shared.chip.tokens_to(1) - before_reports;
+    const unsigned service_shared = shared.chip.tokens_to(2) - before_service;
+
+    CHECK(reports_alone > 0);
+    // The endpoint the keystrokes arrive on is asked as often as it would be
+    // with nothing sharing the schedule - a poll or two either way, since the
+    // window does not begin on one.
+    CHECK(reports_shared + 2 >= reports_alone);
+    // And the service endpoint still gets its every-other turn, because the
+    // receiver family that wedges without one is unaffected by this: its share
+    // of the tokens did not change, only how many there are.
+    CHECK(service_shared > 0);
+    CHECK(service_shared * 2 >= reports_shared);
+}
+
 TEST_CASE(deriving_the_interval_leaves_every_rung_of_the_ladder_usable) {
     using duo_input::u1::ch375::kBaudLadder;
     using duo_input::u1::ch375::kBaudLadderSize;

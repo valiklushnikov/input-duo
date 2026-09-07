@@ -19,10 +19,17 @@
 #include "test_support.hpp"
 
 #include <cstdint>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <vector>
 
+using duo_input::u1::ch375::boot_keyboard_layout;
 using duo_input::u1::ch375::boot_mouse_layout;
+using duo_input::u1::ch375::KeyboardFieldKind;
+using duo_input::u1::ch375::KeyboardReportLayout;
 using duo_input::u1::ch375::MouseReportLayout;
+using duo_input::u1::ch375::parse_keyboard_report_descriptor;
 using duo_input::u1::ch375::parse_mouse_report_descriptor;
 using duo_input::u1::ch375::ReportDescriptorError;
 
@@ -30,6 +37,38 @@ namespace {
 
 duo_input::protocol::ByteView view(const std::vector<std::uint8_t>& bytes) {
     return duo_input::protocol::ByteView{bytes.data(), bytes.size()};
+}
+
+std::vector<std::uint8_t> read_strict_uppercase_hex(const std::string& path) {
+    std::ifstream stream(path, std::ios::binary);
+    const std::string text{std::istreambuf_iterator<char>{stream},
+                           std::istreambuf_iterator<char>{}};
+    if (!stream.is_open() || text.size() < 3 || text.back() != '\n' ||
+        ((text.size() - 1) % 2) != 0) {
+        return {};
+    }
+
+    auto nibble = [](char digit) -> int {
+        if (digit >= '0' && digit <= '9') {
+            return digit - '0';
+        }
+        if (digit >= 'A' && digit <= 'F') {
+            return digit - 'A' + 10;
+        }
+        return -1;
+    };
+
+    std::vector<std::uint8_t> bytes;
+    bytes.reserve((text.size() - 1) / 2);
+    for (std::size_t at = 0; at + 1 < text.size() - 1; at += 2) {
+        const int high = nibble(text[at]);
+        const int low = nibble(text[at + 1]);
+        if (high < 0 || low < 0) {
+            return {};
+        }
+        bytes.push_back(static_cast<std::uint8_t>((high << 4) | low));
+    }
+    return bytes;
 }
 
 /// The report descriptor a plain three-button wheel mouse sends.
@@ -586,4 +625,359 @@ TEST_CASE(an_accepted_packed_layout_replaces_the_callers_fallback) {
     CHECK_EQ(layout.x.offset, std::uint8_t{1});
     CHECK_EQ(layout.y.offset, std::uint8_t{3});
     CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{5});
+}
+
+// ---------------------------------------------------------- keyboard layouts
+
+TEST_CASE(the_fixed_boot_keyboard_layout_is_explicit) {
+    const KeyboardReportLayout layout = boot_keyboard_layout();
+
+    CHECK_FALSE(layout.report_id);
+    CHECK_EQ(layout.report_id_value, std::uint8_t{0});
+    for (std::uint16_t modifier = 0; modifier < 8; ++modifier) {
+        CHECK_EQ(layout.modifier_bits[modifier], modifier);
+    }
+    CHECK_EQ(static_cast<int>(layout.key_kind),
+             static_cast<int>(KeyboardFieldKind::Array));
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{16});
+    CHECK_EQ(layout.key_element_bits, std::uint8_t{8});
+    CHECK_EQ(layout.key_element_count, std::uint8_t{6});
+    CHECK_EQ(layout.key_usage_minimum, std::uint16_t{0});
+    CHECK_EQ(layout.key_usage_maximum, std::uint16_t{0x00FF});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{8});
+}
+
+TEST_CASE(the_captured_aula_keyboard_descriptor_has_one_usable_layout) {
+    const std::vector<std::uint8_t> bytes = read_strict_uppercase_hex(
+        std::string{DUO_USB_DESCRIPTORS_PATH} + "/aula_f75_keyboard_report.hex");
+    CHECK_EQ(bytes.size(), std::size_t{77});
+    KeyboardReportLayout layout;
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::None));
+    CHECK_FALSE(layout.report_id);
+    for (std::uint16_t modifier = 0; modifier < 8; ++modifier) {
+        CHECK_EQ(layout.modifier_bits[modifier], modifier);
+    }
+    CHECK_EQ(static_cast<int>(layout.key_kind),
+             static_cast<int>(KeyboardFieldKind::Array));
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{16});
+    CHECK_EQ(layout.key_element_bits, std::uint8_t{8});
+    CHECK_EQ(layout.key_element_count, std::uint8_t{5});
+    CHECK_EQ(layout.key_usage_minimum, std::uint16_t{0});
+    CHECK_EQ(layout.key_usage_maximum, std::uint16_t{0x00FF});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{7});
+}
+
+TEST_CASE(a_report_id_keyboard_keeps_offsets_inside_its_own_report) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x0C, 0x85, 0x01,              // Consumer report ID 1
+        0x09, 0x01, 0x75, 0x08, 0x95, 0x04,
+        0x81, 0x02,                          // four bytes in report 1
+        0x05, 0x07, 0x85, 0x02,              // Keyboard report ID 2
+        0x19, 0xE0, 0x29, 0xE7,
+        0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x19, 0x00, 0x29, 0x65,
+        0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x06, 0x81, 0x00,
+    };
+    KeyboardReportLayout layout;
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::None));
+    CHECK(layout.report_id);
+    CHECK_EQ(layout.report_id_value, std::uint8_t{2});
+    CHECK_EQ(layout.modifier_bits[0], std::uint16_t{0});
+    CHECK_EQ(layout.modifier_bits[7], std::uint16_t{7});
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{8});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{7});
+}
+
+TEST_CASE(an_eight_byte_array_keyboard_records_modifiers_and_six_slots) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x07,
+        0x19, 0xE0, 0x29, 0xE7,
+        0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x75, 0x08, 0x95, 0x01, 0x81, 0x01,
+        0x19, 0x00, 0x29, 0x65,
+        0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x06, 0x81, 0x00,
+    };
+    KeyboardReportLayout layout;
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::None));
+    CHECK_EQ(layout.modifier_bits[0], std::uint16_t{0});
+    CHECK_EQ(layout.modifier_bits[7], std::uint16_t{7});
+    CHECK_EQ(static_cast<int>(layout.key_kind),
+             static_cast<int>(KeyboardFieldKind::Array));
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{16});
+    CHECK_EQ(layout.key_element_bits, std::uint8_t{8});
+    CHECK_EQ(layout.key_element_count, std::uint8_t{6});
+    CHECK_EQ(layout.key_usage_minimum, std::uint16_t{0});
+    CHECK_EQ(layout.key_usage_maximum, std::uint16_t{0x65});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{8});
+}
+
+TEST_CASE(an_nkro_bitmap_records_its_usage_range) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x07,
+        0x19, 0xE0, 0x29, 0xE7,
+        0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x19, 0x04, 0x29, 0x73,
+        0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x70, 0x81, 0x02,
+    };
+    KeyboardReportLayout layout;
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::None));
+    CHECK_EQ(static_cast<int>(layout.key_kind),
+             static_cast<int>(KeyboardFieldKind::Bitmap));
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{8});
+    CHECK_EQ(layout.key_element_bits, std::uint8_t{1});
+    CHECK_EQ(layout.key_element_count, std::uint8_t{0x70});
+    CHECK_EQ(layout.key_usage_minimum, std::uint16_t{0x04});
+    CHECK_EQ(layout.key_usage_maximum, std::uint16_t{0x73});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{15});
+}
+
+TEST_CASE(global_push_and_pop_restore_keyboard_report_size_and_count) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x07,
+        0x19, 0xE0, 0x29, 0xE7,
+        0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x75, 0x08, 0x95, 0x06,
+        0xA4,                                // Push globals
+        0x75, 0x01, 0x95, 0x01,
+        0xB4,                                // Pop: size 8, count 6
+        0x19, 0x00, 0x29, 0x65,
+        0x15, 0x00, 0x25, 0x65,
+        0x81, 0x00,
+    };
+    KeyboardReportLayout layout;
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::None));
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{8});
+    CHECK_EQ(layout.key_element_bits, std::uint8_t{8});
+    CHECK_EQ(layout.key_element_count, std::uint8_t{6});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{7});
+}
+
+TEST_CASE(output_feature_and_long_items_do_not_move_the_keyboard_input_cursor) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x07,
+        0x19, 0xE0, 0x29, 0xE7,
+        0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x75, 0x08, 0x95, 0x04,
+        0x19, 0x01, 0x29, 0x04, 0x91, 0x02,
+        0x19, 0x01, 0x29, 0x04, 0xB1, 0x02,
+        0xFE, 0x03, 0x99, 0xDE, 0xAD, 0xBE,
+        0x19, 0x00, 0x29, 0x65,
+        0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x06, 0x81, 0x00,
+    };
+    KeyboardReportLayout layout;
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::None));
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{8});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{7});
+}
+
+TEST_CASE(two_competing_keyboard_input_reports_are_refused) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x07,
+        0x85, 0x01,
+        0x19, 0x00, 0x29, 0x65,
+        0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x06, 0x81, 0x00,
+        0x85, 0x02,
+        0x19, 0x04, 0x29, 0x73,
+        0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x70, 0x81, 0x02,
+    };
+    KeyboardReportLayout layout = boot_keyboard_layout();
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::AmbiguousKeyboardReport));
+    CHECK_FALSE(layout.report_id);
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{16});
+    CHECK_EQ(layout.key_element_count, std::uint8_t{6});
+}
+
+TEST_CASE(a_truncated_keyboard_item_leaves_the_callers_layout_unchanged) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x07,
+        0x19, 0x00, 0x29, 0x65,
+        0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x06,
+        0x82, 0x00,                          // two-byte Input, one byte present
+    };
+    KeyboardReportLayout layout = boot_keyboard_layout();
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::Truncated));
+    CHECK_EQ(layout.modifier_bits[0], std::uint16_t{0});
+    CHECK_EQ(static_cast<int>(layout.key_kind),
+             static_cast<int>(KeyboardFieldKind::Array));
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{16});
+    CHECK_EQ(layout.key_element_count, std::uint8_t{6});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{8});
+}
+
+TEST_CASE(global_stack_underflow_and_overflow_are_refused) {
+    const std::vector<std::uint8_t> underflow = {0xB4};
+    const std::vector<std::uint8_t> overflow = {0xA4, 0xA4, 0xA4, 0xA4, 0xA4};
+    KeyboardReportLayout layout = boot_keyboard_layout();
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(underflow), layout)),
+             static_cast<int>(ReportDescriptorError::MalformedGlobalState));
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(overflow), layout)),
+             static_cast<int>(ReportDescriptorError::MalformedGlobalState));
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{16});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{8});
+}
+
+TEST_CASE(a_non_keyboard_descriptor_is_refused_by_name) {
+    const std::vector<std::uint8_t> bytes = plain_wheel_mouse();
+    KeyboardReportLayout layout = boot_keyboard_layout();
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::NoKeyboardReport));
+    CHECK_EQ(layout.modifier_bits[0], std::uint16_t{0});
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{16});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{8});
+}
+
+TEST_CASE(unsupported_keyboard_layouts_are_refused_whole) {
+    const std::vector<std::vector<std::uint8_t>> descriptors = {
+        // Report ID zero is reserved.
+        {0x85, 0x00},
+        // Array elements wider than the bounded reader.
+        {0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x15, 0x00, 0x25, 0x65,
+         0x75, 0x11, 0x95, 0x01, 0x81, 0x00},
+        // Reversed local usage range.
+        {0x05, 0x07, 0x19, 0x65, 0x29, 0x04, 0x15, 0x00, 0x25, 0x65,
+         0x75, 0x08, 0x95, 0x06, 0x81, 0x00},
+        // Reversed global logical range.
+        {0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x15, 0x01, 0x25, 0x00,
+         0x75, 0x08, 0x95, 0x06, 0x81, 0x00},
+        // One bit past the 64-byte report ceiling.
+        {0x75, 0x08, 0x96, 0x40, 0x00, 0x81, 0x01,
+         0x05, 0x07, 0x19, 0x04, 0x29, 0x04, 0x15, 0x00, 0x25, 0x01,
+         0x75, 0x01, 0x95, 0x01, 0x81, 0x02},
+    };
+
+    for (const std::vector<std::uint8_t>& bytes : descriptors) {
+        KeyboardReportLayout layout = boot_keyboard_layout();
+        CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+                 static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+        CHECK_EQ(layout.key_bit_offset, std::uint16_t{16});
+        CHECK_EQ(layout.key_element_count, std::uint8_t{6});
+    }
+}
+
+// A descriptor that names Report IDs at all names them for every report it
+// declares. A keyboard left in the unnamed report 0 alongside identified ones
+// cannot be read: the device prefixes every packet with an identifier, so
+// offsets measured without one are all a byte late and no packet ever matches
+// identifier 0. Boot protocol is the only honest answer.
+TEST_CASE(a_keyboard_report_without_an_id_beside_identified_reports_is_refused) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x07,
+        0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,  // modifiers, in no named report
+        0x19, 0x00, 0x29, 0x65, 0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x06, 0x81, 0x00,  // keys, in no named report
+        0x85, 0x02,                          // Report ID (2), too late
+        0x05, 0x0C, 0x09, 0x01, 0x75, 0x08, 0x95, 0x02, 0x81, 0x02,
+    };
+    KeyboardReportLayout layout = boot_keyboard_layout();
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+    CHECK_FALSE(layout.report_id);
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{16});
+    CHECK_EQ(layout.key_element_count, std::uint8_t{6});
+}
+
+// Two key fields inside one report leave no way to say which one a pressed key
+// arrives in. Taking the last one silently discards the first, which is how a
+// whole half of a keyboard goes quiet; refusing sends the device to boot.
+TEST_CASE(a_second_key_field_in_one_report_is_refused) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x07,
+        0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x19, 0x00, 0x29, 0x65, 0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x06, 0x81, 0x00,  // six slots at bit 8
+        0x19, 0x00, 0x29, 0x65, 0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x06, 0x81, 0x00,  // six more at bit 56
+    };
+    KeyboardReportLayout layout = boot_keyboard_layout();
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{16});
+}
+
+// The bit ceiling is a property of the whole report, not of the fields read out
+// of it. A padding field declared after the keys can push the report past what
+// the bounded reader will ever be handed, and the keys found before it are no
+// reason to accept the rest.
+TEST_CASE(a_report_that_outgrows_sixty_four_bytes_after_its_keys_is_refused) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x07,
+        0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+        0x19, 0x00, 0x29, 0x65, 0x15, 0x00, 0x25, 0x65,
+        0x75, 0x08, 0x95, 0x06, 0x81, 0x00,  // keys end at bit 56
+        0x75, 0x08, 0x96, 0x41, 0x00, 0x81, 0x01,  // 65 constant bytes after
+    };
+    KeyboardReportLayout layout = boot_keyboard_layout();
+
+    CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+             static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+    CHECK_EQ(layout.key_bit_offset, std::uint16_t{16});
+    CHECK_EQ(layout.minimum_body_bytes, std::uint8_t{8});
+}
+
+// An NKRO bitmap is read by counting bits off its usage minimum, so the field
+// has to hold exactly one bit per usage in the declared range. A field that
+// holds fewer bits, or wider ones, maps every key past the first onto the wrong
+// usage - a descriptor that reports the letter next to the one that was struck.
+TEST_CASE(a_bitmap_whose_bit_count_disagrees_with_its_usage_range_is_refused) {
+    const std::vector<std::uint8_t> modifiers = {
+        0x05, 0x07,
+        0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+    };
+    const std::vector<std::vector<std::uint8_t>> tails = {
+        // 112 usages declared, 96 bits sent.
+        {0x19, 0x04, 0x29, 0x73, 0x15, 0x00, 0x25, 0x01,
+         0x75, 0x01, 0x95, 0x60, 0x81, 0x02},
+        // Eight usages, eight elements - but a byte each, not a bit each.
+        {0x19, 0x04, 0x29, 0x0B, 0x15, 0x00, 0x25, 0x01,
+         0x75, 0x08, 0x95, 0x08, 0x81, 0x02},
+    };
+
+    for (const std::vector<std::uint8_t>& tail : tails) {
+        std::vector<std::uint8_t> bytes = modifiers;
+        bytes.insert(bytes.end(), tail.begin(), tail.end());
+        KeyboardReportLayout layout = boot_keyboard_layout();
+
+        CHECK_EQ(static_cast<int>(parse_keyboard_report_descriptor(view(bytes), layout)),
+                 static_cast<int>(ReportDescriptorError::UnsupportedLayout));
+        CHECK_EQ(static_cast<int>(layout.key_kind),
+                 static_cast<int>(KeyboardFieldKind::Array));
+        CHECK_EQ(layout.key_element_bits, std::uint8_t{8});
+        CHECK_EQ(layout.key_element_count, std::uint8_t{6});
+    }
 }

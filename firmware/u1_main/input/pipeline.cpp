@@ -44,11 +44,14 @@ bool keychron_side_state(protocol::ByteView report, bool& held) {
 }  // namespace
 
 void InputPipeline::set_kind(ch375::DeviceKind kind,
+                             const ch375::KeyboardReportLayout& keyboard_layout,
                              const ch375::MouseReportLayout& mouse_layout) {
     kind_ = kind;
-    // Set on every Ready, not only when a descriptor was read: a device that
-    // would not describe itself hands over boot protocol's layout, and setting
-    // it is what stops the mouse before it from being read into this one.
+    // Both set on every Ready, not only when a descriptor was read: a device
+    // that would not describe itself hands over boot protocol's layout, and
+    // setting it is what stops the device before it from being read into this
+    // one.
+    keyboard_.set_layout(keyboard_layout);
     mouse_.set_layout(mouse_layout);
 }
 
@@ -138,6 +141,7 @@ void InputPipeline::on_detached(std::uint32_t now_ms) {
 }
 
 void InputPipeline::on_event(const ch375::Ch375Event& event, ch375::DeviceKind kind,
+                             const ch375::KeyboardReportLayout& keyboard_layout,
                              const ch375::MouseReportLayout& mouse_layout,
                              std::uint32_t now_ms, std::uint16_t vendor_id,
                              std::uint16_t product_id) {
@@ -147,7 +151,7 @@ void InputPipeline::on_event(const ch375::Ch375Event& event, ch375::DeviceKind k
             // has been configured.
             keychron_receiver_ = vendor_id == kKeychronVendorId &&
                                  product_id == kKeychronProductId;
-            set_kind(kind, mouse_layout);
+            set_kind(kind, keyboard_layout, mouse_layout);
             return;
 
         case ch375::Ch375EventKind::Report:

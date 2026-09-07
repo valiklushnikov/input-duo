@@ -71,6 +71,27 @@ struct MouseReportLayout {
 /// has been read under so far.
 MouseReportLayout boot_mouse_layout();
 
+enum class KeyboardFieldKind : std::uint8_t { None, Array, Bitmap };
+inline constexpr std::uint16_t kNoKeyboardBit = 0xFFFF;
+struct KeyboardReportLayout {
+    bool report_id = false;
+    std::uint8_t report_id_value = 0;
+    std::uint16_t modifier_bits[8] = {
+        kNoKeyboardBit, kNoKeyboardBit, kNoKeyboardBit, kNoKeyboardBit,
+        kNoKeyboardBit, kNoKeyboardBit, kNoKeyboardBit, kNoKeyboardBit,
+    };
+    KeyboardFieldKind key_kind = KeyboardFieldKind::None;
+    std::uint16_t key_bit_offset = 0;
+    std::uint8_t key_element_bits = 0;
+    std::uint8_t key_element_count = 0;
+    std::uint16_t key_usage_minimum = 0;
+    std::uint16_t key_usage_maximum = 0;
+    std::uint8_t minimum_body_bytes = 0;
+};
+
+/// The explicit eight-byte boot-protocol keyboard report layout.
+KeyboardReportLayout boot_keyboard_layout();
+
 enum class ReportDescriptorError : std::uint8_t {
     None,
     /// An item runs past the end of what arrived, or nothing arrived.
@@ -79,6 +100,9 @@ enum class ReportDescriptorError : std::uint8_t {
     NoMouseReport,
     /// A mouse, but not one whose fields fit the bounded bit reader.
     UnsupportedLayout,
+    NoKeyboardReport,
+    AmbiguousKeyboardReport,
+    MalformedGlobalState,
 };
 
 /// Walk a HID report descriptor and find the mouse report inside it.
@@ -88,5 +112,11 @@ enum class ReportDescriptorError : std::uint8_t {
 /// cannot half-replace a layout that was working.
 ReportDescriptorError parse_mouse_report_descriptor(protocol::ByteView descriptor,
                                                     MouseReportLayout& out);
+
+/// Walk a HID report descriptor and find one bounded keyboard input report.
+///
+/// A failure never changes ``out``.
+ReportDescriptorError parse_keyboard_report_descriptor(protocol::ByteView descriptor,
+                                                       KeyboardReportLayout& out);
 
 }  // namespace duo_input::u1::ch375
