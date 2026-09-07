@@ -14,7 +14,7 @@ repository green, because none of them ever runs the script.
 directories get guarded, and what U1/U2 are named and sourced from - without
 running the protocol check, the native/Python suites, the configurator or the
 installer, and writes it as JSON to ``build/release-dry-run.json``. This file
-invokes that flag for real, for both backends, and asserts on the plan it
+invokes that flag for real, for all three backends, and asserts on the plan it
 reports. ``Invoke-BackendArtifactGuard`` records every directory it is
 actually called with (see its own ``$Script:GuardCallLog`` line in
 ``tools/build_release.ps1``) *before* doing anything else, so a deleted call
@@ -42,6 +42,7 @@ PLAN_PATH = REPOSITORY_ROOT / "build" / "release-dry-run.json"
 
 CH375_BUILD_DIR = REPOSITORY_ROOT / "build" / "pico-release"
 PIO_USB_BUILD_DIR = REPOSITORY_ROOT / "build" / "pico-pio-usb-release"
+REFERENCE_BUILD_DIR = REPOSITORY_ROOT / "build" / "pico-pio-usb-reference-release"
 
 
 def _project_version() -> str:
@@ -145,6 +146,30 @@ def test_pio_usb_release_guards_both_directories_and_names_u1_distinctly():
     # from build/pico-pio-usb-release/firmware/u2_endpoint/ - catches
     # repointing U2's source at the PIO USB toolchain's own build directory.
     assert plan["U2Source"] == "build/pico-release/firmware/u2_endpoint/duo_u2_endpoint.uf2"
+
+
+@pytest.mark.skipif(
+    not REFERENCE_BUILD_DIR.is_dir(),
+    reason="no build/pico-pio-usb-reference-release; -DryRun still runs "
+    "Test-BackendCache/Invoke-BackendArtifactGuard for real and needs it to "
+    "exist (run cmake --build --preset pico-pio-usb-reference-release first)",
+)
+def test_reference_release_guards_both_directories_and_names_u1_distinctly():
+    plan = _run_dry_run("PIO_USB_REFERENCE")
+
+    assert plan["InputBackend"] == "PIO_USB_REFERENCE"
+    assert [Path(p) for p in plan["GuardedBuildDirs"]] == [
+        CH375_BUILD_DIR,
+        REFERENCE_BUILD_DIR,
+    ]
+    assert plan["U1Source"] == (
+        "build/pico-pio-usb-reference-release/firmware/u1_reference/"
+        "duo_u1_reference.uf2"
+    )
+    assert plan["U1Name"] == f"duo-input-u1-pio-usb-reference-{VERSION}.uf2"
+    assert plan["U2Source"] == (
+        "build/pico-release/firmware/u2_endpoint/duo_u2_endpoint.uf2"
+    )
 
 
 @pytest.mark.skipif(

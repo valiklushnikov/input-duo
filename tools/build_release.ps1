@@ -27,27 +27,31 @@
 
 .PARAMETER InputBackend
     Which U1 USB host path this release's U1 image is built with: CH375 (the
-    two CH375 chips, current shipping hardware) or PIO_USB (the native
-    Pico-PIO-USB/TinyUSB host). Defaults to CH375 - PIO_USB does not become
-    the default until a later task's hardware acceptance decides it should.
+    two CH375 chips, current shipping hardware), PIO_USB (the native
+    Pico-PIO-USB/TinyUSB host), or PIO_USB_REFERENCE (the reference-first
+    Pico-PIO-USB/TinyUSB integration). Defaults to CH375 - the reference
+    backend does not become the default until hardware acceptance decides it
+    should.
 
     U1's artefact name and source build directory both follow this
     parameter: CH375 builds ``pico-release`` and names the image
     ``duo-input-u1-<version>.uf2``; PIO_USB additionally builds
     ``pico-pio-usb-release`` and names its image
-    ``duo-input-u1-pio-usb-<version>.uf2``. Either way, U2 is always taken
-    from the ``pico-release`` (CH375-toolchain) build - see the "U2 is one
-    artefact" note below.
+    ``duo-input-u1-pio-usb-<version>.uf2``; PIO_USB_REFERENCE builds
+    ``pico-pio-usb-reference-release`` and names its image
+    ``duo-input-u1-pio-usb-reference-<version>.uf2``. In every case, U2 is
+    always taken from the ``pico-release`` (CH375-toolchain) build - see the
+    "U2 is one artefact" note below.
 
 .PARAMETER DryRun
     Resolve the firmware plan for -InputBackend - which build directories are
     built, which ones the backend/label guard runs against, and the U1/U2
     artefact names and sources - without running the protocol check, the
     native/Python suites, the configurator or the installer. Existing
-    ``build/pico-release`` (and, for ``PIO_USB``, ``build/pico-pio-usb-release``)
-    directories are still checked and guarded for real: only the expensive,
-    non-firmware-specific steps and the cmake configure/build invocations
-    themselves are skipped. Writes the resolved plan as JSON to
+    ``build/pico-release`` and the selected PIO build directory are still
+    checked and guarded for real: only the expensive, non-firmware-specific
+    steps and the cmake configure/build invocations themselves are skipped.
+    Writes the resolved plan as JSON to
     ``build/release-dry-run.json`` and to stdout, then exits.
 
     This exists so the naming/sourcing decisions in this script - which the
@@ -62,6 +66,9 @@
     powershell -ExecutionPolicy Bypass -File tools/build_release.ps1 -Version 0.1.0-rc1 -InputBackend PIO_USB
 
 .EXAMPLE
+    powershell -ExecutionPolicy Bypass -File tools/build_release.ps1 -Version 0.1.0-rc1 -InputBackend PIO_USB_REFERENCE
+
+.EXAMPLE
     powershell -ExecutionPolicy Bypass -File tools/build_release.ps1 -Version 0.1.0 -InputBackend PIO_USB -AllowDirty -DryRun
 #>
 
@@ -71,7 +78,7 @@ param(
     [string]$Version,
     [string]$OutputDir,
     [switch]$AllowDirty,
-    [ValidateSet('CH375', 'PIO_USB')]
+    [ValidateSet('CH375', 'PIO_USB', 'PIO_USB_REFERENCE')]
     [string]$InputBackend = 'CH375',
     [switch]$DryRun
 )
@@ -289,24 +296,32 @@ try {
     Invoke-BackendArtifactGuard $ch375BuildDir
 
     $pioBuildDir = $null
-    if ($InputBackend -eq 'PIO_USB') {
-        $pioBuildDir = Join-Path $RepositoryRoot 'build/pico-pio-usb-release'
-        if ($DryRun) {
-            Write-Step 'Skipping the PIO USB configure/build (-DryRun); using what is already in build/pico-pio-usb-release'
+    if ($InputBackend -in @('PIO_USB', 'PIO_USB_REFERENCE')) {
+        $isReference = $InputBackend -eq 'PIO_USB_REFERENCE'
+        $pioPreset = if ($isReference) {
+            'pico-pio-usb-reference-release'
         }
         else {
-            Write-Step 'Building the Pico firmware (PIO USB)'
-            & cmake --preset pico-pio-usb-release
+            'pico-pio-usb-release'
+        }
+        $pioBuildDir = Join-Path $RepositoryRoot "build/$pioPreset"
+        $pioLabel = if ($isReference) { 'PIO USB reference' } else { 'PIO USB' }
+        if ($DryRun) {
+            Write-Step "Skipping the $pioLabel configure/build (-DryRun); using what is already in build/$pioPreset"
+        }
+        else {
+            Write-Step "Building the Pico firmware ($pioLabel)"
+            & cmake --preset $pioPreset
             if ($LASTEXITCODE -ne 0) {
-                throw 'configuring the Pico build (PIO USB) failed; see docs/release/firmware-build.md'
+                throw "configuring the Pico build ($pioLabel) failed; see docs/release/firmware-build.md"
             }
-            & cmake --build --preset pico-pio-usb-release --parallel
-            if ($LASTEXITCODE -ne 0) { throw 'the Pico firmware build (PIO USB) failed' }
+            & cmake --build --preset $pioPreset --parallel
+            if ($LASTEXITCODE -ne 0) { throw "the Pico firmware build ($pioLabel) failed" }
         }
 
-        Test-BackendCache $pioBuildDir 'PIO_USB'
+        Test-BackendCache $pioBuildDir $InputBackend
 
-        Write-Step 'Checking the PIO USB firmware meets the build and backend contract'
+        Write-Step "Checking the $pioLabel firmware meets the build and backend contract"
         Invoke-BackendArtifactGuard $pioBuildDir
     }
 }
@@ -321,7 +336,11 @@ finally {
 # exactly this naming/sourcing decision without running the configurator or
 # installer, and so the assemble step below has one source of truth for it
 # instead of recomputing the same branch a second time.
-if ($InputBackend -eq 'PIO_USB') {
+if ($InputBackend -eq 'PIO_USB_REFERENCE') {
+    $u1Source = 'build/pico-pio-usb-reference-release/firmware/u1_reference/duo_u1_reference.uf2'
+    $u1Name = "duo-input-u1-pio-usb-reference-$Version.uf2"
+}
+elseif ($InputBackend -eq 'PIO_USB') {
     $u1Source = 'build/pico-pio-usb-release/firmware/u1_main/duo_u1_main.uf2'
     $u1Name = "duo-input-u1-pio-usb-$Version.uf2"
 }
@@ -397,10 +416,16 @@ Write-Utf8NoBom (Join-Path $OutputDir 'SHA256SUMS.txt') $lines
 
 # --- notes -------------------------------------------------------------------
 
-$firmwareNotes = if ($InputBackend -eq 'PIO_USB') {
+$firmwareNotes = if ($InputBackend -in @('PIO_USB', 'PIO_USB_REFERENCE')) {
     $revisions = Get-PioUsbToolchainRevisions
+    $backendDescription = if ($InputBackend -eq 'PIO_USB_REFERENCE') {
+        'reference-first Pico-PIO-USB/TinyUSB host on Core 1'
+    }
+    else {
+        'native Pico-PIO-USB/TinyUSB host on Core 1'
+    }
     @"
-- U1 backend: ``PIO_USB`` (native Pico-PIO-USB/TinyUSB host on Core 1)
+- U1 backend: ``$InputBackend`` ($backendDescription)
 - PIO USB toolchain (pinned by ``cmake/pio_usb_toolchain_lock.cmake``):
   - Pico SDK: ``$($revisions['Pico SDK'])``
   - TinyUSB: ``$($revisions['TinyUSB'])``

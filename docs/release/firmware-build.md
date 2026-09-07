@@ -71,15 +71,17 @@ someone's hands.
 | `pico-debug` | the same CH375 images with symbols, for a debug probe |
 | `pico-pio-usb-release` | U1 built against the native Pico-PIO-USB/TinyUSB host, `DUO_INPUT_BACKEND=PIO_USB` - see "The PIO USB backend toolchain" below |
 | `pico-pio-usb-debug` | the same PIO USB host build with symbols, for a debug probe |
-| `pico-pio-usb-reference-release` | frozen U1 golden built from the pinned upstream `host_hid_to_device_cdc` example, `DUO_INPUT_BACKEND=PIO_USB_REFERENCE` |
+| `pico-pio-usb-reference-release` | reference-first U1 integration derived from the pinned upstream `host_hid_to_device_cdc` example, `DUO_INPUT_BACKEND=PIO_USB_REFERENCE` |
 
 `DUO_INPUT_BACKEND` selects which USB host path U1 is built with. It accepts
 exactly `CH375`, `PIO_USB` or `PIO_USB_REFERENCE`; any other value fails
 configuration rather than silently defaulting to one of them. The reference
 preset produces
 `build/pico-pio-usb-reference-release/firmware/u1_reference/duo_u1_reference.uf2`.
-It is a development/hardware-gate artifact and is not selected by release
-packaging until the reference-first acceptance plan reaches its release slice.
+It remains an experimental hardware-gate artifact, but release packaging can
+select it explicitly with `-InputBackend PIO_USB_REFERENCE`. CH375 remains the
+default until the complete reference recovery/soak and two-PC clipboard gates
+have measured passes.
 
 ## The PIO USB backend toolchain
 
@@ -191,12 +193,14 @@ that means for anything actually shipped.
 ## Packaging a release
 
 `tools/build_release.ps1` assembles one release folder from these presets,
-plus the configurator and installer. It takes `-InputBackend CH375` (the
-default) or `-InputBackend PIO_USB`:
+plus the configurator and installer. It takes exactly `-InputBackend CH375`
+(the default), `-InputBackend PIO_USB`, or
+`-InputBackend PIO_USB_REFERENCE`:
 
 ```bat
 powershell -ExecutionPolicy Bypass -File tools/build_release.ps1 -Version 0.1.0-rc1
 powershell -ExecutionPolicy Bypass -File tools/build_release.ps1 -Version 0.1.0-rc1 -InputBackend PIO_USB
+powershell -ExecutionPolicy Bypass -File tools/build_release.ps1 -Version 0.1.0-rc1 -InputBackend PIO_USB_REFERENCE
 ```
 
 A `CH375` release builds only `pico-release` and names its U1 image
@@ -205,6 +209,12 @@ A `CH375` release builds only `pico-release` and names its U1 image
 `duo-input-u1-pio-usb-<version>.uf2` - the two names cannot collide in one
 output folder, so a release directory that somehow contained both backends'
 U1 images would still be unambiguous about which is which.
+
+A `PIO_USB_REFERENCE` release instead builds
+`pico-pio-usb-reference-release` and names its U1 image
+`duo-input-u1-pio-usb-reference-<version>.uf2`. This explicit packaging path
+does not make it the release default and does not constitute hardware
+acceptance.
 
 ### U2 is one artefact
 
@@ -226,20 +236,21 @@ rule out, and nothing about U2 (no CH375 chips, no PIO pins, no
 
 So `tools/build_release.ps1` always takes U2 from the `pico-release`
 (CH375-toolchain, Pico SDK 2.1.0) build, regardless of `-InputBackend`. A
-`PIO_USB` release therefore builds *both* presets - `pico-release` for U2 (and
-for U1, on the `CH375` path), `pico-pio-usb-release` for U1 only, on the
-`PIO_USB` path - and still emits exactly one U2 artefact, byte-identical to
-the one a `CH375` release of the same commit emits. `pico-release` remaining
-buildable is consequently a precondition for *any* release, not just a
-`CH375` one.
+PIO USB release therefore builds *both* `pico-release` and its selected PIO
+preset: `pico-pio-usb-release` for `PIO_USB`, or
+`pico-pio-usb-reference-release` for `PIO_USB_REFERENCE`. The selected PIO
+preset supplies U1 only; the release still emits exactly one U2 artefact,
+byte-identical to the one a `CH375` release of the same commit emits.
+`pico-release` remaining buildable is consequently a precondition for *any*
+release, not just a `CH375` one.
 
-**`build/pico-pio-usb-release/firmware/u2_endpoint/duo_u2_endpoint.uf2` is
-never a flash source.** It exists - `pico-pio-usb-release` configures and
-builds U2 like every preset does - and `tests/build/test_firmware_artifacts.py`
+**The U2 UF2 under either PIO build directory is never a release or flash
+source.** It exists because both PIO presets configure and build U2 like every
+preset does, and `tests/build/test_firmware_artifacts.py`
 requires it to exist and meet the same flash-layout contract, precisely
 because a UF2 nobody meant to ship is one someone would eventually flash by
 hand. But no code path in `tools/build_release.ps1` ever reads a U2 UF2 from
-`build/pico-pio-usb-release/` - `$u2Source` is set once, right after the
+either PIO build directory - `$u2Source` is set once, right after the
 firmware section, to the `pico-release` path, and both the assemble step and
 `-DryRun`'s resolved plan use that one value regardless of `-InputBackend`
 (`tests/build/test_build_release_plan.py` pins this: it fails if U2's source
@@ -252,13 +263,15 @@ that only one of the two ever reaches a release folder.
 
 ### The label guard
 
-Before naming or copying either backend's U1 UF2, `tools/build_release.ps1`
+Before naming or copying any backend's U1 UF2, `tools/build_release.ps1`
 runs `tests/build/test_backend_artifacts.py` scoped to the one build
 directory it just built (via `DUO_INPUT_PICO_BUILD`). That file cross-checks
 the build directory's declared backend (`CMakeCache.txt`) against what the
 linked ELF's symbol table actually contains - a CH375 image must link
 `Ch375Device::tick` and must not link TinyUSB's host task or HID-receive
-symbols; a PIO USB image is the reverse. A build directory that fails this
+symbols; a PIO USB image is the reverse. The reference image must additionally
+link `InputPipeline::on_event` while excluding both `Ch375Device::tick` and
+`PioUsbBackend::task`. A build directory that fails this
 check - most plausibly a shared build directory reconfigured by hand, or by
 another session, between one release and the next - never reaches the copy
 step, so a PIO USB image cannot be shipped labelled CH375, or the reverse.
@@ -271,15 +284,16 @@ That guard's own call sites, and the naming/sourcing decisions above them
 guarded and what U1/U2 are named and sourced from - without running the
 protocol check, the native/Python suites, the configurator or the installer,
 and writes it as JSON to `build/release-dry-run.json`.
-`tests/build/test_build_release_plan.py` runs it for both backends and
-asserts on the result, so deleting a guard call, swapping the two backends'
+`tests/build/test_build_release_plan.py` runs it for all three backends and
+asserts on the result, so deleting a guard call, swapping the backends'
 U1 names, or repointing U2's source is caught by a test that actually
 executes this script - not only by a human reading it.
 
 ### What the release notes record
 
 Every release's `RELEASE-NOTES.md` states which backend U1 was built with. A
-`PIO_USB` release additionally records all three pinned toolchain revisions
+PIO USB release (`PIO_USB` or `PIO_USB_REFERENCE`) additionally records all
+three pinned toolchain revisions
 (read from `cmake/pio_usb_toolchain_lock.cmake`, so the notes cannot drift
 from what configuration actually verified), and states that U2 came from the
 CH375 toolchain regardless.

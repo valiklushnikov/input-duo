@@ -152,6 +152,13 @@ def test_the_two_images_are_different(artifacts):
 
 
 def _u1_elf() -> Path:
+    if _declared_backend() == "PIO_USB_REFERENCE":
+        return (
+            _build_dir()
+            / "firmware"
+            / "u1_reference"
+            / "duo_u1_reference.elf"
+        )
     return _build_dir() / "firmware" / "u1_main" / "duo_u1_main.elf"
 
 
@@ -203,14 +210,21 @@ def test_a_release_image_contains_the_real_peripheral_input_path():
         "release ELF does not contain InputPipeline::on_event"
     )
 
-    if backend == "PIO_USB":
+    if backend in ("PIO_USB", "PIO_USB_REFERENCE"):
         assert any("tuh_task" in name for name in symbols), (
-            "release ELF is configured for PIO_USB but contains no tuh_task"
+            f"release ELF is configured for {backend} but contains no tuh_task"
         )
         assert any("tuh_hid_receive_report" in name for name in symbols), (
-            "release ELF is configured for PIO_USB but contains no "
+            f"release ELF is configured for {backend} but contains no "
             "tuh_hid_receive_report"
         )
+        if backend == "PIO_USB_REFERENCE":
+            assert not any("Ch375Device4tick" in name for name in symbols), (
+                "reference release ELF contains Ch375Device::tick"
+            )
+            assert not any("PioUsbBackend4task" in name for name in symbols), (
+                "reference release ELF contains PioUsbBackend::task"
+            )
     else:
         # CH375, or an older build directory with no DUO_INPUT_BACKEND at
         # all - the only backend that predates this cache variable.

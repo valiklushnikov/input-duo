@@ -125,13 +125,21 @@ def _configure_and_rebuild_u2(
     *, preset: str, build_dir: Path, backup_dir: Path, env: dict[str, str]
 ) -> tuple[Path, Path]:
     make_program = _configured_make_program()
+    picotool_dir = REFERENCE_BUILD / "_deps" / "picotool"
+    assert (picotool_dir / "picotoolConfig.cmake").is_file(), (
+        f"picotool package is absent from {picotool_dir}; build "
+        f"{REFERENCE_PRESET} first"
+    )
 
     configure = subprocess.run(
         [
             "cmake",
             "--preset",
             preset,
+            "-B",
+            str(build_dir),
             f"-DCMAKE_MAKE_PROGRAM={make_program}",
+            f"-Dpicotool_DIR={picotool_dir}",
         ],
         cwd=ROOT,
         env=env,
@@ -517,19 +525,21 @@ def test_reference_elf_contains_only_the_upstream_host_device_path(
 def test_reference_u2_matches_the_same_toolchain_pio_usb_u2(tmp_path):
     env = os.environ.copy()
     env["SOURCE_DATE_EPOCH"] = FIXED_SOURCE_DATE_EPOCH
+    isolated_pio_usb_build = tmp_path / "pico-pio-usb-release"
+    isolated_reference_build = tmp_path / "pico-pio-usb-reference-release"
 
-    # Hold the same repository-wide interprocess lock used by U1 freshness
-    # while both shared U2 graphs are configured, rebuilt, and compared.
+    # Use private build graphs: the fixed comparison epoch must never poison
+    # the persistent release build directories consumed by later tests.
     with firmware_artifact_lock(ROOT):
         _, pio_usb_u2_uf2 = _configure_and_rebuild_u2(
             preset=PIO_USB_PRESET,
-            build_dir=PIO_USB_BUILD,
+            build_dir=isolated_pio_usb_build,
             backup_dir=tmp_path / "pio-usb-u2-backup",
             env=env,
         )
         _, reference_u2_uf2 = _configure_and_rebuild_u2(
             preset=REFERENCE_PRESET,
-            build_dir=REFERENCE_BUILD,
+            build_dir=isolated_reference_build,
             backup_dir=tmp_path / "reference-u2-backup",
             env=env,
         )

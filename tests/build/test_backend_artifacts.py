@@ -60,10 +60,9 @@ REFERENCE_DEVICE_SYMBOL_FRAGMENTS = ("tud_task",)
 # satisfy the reference image's CDC data-write contract.
 REFERENCE_EXACT_SYMBOLS = ("tud_cdc_n_write",)
 
-# Production integration symbols that must not leak into the frozen reference.
+# Backend implementations that must not leak into the reference-first target.
 REFERENCE_EXCLUDED_SYMBOL_FRAGMENTS = (
     CH375_ONLY_SYMBOL_FRAGMENT,
-    "InputPipeline8on_event",
     "PioUsbBackend4task",
 )
 
@@ -162,7 +161,7 @@ def test_a_pio_usb_declared_build_actually_links_pio_usb_and_not_ch375():
     )
 
 
-def test_a_reference_declared_build_links_only_the_upstream_host_device_path(tmp_path):
+def test_a_reference_declared_build_links_only_the_new_input_path(tmp_path):
     if declared_backend(BUILD_DIR) != "PIO_USB_REFERENCE":
         pytest.skip("this build directory is not configured for PIO_USB_REFERENCE")
 
@@ -176,6 +175,7 @@ def test_a_reference_declared_build_links_only_the_upstream_host_device_path(tmp
     required_fragments = (
         *PIO_USB_ONLY_SYMBOL_FRAGMENTS,
         *REFERENCE_DEVICE_SYMBOL_FRAGMENTS,
+        SHARED_SYMBOL_FRAGMENT,
     )
     for fragment in required_fragments:
         assert any(fragment in name for name in symbols), (

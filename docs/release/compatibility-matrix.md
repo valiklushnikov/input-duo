@@ -63,6 +63,13 @@ bucket.
 
 ## Status
 
+Task 7's software packaging slice now accepts the explicit backend
+`PIO_USB_REFERENCE` and produces
+`duo-input-u1-pio-usb-reference-<version>.uf2`. This is not a hardware result:
+the postponed two-PC clipboard gate and the Task 7 recovery/soak checklist are
+still unmeasured, so CH375 remains the release default and the reference
+backend remains experimental.
+
 **One hardware acceptance run has been recorded: the `peripherals` scenario,
 against U1 on COM18, 2026-08-30 12:49 +0300, verdict `partial`, exit code 3.**
 The report is `artifacts/peripherals.json` and every figure below is copied
