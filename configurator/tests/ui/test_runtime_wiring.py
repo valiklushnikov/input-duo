@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QSettings, Qt
 from PySide6.QtWidgets import QMessageBox
 
 from duo_input import app as app_module
@@ -214,6 +214,75 @@ def test_switching_off_actually_releases_the_listening_socket(qtbot, qapp, tmp_p
         assert probe2.listen(port=TCP_PORT) is True, "выключение обязано освободить порт"
     finally:
         probe2.close()
+
+
+def test_switching_off_disconnects_page_controls_from_the_stopped_coordinator(
+    qtbot, qapp, tmp_path, monkeypatch
+):
+    """With sharing off, Pair/address edits must not revive the old runtime."""
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    settings = _settings(tmp_path, False)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+
+    coordinators = []
+    real_coordinator = app_module.ClipboardCoordinator
+
+    def capturing_coordinator(*args, **kwargs):
+        coordinator = real_coordinator(*args, **kwargs)
+        coordinators.append(coordinator)
+        return coordinator
+
+    monkeypatch.setattr(app_module, "ClipboardCoordinator", capturing_coordinator)
+    configure_runtime(qapp, window, settings)
+    window.clipboard_page.sharing_checkbox.setChecked(True)
+    coordinator = coordinators[0]
+
+    window.clipboard_page.sharing_checkbox.setChecked(False)
+    window.clipboard_page.pair_button.click()
+    window.clipboard_page.address_field.setText("192.168.1.42")
+    window.clipboard_page.address_field.editingFinished.emit()
+
+    try:
+        assert coordinator._discovery._timer.isActive() is False
+        assert coordinator.state.value == "unpaired"
+        assert coordinator._manual_address == ""
+    finally:
+        coordinator.stop()
+
+
+def test_repeated_enable_cycles_destroy_each_stopped_coordinator(
+    qtbot, qapp, tmp_path, monkeypatch
+):
+    """Enable/disable cycles must not accumulate QApplication-owned runtimes."""
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    settings = _settings(tmp_path, False)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+
+    coordinators = []
+    destroyed: list[int] = []
+    real_coordinator = app_module.ClipboardCoordinator
+
+    def capturing_coordinator(*args, **kwargs):
+        coordinator = real_coordinator(*args, **kwargs)
+        coordinators.append(coordinator)
+        coordinator.destroyed.connect(
+            lambda _object=None, number=len(coordinators): destroyed.append(number)
+        )
+        return coordinator
+
+    monkeypatch.setattr(app_module, "ClipboardCoordinator", capturing_coordinator)
+    configure_runtime(qapp, window, settings)
+
+    for _ in range(3):
+        window.clipboard_page.sharing_checkbox.setChecked(True)
+        coordinator = coordinators[-1]
+        window.clipboard_page.sharing_checkbox.setChecked(False)
+        QCoreApplication.sendPostedEvents(coordinator, QEvent.Type.DeferredDelete)
+
+    assert len(coordinators) == 3
+    assert destroyed == [1, 2, 3]
 
 
 def test_the_tray_checkbox_toggle_stops_the_subsystem_and_the_page_agrees(

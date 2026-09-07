@@ -307,8 +307,13 @@ class _ClipboardRuntime(QObject):
         # бы вторую подписку поверх этой при создании нового координатора.
         coordinator.stop()
         coordinator.state_changed.disconnect(self.tray.set_link_state)
+        page = self._window.clipboard_page
+        page.pair_requested.disconnect(coordinator.begin_pairing)
+        page.forget_requested.disconnect(coordinator.forget_peer)
+        page.address_changed.disconnect(coordinator.set_manual_address)
         if backend is not None:
             backend.stop()
+        coordinator.deleteLater()
 
         self._application.setQuitOnLastWindowClosed(True)
 

@@ -239,6 +239,8 @@ class ClipboardCoordinator(QObject):
                 protocol_major=PROTOCOL_MAJOR,
             )
         )
+        if self._manual_address:
+            self._pairing_connect(self._manual_address, TCP_PORT)
         self._pairing_window.start()
         self._set_state(LinkState.SEARCHING)
 
@@ -557,6 +559,8 @@ class ClipboardCoordinator(QObject):
         if protocol_mismatch:
             self._set_state(LinkState.PROTOCOL_MISMATCH)
             return
+        if not self._manual_address:
+            self._start_looking()
         self._set_state(LinkState.DISCONNECTED)
         self._retry.start(reconnect_delay_ms(self._attempt))
         self._attempt += 1

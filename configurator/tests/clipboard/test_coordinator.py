@@ -270,6 +270,62 @@ def test_the_smaller_origin_id_calls_the_other_side(tmp_path, monkeypatch):
     assert calls == [("192.168.1.5", TCP_PORT, "f" * 64)]
 
 
+def test_a_failed_last_known_address_starts_discovery_and_uses_the_new_address(
+    tmp_path, monkeypatch
+):
+    """A moved trusted peer must be rediscovered after its saved address fails."""
+    coordinator, trust = _make_coordinator(
+        tmp_path, peer_origin_id=LARGEST_ORIGIN_ID
+    )
+    calls: list[tuple[str, int, str | None]] = []
+    links: list[object] = []
+
+    class _RecordingLink(QObject):
+        connected = Signal(str)
+        disconnected = Signal(str)
+        message_received = Signal(object)
+
+        def __init__(self, identity, parent=None) -> None:
+            super().__init__(parent)
+            links.append(self)
+
+        def connect_to(self, address, port, expected_fingerprint) -> None:
+            calls.append((address, port, expected_fingerprint))
+
+        def send(self, message) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(coordinator_module, "PeerLink", _RecordingLink)
+
+    coordinator._try_connect()
+    links[0].disconnected.emit("host unreachable")
+
+    try:
+        assert coordinator._discovery._timer.isActive() is True
+
+        coordinator._on_peer_seen(
+            coordinator_module.Beacon(
+                origin_id=LARGEST_ORIGIN_ID,
+                machine_name="LAPTOP-TWO",
+                fingerprint="f" * 64,
+                port=TCP_PORT,
+                protocol_major=PROTOCOL_MAJOR,
+            ),
+            "192.168.1.99",
+        )
+
+        assert trust.peer().last_address == "192.168.1.99"
+        assert calls == [
+            ("192.168.1.5", TCP_PORT, "f" * 64),
+            ("192.168.1.99", TCP_PORT, "f" * 64),
+        ]
+    finally:
+        coordinator.stop()
+
+
 def test_the_bigger_origin_id_waits_for_the_call(tmp_path, monkeypatch, qapp):
     """Больший origin_id не звонит сам - иначе оба узла звонили бы одновременно."""
     coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=SMALLEST_ORIGIN_ID)
@@ -869,6 +925,36 @@ def test_try_connect_refuses_to_search_without_a_trusted_peer(tmp_path, qapp):
 
 # ---------------------------------------------------------------------- I3: ручной адрес
 # закрывает прежнюю связь, а не открывает вторую
+
+
+def test_manual_address_bootstraps_pairing_without_a_discovery_beacon(
+    tmp_path, monkeypatch
+):
+    """An isolated unpaired client must dial the address entered by the user."""
+    coordinator, _ = _make_coordinator(tmp_path)
+    calls: list[tuple[str, int, str | None]] = []
+
+    class _RecordingLink(QObject):
+        connected = Signal(str)
+
+        def __init__(self, identity, parent=None) -> None:
+            super().__init__(parent)
+
+        def connect_to(self, address, port, expected_fingerprint) -> None:
+            calls.append((address, port, expected_fingerprint))
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(coordinator_module, "PeerLink", _RecordingLink)
+
+    coordinator.set_manual_address(" 192.168.1.42 ")
+    coordinator.begin_pairing()
+
+    try:
+        assert calls == [("192.168.1.42", TCP_PORT, None)]
+    finally:
+        coordinator.stop()
 
 
 def test_setting_a_manual_address_while_connected_closes_the_previous_link(tmp_path, monkeypatch):
