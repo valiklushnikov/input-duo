@@ -1799,3 +1799,122 @@ closure.
 image that prints the queue-overflow and host-error counters after the same
 exercises, hashed and referenced here the way the EP0 ACK capture is. That
 capture has not been taken, and Task 4 proceeds without it.
+
+## Task 4 hardware gate: the reference host's link to U2 (2026-09-07)
+
+The gate was reduced before it was run. Routes on this image cannot be
+switched - `Routes` comes from a stored profile and `StoredProfiles` is
+deliberately unloaded until Task 5 admits configuration - so the PC1-only,
+PC2-only and both rows have nothing to select them and are carried to Task 5's
+gate. The operator agreed to that reduction. What is below is what this image
+can actually be asked.
+
+### Images
+
+U1: `duo_u1_reference.uf2`, 253440 bytes, SHA-256
+`98DAFF090716A32206687FCA85F1F81C8BFBBCA4AAB0B4173704CA0D9BD6B6DF`. The
+working tree was clean at commit `e088768` and a rebuild after the run
+reproduced that exact hash, so the flashed bytes are the ones that commit
+contains.
+
+U2: `duo_u2_endpoint.uf2`, 63488 bytes, SHA-256
+`4057AD2FB66D2175333F528D50D289C70875A05CA0EAFFD548E8943D6592DA52`, built with
+`SOURCE_DATE_EPOCH=1788691431` - the image
+`test_reference_u2_matches_the_same_toolchain_pio_usb_u2` compares byte for
+byte against the PIO USB build's U2. No `firmware/u2_endpoint` source changed.
+
+### The link never answered, and the reason was not the link
+
+The first capture, with U1 alone, printed the new line once a second:
+
+```
+LINK ans=0 tx=1250 crc=1250 echo=0 drops=0 rel=0
+LINK ans=0 tx=2250 crc=2250 echo=0 drops=0 rel=0
+```
+
+`tx` climbs by exactly 50 a second, which is the 20 ms heartbeat, so Core 0 was
+sending. `crc` equalled `tx`: nothing decodable ever came back. That counter is
+incremented for silence and for damage alike - `consume_reply` cannot tell them
+apart - so this says "no valid reply", not "the wires corrupt data".
+
+The board wired as U2 was enumerating as `2E8A:000A` with a Pico-SDK stdio CDC
+and a picotool reset interface. `duo_u2_endpoint` disables stdio USB and uses
+`1209:D102`, so that board was not running U2's firmware at all. It was put
+into BOOTSEL over its own 1200-baud reset and flashed with the image above,
+after which it enumerated as `1209:D102`.
+
+### What the link then did
+
+The link came up inside a capture:
+
+```
+LINK ans=0 tx=3400 crc=3400 echo=0 drops=0 rel=0
+LINK ans=1 tx=3452 crc=3415 echo=0 drops=1 rel=0
+```
+
+- `crc` stops climbing and stays at 3415: from that instant every reply decodes.
+- `drops=1` came *from U2 over this link*, so the ENDPOINT_STATUS payload is
+  being parsed and not merely CRC-checked.
+- `echo=0`: U1's own frame is not returning on the incoming line.
+
+**One release per reconnection, measured three times.** On each `ans=0 -> 1`
+transition the second's frame count rises by 52 instead of the steady 50, and
+by exactly 50 in every second after it: 3400->3452, 13702->13754,
+21904->21956. Two extra frames on the transition and never again is what one
+CONTROL_RELEASE_ALL plus the state resend its cache invalidation forces looks
+like. A release taken every pass would show fifty extra frames a second, for
+ever. This is the hardware counterpart of `LinkReconnect`'s native tests.
+
+**A deliberate outage.** With U2 unplugged, `ans` fell to 0 and `crc` resumed
+climbing at 50 a second while `tx` kept climbing at the same rate - U1 went on
+sending rather than stalling on the missing endpoint. On replug `ans` returned
+to 1 and `crc` froze again.
+
+**PC1 through the loss of U2.** In the outage window of the last capture the
+trace carries 230 keyboard reports (`a=2 i=3`), 663 in the capture as a whole,
+while `ans=0`. The operator was typing continuously across the unplug and
+confirmed the text appeared normally on PC1 throughout.
+
+### Evidence
+
+All four captures are COM22 reads of the flashed image, in
+`.superpowers/sdd/2026-09-06-pio-usb-reference-first-rebuild/`. That directory
+is gitignored, as it was for the EP0 capture above, so these hashes are
+checkable on the bench machine and nowhere else - the files are not in the
+repository:
+
+| file | bytes | SHA-256 |
+| --- | --- | --- |
+| `hardware-task4-link-before-u2-2026-09-07.log` | 31737 | `442E4C023B7199B18FD0930CCE4BD57075B039C021C0418A1E7A81AFE7AD6152` |
+| `hardware-task4-link-u2-up-2026-09-07.log` | 2851 | `2BF1C2E0CC0C16BE65BB295D4E758C1819EECE151EE527508588B66AF46DA15C` |
+| `hardware-task4-link-outage-2026-09-07.log` | 72382 | `3E0AB3813AC91A6BEA5EBD55DF40A255A6DF1460FE9683C3D3FB135E8C53E985` |
+| `hardware-task4-pc1-through-outage-2026-09-07.log` | 33258 | `D056ADDB07DC59BE66310819CB5389726FC7CA88E1A2557A21A66CE8A6D030CD` |
+
+### What this gate does not claim
+
+- No route was ever switched. Everything above ran with the default PC1 routes,
+  so no input was routed to PC2 and no PC2-only or both row was measured. Those
+  rows belong to Task 5's gate, when configuration can select them.
+- `rel=0` while `drops=1` is recorded as read. U2 reports having released
+  everything once and reports the silence that caused it as zero milliseconds.
+  No explanation is offered here for that pair.
+- The queue and host error counters of Task 3's outstanding row were still not
+  read. The LINK line carries link counters only.
+- The 230 reports prove that U1's host kept reading the keyboard through the
+  outage; that the characters reached the screen is the operator's statement,
+  made during the same run.
+
+### A measurement trap worth keeping
+
+After a cold power cycle the CDC produced 0 bytes over two 20-second reads,
+which looks exactly like a board that was never flashed. It was not: a
+1200-baud open still dropped the board into BOOTSEL, which only `tud_task` on
+Core 0 can do, so the loop was running the whole time. Reflashing the same
+image and opening the port within a second of enumeration produced output
+immediately, starting at `tx=50`.
+
+The difference between the silent and the talking runs is how long the board
+printed with nobody reading the port. Open the CDC port right after the board
+appears; a silence measured on a port opened minutes later is not evidence
+about the firmware. This is the same class of trap as the power cycle after a
+flash, and it cost two false readings in this session.
