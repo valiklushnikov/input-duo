@@ -46,6 +46,13 @@ if(DUO_FUZZ_TESTS)
         -g
     )
     target_compile_options(duo_common PRIVATE ${DUO_FUZZ_SANITIZER_FLAGS})
+    if(MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+        # LLVM's Windows libFuzzer runtime is built against the static release
+        # CRT. Every instrumented object must use that same ABI or lld-link
+        # rejects the target before a campaign can run.
+        set_property(TARGET duo_common PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded")
+    endif()
 
     foreach(source IN LISTS DUO_FUZZ_SOURCES)
         get_filename_component(name "${source}" NAME_WE)
@@ -53,5 +60,9 @@ if(DUO_FUZZ_TESTS)
         target_link_libraries(duo_${name} PRIVATE duo_common)
         target_compile_options(duo_${name} PRIVATE ${DUO_FUZZ_SANITIZER_FLAGS})
         target_link_options(duo_${name} PRIVATE ${DUO_FUZZ_SANITIZER_FLAGS})
+        if(MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+            set_property(TARGET duo_${name} PROPERTY
+                MSVC_RUNTIME_LIBRARY "MultiThreaded")
+        endif()
     endforeach()
 endif()

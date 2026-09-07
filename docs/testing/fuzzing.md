@@ -37,7 +37,7 @@ Use a Clang installation that includes libFuzzer.  `DUO_FUZZ_TESTS` is deliberat
 and fails CMake configuration under non-Clang compilers instead of producing unfuzzed lookalikes.
 
 ```powershell
-cmake -S . -B build/fuzz-clang -G Ninja -DDUO_FUZZ_TESTS=ON -DCMAKE_CXX_COMPILER=clang++
+cmake -S . -B build/fuzz-clang -G Ninja -DDUO_FUZZ_TESTS=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_COMPILER=clang++
 cmake --build build/fuzz-clang
 build/fuzz-clang/tests/fuzz/duo_fuzz_cdc_frame.exe -max_total_time=60 tests/fuzz/corpus/cdc
 build/fuzz-clang/tests/fuzz/duo_fuzz_spi_frame.exe -max_total_time=60 tests/fuzz/corpus/spi
@@ -45,4 +45,7 @@ build/fuzz-clang/tests/fuzz/duo_fuzz_config.exe -max_total_time=120 tests/fuzz/c
 ```
 
 These targets compile and link with `-fsanitize=fuzzer,address,undefined`, frame pointers, and
-debug information.  Send crash artifacts to a build directory rather than the committed corpus.
+debug information. `RelWithDebInfo` also selects the release STL ABI expected
+by LLVM's Windows libFuzzer runtime; the targets select its matching static
+CRT automatically on MSVC-ABI Clang. Send crash artifacts to a build directory
+rather than the committed corpus.
