@@ -301,6 +301,19 @@ inline constexpr std::size_t kHostObservationBytes =
     1 + 4 + 4 + 4 + 1 + 2 + 4 + 2 + 2 + 2 + 1 + 1 + 4 + 2 + 2 + 2 + 4 + 4 + 4 +
     4 + 4 + 4 + 4 + 4 + 4;
 
+/// The base reading alone, without its leading length: whether the host
+/// started, on which clock, the free-running frame counter, the root port's
+/// own four bits, and how many passes Core 1 has made. Everything behind it
+/// is below TinyUSB's endpoint pool and the enumeration-progress bookkeeping
+/// firmware/u1_main/pio_usb/device_registry.hpp owns - a build that reads
+/// pio_usb's own root port and frame counter directly, and nothing else,
+/// declares this many bytes rather than the full kHostObservationBytes, so a
+/// configurator reads exactly the fields that build measured and nothing it
+/// invented for the rest. Matches
+/// configurator/src/duo_input/device/transactions.py's own
+/// ``_HOST_OBSERVATION_BASE`` struct size.
+inline constexpr std::size_t kHostObservationBaseBytes = 1 + 4 + 4 + 4 + 1 + 2 + 4;
+
 /// The appended host block: one length byte, then that many bytes.
 ///
 /// The length byte is what lets a build publish none of this. It is what the
@@ -317,11 +330,7 @@ inline constexpr std::size_t kHostBlockBytes = 1 + kHostObservationBytes;
 ///
 /// Appended after every block above it, for the same append-only reason as
 /// the backend and host blocks: a configurator that stops reading at the end
-/// of the host block still reads exactly what it always read. Unlike those
-/// two, this one carries no presence marker of its own - every build that
-/// links ConfigService knows these two counters and knows whether each role
-/// is owned, so there is no equivalent of "this image has no host stack" to
-/// say nothing about.
+/// of the host block still reads exactly what it always read.
 struct ReferenceCounters {
     std::uint32_t callback_overflows = 0;
     std::uint32_t ignored_interfaces = 0;
@@ -329,15 +338,31 @@ struct ReferenceCounters {
     bool mouse_ready = false;
 };
 
-/// The reference-counters block's own bytes on the wire: two u32 counters and
-/// two single-byte flags.
-inline constexpr std::size_t kReferenceCounterBlockBytes = 4 + 4 + 1 + 1;
+/// The reference-counters block's own field bytes on the wire, without its
+/// leading length: two u32 counters and two single-byte flags.
+inline constexpr std::size_t kReferenceCounterFieldBytes = 4 + 4 + 1 + 1;
+
+/// The appended reference-counters block: one length byte, then that many
+/// bytes.
+///
+/// The length byte is what lets a build publish none of this - the same
+/// reason the host block's own length byte exists, for the same failure this
+/// would otherwise reproduce: CH375 and PIO_USB link this exact
+/// ConfigService and never call set_reference_counters, and without a
+/// presence marker their ten zero bytes would read as ten real measurements
+/// on a board that never took them. A length of zero means "this image links
+/// ConfigService and has not published these counters" - true of every
+/// backend except the reference target - and is reported as
+/// ReferenceCounters::state == "none" on the configurator side, the same way
+/// CH375's empty host block reports HostObservation::state == "none".
+inline constexpr std::size_t kReferenceCounterBlockBytes = 1 + kReferenceCounterFieldBytes;
 
 /// The longest a GET_DIAGNOSTICS reply can be: a backend publishing every
-/// counter, a host block with every field, and the reference-counters block
-/// behind them. A backend publishing none sends 4 * kBackendCounterCount
-/// fewer bytes and an image with no host stack sends kHostObservationBytes
-/// fewer, so this is a ceiling and not a length.
+/// counter, a host block with every field, and a reference-counters block
+/// with its own fields. A backend publishing none sends 4 * kBackendCounterCount
+/// fewer bytes, an image with no host stack sends kHostObservationBytes
+/// fewer, and a build that never calls set_reference_counters sends
+/// kReferenceCounterFieldBytes fewer, so this is a ceiling and not a length.
 inline constexpr std::size_t kDiagnosticsPayloadSize =
     kBackendBlockOffset + kBackendBlockBytes + kHostBlockBytes +
     kReferenceCounterBlockBytes;
@@ -433,28 +458,49 @@ public:
 
     /// Publish what the host stack and its root port are doing.
     ///
-    /// Two overloads for the same reason set_backend has two: "this image has
-    /// no host stack to observe" and "the host stack reports all zeros" are
-    /// different claims about the device, and the call site has to make one of
-    /// them on purpose. The CH375 image uses the first - it has no host stack,
-    /// no root port and no Core 1 backend loop, so every field would be an
-    /// invented reading.
+    /// Three shapes for three different claims about the device, and the call
+    /// site has to make one of them on purpose:
+    ///
+    /// - No block at all: this image has no host stack to observe. The CH375
+    ///   image uses this - it has no host stack, no root port and no Core 1
+    ///   backend loop, so every field would be an invented reading.
+    /// - The full block: every field this struct carries is a real reading.
+    ///   The shipping PIO USB backend uses this - its DeviceRegistry keeps
+    ///   the endpoint-pool and enumeration-progress counters the extension
+    ///   fields report.
+    /// - The base block only (set_host_observation_base): a build that reads
+    ///   pio_usb's own root port and frame counter directly and has none of
+    ///   that further instrumentation. Declaring kHostObservationBaseBytes
+    ///   rather than the full width is what keeps the sixteen fields it never
+    ///   measured out of the reply, rather than sixteen invented zeros behind
+    ///   the seven it actually knows.
     void set_host_observation() {
         host_observation_ = {};
         host_publishes_observation_ = false;
+        host_observation_base_only_ = false;
     }
     void set_host_observation(const HostObservation& observation) {
         host_observation_ = observation;
         host_publishes_observation_ = true;
+        host_observation_base_only_ = false;
+    }
+    void set_host_observation_base(const HostObservation& observation) {
+        host_observation_ = observation;
+        host_publishes_observation_ = true;
+        host_observation_base_only_ = true;
     }
 
     /// Publish the reference target's own counters: the callback queue's
     /// overflow count, how many interfaces earned no role, and whether each
-    /// of the two roles currently has an owner. Unconditional - see
-    /// ReferenceCounters above for why there is no "publishes none" overload
-    /// here the way set_backend and set_host_observation have one.
+    /// of the two roles currently has an owner.
+    ///
+    /// Only the reference target calls this. CH375 and PIO_USB never do, and
+    /// their reply must say so rather than send zeros for counters they never
+    /// measured - the same reason set_backend and set_host_observation each
+    /// have a "publishes none" shape.
     void set_reference_counters(const ReferenceCounters& counters) {
         reference_counters_ = counters;
+        reference_publishes_counters_ = true;
     }
 
     /// Which profile the device is running.
@@ -562,8 +608,8 @@ private:
     /// is one byte when this image publishes no observation.
     std::size_t write_host_observation(std::uint8_t* out) const;
     /// The appended reference-counters block, written at ``out``. Returns
-    /// its length, which is always kReferenceCounterBlockBytes - see
-    /// ReferenceCounters for why this block has no "publishes none" shape.
+    /// its length, which is one byte when this image never published
+    /// reference counters.
     std::size_t write_reference_counters(std::uint8_t* out) const;
 
     storage::AbStore& store_;
@@ -643,9 +689,17 @@ private:
     /// never does, and the block then carries a length of zero rather than
     /// seven zeroed readings of hardware it does not have.
     bool host_publishes_observation_ = false;
-    /// Zero and not-ready until the main loop publishes otherwise - the
-    /// truthful default for a build that has not yet run a single pass.
+    /// True only after set_host_observation_base: the block declares
+    /// kHostObservationBaseBytes instead of the full width, so the fields
+    /// this build never measured are left off the wire rather than sent as
+    /// invented zeros. Meaningless while host_publishes_observation_ is
+    /// false.
+    bool host_observation_base_only_ = false;
     ReferenceCounters reference_counters_{};
+    /// False until the main loop publishes some. CH375 and PIO_USB never do,
+    /// and the block then carries a length of zero rather than four readings
+    /// of a bounded callback queue neither of them has.
+    bool reference_publishes_counters_ = false;
 
 #if DUO_SPI_DEBUG || DUO_CH375_PROBE
     // One byte short of what a CDC reply can carry, because the payload leads

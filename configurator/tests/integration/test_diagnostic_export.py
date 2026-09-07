@@ -377,12 +377,15 @@ def test_the_report_carries_the_reference_targets_own_counters(qtbot, emulator):
     assert snapshot.reference_mouse_ready == "no"
 
 
-def test_a_report_from_firmware_that_predates_the_reference_counters_says_unknown(
-    qtbot, emulator
-):
-    """The compatibility direction that matters most: an older firmware sends
-    no such block, and that must read as unknown rather than as a guess."""
-    emulator.input_backend = 2
+def test_a_ch375_board_never_reports_reference_counters_as_real_readings(qtbot, emulator):
+    """The regression this section exists to catch: CH375 links the exact
+    same ConfigService as the reference target and never calls
+    set_reference_counters, so its reply must read as unknown here - never as
+    zero overflows and two roles reported not-ready on a board whose keyboard
+    is actively typing. The same holds for a firmware built before this block
+    existed at all, which sends no block whatsoever; both must land here as
+    unknown rather than as a guess."""
+    emulator.input_backend = 1
     service = DeviceService(timeout_ms=5000)
     with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
         service.connect_device(emulator)

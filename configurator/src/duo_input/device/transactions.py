@@ -928,9 +928,10 @@ def _parse_backend(block: bytes) -> tuple[InputBackendReport | None, bytes]:
     return (report, bytes(block[expected:]))
 
 
-#: The reference-counters block: two u32 counters and two single-byte flags,
-#: little-endian, in the wire's own order.
-_REFERENCE_COUNTERS = struct.Struct("<IIBB")
+#: The reference-counters block's own fields: two u32 counters and two
+#: single-byte flags, little-endian, in the wire's own order - behind their
+#: own one-byte length, the same shape the host block uses.
+_REFERENCE_COUNTERS_FIELDS = struct.Struct("<IIBB")
 
 
 @dataclass(frozen=True)
@@ -947,42 +948,73 @@ class ReferenceCounters:
     behind it produces the same silence as a route that is misconfigured.
     """
 
-    #: ``None`` means the firmware sent no block at all - a valid older
-    #: payload, since this was appended after everything above it for the
-    #: same reason the backend and host blocks were.
+    #: ``"reported"`` - the fields below are real readings.
+    #: ``"none"`` - the firmware links ConfigService and has not published
+    #: these counters. True of every backend except the reference target:
+    #: CH375 and PIO_USB never call set_reference_counters, and reporting
+    #: zeros for them would read as real measurements on a board that never
+    #: took them - the same failure mode the host block's own "none" state
+    #: exists to prevent.
+    #: ``"unreadable"`` - a block was there and did not parse.
+    state: str = "none"
+    #: Set only when state is ``"unreadable"``. Everything in front of this
+    #: block in the reply is still complete and correct, the same rule the
+    #: backend and host blocks follow.
+    unreadable_reason: str | None = None
+    #: ``None`` in every state but ``"reported"``.
     callback_overflows: int | None = None
     ignored_interfaces: int | None = None
     keyboard_ready: bool | None = None
     mouse_ready: bool | None = None
-    #: Set only when a block arrived and could not be read - too short for
-    #: its own fixed shape. Everything in front of it in the reply is still
-    #: complete and correct, the same rule the backend and host blocks follow.
-    unreadable_reason: str | None = None
 
 
 def _parse_reference_counters(block: bytes) -> ReferenceCounters | None:
     """Read the appended reference-counters block, in both compatibility
     directions.
 
-    Unlike the backend and host blocks, this one carries no leading count or
-    length byte: it is a fixed ten bytes, unconditionally, from every
-    firmware that links ConfigService at all. ``None`` still means "the
-    firmware predates this block" - the compatibility direction that matters
-    for firmware built before Task 5.
+    ``None`` means the firmware sent no block at all - a valid older payload,
+    since this was appended after everything above it for the same reason the
+    backend and host blocks were: firmware built before Task 5 sends nothing
+    here.
+
+    A leading length of zero means the firmware HAS the block and published
+    nothing into it - true of every backend except the reference target, and
+    reported as ``state == "none"``, the same way CH375's empty host block
+    reports ``HostObservation.state == "none"``.
+
+    A block that IS there and cannot be read is reported as
+    ``"unreadable"`` rather than raised, for the same reason the backend and
+    host blocks are: everything in front of it is complete and correct
+    however garbled this trailing block is.
     """
     if not block:
         return None
-    if len(block) < _REFERENCE_COUNTERS.size:
+    declared = block[0]
+    if declared == 0:
+        return ReferenceCounters(state="none")
+    body = block[1:]
+    if len(body) < declared:
         return ReferenceCounters(
+            state="unreadable",
             unreadable_reason=(
-                f"the reference-counters block needs {_REFERENCE_COUNTERS.size} "
-                f"bytes and {len(block)} arrived"
-            )
+                f"the reference-counters block declares {declared} bytes of "
+                f"fields and {len(body)} arrived"
+            ),
+        )
+    if declared < _REFERENCE_COUNTERS_FIELDS.size:
+        return ReferenceCounters(
+            state="unreadable",
+            unreadable_reason=(
+                f"the reference-counters block declares {declared} bytes of "
+                f"fields, fewer than the {_REFERENCE_COUNTERS_FIELDS.size} "
+                "this configurator reads"
+            ),
         )
     callback_overflows, ignored_interfaces, keyboard_ready, mouse_ready = (
-        _REFERENCE_COUNTERS.unpack_from(block, 0)
+        _REFERENCE_COUNTERS_FIELDS.unpack_from(body, 0)
     )
     return ReferenceCounters(
+        state="reported",
         callback_overflows=callback_overflows,
         ignored_interfaces=ignored_interfaces,
         keyboard_ready=bool(keyboard_ready),

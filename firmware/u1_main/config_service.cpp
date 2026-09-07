@@ -453,10 +453,19 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
 }
 
 std::size_t ConfigService::write_reference_counters(std::uint8_t* out) const {
-    put_u32(out, reference_counters_.callback_overflows);
-    put_u32(out + 4, reference_counters_.ignored_interfaces);
-    out[8] = reference_counters_.keyboard_ready ? 1 : 0;
-    out[9] = reference_counters_.mouse_ready ? 1 : 0;
+    // The leading length, for the same reason the host block leads with one:
+    // it is what lets CH375 and PIO_USB - which link this exact class and
+    // never call set_reference_counters - publish nothing here rather than
+    // four zeroed readings of a bounded callback queue neither backend has.
+    if (!reference_publishes_counters_) {
+        out[0] = 0;
+        return 1;
+    }
+    out[0] = static_cast<std::uint8_t>(kReferenceCounterFieldBytes);
+    put_u32(out + 1, reference_counters_.callback_overflows);
+    put_u32(out + 5, reference_counters_.ignored_interfaces);
+    out[9] = reference_counters_.keyboard_ready ? 1 : 0;
+    out[10] = reference_counters_.mouse_ready ? 1 : 0;
     return kReferenceCounterBlockBytes;
 }
 
@@ -472,7 +481,9 @@ std::size_t ConfigService::write_host_observation(std::uint8_t* out) const {
         out[0] = 0;
         return 1;
     }
-    out[0] = static_cast<std::uint8_t>(kHostObservationBytes);
+    out[0] = static_cast<std::uint8_t>(host_observation_base_only_
+                                            ? kHostObservationBaseBytes
+                                            : kHostObservationBytes);
     std::size_t at = 1;
     out[at++] = host_observation_.init_flags;
     put_u32(out + at, host_observation_.clk_hz_at_begin);
@@ -486,6 +497,15 @@ std::size_t ConfigService::write_host_observation(std::uint8_t* out) const {
     at += 2;
     put_u32(out + at, host_observation_.core1_passes);
     at += 4;
+    if (host_observation_base_only_) {
+        // Everything behind this point is below TinyUSB's endpoint pool and
+        // the enumeration-progress bookkeeping this build does not have -
+        // see set_host_observation_base's own comment. Declaring
+        // kHostObservationBaseBytes above already told the configurator
+        // where this block ends; writing invented zeros past it would
+        // contradict that declaration.
+        return at;
+    }
     put_u16(out + at, host_observation_.mount_events);
     at += 2;
     put_u16(out + at, host_observation_.umount_events);

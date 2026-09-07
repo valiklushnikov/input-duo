@@ -28,6 +28,7 @@
 // locks.
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 
 #include "hardware/clocks.h"
@@ -54,6 +55,16 @@ extern "C" void reference_drain_one_callback();
 #include "source_adapter.hpp"
 #include "spi_master.hpp"
 #include "usb_service.hpp"
+
+// Pico-PIO-USB's own root-port table. Declared here rather than reached
+// through pio_usb_ll.h, for the same reason firmware/u1_main/pio_usb/backend.cpp
+// does: that header drags in hardware/pio.h and both generated .pio.h
+// programs for four volatile bools this target only reads. root_port_t and
+// PIO_USB_ROOT_PORT_CNT come from pio_usb.h above, already included, so this
+// is the library's own type and not a second copy of it that could drift. At
+// file scope rather than in the anonymous namespace below: a C-linkage name
+// cannot also have internal linkage.
+extern "C" root_port_t pio_usb_root_port[PIO_USB_ROOT_PORT_CNT];
 
 namespace {
 
@@ -248,6 +259,55 @@ public:
 RuntimeConfig g_runtime_config;
 
 duo_input::u1::ConfigService g_config(g_store, g_cdc_writer, g_runtime_config);
+
+// ---------------------------------------------------------------------------
+// The host stack's own base reading.
+//
+// GET_DIAGNOSTICS' host-observation block existed, before this target linked
+// ConfigService, only for the shipping PIO USB backend - and that backend's
+// DeviceRegistry is the one thing this rebuild does not import (see the
+// CMakeLists.txt comment: "the current pio_usb/backend.cpp"). Publishing
+// nothing here at all would make this the one image that demonstrably runs a
+// live TinyUSB/PIO host on Core 1 and tells the configurator it has none -
+// exactly the reading an operator needs when nothing enumerates. Publishing
+// the shipping backend's own struct with everything past the base zeroed
+// would be worse: an invented "0 mount events" beside a real "3554 SOF
+// frames" is not a fact about this board.
+//
+// So this target reads only what pio_usb itself already exposes - its root
+// port and its free-running frame counter, both read directly rather than
+// through DeviceRegistry - and declares the base shape
+// (kHostObservationBaseBytes) rather than the full one. A configurator that
+// knows only the old shape reads exactly what it always read; one that knows
+// the full shape reads the fields this build measured and nothing past them.
+
+/// What core1_main's own tuh_configure()/tuh_init() calls answered, and
+/// whether the host stack was already active before they ran - captured once,
+/// at the moment those calls are made, because a call made later would be
+/// reading TinyUSB's memory of its own history rather than watching it
+/// happen. See firmware/u1_main/pio_usb/backend.cpp's PioUsbBackend::begin()
+/// for the same reading, taken the same way, for the same reason.
+///
+/// Written by Core 1 once, before its service loop starts, and never again;
+/// read by Core 0 every pass. No atomics: a write that happens once, long
+/// before anything reads it, and never again has no later writer for a
+/// fence to order against - unlike the two counters below, which really do
+/// change under a concurrent reader.
+struct HostInitReading {
+    bool ready = false;
+    std::uint8_t init_flags = 0;
+    std::uint32_t clk_hz_at_begin = 0;
+};
+HostInitReading g_host_init;
+
+/// Passes of Core 1's loop, and root-port connect edges seen while polling
+/// it - the two readings that genuinely accumulate under a concurrent
+/// reader, so unlike g_host_init above they are atomic. Incremented only by
+/// Core 1 (core1_main's loop), read only by Core 0 (main's loop) - the same
+/// single-writer/single-reader shape reference_overflows() already uses
+/// across this same core boundary.
+std::atomic<std::uint32_t> g_core1_passes{0};
+std::atomic<std::uint32_t> g_root_port_connects{0};
 
 /// Where a normalized event goes.
 class RuntimeInput final : public duo_input::u1::input::IInputHandler {
@@ -454,16 +514,41 @@ extern "C" void core1_main() {
     multicore_lockout_victim_init();
     duo_input::u1::set_core1_running(true);
 
+    // Before anything below changes a clock or touches the host stack:
+    // whether it was already active, and the clock it is about to compute
+    // its PIO dividers against. Read here and nowhere later, for the same
+    // reason PioUsbBackend::begin() reads them first - a call made after
+    // tuh_init cannot tell "this call started the host" from "tuh_init
+    // returned true for an rhport something else already activated".
+    std::uint8_t host_init_flags = tuh_rhport_is_active(1) ? (1u << 0) : 0;
+    g_host_init.clk_hz_at_begin = clock_get_hz(clk_sys);
+
     sleep_ms(10);
 
     // Use tuh_configure() to pass pio configuration to the host stack
     // Note: tuh_configure() must be called before
     pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
-    tuh_configure(1, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_cfg);
+    const bool pio_configured =
+        tuh_configure(1, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_cfg);
 
     // To run USB SOF interrupt in core1, init host stack for pio_usb (roothub
     // port1) on core1
-    tuh_init(1);
+    const bool tuh_initialized = tuh_init(1);
+
+    // Recorded whatever they said, including "true" - see the comment above:
+    // a true from tuh_init on an rhport somebody else already activated is
+    // not evidence that this call did anything.
+    if (pio_configured) {
+        host_init_flags |= 1u << 1;
+    }
+    if (tuh_initialized) {
+        host_init_flags |= 1u << 2;
+    }
+    if (tuh_inited()) {
+        host_init_flags |= 1u << 3;
+    }
+    g_host_init.init_flags = host_init_flags;
+    g_host_init.ready = true;
 
     // Whatever main()'s boot-time flash scan already loaded into g_profiles
     // is what this core starts running - the bindings and macros a
@@ -487,6 +572,26 @@ extern "C" void core1_main() {
         }
 
         tuh_task();  // tinyusb host task
+
+        // Passes of this loop, and the root port's own connect edge - the
+        // two host-observation readings that genuinely accumulate, so
+        // unlike g_host_init they are counted here every pass rather than
+        // captured once. Saturating, the same as every other counter on
+        // this path: a u32 that wrapped back to a value it already showed
+        // would read as a stopped Core 1 to the exact procedure that exists
+        // to detect one.
+        if (g_core1_passes.load(std::memory_order_relaxed) != 0xFFFFFFFFu) {
+            g_core1_passes.fetch_add(1, std::memory_order_relaxed);
+        }
+        {
+            static bool was_connected = false;
+            const bool connected = pio_usb_root_port[0].connected;
+            if (connected && !was_connected &&
+                g_root_port_connects.load(std::memory_order_relaxed) != 0xFFFFFFFFu) {
+                g_root_port_connects.fetch_add(1, std::memory_order_relaxed);
+            }
+            was_connected = connected;
+        }
 
         // Refused captures are input this firmware did not keep, and have to
         // reach the trace rather than only a counter.
@@ -648,6 +753,39 @@ int main() {
             counters.keyboard_ready = g_adapter.keyboard_ready();
             counters.mouse_ready = g_adapter.mouse_ready();
             g_config.set_reference_counters(counters);
+        }
+
+        // What the host stack itself is doing, below every counter above -
+        // see the comment beside HostInitReading for why this target
+        // publishes the base reading rather than nothing at all or the
+        // shipping backend's full struct. g_host_init.ready is false only
+        // before Core 1 has made its one capture, at the very start of
+        // core1_main - a window measured in microseconds, not passes.
+        if (g_host_init.ready) {
+            duo_input::u1::HostObservation observation;
+            observation.init_flags = g_host_init.init_flags;
+            observation.clk_hz_at_begin = g_host_init.clk_hz_at_begin;
+            observation.clk_hz_now = clock_get_hz(clk_sys);
+            observation.sof_frame_count = pio_usb_host_get_frame_number();
+            const root_port_t& root = pio_usb_root_port[0];
+            std::uint8_t root_state = 0;
+            if (root.initialized) {
+                root_state |= 1u << 0;
+            }
+            if (root.connected) {
+                root_state |= 1u << 1;
+            }
+            if (root.suspended) {
+                root_state |= 1u << 2;
+            }
+            if (root.is_fullspeed) {
+                root_state |= 1u << 3;
+            }
+            observation.root_port_state = root_state;
+            observation.root_port_connects = static_cast<std::uint16_t>(
+                g_root_port_connects.load(std::memory_order_relaxed));
+            observation.core1_passes = g_core1_passes.load(std::memory_order_relaxed);
+            g_config.set_host_observation_base(observation);
         }
 
         // And what the link had to say, once a second. Often enough to watch

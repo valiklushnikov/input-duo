@@ -673,15 +673,20 @@ class U1Emulator(AbstractByteTransport):
             layout = _HOST_OBSERVATION_LAYOUTS[len(self.host_observation)]
             fields = struct.pack(layout, *self.host_observation)
             host = bytes((len(fields),)) + fields
-        # No leading length or count: this block is a fixed shape from every
-        # firmware that sends it at all, unlike the two blocks in front of
-        # it. ``None`` leaves it off entirely, so this emulator can still
-        # answer exactly the way firmware built before Task 5 answers.
-        reference = (
-            b""
-            if self.reference_counters is None
-            else struct.pack("<IIBB", *self.reference_counters)
-        )
+        # The leading length carries the same meaning the host block's does:
+        # zero says this image links ConfigService and has not published
+        # these counters - true of every backend this emulator otherwise
+        # models (CH375, PIO_USB) once ``input_backend`` is set at all, the
+        # same way a real CH375 or PIO_USB image now answers post-Task-5.
+        # ``None`` is that default, not "the block is missing" - a
+        # firmware that predates the block entirely is not something any
+        # backend this emulator can be set to reproduces once
+        # ``input_backend`` is set, and no test needs it to.
+        if self.reference_counters is None:
+            reference = bytes((0,))
+        else:
+            fields = struct.pack("<IIBB", *self.reference_counters)
+            reference = bytes((len(fields),)) + fields
         return latency + ports + backend + host + reference
 
     def _handle_factory_reset_arm(self, payload: bytes) -> bytes:

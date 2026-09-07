@@ -1764,6 +1764,12 @@ def test_the_emulator_and_the_parser_agree_about_the_host_block() -> None:
     assert observation.sof_frame_count == 4321
     assert observation.root_port_connects == 3
     assert observation.core1_passes == 55
+    # This is also the shape a base-only publication uses (see
+    # firmware/u1_main/config_service.hpp's set_host_observation_base): a
+    # build that knows only the base reading declares this many bytes, and
+    # everything behind it must read as unmeasured, not as zero.
+    assert observation.mount_events is None
+    assert observation.ep_slot_map is None
 
     emulator.host_observation = None
     empty = parse_diagnostics(emulator._handle_get_diagnostics(b"")).host_observation
@@ -1842,15 +1848,25 @@ def test_the_emulator_can_speak_the_whole_current_host_block() -> None:
 def _reference_counters_block(
     callback_overflows: int, ignored_interfaces: int, keyboard_ready: int, mouse_ready: int
 ) -> bytes:
-    """The appended suffix: two u32 counters and two single-byte flags, with
-    no leading count or length byte of its own - unlike the backend and host
-    blocks, every firmware that links ConfigService at all sends exactly this
-    fixed shape."""
+    """The appended suffix: a one-byte length, then two u32 counters and two
+    single-byte flags - the same "length, then that many bytes" shape the
+    host block uses, and for the same reason: CH375 and PIO_USB link this
+    exact ConfigService and never publish these counters, and the length is
+    what lets them say so instead of sending ten zero bytes a reader would
+    take for real measurements."""
     import struct
 
-    return struct.pack(
+    fields = struct.pack(
         "<IIBB", callback_overflows, ignored_interfaces, keyboard_ready, mouse_ready
     )
+    return bytes((len(fields),)) + fields
+
+
+def _empty_reference_counters_block() -> bytes:
+    """What a backend that never calls set_reference_counters sends: a
+    length of zero - the regression this whole section exists to catch. See
+    ``test_a_backend_that_never_publishes_reference_counters_reports_none``."""
+    return bytes((0,))
 
 
 def test_the_reference_counters_reach_the_configurator() -> None:
@@ -1868,6 +1884,7 @@ def test_the_reference_counters_reach_the_configurator() -> None:
     counters = parse_diagnostics(payload).reference_counters
 
     assert counters is not None
+    assert counters.state == "reported"
     assert counters.callback_overflows == 6
     assert counters.ignored_interfaces == 2
     assert counters.keyboard_ready is True
@@ -1875,10 +1892,39 @@ def test_the_reference_counters_reach_the_configurator() -> None:
     assert counters.unreadable_reason is None
 
 
+def test_a_backend_that_never_publishes_reference_counters_reports_none() -> None:
+    """The regression this whole section exists to catch: CH375 and PIO_USB
+    link the exact same ConfigService as the reference target and never call
+    set_reference_counters. Their reply must say "none" here, never render as
+    zero overflows and two not-ready roles on a board that never measured
+    either - the same failure the host block's own "none" state prevents for
+    an image with no host stack at all."""
+    from duo_input.device.transactions import parse_diagnostics
+
+    payload = (
+        _diagnostics_head()
+        + _full_latency()
+        + _both_ports()
+        + _twelve()
+        + _empty_host_block()
+        + _empty_reference_counters_block()
+    )
+
+    counters = parse_diagnostics(payload).reference_counters
+
+    assert counters is not None
+    assert counters.state == "none"
+    assert counters.callback_overflows is None
+    assert counters.ignored_interfaces is None
+    assert counters.keyboard_ready is None
+    assert counters.mouse_ready is None
+
+
 def test_firmware_that_predates_the_reference_counters_block_still_parses() -> None:
     """The compatibility direction that matters most here: every U1 built
     before this block existed answers with the host block as its last block,
-    exactly as it always did."""
+    exactly as it always did - no bytes at all for this block, not even the
+    one-byte "none" marker every build built from this commit now sends."""
     from duo_input.device.transactions import parse_diagnostics
 
     payload = (
@@ -1907,12 +1953,13 @@ def test_a_short_reference_counters_block_is_unreadable_rather_than_raised() -> 
         + _both_ports()
         + _twelve()
         + _empty_host_block()
-        + bytes((1, 2, 3))  # three bytes, not the fixed ten
+        + bytes((3, 1, 2, 3))  # declares 3 bytes of fields, fewer than the 10 known
     )
 
     counters = parse_diagnostics(payload)
 
     assert counters.reference_counters is not None
+    assert counters.reference_counters.state == "unreadable"
     assert counters.reference_counters.callback_overflows is None
     assert counters.reference_counters.unreadable_reason is not None
     # Everything in front of it is still complete and correct.
@@ -1936,11 +1983,16 @@ def test_the_emulator_and_the_parser_agree_about_the_reference_counters() -> Non
     counters = parse_diagnostics(emulator._handle_get_diagnostics(b"")).reference_counters
 
     assert counters is not None
+    assert counters.state == "reported"
     assert counters.callback_overflows == 6
     assert counters.ignored_interfaces == 2
     assert counters.keyboard_ready is True
     assert counters.mouse_ready is True
 
+    # The emulator's own default - unset, like every backend but the
+    # reference target - reports "none", never a shape this configurator
+    # would render as real counters.
     emulator.reference_counters = None
-    absent = parse_diagnostics(emulator._handle_get_diagnostics(b"")).reference_counters
-    assert absent is None
+    unset = parse_diagnostics(emulator._handle_get_diagnostics(b"")).reference_counters
+    assert unset is not None
+    assert unset.state == "none"

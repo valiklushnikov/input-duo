@@ -162,12 +162,16 @@ def test_the_reference_counters_reach_the_page(page, emulator, qtbot):
     assert page.value("reference_mouse_ready") == "no"
 
 
-def test_older_firmware_that_predates_the_reference_counters_leaves_the_rows_empty(
+def test_a_ch375_board_never_renders_reference_counters_as_real_readings(
     page, emulator, qtbot
 ):
-    """The emulator sends the payload older firmware sends. Nothing may
-    invent a reading for a block that firmware never claimed to have."""
-    emulator.input_backend = 2
+    """The regression this page's own rows must not reproduce: CH375 links
+    the exact same ConfigService as the reference target and never calls
+    set_reference_counters, so these rows must read as unknown here - never
+    as "0" and "no" on a board whose keyboard is actively typing. A firmware
+    built before this block existed sends no block at all and lands here the
+    same way."""
+    emulator.input_backend = 1
     with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
         page.service.connect_device(emulator)
 
@@ -175,7 +179,9 @@ def test_older_firmware_that_predates_the_reference_counters_leaves_the_rows_emp
         page.refresh_button.click()
 
     assert page.value("reference_callback_overflows") == UNKNOWN
+    assert page.value("reference_ignored_interfaces") == UNKNOWN
     assert page.value("reference_keyboard_ready") == UNKNOWN
+    assert page.value("reference_mouse_ready") == UNKNOWN
 
 
 def test_the_host_stack_row_reports_a_host_started_on_the_wrong_core(
