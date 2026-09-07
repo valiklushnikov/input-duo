@@ -38,6 +38,12 @@ enum class InputEventKind : std::uint8_t {
 
 struct InputEvent {
     InputEventKind kind = InputEventKind::None;
+    /// Which source slot produced this. A runtime index into SourceTable,
+    /// never stored in a configuration: a slot freed by unplugging one device
+    /// is reused by the next, so a saved index would retarget a binding at
+    /// whatever was plugged in afterwards. Bindings match on the identity
+    /// SourceTable::resolve hands back, not on this.
+    std::uint8_t source_index = 0;
     std::uint16_t code = 0;
     std::int16_t x = 0;
     std::int16_t y = 0;

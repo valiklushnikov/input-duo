@@ -11,7 +11,6 @@
 
 #include <vector>
 
-using duo_input::protocol::ByteView;
 using duo_input::u1::input::DeviceKind;
 using duo_input::u1::input::IInputHandler;
 using duo_input::u1::input::InputEvent;
@@ -85,18 +84,6 @@ SourceEvent report_event(const std::uint8_t* bytes, std::size_t size) {
     return event;
 }
 
-SourceEvent auxiliary_report_event(std::uint8_t endpoint, const std::uint8_t* bytes,
-                                   std::size_t size) {
-    SourceEvent event;
-    event.kind = SourceEventKind::AuxiliaryReport;
-    event.endpoint = endpoint;
-    for (std::size_t index = 0; index < size; ++index) {
-        event.report[index] = bytes[index];
-    }
-    event.report_size = size;
-    return event;
-}
-
 SourceEvent detached_event() {
     SourceEvent event;
     event.kind = SourceEventKind::Detached;
@@ -109,31 +96,6 @@ constexpr std::uint8_t kNoKeys[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x
 
 /// A boot mouse report: buttons, x, y.
 constexpr std::uint8_t kMouseLeftAndRight[] = {0x01, 0x05, 0xFB};
-
-// Captured from Keychron M3 receiver 3434:D030, interface 2 / endpoint 1.
-constexpr std::uint16_t kKeychronVendorId = 0x3434;
-constexpr std::uint16_t kKeychronProductId = 0xD030;
-constexpr std::uint8_t kKeychronSidePress[] = {0x01, 0x01, 0x00, 0x4F,
-                                               0x00, 0x00, 0x00, 0x00, 0x03};
-constexpr std::uint8_t kKeychronSideRelease[] = {0x01, 0x00, 0x00, 0x00,
-                                                 0x00, 0x00, 0x00, 0x00, 0x03};
-constexpr std::uint8_t kKeychronSideWithoutModifier[] = {
-    0x01, 0x00, 0x00, 0x4F, 0x00, 0x00, 0x00, 0x00, 0x03};
-constexpr std::uint8_t kKeychronSidePressZeroTail[] = {
-    0x01, 0x01, 0x00, 0x4F, 0x00, 0x00, 0x00, 0x00, 0x00};
-constexpr std::uint8_t kKeychronSideReleaseZeroTail[] = {
-    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-constexpr std::uint8_t kKeychronSideUnknownTail[] = {
-    0x01, 0x01, 0x00, 0x4F, 0x00, 0x00, 0x00, 0x00, 0x04};
-constexpr std::uint8_t kTruncatedKeychronSidePress[] = {
-    0x01, 0x01, 0x00, 0x4F, 0x00, 0x00, 0x00, 0x00};
-
-void ready_keychron(InputPipeline& pipeline) {
-    pipeline.on_event(ready_event(),
-                      identity(DeviceKind::Mouse, boot_keyboard_layout(), boot_mouse_layout(),
-                               kKeychronVendorId, kKeychronProductId),
-                      1000);
-}
 
 /// The layout of a keyboard that leads every report with an identifier.
 ///
@@ -191,110 +153,6 @@ TEST_CASE(a_mouse_report_becomes_motion_and_a_button) {
 
     CHECK_EQ(recorder.count(InputEventKind::MouseButtonDown), 1);
     CHECK_EQ(recorder.count(InputEventKind::MouseMove), 1);
-}
-
-TEST_CASE(the_keychron_side_shortcut_becomes_mouse_button_four) {
-    Recorder recorder;
-    InputPipeline pipeline(recorder);
-    ready_keychron(pipeline);
-
-    pipeline.on_event(
-        auxiliary_report_event(1, kKeychronSidePress, sizeof(kKeychronSidePress)),
-        identity(DeviceKind::Mouse, boot_keyboard_layout(), boot_mouse_layout()), 1010);
-    pipeline.on_event(
-        auxiliary_report_event(1, kKeychronSideRelease, sizeof(kKeychronSideRelease)),
-        identity(DeviceKind::Mouse, boot_keyboard_layout(), boot_mouse_layout()), 1020);
-
-    CHECK_EQ(recorder.of(InputEventKind::MouseButtonDown, 3), 1);
-    CHECK_EQ(recorder.of(InputEventKind::MouseButtonUp, 3), 1);
-}
-
-TEST_CASE(an_unrelated_auxiliary_report_is_not_invented_as_a_mouse_button) {
-    Recorder recorder;
-    InputPipeline pipeline(recorder);
-    pipeline.on_event(ready_event(),
-                      identity(DeviceKind::Mouse, boot_keyboard_layout(), boot_mouse_layout()),
-                      1000);
-
-    pipeline.on_event(
-        auxiliary_report_event(4, kKeychronSidePress, sizeof(kKeychronSidePress)),
-        identity(DeviceKind::Mouse, boot_keyboard_layout(), boot_mouse_layout()), 1010);
-
-    CHECK_EQ(recorder.count(InputEventKind::MouseButtonDown), 0);
-}
-
-TEST_CASE(the_keychron_side_key_is_recognised_when_its_modifier_arrives_separately) {
-    Recorder recorder;
-    InputPipeline pipeline(recorder);
-    ready_keychron(pipeline);
-
-    pipeline.on_event(
-        auxiliary_report_event(1, kKeychronSideWithoutModifier,
-                               sizeof(kKeychronSideWithoutModifier)),
-        identity(DeviceKind::Mouse, boot_keyboard_layout(), boot_mouse_layout()), 1010);
-    pipeline.on_event(
-        auxiliary_report_event(1, kKeychronSideRelease, sizeof(kKeychronSideRelease)),
-        identity(DeviceKind::Mouse, boot_keyboard_layout(), boot_mouse_layout()), 1020);
-
-    CHECK_EQ(recorder.of(InputEventKind::MouseButtonDown, 3), 1);
-    CHECK_EQ(recorder.of(InputEventKind::MouseButtonUp, 3), 1);
-}
-
-TEST_CASE(the_keychron_zero_tail_variant_remains_supported) {
-    Recorder recorder;
-    InputPipeline pipeline(recorder);
-    ready_keychron(pipeline);
-
-    pipeline.on_event(
-        auxiliary_report_event(1, kKeychronSidePressZeroTail, sizeof(kKeychronSidePressZeroTail)),
-        identity(DeviceKind::Mouse, boot_keyboard_layout(), boot_mouse_layout()), 1010);
-    pipeline.on_event(
-        auxiliary_report_event(1, kKeychronSideReleaseZeroTail,
-                               sizeof(kKeychronSideReleaseZeroTail)),
-        identity(DeviceKind::Mouse, boot_keyboard_layout(), boot_mouse_layout()), 1020);
-
-    CHECK_EQ(recorder.of(InputEventKind::MouseButtonDown, 3), 1);
-    CHECK_EQ(recorder.of(InputEventKind::MouseButtonUp, 3), 1);
-}
-
-TEST_CASE(an_unknown_ninth_byte_is_not_invented_as_a_side_button) {
-    Recorder recorder;
-    InputPipeline pipeline(recorder);
-    ready_keychron(pipeline);
-
-    pipeline.on_event(
-        auxiliary_report_event(1, kKeychronSideUnknownTail, sizeof(kKeychronSideUnknownTail)),
-        identity(DeviceKind::Mouse, boot_keyboard_layout(), boot_mouse_layout()), 1010);
-
-    CHECK_EQ(recorder.count(InputEventKind::MouseButtonDown), 0);
-}
-
-TEST_CASE(the_keychron_shortcut_is_not_enabled_for_another_device_identity) {
-    Recorder recorder;
-    InputPipeline pipeline(recorder);
-    pipeline.on_event(
-        ready_event(),
-        identity(DeviceKind::Mouse, boot_keyboard_layout(), boot_mouse_layout(), 0x1234, 0x5678),
-        1000);
-
-    pipeline.on_event(
-        auxiliary_report_event(1, kKeychronSidePress, sizeof(kKeychronSidePress)),
-        identity(DeviceKind::Mouse, boot_keyboard_layout(), boot_mouse_layout()), 1010);
-
-    CHECK_EQ(recorder.count(InputEventKind::MouseButtonDown), 0);
-}
-
-TEST_CASE(an_eight_byte_prefix_is_not_accepted_as_a_keychron_side_button) {
-    Recorder recorder;
-    InputPipeline pipeline(recorder);
-    ready_keychron(pipeline);
-
-    pipeline.on_event(
-        auxiliary_report_event(1, kTruncatedKeychronSidePress,
-                               sizeof(kTruncatedKeychronSidePress)),
-        identity(DeviceKind::Mouse, boot_keyboard_layout(), boot_mouse_layout()), 1010);
-
-    CHECK_EQ(recorder.count(InputEventKind::MouseButtonDown), 0);
 }
 
 TEST_CASE(a_report_from_a_device_nobody_identified_is_dropped) {

@@ -13,7 +13,6 @@
 // it is rebooted. So a disconnect synthesises the releases the device did not
 // send, which is the only moment anything here invents input.
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -51,8 +50,6 @@ public:
 
     /// A report arrived from the device.
     void on_report(protocol::ByteView report, std::uint32_t now_ms);
-    void on_auxiliary_report(std::uint8_t endpoint, protocol::ByteView report,
-                             std::uint32_t now_ms);
 
     /// The device went away.
     void on_detached(std::uint32_t now_ms);
@@ -70,15 +67,6 @@ public:
 #if DUO_CH375_PROBE
     /// What the keyboard normalizer made of the reports it was handed.
     const KeyboardNormalizer& keyboard_normalizer() const { return keyboard_; }
-    std::uint32_t keychron_side_presses() const {
-        return keychron_side_presses_.load(std::memory_order_relaxed);
-    }
-    std::uint32_t keychron_side_releases() const {
-        return keychron_side_releases_.load(std::memory_order_relaxed);
-    }
-    bool keychron_side_held() const {
-        return keychron_side_button_held_.load(std::memory_order_relaxed);
-    }
 #endif
 
 private:
@@ -88,12 +76,6 @@ private:
     DeviceKind kind_ = DeviceKind::Unknown;
     KeyboardNormalizer keyboard_;
     MouseNormalizer mouse_;
-    bool keychron_receiver_ = false;
-    std::atomic<bool> keychron_side_button_held_{false};
-#if DUO_CH375_PROBE
-    std::atomic<std::uint32_t> keychron_side_presses_{0};
-    std::atomic<std::uint32_t> keychron_side_releases_{0};
-#endif
     std::uint32_t unclaimed_ = 0;
 };
 

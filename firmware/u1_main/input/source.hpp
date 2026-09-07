@@ -45,7 +45,8 @@ enum class SourceEventKind : std::uint8_t {
     /// A report arrived on the primary endpoint/instance.
     Report,
     /// A report arrived on a secondary endpoint/instance of the same source -
-    /// serviced so it cannot block the primary one, not read as its layout.
+    /// serviced so it cannot block the primary one. SourceTable reads it
+    /// through the layout of the interface identified by source_id.
     AuxiliaryReport,
     /// The source went away. Whatever it was holding must be released.
     Detached,
@@ -89,6 +90,9 @@ struct SourceIdentity {
     DeviceKind kind = DeviceKind::Unknown;
     std::uint16_t vendor_id = 0;
     std::uint16_t product_id = 0;
+    /// This interface's number within its device's configuration. Together
+    /// with the VID and PID it is what a saved binding matches on.
+    std::uint8_t interface_number = 0;
     hid::KeyboardReportLayout keyboard_layout{};
     hid::MouseReportLayout mouse_layout{};
     /// SHA-256 of the report descriptor the source gave up, or all zeros if

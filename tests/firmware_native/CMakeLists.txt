@@ -476,6 +476,28 @@ endif()
 
 add_test(NAME input_pipeline COMMAND duo_input_pipeline_test)
 
+add_executable(duo_source_table_test
+    test_main.cpp
+    test_source_table.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/source_table.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/pipeline.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/keyboard_normalizer.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/hid/report_descriptor.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/mouse_normalizer.cpp
+)
+
+target_link_libraries(duo_source_table_test PRIVATE duo_common)
+target_include_directories(duo_source_table_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+if(MSVC)
+    target_compile_options(duo_source_table_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME source_table COMMAND duo_source_table_test)
+
 add_executable(duo_input_source_test
     test_main.cpp
     test_input_source.cpp

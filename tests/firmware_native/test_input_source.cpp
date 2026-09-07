@@ -249,22 +249,6 @@ TEST_CASE(a_neutral_report_becomes_mouse_motion_and_a_button) {
     CHECK_EQ(recorder.count(InputEventKind::MouseMove), 1);
 }
 
-TEST_CASE(a_neutral_auxiliary_report_carries_the_keychron_side_button_edge) {
-    Recorder recorder;
-    InputPipeline pipeline(recorder);
-
-    pipeline.on_event(ready_event(), mouse_identity(kKeychronVendorId, kKeychronProductId), 1000);
-    pipeline.on_event(
-        auxiliary_report_event(1, kKeychronSidePress, sizeof(kKeychronSidePress)),
-        mouse_identity(kKeychronVendorId, kKeychronProductId), 1010);
-    pipeline.on_event(
-        auxiliary_report_event(1, kKeychronSideRelease, sizeof(kKeychronSideRelease)),
-        mouse_identity(kKeychronVendorId, kKeychronProductId), 1020);
-
-    CHECK_EQ(recorder.of(InputEventKind::MouseButtonDown, 3), 1);
-    CHECK_EQ(recorder.of(InputEventKind::MouseButtonUp, 3), 1);
-}
-
 TEST_CASE(a_neutral_detach_releases_the_key_that_was_held) {
     Recorder recorder;
     InputPipeline pipeline(recorder);
@@ -399,11 +383,10 @@ TEST_CASE(identity_reads_kind_layout_and_hash_from_a_settled_mouse_setup) {
                       sizeof(identity.descriptor_hash)) == 0);
 }
 
-TEST_CASE(
-    the_keychron_vendor_and_product_id_survive_setup_through_identity_to_the_synthesised_button) {
+TEST_CASE(identity_preserves_vendor_and_product_ids_from_setup) {
     Rig rig;
     rig.chip.attach_device();
-    rig.chip.set_device_ids(kKeychronVendorId, kKeychronProductId);
+    rig.chip.set_device_ids(0x1234, 0x5678);
     rig.chip.serve_boot_mouse();
     rig.begin(rig.chip.now_us());
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
@@ -411,22 +394,8 @@ TEST_CASE(
     Ch375SourceAdapter adapter(0);
     const SourceIdentity identity = adapter.identity(rig.setup);
 
-    // The exact bug this test exists to catch: a transposed vendor_id/
-    // product_id assignment inside identity() would still compile, still
-    // pass every hand-built-SourceIdentity test above, and would silently
-    // stop the Keychron side button from working on real hardware.
-    CHECK_EQ(identity.vendor_id, kKeychronVendorId);
-    CHECK_EQ(identity.product_id, kKeychronProductId);
-
-    Recorder recorder;
-    InputPipeline pipeline(recorder);
-    pipeline.on_event(ready_event(), identity, 1000);
-    pipeline.on_event(auxiliary_report_event(1, kKeychronSidePress, sizeof(kKeychronSidePress)),
-                      identity, 1010);
-    pipeline.on_event(
-        auxiliary_report_event(1, kKeychronSideRelease, sizeof(kKeychronSideRelease)), identity,
-        1020);
-
-    CHECK_EQ(recorder.of(InputEventKind::MouseButtonDown, 3), 1);
-    CHECK_EQ(recorder.of(InputEventKind::MouseButtonUp, 3), 1);
+    // A transposed assignment still compiles and would cause bindings to
+    // resolve against the wrong physical source.
+    CHECK_EQ(identity.vendor_id, 0x1234);
+    CHECK_EQ(identity.product_id, 0x5678);
 }
