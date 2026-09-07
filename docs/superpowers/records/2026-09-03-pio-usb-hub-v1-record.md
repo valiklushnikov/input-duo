@@ -1696,3 +1696,45 @@ The remaining behavioral gate is hardware, not a source-text claim: after the
 backport, the 77-byte transfer must show `DATA1 len=64`, then
 `DATA0 len=13`, complete with `actual_len=77`, match the checked-in descriptor,
 and mount the Aula keyboard with that descriptor rather than boot fallback.
+
+## EP0 ACK-turnaround hardware result after the upstream backport (2026-09-07)
+
+Candidate repository HEAD before the hardware run was `1bbb98c`; the firmware
+backport under measurement is commit `6da7602`. The flashed U1 UF2 was 238080
+bytes, SHA-256
+`1DE49BD4A39227A9EE08CA1D54767F4AA775DD298EA51927DCF53787242B2B55`.
+The raw evidence is
+`.superpowers/sdd/2026-09-06-pio-usb-reference-first-rebuild/hardware-ep0-ack-capture-2026-09-07.log`,
+SHA-256 `8089B5C3324ECC2E40A441B13458291F00D39B0F945ACA2C602BF614816C67A3`:
+a COM22 capture reporting 16021 bytes over a 45-second read window.
+
+The CTRL records are continuous and unique from seq 6 through 228 (223
+entries), with no `CTRL_LOST` line. This capture does not contain seq 0..5 or
+an explicit `CTRL_LOST n=0`; the material point is that seq 208..228 is
+continuous and no ring-loss signal was emitted there.
+
+The Aula enumerated at address 2 (`3554:FA09`), EP0 MPS 64, with two
+interfaces. Its keyboard request is seq208 setup `8106002200004D00`: seq209 is
+`DATA1 len=64 act=64 tot=77`, seq210 is an identical retransmitted
+`DATA1 len=64 act=64 tot=77`, seq211 is `DATA0 len=13 act=77 tot=77`, and
+seq212 is DONE with `act=77`. It mounts as instance 3 with len 77 and prefix
+`05 01 09 06 A1 01 05 08`.
+
+The vendor request at seq219 is setup `810600220100DA00`: seq220 is DATA1/64,
+seq221 is an identical retransmitted DATA1/64, then DATA0/64, DATA1/64, and
+DATA0/26 follow; DONE reports `act=218`, and instance 4 mounts with len 218.
+Seq226 setup `210B010000000000` is HID SET_PROTOCOL(report), wIndex 0, after
+the keyboard descriptor mounted. There is no `DESC64_*` or `DESC77_*` marker,
+and no post-mount GET_DESCRIPTOR, because both descriptors completed during
+enumeration; no such absent outcome is invented here.
+
+### Verdicts
+
+1. **Functional descriptor/enumeration goal: PASS.** Both descriptors now
+   complete and mount, the keyboard uses its full 77-byte report descriptor,
+   and report protocol is requested.
+2. **Strict timing gate from the implementation brief: FAIL/PARTIAL.** The
+   required immediate `DATA1/64 -> DATA0/13` sequence is not present: one
+   repeated DATA1 precedes DATA0. The change reduced the old four-repeat
+   failure to one retransmission and allowed completion, but does not prove
+   every first ACK is accepted.
