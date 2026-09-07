@@ -18,6 +18,10 @@ public:
     static constexpr std::size_t kMaxSources = 8;
 
     explicit SourceTable(IInputHandler& handler);
+    SourceTable(const SourceTable&) = delete;
+    SourceTable& operator=(const SourceTable&) = delete;
+    SourceTable(SourceTable&&) = delete;
+    SourceTable& operator=(SourceTable&&) = delete;
 
     void on_event(const SourceEvent& event, const SourceIdentity& identity,
                   std::uint32_t now_ms);
