@@ -1918,3 +1918,55 @@ printed with nobody reading the port. Open the CDC port right after the board
 appears; a silence measured on a port opened minutes later is not evidence
 about the firmware. This is the same class of trap as the power cycle after a
 flash, and it cost two false readings in this session.
+
+## Task 5 hardware gate: configuration, routes, macros and latency (2026-09-07)
+
+### Image and configuration
+
+U1 was flashed only after exactly one `RPI-RP2` volume was present, then given
+a separate power cycle. The image was
+`build/pico-pio-usb-reference-release/firmware/u1_reference/duo_u1_reference.uf2`,
+273408 bytes, SHA-256
+`7D035F15777C576922B68716C9B0B235AEFD0DBAB6896D4D92D0071DFBB3CEBF`, from
+commit `7d9bbdb`. U2 was not flashed or otherwise changed.
+
+The stored configuration survived that firmware replacement and power cycle.
+The configurator read generation 1, active profile 3 (`S4 Profile 3`) and 6984
+bytes whose SHA-256 was
+`2F64E548DBAD3F46B96C0F6E6336A9E229815834686CD86B37BD3468307CFCAA`, exactly
+the digest reported by HELLO and exactly the package deployed before the
+flash.
+
+### Functional routing and macro result
+
+With both USB outputs attached to the same laptop, the operator observed one
+character from F9 (PC1-only), one from F10 (PC2-only), and two from F11
+(both). A Windows raw-input observation independently identified an Escape
+down/up pair from the U2 D102 keyboard collection. The physical Up-arrow macro
+printed `ЗКЩАШДУ-8`, the Russian keyboard-layout rendering of `PROFILE-8`, and
+the operator confirmed that it worked. These are operator-visible functional
+observations; no claim of a byte-for-byte HID capture is made.
+
+### Latency wiring measurement
+
+Before input, both diagnostic histograms reported `count=0`. The operator then
+pressed ordinary letter keys, moved the mouse and used the wheel. A second CDC
+diagnostic request reported:
+
+- keyboard: `count=24`, buckets
+  `(0, 23, 1, 0, 0, 0, 0, 0, 0)`, maximum 509 us;
+- mouse: `count=697`, buckets
+  `(44, 624, 0, 29, 0, 0, 0, 0, 0)`, maximum 1157 us.
+
+This closes the zero-count defect: the reference callback timestamp now
+reaches `Runtime::set_event_origin_us()` before pipeline dispatch and is
+cleared afterwards. During the same before/after readings,
+`callback_overflows=0`, `runtime_fault=0`, `dropped_commands=0`,
+`keyboard_ready=true`, `mouse_ready=true`, `endpoint_mounted=true` and
+`endpoint_answering=true`. The cumulative pre-existing values
+`endpoint_drops=3` and `link_crc_errors=1` were unchanged between the two
+readings; they are recorded rather than represented as zero.
+
+The diagnostics above were read interactively from COM22. No raw capture file
+was retained, so the exact console values in this section are the durable
+record; this section does not claim an independently hashable trace artifact.
