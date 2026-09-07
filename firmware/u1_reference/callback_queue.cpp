@@ -21,6 +21,29 @@ const char* kind_name(ReferenceCallbackKind kind) {
     return "?";
 }
 
+//: End a trace line with the byte that separates it from a protocol frame.
+//:
+//: This target writes its plain-text trace and the configurator's COBS frames
+//: to the same physical CDC endpoint. A COBS frame ends at the first zero
+//: byte, so a trace line ending only in CRLF fuses with whatever frame follows
+//: it into a single candidate no decoder can read - measured twice on
+//: hardware, as "malformed COBS frame" and then as "invalid CDC magic". With
+//: the zero byte here, each line is its own delimited candidate: the host's
+//: reassembler fails to decode it, discards it, and carries on into the frame
+//: behind it untouched.
+//:
+//: Deliberately here and not in ConfigService::reply or in the shared framing:
+//: a leading delimiter on every frame would be the classic answer, but reply()
+//: is shared with the CH375 and PIO_USB images and that would change what an
+//: older configurator sees from every backend. Nothing here touches a protocol
+//: byte.
+//:
+//: Returns how many bytes it wrote, so callers keep their own bounds.
+std::size_t terminate_trace_line(char* end) {
+    *end = '\0';
+    return 1;
+}
+
 const char* reason_name(ReferenceDescriptorReason reason) {
     switch (reason) {
         case ReferenceDescriptorReason::None:
@@ -420,25 +443,30 @@ bool deliver_one_descriptor_diagnostic(IReferenceCdcWriter& writer) {
     }
 
     // snprintf reports what it *would* have written, so clamp to what fits -
-    // keeping two bytes in hand, so the CRLF below always has room whatever
-    // the header cost. used <= sizeof(line) - 2 holds from here on.
+    // keeping three bytes in hand, so the CRLF below and the zero byte after
+    // it always have room whatever the header cost.
+    // used <= sizeof(line) - 3 holds from here on.
     std::size_t used =
         written > 0 ? std::min<std::size_t>(static_cast<std::size_t>(written),
-                                            sizeof(line) - 2)
+                                            sizeof(line) - 3)
                     : 0;
     if (used != 0 && renders_prefix) {
         for (std::uint8_t index = 0; index < entry.prefix_size; ++index) {
-            // Two hex digits, and the CRLF that must still fit after them.
-            if (used + 2 > sizeof(line) - 2) {
+            // Two hex digits, and the CRLF and terminator that must still fit
+            // after them.
+            if (used + 2 > sizeof(line) - 3) {
                 break;
             }
             std::snprintf(line + used, 3, "%02X", entry.prefix[index]);
             used += 2;
         }
         // Both the clamp above and the loop guard keep used at or below
-        // sizeof(line) - 2, so these two writes are always in bounds.
+        // sizeof(line) - 3, so these two writes are always in bounds.
         line[used++] = '\r';
         line[used++] = '\n';
+    }
+    if (used != 0) {
+        used += terminate_trace_line(line + used);
     }
 
     if (used == 0) {
@@ -561,10 +589,14 @@ void build_next_control_line() {
         const int written = std::snprintf(
             g_control_line, sizeof(g_control_line), "CTRL_LOST n=%lu\r\n",
             static_cast<unsigned long>(lost - g_control_reported_lost));
-        g_control_line_size =
+        std::size_t lost_used =
             written > 0 ? std::min<std::size_t>(static_cast<std::size_t>(written),
-                                                sizeof(g_control_line))
+                                                sizeof(g_control_line) - 1)
                         : 0;
+        if (lost_used != 0) {
+            lost_used += terminate_trace_line(g_control_line + lost_used);
+        }
+        g_control_line_size = lost_used;
         g_control_offset = 0;
         g_control_reported_lost = lost;
         return;
@@ -612,16 +644,22 @@ void build_next_control_line() {
     }
 
     // snprintf reports what it would have written, so clamp to what fits and
-    // keep two bytes in hand for the CRLF below.
+    // keep three bytes in hand for the CRLF below and the zero byte after it.
     std::size_t used =
         written > 0 ? std::min<std::size_t>(static_cast<std::size_t>(written),
-                                            sizeof(g_control_line) - 2)
+                                            sizeof(g_control_line) - 3)
                     : 0;
     if (used != 0 && renders_payload) {
         used = append_payload(g_control_line, sizeof(g_control_line), used,
                               entry);
         g_control_line[used++] = '\r';
         g_control_line[used++] = '\n';
+    }
+    if (used != 0) {
+        // append_payload's own guard leaves used at or below capacity - 3, so
+        // the CRLF above lands at capacity - 2 and - 1 at worst and this byte
+        // is still inside the buffer.
+        used += terminate_trace_line(g_control_line + used);
     }
     g_control_line_size = used;
 }
@@ -685,7 +723,10 @@ void reference_service_cdc(IReferenceCdcWriter& writer) {
     // behind them is a link line nobody sees.
     ReferenceLinkStatus link{};
     if (reference_link_status_take(link)) {
-        char line[64];
+        // 96, not 64: every counter at its widest renders 79 characters, and
+        // snprintf returns what it *would* have written, so the old buffer
+        // could be handed to write() with a length past its own end.
+        char line[96];
         const int written = std::snprintf(
             line, sizeof(line),
             "LINK ans=%u tx=%lu crc=%lu echo=%lu drops=%u rel=%u\r\n",
@@ -696,7 +737,10 @@ void reference_service_cdc(IReferenceCdcWriter& writer) {
             static_cast<unsigned>(link.endpoint_drops),
             static_cast<unsigned>(link.endpoint_release_ms));
         if (written > 0) {
-            writer.write(line, static_cast<std::size_t>(written));
+            std::size_t used = std::min<std::size_t>(
+                static_cast<std::size_t>(written), sizeof(line) - 1);
+            used += terminate_trace_line(line + used);
+            writer.write(line, used);
             writer.flush();
         }
         return;
@@ -713,17 +757,20 @@ void reference_service_cdc(IReferenceCdcWriter& writer) {
                                 entry.instance, entry.length);
     for (std::uint8_t index = 0;
          index < entry.prefix_size && written > 0 &&
-         written < static_cast<int>(sizeof(line)) - 4;
+         written < static_cast<int>(sizeof(line)) - 5;
          ++index) {
         written += std::snprintf(line + written, sizeof(line) - written,
                                  " %02X", entry.prefix[index]);
     }
-    if (written > 0 && written < static_cast<int>(sizeof(line)) - 2) {
+    if (written > 0 && written < static_cast<int>(sizeof(line)) - 3) {
         line[written++] = '\r';
         line[written++] = '\n';
     }
     if (written > 0) {
-        writer.write(line, static_cast<std::size_t>(written));
+        std::size_t used = std::min<std::size_t>(
+            static_cast<std::size_t>(written), sizeof(line) - 1);
+        used += terminate_trace_line(line + used);
+        writer.write(line, used);
         writer.flush();
     }
 }

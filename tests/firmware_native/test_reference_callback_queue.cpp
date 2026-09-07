@@ -25,6 +25,12 @@
 #include "callback_queue.hpp"
 #include "test_support.hpp"
 
+// Every trace-line expectation below ends with the zero byte that separates
+// the line from a protocol frame on the shared CDC endpoint, and
+// std::string{const char*} stops at the first embedded zero - the sized ""s
+// literal does not.
+using namespace std::string_literals;
+
 namespace {
 
 //: The wire-visible "no compared byte disagreed" sentinel, written as a
@@ -400,9 +406,8 @@ TEST_CASE(desc64_diagnostics_bypass_a_full_continuous_report_trace) {
     CdcWriter writer;
     reference_service_cdc(writer);
     CHECK_EQ(writer.output,
-             std::string{
-                 "DESC64_MISMATCH actual=0 first=none "
-                 "prefix=A5A5A5A5A5A5A5A5\r\n"});
+             "DESC64_MISMATCH actual=0 first=none "
+                 "prefix=A5A5A5A5A5A5A5A5\r\n\0"s);
     CHECK_EQ(writer.flush_calls, 1u);
     CHECK_EQ(reference_trace_overflows(), 0u);
 }
@@ -416,7 +421,7 @@ TEST_CASE(every_desc64_token_renders_exactly_as_the_output_contract_states) {
     ReferenceDescriptorDiagnostic start{};
     start.kind = ReferenceDescriptorDiagnosticKind::Start;
     start.requested = 64u;
-    CHECK_EQ(render_one(start), std::string{"DESC64_START\r\n"});
+    CHECK_EQ(render_one(start), "DESC64_START\r\n\0"s);
 
     ReferenceDescriptorDiagnostic match{};
     match.kind = ReferenceDescriptorDiagnosticKind::Match;
@@ -425,7 +430,7 @@ TEST_CASE(every_desc64_token_renders_exactly_as_the_output_contract_states) {
     match.prefix = golden;
     match.prefix_size = 8u;
     CHECK_EQ(render_one(match),
-             std::string{"DESC64_MATCH actual=64 prefix=05010906A1010508\r\n"});
+             "DESC64_MATCH actual=64 prefix=05010906A1010508\r\n\0"s);
 
     ReferenceDescriptorDiagnostic mismatch{};
     mismatch.kind = ReferenceDescriptorDiagnosticKind::Mismatch;
@@ -435,8 +440,8 @@ TEST_CASE(every_desc64_token_renders_exactly_as_the_output_contract_states) {
     mismatch.prefix = golden;
     mismatch.prefix_size = 8u;
     CHECK_EQ(render_one(mismatch),
-             std::string{"DESC64_MISMATCH actual=64 first=17 "
-                         "prefix=05010906A1010508\r\n"});
+             "DESC64_MISMATCH actual=64 first=17 "
+                         "prefix=05010906A1010508\r\n\0"s);
 
     // The measured case, and the discriminator this round exists to add: a
     // successful transfer of zero bytes. No byte was compared, so there is no
@@ -449,21 +454,21 @@ TEST_CASE(every_desc64_token_renders_exactly_as_the_output_contract_states) {
     empty.prefix.fill(0xA5u);
     empty.prefix_size = 8u;
     CHECK_EQ(render_one(empty),
-             std::string{"DESC64_MISMATCH actual=0 first=none "
-                         "prefix=A5A5A5A5A5A5A5A5\r\n"});
+             "DESC64_MISMATCH actual=0 first=none "
+                         "prefix=A5A5A5A5A5A5A5A5\r\n\0"s);
 
     ReferenceDescriptorDiagnostic failure{};
     failure.kind = ReferenceDescriptorDiagnosticKind::Failure;
     failure.requested = 64u;
     failure.actual_len = 0u;
     failure.reason = ReferenceDescriptorReason::Transfer;
-    CHECK_EQ(render_one(failure), std::string{"DESC64_FAIL actual=0 r=xfer\r\n"});
+    CHECK_EQ(render_one(failure), "DESC64_FAIL actual=0 r=xfer\r\n\0"s);
 
     ReferenceDescriptorDiagnostic skip{};
     skip.kind = ReferenceDescriptorDiagnosticKind::Skip;
     skip.requested = 64u;
     skip.reason = ReferenceDescriptorReason::NoOffer;
-    CHECK_EQ(render_one(skip), std::string{"DESC64_SKIP r=nooffers\r\n"});
+    CHECK_EQ(render_one(skip), "DESC64_SKIP r=nooffers\r\n\0"s);
 }
 
 TEST_CASE(a_full_width_desc64_line_still_ends_in_crlf_and_fits) {
@@ -477,9 +482,9 @@ TEST_CASE(a_full_width_desc64_line_still_ends_in_crlf_and_fits) {
     widest.prefix_size = static_cast<std::uint8_t>(widest.prefix.size());
     const std::string line = render_one(widest);
     CHECK_EQ(line,
-             std::string{"DESC65535_MISMATCH actual=65535 first=65534 "
+             "DESC65535_MISMATCH actual=65535 first=65534 "
                          "prefix=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
-                         "FFFF\r\n"});
+                         "FFFF\r\n\0"s);
 }
 
 TEST_CASE(an_unrenderable_diagnostic_is_dropped_rather_than_stopping_cdc) {
@@ -504,7 +509,7 @@ TEST_CASE(an_unrenderable_diagnostic_is_dropped_rather_than_stopping_cdc) {
     // ever, which is the loudest possible way to lose the measurement.
     CdcWriter second;
     reference_service_cdc(second);
-    CHECK_EQ(second.output, std::string{"REPORT a=3 i=1 len=8\r\n"});
+    CHECK_EQ(second.output, "REPORT a=3 i=1 len=8\r\n\0"s);
 }
 
 TEST_CASE(the_diagnostic_capacity_is_a_power_of_two) {
@@ -603,16 +608,16 @@ TEST_CASE(a_control_setup_entry_carries_the_request_that_caused_the_packets) {
     setup.byte_count = 8;
 
     CHECK_EQ(render_control(setup),
-             std::string{"CTRL_SETUP a=2 ep=0 seq=7 pid=ACK "
-                         "bytes=8006002200004000\r\n"});
+             "CTRL_SETUP a=2 ep=0 seq=7 pid=ACK "
+                         "bytes=8006002200004000\r\n\0"s);
 }
 
 TEST_CASE(a_control_data_entry_renders_the_measured_zero_length_packet) {
     // The ZLP prediction, written as the line an operator would read: a
     // DATA1 packet of zero bytes, acknowledged, against a 64-byte endpoint.
     CHECK_EQ(render_control(data_entry()),
-             std::string{"CTRL_RX a=2 ep=128 seq=8 pid=DATA1 len=0 size=64 "
-                         "act=0 tot=64 bytes=\r\n"});
+             "CTRL_RX a=2 ep=128 seq=8 pid=DATA1 len=0 size=64 "
+                         "act=0 tot=64 bytes=\r\n\0"s);
 }
 
 TEST_CASE(every_control_trace_field_comes_from_its_own_source) {
@@ -634,8 +639,8 @@ TEST_CASE(every_control_trace_field_comes_from_its_own_source) {
     entry.byte_count = 3;
 
     CHECK_EQ(render_control(entry),
-             std::string{"CTRL_RX a=3 ep=128 seq=41 pid=DATA0 len=3 size=8 "
-                         "act=11 tot=22 bytes=DEADBE\r\n"});
+             "CTRL_RX a=3 ep=128 seq=41 pid=DATA0 len=3 size=8 "
+                         "act=11 tot=22 bytes=DEADBE\r\n\0"s);
 }
 
 TEST_CASE(a_truncated_control_payload_is_never_rendered_as_if_complete) {
@@ -650,9 +655,8 @@ TEST_CASE(a_truncated_control_payload_is_never_rendered_as_if_complete) {
     }
 
     CHECK_EQ(render_control(entry),
-             std::string{
-                 "CTRL_RX a=2 ep=128 seq=8 pid=DATA1 len=64 size=64 act=64 "
-                 "tot=64 bytes=000102030405060708090A0B0C0D0E0F+\r\n"});
+             "CTRL_RX a=2 ep=128 seq=8 pid=DATA1 len=64 size=64 act=64 "
+                 "tot=64 bytes=000102030405060708090A0B0C0D0E0F+\r\n\0"s);
 }
 
 TEST_CASE(a_control_done_entry_bounds_the_run_of_packets_before_it) {
@@ -667,7 +671,7 @@ TEST_CASE(a_control_done_entry_bounds_the_run_of_packets_before_it) {
     done.ep_size = 64;
 
     CHECK_EQ(render_control(done),
-             std::string{"CTRL_DONE a=2 ep=128 seq=9 pid=STALL act=0 tot=64\r\n"});
+             "CTRL_DONE a=2 ep=128 seq=9 pid=STALL act=0 tot=64\r\n\0"s);
 }
 
 TEST_CASE(every_descriptor_failure_reason_has_a_stable_r_token) {
@@ -690,7 +694,8 @@ TEST_CASE(every_descriptor_failure_reason_has_a_stable_r_token) {
         diagnostic.reason = item.reason;
         diagnostic.requested = 64;
         CHECK_EQ(render_one(diagnostic),
-                 std::string{"DESC64_FAIL actual=0 r="} + item.token + "\r\n");
+                 std::string{"DESC64_FAIL actual=0 r="} + item.token +
+                     "\r\n\0"s);
     }
 }
 
@@ -709,7 +714,7 @@ TEST_CASE(every_control_trace_pid_renders_by_name_or_by_value) {
         const std::string line = render_control(data);
         CHECK_EQ(line,
                  std::string{"CTRL_RX a=2 ep=128 seq=8 pid="} + item.rendered +
-                     " len=0 size=64 act=0 tot=64 bytes=\r\n");
+                     " len=0 size=64 act=0 tot=64 bytes=\r\n\0"s);
     }
 }
 
@@ -730,15 +735,15 @@ TEST_CASE(a_lost_control_trace_entry_is_counted_and_reported_not_dropped) {
 
     CdcWriter first;
     reference_service_cdc(first);
-    CHECK_EQ(first.output, std::string{"CTRL_LOST n=3\r\n"});
+    CHECK_EQ(first.output, "CTRL_LOST n=3\r\n\0"s);
 
     // Announced once, at the point it was noticed - not once per pass, which
     // would bury the packets the loss is meant to qualify.
     CdcWriter second;
     reference_service_cdc(second);
     CHECK_EQ(second.output,
-             std::string{"CTRL_RX a=2 ep=128 seq=8 pid=DATA1 len=0 size=64 "
-                         "act=0 tot=64 bytes=\r\n"});
+             "CTRL_RX a=2 ep=128 seq=8 pid=DATA1 len=0 size=64 "
+                         "act=0 tot=64 bytes=\r\n\0"s);
 
     CdcWriter third;
     reference_service_cdc(third);
@@ -748,7 +753,7 @@ TEST_CASE(a_lost_control_trace_entry_is_counted_and_reported_not_dropped) {
     source.lost_count = 5;
     CdcWriter fourth;
     reference_service_cdc(fourth);
-    CHECK_EQ(fourth.output, std::string{"CTRL_LOST n=2\r\n"});
+    CHECK_EQ(fourth.output, "CTRL_LOST n=2\r\n\0"s);
 
     reference_set_control_trace_source(nullptr);
 }
@@ -763,7 +768,7 @@ TEST_CASE(a_newly_installed_control_trace_source_counts_its_own_losses) {
     reference_set_control_trace_source(&first);
     CdcWriter announced;
     reference_service_cdc(announced);
-    CHECK_EQ(announced.output, std::string{"CTRL_LOST n=9\r\n"});
+    CHECK_EQ(announced.output, "CTRL_LOST n=9\r\n\0"s);
 
     FakeControlTrace second;
     second.lost_count = 2;
@@ -771,7 +776,7 @@ TEST_CASE(a_newly_installed_control_trace_source_counts_its_own_losses) {
     CdcWriter again;
     reference_service_cdc(again);
     reference_set_control_trace_source(nullptr);
-    CHECK_EQ(again.output, std::string{"CTRL_LOST n=2\r\n"});
+    CHECK_EQ(again.output, "CTRL_LOST n=2\r\n\0"s);
 }
 
 TEST_CASE(control_trace_entries_are_serviced_in_the_order_they_were_recorded) {
@@ -793,13 +798,12 @@ TEST_CASE(control_trace_entries_are_serviced_in_the_order_they_were_recorded) {
     reference_set_control_trace_source(nullptr);
 
     CHECK_EQ(output,
-             std::string{
-                 "CTRL_RX a=2 ep=128 seq=0 pid=DATA1 len=0 size=64 act=0 "
-                 "tot=64 bytes=\r\n"
+             "CTRL_RX a=2 ep=128 seq=0 pid=DATA1 len=0 size=64 act=0 "
+                 "tot=64 bytes=\r\n\0"
                  "CTRL_RX a=2 ep=128 seq=1 pid=DATA1 len=0 size=64 act=0 "
-                 "tot=64 bytes=\r\n"
+                 "tot=64 bytes=\r\n\0"
                  "CTRL_RX a=2 ep=128 seq=2 pid=DATA1 len=0 size=64 act=0 "
-                 "tot=64 bytes=\r\n"});
+                 "tot=64 bytes=\r\n\0"s);
 }
 
 TEST_CASE(a_control_trace_line_outranks_continuous_report_traffic) {
@@ -822,8 +826,8 @@ TEST_CASE(a_control_trace_line_outranks_continuous_report_traffic) {
     reference_set_control_trace_source(nullptr);
 
     CHECK_EQ(writer.output,
-             std::string{"CTRL_RX a=2 ep=128 seq=8 pid=DATA1 len=0 size=64 "
-                         "act=0 tot=64 bytes=\r\n"});
+             "CTRL_RX a=2 ep=128 seq=8 pid=DATA1 len=0 size=64 "
+                         "act=0 tot=64 bytes=\r\n\0"s);
 }
 
 TEST_CASE(a_descriptor_measurement_still_outranks_the_control_trace) {
@@ -841,7 +845,7 @@ TEST_CASE(a_descriptor_measurement_still_outranks_the_control_trace) {
     reference_service_cdc(writer);
     reference_set_control_trace_source(nullptr);
 
-    CHECK_EQ(writer.output, std::string{"DESC64_START\r\n"});
+    CHECK_EQ(writer.output, "DESC64_START\r\n\0"s);
 }
 
 TEST_CASE(a_control_trace_line_that_does_not_fit_is_retained_not_truncated) {
@@ -869,8 +873,8 @@ TEST_CASE(a_control_trace_line_that_does_not_fit_is_retained_not_truncated) {
     reference_service_cdc(roomy);
     reference_set_control_trace_source(nullptr);
     CHECK_EQ(roomy.output,
-             std::string{"CTRL_RX a=2 ep=128 seq=8 pid=DATA1 len=0 size=64 "
-                         "act=0 tot=64 bytes=\r\n"});
+             "CTRL_RX a=2 ep=128 seq=8 pid=DATA1 len=0 size=64 "
+                         "act=0 tot=64 bytes=\r\n\0"s);
 }
 
 TEST_CASE(an_absent_control_trace_source_leaves_the_report_trace_alone) {
@@ -884,7 +888,7 @@ TEST_CASE(an_absent_control_trace_source_leaves_the_report_trace_alone) {
 
     CdcWriter writer;
     reference_service_cdc(writer);
-    CHECK_EQ(writer.output, std::string{"REPORT a=3 i=1 len=8\r\n"});
+    CHECK_EQ(writer.output, "REPORT a=3 i=1 len=8\r\n\0"s);
 }
 
 TEST_CASE(the_widest_control_trace_line_still_ends_in_crlf_and_fits) {
@@ -902,9 +906,9 @@ TEST_CASE(the_widest_control_trace_line_still_ends_in_crlf_and_fits) {
     widest.byte_count = static_cast<std::uint8_t>(widest.bytes.size());
 
     CHECK_EQ(render_control(widest),
-             std::string{"CTRL_RX a=255 ep=255 seq=4294967295 pid=DATA1 "
+             "CTRL_RX a=255 ep=255 seq=4294967295 pid=DATA1 "
                          "len=65535 size=65535 act=65535 tot=65535 "
-                         "bytes=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF+\r\n"});
+                         "bytes=FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF+\r\n\0"s);
 }
 
 TEST_CASE(the_desc77_follow_up_renders_with_its_own_token_prefix) {
@@ -914,7 +918,7 @@ TEST_CASE(the_desc77_follow_up_renders_with_its_own_token_prefix) {
     ReferenceDescriptorDiagnostic start{};
     start.kind = ReferenceDescriptorDiagnosticKind::Start;
     start.requested = 77u;
-    CHECK_EQ(render_one(start), std::string{"DESC77_START\r\n"});
+    CHECK_EQ(render_one(start), "DESC77_START\r\n\0"s);
 
     ReferenceDescriptorDiagnostic mismatch{};
     mismatch.kind = ReferenceDescriptorDiagnosticKind::Mismatch;
@@ -927,14 +931,14 @@ TEST_CASE(the_desc77_follow_up_renders_with_its_own_token_prefix) {
     mismatch.prefix[2] = 0x05;
     mismatch.prefix[3] = 0xFF;
     CHECK_EQ(render_one(mismatch),
-             std::string{"DESC77_MISMATCH actual=77 first=none "
-                         "prefix=810005FF\r\n"});
+             "DESC77_MISMATCH actual=77 first=none "
+                         "prefix=810005FF\r\n\0"s);
 
     ReferenceDescriptorDiagnostic skip{};
     skip.kind = ReferenceDescriptorDiagnosticKind::Skip;
     skip.requested = 77u;
     skip.reason = ReferenceDescriptorReason::Unmounted;
-    CHECK_EQ(render_one(skip), std::string{"DESC77_SKIP r=unmounted\r\n"});
+    CHECK_EQ(render_one(skip), "DESC77_SKIP r=unmounted\r\n\0"s);
 }
 
 TEST_CASE(the_descriptor_prefix_is_wide_enough_to_show_the_second_packet) {
@@ -959,9 +963,9 @@ TEST_CASE(the_descriptor_prefix_is_wide_enough_to_show_the_second_packet) {
     entry.prefix_size = static_cast<std::uint8_t>(copied);
 
     CHECK_EQ(render_one(entry),
-             std::string{"DESC77_MISMATCH actual=77 first=0 "
+             "DESC77_MISMATCH actual=77 first=0 "
                          "prefix=810005FF0903750895018102C005010906A101050819"
-                         "0129\r\n"});
+                         "0129\r\n\0"s);
 }
 
 // The link to U2, as a line somebody can read.
@@ -1000,7 +1004,7 @@ TEST_CASE(a_published_link_status_prints_one_line) {
     CdcWriter writer;
     reference_service_cdc(writer);
 
-    CHECK(writer.output == "LINK ans=1 tx=42 crc=3 echo=1 drops=2 rel=100\r\n");
+    CHECK(writer.output == "LINK ans=1 tx=42 crc=3 echo=1 drops=2 rel=100\r\n\0"s);
 }
 
 TEST_CASE(a_link_that_never_answered_says_so_rather_than_saying_nothing) {
@@ -1013,7 +1017,7 @@ TEST_CASE(a_link_that_never_answered_says_so_rather_than_saying_nothing) {
     CdcWriter writer;
     reference_service_cdc(writer);
 
-    CHECK(writer.output == "LINK ans=0 tx=0 crc=0 echo=0 drops=0 rel=0\r\n");
+    CHECK(writer.output == "LINK ans=0 tx=0 crc=0 echo=0 drops=0 rel=0\r\n\0"s);
 }
 
 TEST_CASE(only_the_newest_link_status_is_printed) {
@@ -1031,7 +1035,7 @@ TEST_CASE(only_the_newest_link_status_is_printed) {
     CdcWriter writer;
     reference_service_cdc(writer);
 
-    CHECK(writer.output == "LINK ans=1 tx=9 crc=0 echo=0 drops=0 rel=0\r\n");
+    CHECK(writer.output == "LINK ans=1 tx=9 crc=0 echo=0 drops=0 rel=0\r\n\0"s);
 }
 
 TEST_CASE(a_link_status_is_printed_once_and_not_repeated) {
@@ -1066,4 +1070,81 @@ TEST_CASE(a_link_status_is_printed_ahead_of_report_traffic) {
     reference_service_cdc(writer);
 
     CHECK(writer.output.rfind("LINK ", 0) == 0);
+}
+
+// The trace and the configurator share one CDC endpoint, and a COBS frame
+// ends at the first zero byte. A trace line that ends only in CRLF therefore
+// fuses with whatever frame follows it into a single candidate no decoder can
+// read - measured twice on hardware, as "malformed COBS frame" and then as
+// "invalid CDC magic". Ending every line with a zero byte makes each line its
+// own delimited candidate, which the host's reassembler discards on sight
+// without touching the frame behind it.
+
+TEST_CASE(every_trace_line_ends_with_the_zero_that_separates_it_from_a_frame) {
+    reference_queue_reset();
+    ReferenceLinkStatus status{};
+    status.answered = true;
+    reference_link_status_publish(status);
+    CdcWriter link_writer;
+    reference_service_cdc(link_writer);
+    CHECK(!link_writer.output.empty());
+    CHECK_EQ(link_writer.output.back(), '\0');
+
+    reference_queue_reset();
+    ReferenceTraceEntry report{};
+    report.kind = ReferenceCallbackKind::Report;
+    report.dev_addr = 3;
+    report.instance = 1;
+    report.length = 8;
+    CHECK(reference_trace_push(report));
+    CdcWriter report_writer;
+    reference_service_cdc(report_writer);
+    CHECK(!report_writer.output.empty());
+    CHECK_EQ(report_writer.output.back(), '\0');
+
+    ReferenceDescriptorDiagnostic start{};
+    start.kind = ReferenceDescriptorDiagnosticKind::Start;
+    start.requested = 64u;
+    const std::string descriptor = render_one(start);
+    CHECK(!descriptor.empty());
+    CHECK_EQ(descriptor.back(), '\0');
+
+    const std::string control = render_control(data_entry());
+    CHECK(!control.empty());
+    CHECK_EQ(control.back(), '\0');
+
+    // Exactly one, and only at the end: a line is one candidate for the host
+    // to discard, not several, and an empty candidate in the middle of one
+    // would say the line had ended where it had not.
+    CHECK_EQ(std::count(descriptor.begin(), descriptor.end(), '\0'),
+             static_cast<std::ptrdiff_t>(1));
+    CHECK_EQ(std::count(control.begin(), control.end(), '\0'),
+             static_cast<std::ptrdiff_t>(1));
+}
+
+TEST_CASE(a_trace_line_that_could_not_be_delivered_whole_is_not_written_at_all) {
+    // The zero byte is only a separator if it is on the wire. The two
+    // resumable paths reserve room for the whole line before writing any of
+    // it, so a full FIFO retains the line rather than emitting a headless
+    // fragment that would fuse with the next thing written.
+    reference_queue_reset();
+    ReferenceDescriptorDiagnostic start{};
+    start.kind = ReferenceDescriptorDiagnosticKind::Start;
+    start.requested = 64u;
+    CHECK(reference_descriptor_diagnostic_push(start));
+
+    CdcWriter cramped;
+    // 14 is "DESC64_START\r\n" - one byte short of the terminated line, so a
+    // writer with exactly this much room must take none of it.
+    cramped.space = 14;
+    reference_service_cdc(cramped);
+    CHECK(cramped.output.empty());
+    CHECK_EQ(cramped.write_calls, 0u);
+
+    CdcWriter roomy;
+    reference_service_cdc(roomy);
+    CHECK(!roomy.output.empty());
+    if (!roomy.output.empty()) {
+        CHECK_EQ(roomy.output.back(), '\0');
+    }
 }

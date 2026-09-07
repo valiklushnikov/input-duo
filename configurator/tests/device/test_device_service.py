@@ -381,6 +381,23 @@ def test_a_trace_line_ahead_of_a_reply_does_not_lose_the_reply(
     assert service.diagnostics is not None
 
 
+def test_the_zero_the_device_writes_before_a_reply_is_not_a_damaged_frame(
+    qtbot, service, emulator, config_a
+):
+    """The reference target ends every trace line with a zero byte and writes
+    one more when it clears what was already in flight, so a reply can arrive
+    behind one or two lone delimiters. Nothing was damaged, and nothing may be
+    reported as damaged."""
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+    emulator.inject_leading_noise(b"LINK ans=1 tx=9 crc=0 echo=0\r\n\x00\x00")
+
+    result = _succeed(qtbot, service, service.get_diagnostics)
+
+    assert result.operation == "get_diagnostics"
+    assert service.diagnostics is not None
+
+
 def test_a_reply_that_is_only_junk_still_fails_the_operation_at_once(
     qtbot, service, emulator, config_a
 ):

@@ -678,6 +678,15 @@ class FrameAssembler:
                 break
             candidate = bytes(self._buffer[: end + 1])
             del self._buffer[: end + 1]
+            if end == 0:
+                # Two delimiters in a row carry no bytes, so there is nothing
+                # here to be a damaged frame. The reference target reaches
+                # this on purpose: it ends every trace line with a delimiter
+                # and writes one more when it clears whatever was still in
+                # flight as a conversation begins. Reporting it as a discard
+                # would let a device that closed its trace politely fail the
+                # very request it was making room for.
+                continue
             try:
                 frames.append(decode_cdc_frame(candidate))
             except FrameError as error:

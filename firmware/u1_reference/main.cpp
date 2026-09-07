@@ -168,7 +168,23 @@ public:
     // here is what keeps them from preceding it: on real hardware, without
     // this, the configurator's own frame decoder read leftover trace text as
     // the start of its first reply and reported "invalid CDC magic".
-    void clear_pending() override { tud_cdc_write_clear(); }
+    //
+    // The zero byte after the clear is the other half of the same guarantee.
+    // Discarding the TX FIFO says nothing about the trace bytes that already
+    // left it: USB ships whole packets, so the host's buffer can end in the
+    // middle of a line, with no terminator of its own, and the reply written
+    // next would fuse with that fragment exactly as an unterminated line used
+    // to. One zero closes whatever is already in flight into its own
+    // candidate, which the host discards before reading the reply behind it.
+    // Harmless when the trace happened to end cleanly: back to back
+    // delimiters are an empty candidate, which the host's reassembler skips
+    // as nothing rather than reading it as a damaged frame.
+    void clear_pending() override {
+        tud_cdc_write_clear();
+        const std::uint8_t terminator = 0;
+        tud_cdc_write(&terminator, 1);
+        tud_cdc_write_flush();
+    }
 };
 
 CdcWriter g_cdc_writer;

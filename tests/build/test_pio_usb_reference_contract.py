@@ -683,12 +683,31 @@ def test_starting_a_conversation_discards_whatever_trace_was_already_queued():
     compact = re.sub(r"\s+", " ", source)
 
     assert re.search(
-        r"void\s+clear_pending\(\)\s+override\s*\{\s*tud_cdc_write_clear\(\);\s*\}",
+        r"void\s+clear_pending\(\)\s+override\s*\{\s*tud_cdc_write_clear\(\);",
         compact,
     ), (
         "CdcWriter::clear_pending() must call tud_cdc_write_clear(), or "
         "trace text already queued before a conversation begins can still "
         "precede that conversation's first reply"
+    )
+
+    # Fix round 5. Clearing the TX FIFO says nothing about the trace bytes
+    # that already left it: USB ships whole packets, so the host's buffer can
+    # end mid-line with no terminator of its own, and the reply written next
+    # fuses with that fragment exactly as an unterminated line used to. One
+    # zero byte after the clear closes whatever is already in flight into its
+    # own candidate. Only a source check can cover this: tud_cdc_write is a
+    # device-stack call with no native implementation, and main.cpp is not
+    # desktop-buildable.
+    assert re.search(
+        r"void\s+clear_pending\(\)\s+override\s*\{\s*tud_cdc_write_clear\(\);"
+        r"\s*const\s+std::uint8_t\s+terminator\s*=\s*0;"
+        r"\s*tud_cdc_write\(&terminator,\s*1\);",
+        compact,
+    ), (
+        "CdcWriter::clear_pending() must write one zero byte after clearing, "
+        "or a half-transmitted trace line can still fuse with the first reply "
+        "of a conversation"
     )
 
 

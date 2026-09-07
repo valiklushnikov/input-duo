@@ -29,6 +29,11 @@
 #include "source_adapter.hpp"
 #include "test_support.hpp"
 
+// A trace-line expectation carries an embedded zero byte, and
+// std::string{const char*} stops at the first one - the sized ""s literal
+// does not.
+using namespace std::string_literals;
+
 using duo_input::u1::input::DeviceKind;
 using duo_input::u1::input::SourceEvent;
 using duo_input::u1::input::SourceEventKind;
@@ -1025,15 +1030,18 @@ TEST_CASE(descriptor_completion_owns_cdc_until_one_full_write) {
     reference_service_cdc(writer);
     CHECK_EQ(writer.write_calls, 2u);
     CHECK_EQ(writer.flush_calls, 1u);
+    // Each line carries the zero byte that separates it from a protocol frame
+    // on the shared CDC endpoint, so the expectations are sized literals -
+    // std::string{const char*} would stop at the first one.
     CHECK_EQ(writer.output,
-             std::string{"DESC64_MATCH actual=64 prefix=" HEX_PREFIX "\r\n"});
+             "DESC64_MATCH actual=64 prefix=" HEX_PREFIX "\r\n\0"s);
 
     reference_service_cdc(writer);
     CHECK_EQ(writer.write_calls, 3u);
     CHECK_EQ(writer.flush_calls, 2u);
     CHECK_EQ(writer.output,
-             std::string{"DESC64_MATCH actual=64 prefix=" HEX_PREFIX "\r\n"
-                         "REPORT a=7 i=1 len=8\r\n"});
+             "DESC64_MATCH actual=64 prefix=" HEX_PREFIX "\r\n\0"
+             "REPORT a=7 i=1 len=8\r\n\0"s);
 
     reference_service_cdc(writer);
     CHECK_EQ(writer.write_calls, 3u);

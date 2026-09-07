@@ -181,6 +181,34 @@ def test_assembler_discards_noise_accumulated_over_many_reads():
     assert assembler.pending == 0
 
 
+def test_assembler_reads_back_to_back_delimiters_as_nothing_at_all():
+    """Two delimiters in a row carry no bytes, so they are not a damaged
+    frame - there is nothing there to be damaged. The reference target makes
+    this reachable: every trace line now ends with a zero byte, and the
+    device writes one more when it clears whatever was already in flight at
+    the start of a conversation."""
+    assembler = FrameAssembler()
+    wire = _wire(5, b"reply")
+
+    scan = assembler.push(b"LINK ans=1\r\n\0" + b"\0" + wire)
+
+    assert scan.frames == (_ping(5, b"reply"),)
+    assert len(scan.discarded) == 1, "the empty candidate is nothing, not junk"
+
+
+def test_assembler_ignores_a_lone_delimiter_with_a_request_outstanding():
+    """The empty candidate must not even be reported as discarded: the
+    service fails an operation when a read carries junk and no frame, and a
+    device that politely closed its trace has not damaged anything."""
+    assembler = FrameAssembler()
+
+    scan = assembler.push(b"\0\0\0")
+
+    assert scan.frames == ()
+    assert scan.discarded == ()
+    assert assembler.pending == 0
+
+
 def test_assembler_bound_survives_discarding_junk_candidate_after_candidate():
     """Junk that *is* delimited must not accumulate either: each candidate is
     dropped as it completes, so an endless trace never reaches the bound."""
