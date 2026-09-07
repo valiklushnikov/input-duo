@@ -97,12 +97,20 @@ public:
         frames_.emplace_back(data, data + size);
     }
 
+    /// See CdcSink::clear_pending()'s own comment. Counted, not just
+    /// booleaned, so a test can tell "called once" from "called on every
+    /// frame" - the latter would risk discarding a reply of this service's
+    /// own that a slow host had not yet read.
+    void clear_pending() override { ++clear_pending_calls_; }
+
     std::size_t count() const { return frames_.size(); }
     const std::vector<std::uint8_t>& last() const { return frames_.back(); }
     void clear() { frames_.clear(); }
+    std::size_t clear_pending_calls() const { return clear_pending_calls_; }
 
 private:
     std::vector<std::vector<std::uint8_t>> frames_;
+    std::size_t clear_pending_calls_ = 0;
 };
 
 class RuntimeConfigRecorder final : public IRuntimeConfig {
@@ -413,6 +421,63 @@ TEST_CASE(an_idle_pass_with_no_bytes_does_not_reopen_the_trace_gate) {
     link.service.on_cdc_bytes(nullptr, 0);
 
     CHECK(link.service.conversation_active());
+}
+
+// ----------------------------------------------------- clearing stale output
+//
+// Fix round 3 (Task 5): the reference target's own trace has been streaming
+// since power-on by the time a conversation begins, and the gate above stops
+// it only from that instant forward - it cannot un-send what the sink
+// already had queued. sink_.clear_pending() is what discards that, and it
+// has to run exactly once, before the first reply of a conversation is
+// generated, never on every frame (that would risk discarding this
+// service's own reply to a slow host). What clear_pending() actually does on
+// real hardware - tud_cdc_write_clear() - is asserted at the source level in
+// tests/build/test_pio_usb_reference_contract.py, because main.cpp is not
+// desktop-buildable; what is asserted here is that ConfigService calls it at
+// the right moment and no other.
+
+TEST_CASE(the_first_valid_frame_of_a_conversation_clears_pending_output) {
+    Link link;
+    CHECK_EQ(link.replies.clear_pending_calls(), 0u);
+
+    link.hello();
+
+    CHECK_EQ(link.replies.clear_pending_calls(), 1u);
+}
+
+TEST_CASE(a_damaged_frame_does_not_clear_pending_output) {
+    Link link;
+    std::uint8_t wire[16] = {5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0};
+
+    link.service.on_cdc_bytes(wire, sizeof(wire));
+
+    CHECK_EQ(link.replies.clear_pending_calls(), 0u);
+}
+
+TEST_CASE(later_frames_in_the_same_conversation_do_not_clear_pending_output_again) {
+    Link link;
+    link.hello();
+    CHECK_EQ(link.replies.clear_pending_calls(), 1u);
+
+    link.send(CdcMessageType::GET_STATUS);
+    link.send(CdcMessageType::GET_STATUS);
+    link.send(CdcMessageType::GET_DIAGNOSTICS);
+
+    // Never again: a second call here would risk discarding one of these
+    // very replies before the host had read it.
+    CHECK_EQ(link.replies.clear_pending_calls(), 1u);
+}
+
+TEST_CASE(a_new_conversation_after_disconnecting_clears_pending_output_again) {
+    Link link;
+    link.hello();
+    CHECK_EQ(link.replies.clear_pending_calls(), 1u);
+
+    link.service.on_disconnect();
+    link.hello();
+
+    CHECK_EQ(link.replies.clear_pending_calls(), 2u);
 }
 
 TEST_CASE(a_frame_split_across_two_reads_is_still_one_frame) {

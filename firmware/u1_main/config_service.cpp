@@ -224,7 +224,17 @@ void ConfigService::handle_frame(const std::uint8_t* wire, std::size_t size) {
     // A real client, decoded and CRC-verified - see conversation_active()'s
     // own comment for why this is the earliest point that can be said and
     // why it matters on a target that shares this endpoint with a trace.
-    conversation_active_ = true;
+    //
+    // Only on the transition into a conversation, and before dispatch below
+    // has generated this frame's own reply: whatever the sink already had
+    // queued to send - trace text written before this frame arrived, on a
+    // target that shares the endpoint - must not precede that reply. Calling
+    // this on every frame rather than only the first would risk discarding a
+    // reply of this service's own that a slow host had not yet read.
+    if (!conversation_active_) {
+        conversation_active_ = true;
+        sink_.clear_pending();
+    }
 
     const CdcFrame& frame = result.cdc;
 

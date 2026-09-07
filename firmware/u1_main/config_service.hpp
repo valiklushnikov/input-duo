@@ -66,6 +66,25 @@ class CdcSink {
 public:
     virtual ~CdcSink() = default;
     virtual void write(const std::uint8_t* data, std::size_t size) = 0;
+
+    /// Discard whatever this sink has queued to send but has not sent yet.
+    ///
+    /// Called exactly once per conversation, the instant it begins - see
+    /// ConfigService::handle_frame, the only caller, and
+    /// conversation_active()'s own comment for why that moment is the
+    /// earliest a real client can be told apart from noise. A target that
+    /// writes anything else into this same sink (the reference target's own
+    /// trace, sharing one physical CDC endpoint) may already have bytes
+    /// queued ahead of the very first reply - a device that has been
+    /// streaming trace text since power-on has no way to know a host is
+    /// about to open the port and start reading. Left unqueued, those bytes
+    /// precede the reply in the transport, and the host's frame decoder
+    /// reads them as part of it. Called before dispatch has generated that
+    /// first reply, so nothing this call discards is ever the reply itself.
+    ///
+    /// The default does nothing: a sink with nothing else writing to it (the
+    /// shipping backends' own CdcWriter) has nothing to discard.
+    virtual void clear_pending() {}
 };
 
 /// Makes a newly committed flash slot safe for the realtime runtime.

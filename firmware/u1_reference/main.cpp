@@ -157,6 +157,18 @@ public:
         tud_cdc_write(data, static_cast<std::uint32_t>(size));
         tud_cdc_write_flush();
     }
+
+    // ConfigService calls this exactly once, the instant a conversation
+    // begins and before it has generated that conversation's first reply -
+    // see CdcSink::clear_pending()'s own comment. This target shares its one
+    // physical CDC endpoint with the plain-text trace
+    // (reference_service_one_cdc, gated off by then but not before), so a
+    // device that has been streaming trace text since power-on may already
+    // have bytes queued in the TX FIFO ahead of that reply. Discarding them
+    // here is what keeps them from preceding it: on real hardware, without
+    // this, the configurator's own frame decoder read leftover trace text as
+    // the start of its first reply and reported "invalid CDC magic".
+    void clear_pending() override { tud_cdc_write_clear(); }
 };
 
 CdcWriter g_cdc_writer;

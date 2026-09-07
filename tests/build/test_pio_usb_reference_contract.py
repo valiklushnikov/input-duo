@@ -654,6 +654,44 @@ def test_the_trace_stops_the_instant_a_configurator_frame_decodes():
     )
 
 
+def test_starting_a_conversation_discards_whatever_trace_was_already_queued():
+    """Hardware-confirmed regression (Task 5 fix round 3).
+
+    Fix round 2's gate stops the trace only from the instant a conversation
+    begins - it cannot un-send bytes the sink already had queued for
+    transmission. On real hardware the device had been streaming trace text
+    since power-on, so the very first reply of a conversation was still
+    preceded by whatever was already in the CDC TX FIFO: the configurator's
+    frame decoder read that leftover as the start of the reply and reported
+    "invalid CDC magic" - a different, later failure than fix round 2's
+    "malformed COBS frame", which is exactly what a fix at the right layer
+    of the same bug looks like.
+
+    ConfigService::handle_frame calls sink_.clear_pending() exactly once per
+    conversation - covered natively in
+    tests/firmware_native/test_config_service.cpp, which drives the same
+    on_cdc_bytes() path this device's tud_cdc_read()/on_cdc_bytes() call
+    does. What only this source check can cover is that the reference
+    target's own CdcSink actually discards anything when asked:
+    CdcSink::clear_pending() defaults to doing nothing, so a target that
+    never overrides it would pass every native ConfigService test while
+    still shipping the exact bytes that produced this measurement.
+    """
+    source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(
+        encoding="utf-8"
+    )
+    compact = re.sub(r"\s+", " ", source)
+
+    assert re.search(
+        r"void\s+clear_pending\(\)\s+override\s*\{\s*tud_cdc_write_clear\(\);\s*\}",
+        compact,
+    ), (
+        "CdcWriter::clear_pending() must call tud_cdc_write_clear(), or "
+        "trace text already queued before a conversation begins can still "
+        "precede that conversation's first reply"
+    )
+
+
 def test_desc64_completion_pins_the_lifetime_token_it_was_handed():
     """The token is the only thing separating a stale callback from a live one.
 

@@ -79,6 +79,20 @@ class QSerialPortTransport(QObject):
         #
         # The emulator has no control lines, so only a real port shows this.
         self._port.setDataTerminalReady(True)
+
+        # A port can hold bytes that arrived before this process ever opened
+        # it - the OS driver keeps reading and buffering a CDC-ACM device's
+        # output as soon as it is enumerated, whether or not anything has
+        # the port open. On the reference target that includes its own
+        # plain-text trace: the device has no way to know a host is about to
+        # start reading, and does not stop sending it until this transport's
+        # own first request has reached it. Left in the buffer, those bytes
+        # are read as the start of the first reply, and the frame decoder
+        # calls it corrupt - measured on real hardware, not by inference.
+        # Correct independent of the trace, too: a board that rebooted mid
+        # conversation, or a reply this process never finished reading last
+        # time, leaves exactly the same kind of stale bytes behind.
+        self._port.clear(QSerialPort.Direction.Input)
         return True
 
     def close(self) -> None:
@@ -89,6 +103,12 @@ class QSerialPortTransport(QObject):
         if not self._port.isOpen():
             self.link_lost.emit("serial port is not open")
             return
+        # Same reasoning as open()'s own clear, and needed independently of
+        # it: trace text (or anything else stale) can still arrive in the
+        # gap between opening the port and this first request, or - if the
+        # device's own conversation-start guard has not yet run - in the
+        # instant before it does.
+        self._port.clear(QSerialPort.Direction.Input)
         if self._port.write(bytes(data)) < 0:
             self.link_lost.emit(self._port.errorString())
 
