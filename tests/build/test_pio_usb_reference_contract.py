@@ -607,6 +607,53 @@ def test_desc64_measurement_requests_and_compares_one_packet_only():
     assert "reference_service_one_cdc();" in source
 
 
+def test_the_trace_stops_the_instant_a_configurator_frame_decodes():
+    """Hardware-confirmed regression (Task 5 fix round 2).
+
+    The reference target's plain-text trace (LINK/REPORT/MOUNT/CTRL_* lines)
+    and the configurator's own COBS-framed replies share one physical CDC
+    endpoint. A COBS decoder finds its frame boundary at the next zero byte
+    regardless of what sits between two replies, so a single trace line
+    landing inside or between frames turns the configurator's next reply into
+    "malformed COBS frame" - measured on real hardware the first time a
+    configurator actually talked to this target after ConfigService was
+    linked, not caught by any of 1190 software tests because the emulator
+    never exercises real CDC bytes and emits no trace at all.
+
+    A bare ``"reference_service_one_cdc();" in source`` check (see the test
+    above this one) is satisfied by an unconditional call and would not have
+    caught the regression - the call still exists, just never gated. This
+    asserts the actual gate: the call must sit inside
+    ``if (!g_config.conversation_active())``, so once ConfigService has
+    decoded one real frame the trace stops going out until the host
+    genuinely disconnects (see ConfigService::conversation_active's own
+    comment in config_service.hpp for why that is the only "gone" this
+    device can reliably measure).
+
+    firmware/u1_main's own ConfigService::conversation_active() behaviour -
+    that a valid frame sets it and on_disconnect() clears it - is covered
+    natively in tests/firmware_native/test_config_service.cpp, which drives
+    the same on_cdc_bytes() path this device's tud_cdc_read()/on_cdc_bytes()
+    call does. What only this source check can cover is that main.cpp
+    actually reads that flag before writing to the shared endpoint - the
+    half of the bug native tests cannot reach.
+    """
+    source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(
+        encoding="utf-8"
+    )
+    compact = re.sub(r"\s+", " ", source)
+
+    assert re.search(
+        r"if\s*\(\s*!g_config\.conversation_active\(\)\s*\)\s*\{\s*"
+        r"reference_service_one_cdc\(\);",
+        compact,
+    ), (
+        "reference_service_one_cdc() must be called only inside "
+        "'if (!g_config.conversation_active())', or a trace line can land "
+        "inside a configurator's own CDC session and corrupt its framing"
+    )
+
+
 def test_desc64_completion_pins_the_lifetime_token_it_was_handed():
     """The token is the only thing separating a stale callback from a live one.
 

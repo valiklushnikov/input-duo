@@ -348,6 +348,73 @@ TEST_CASE(a_damaged_frame_is_counted_and_never_answered) {
     CHECK_EQ(link.service.diagnostics().bad_crc, 1u);
 }
 
+// ------------------------------------------------------- the trace's own gate
+//
+// The reference target's plain-text trace and the configurator's own
+// COBS-framed replies share one physical CDC endpoint (see
+// firmware/u1_reference/main.cpp). conversation_active() is the guard that
+// keeps trace text out of the wire once a real client is on it - hardware
+// proved that omitting it corrupts the configurator's framing, not any test
+// here. These drive on_cdc_bytes() exactly the way main.cpp's own
+// tud_cdc_read()/on_cdc_bytes() call does; what main.cpp does with the
+// answer - gate reference_service_one_cdc() on it - is covered separately
+// in tests/build/test_pio_usb_reference_contract.py, which is the only place
+// that can read main.cpp's own wiring.
+
+TEST_CASE(the_trace_gate_starts_open_before_any_frame_arrives) {
+    Link link;
+
+    CHECK_FALSE(link.service.conversation_active());
+}
+
+TEST_CASE(a_valid_frame_closes_the_trace_gate) {
+    Link link;
+    CHECK_FALSE(link.service.conversation_active());
+
+    link.hello();
+
+    CHECK(link.service.conversation_active());
+}
+
+TEST_CASE(a_damaged_frame_leaves_the_trace_gate_open) {
+    Link link;
+    std::uint8_t wire[16] = {5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0};
+
+    link.service.on_cdc_bytes(wire, sizeof(wire));
+
+    // Garbage on the wire is not evidence of a real client, only a frame
+    // that survives decode_cdc_frame's own CRC check is - the same frame
+    // this test's twin above (a_damaged_frame_is_counted_and_never_answered)
+    // shows is never answered either.
+    CHECK_FALSE(link.service.conversation_active());
+}
+
+TEST_CASE(disconnecting_reopens_the_trace_gate) {
+    Link link;
+    link.hello();
+    CHECK(link.service.conversation_active());
+
+    link.service.on_disconnect();
+
+    // Only a genuine disconnect reopens it - never merely a quiet pass with
+    // no bytes to read, which happens between every pair of ordinary
+    // requests and must not turn the trace back on mid-session.
+    CHECK_FALSE(link.service.conversation_active());
+}
+
+TEST_CASE(an_idle_pass_with_no_bytes_does_not_reopen_the_trace_gate) {
+    Link link;
+    link.hello();
+    CHECK(link.service.conversation_active());
+
+    // What main.cpp's loop does every pass nothing arrived on: hand
+    // on_cdc_bytes zero bytes. This must be indistinguishable from not
+    // calling it at all.
+    link.service.on_cdc_bytes(nullptr, 0);
+
+    CHECK(link.service.conversation_active());
+}
+
 TEST_CASE(a_frame_split_across_two_reads_is_still_one_frame) {
     Link link;
     link.hello();

@@ -191,6 +191,7 @@ void ConfigService::on_disconnect() {
     have_sequence_ = false;
     negotiated_ = false;
     negotiated_capabilities_ = 0;
+    conversation_active_ = false;
     if (capture_active_) {
         // A configurator that crashed mid-question would otherwise leave a
         // keyboard silently eating its own input until the timeout runs out.
@@ -219,6 +220,11 @@ void ConfigService::handle_frame(const std::uint8_t* wire, std::size_t size) {
         ++diagnostics_.bad_crc;
         return;
     }
+
+    // A real client, decoded and CRC-verified - see conversation_active()'s
+    // own comment for why this is the earliest point that can be said and
+    // why it matters on a target that shares this endpoint with a trace.
+    conversation_active_ = true;
 
     const CdcFrame& frame = result.cdc;
 

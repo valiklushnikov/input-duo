@@ -693,7 +693,24 @@ int main() {
         // In core_bridge.cpp rather than here, and tested there.
         duo_input::u1::pump_core_bridge(g_config, g_runtime);
 
-        reference_service_one_cdc();
+        // The trace and the configurator's own replies share this one
+        // physical CDC endpoint (see g_cdc_writer above and
+        // host_callbacks.cpp's TinyUsbCdcWriter). A COBS decoder finds its
+        // frame boundary at the next zero byte regardless of what sits
+        // between two replies, so one trace line landing mid-session turns
+        // the configurator's next frame into "malformed COBS frame" - proven
+        // on real hardware, not by inference, the first time a configurator
+        // actually talked to this target. So the trace stops the instant
+        // on_cdc_bytes above has decoded one real frame
+        // (conversation_active()) and only resumes once the host has
+        // genuinely gone (on_disconnect(), called from the mount transition
+        // above) - never merely because the configurator app went idle
+        // between requests, which this device cannot reliably tell apart
+        // from "still connected": QSerialPort does not raise DTR on open,
+        // the same fact CdcWriter's own comment already relies on.
+        if (!g_config.conversation_active()) {
+            reference_service_one_cdc();
+        }
 
         g_outputs.drain(millis, time_us_32());
         g_usb.publish(g_outputs);

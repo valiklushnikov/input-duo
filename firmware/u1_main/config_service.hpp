@@ -406,7 +406,29 @@ public:
     ///
     /// Called when the host goes away. An abandoned staging slot has no header
     /// so it is already nothing, but the counter should say it happened.
+    /// Also the moment conversation_active() below goes false again - see its
+    /// own comment for why this is the one signal that means "gone" here.
     void on_disconnect();
+
+    /// Whether a byte-clean CDC frame has actually been decoded since boot or
+    /// since the last on_disconnect().
+    ///
+    /// A target that shares this CDC endpoint with a plain-text trace (the
+    /// reference target does; see its main.cpp) must stop writing that trace
+    /// the moment this is true: a COBS decoder finds its frame boundary at
+    /// the next zero byte regardless of what is between them, so a single
+    /// trace line landing inside a session turns the next reply into
+    /// "malformed COBS frame" on the configurator's side - confirmed on real
+    /// hardware, not by inference. True from the first frame that survives
+    /// decode_cdc_frame's CRC check, which is the earliest point a stray
+    /// noise byte can be told apart from a real client.
+    ///
+    /// Stays true until on_disconnect(), because nothing else this device can
+    /// see is a reliable "the configurator process closed its port": DTR is
+    /// not it - see CdcWriter's own comment in u1_main and u1_reference's
+    /// main.cpp for why - so the USB mount transition on_disconnect() is
+    /// already keyed to is the only "gone" this board can actually measure.
+    bool conversation_active() const { return conversation_active_; }
 
     /// Publish what the link is doing, for GET_DIAGNOSTICS to report.
     void set_link_state(const LinkState& state) { link_state_ = state; }
@@ -643,6 +665,9 @@ private:
     // Assembly of an incoming frame.
     std::uint8_t pending_[kMaxWireFrame] = {};
     std::size_t pending_size_ = 0;
+
+    /// See conversation_active() above.
+    bool conversation_active_ = false;
 
     // The last exchange, kept so a repeated request gets a repeated reply.
     std::uint8_t last_request_[kMaxWireFrame] = {};
