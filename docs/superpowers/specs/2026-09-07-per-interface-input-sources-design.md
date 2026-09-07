@@ -15,15 +15,26 @@ The firmware already knows this about this one mouse. `input/pipeline.cpp`
 carries `keychron_side_state()`, the constants `kKeychronVendorId`,
 `kKeychronProductId` and `kKeychronSideUsage`, and an `on_auxiliary_report()`
 that maps that usage onto mouse button 4. It is roughly eighty lines of
-knowledge about a single product, and it does not work: `on_auxiliary_report()`
-has no caller anywhere in the firmware, and the `keychron_receiver_` flag it
-guards on has no setter, so it is permanently false. Working code with passing
-tests that production never reaches is this project's most common defect, and
-this is an instance of it.
+knowledge about a single product.
 
-Extending that approach does not scale. Every mouse chooses its own interface,
-its own usage and its own report shape, and the operator cannot be asked to wait
-for us to add theirs.
+That path is live - `on_event()` dispatches `AuxiliaryReport` to it and
+`keychron_receiver_` is latched from the identity's VID/PID on `Ready` - but the
+two backends disagree about what reaches it. `on_auxiliary_report()` gates on
+`endpoint != 1`. The shipping backend feeds it the constant
+`kKeychronAuxiliaryEndpoint = 1` and says why in its own comment: *"Not this
+interface's own TinyUSB instance number - enumeration order does not guarantee
+that is 1."* The reference target passes `record.instance`, the raw TinyUSB
+instance, straight through (`u1_reference/source_adapter.cpp`, `Role::Auxiliary`).
+So on the reference build the side button reaches the guard and is dropped
+unless enumeration happens to hand that interface instance 1.
+
+A magic endpoint number that two backends fill in differently is the defect
+underneath the defect. Extending this approach does not scale either: every
+mouse chooses its own interface, its own usage and its own report shape, and the
+operator cannot be asked to wait for us to add theirs.
+
+The generic design removes the magic number rather than aligning it. There is no
+privileged endpoint, so there is nothing for two backends to disagree about.
 
 ## The shape of the fix
 
