@@ -1761,3 +1761,41 @@ combination.
 Task 3 Step 7 remains incomplete: mouse five buttons/side buttons, macros,
 rapid simultaneous input, detach-held release, and counters are still
 outstanding. The strict ACK timing FAIL/PARTIAL verdict is unchanged.
+
+### Task 3 Step 7 operator closure of the remaining matrix (2026-09-07)
+
+Same flashed U1 image as the two entries above: UF2 238080 bytes, SHA-256
+`1DE49BD4A39227A9EE08CA1D54767F4AA775DD298EA51927DCF53787242B2B55`, firmware
+backport commit `6da7602`, repository HEAD `99315e3` at the time of this
+statement. Nothing was reflashed between the partial evidence above and this
+closure.
+
+The operator stated, as a single final confirmation covering every row that
+was still open, that the following work on PC1:
+
+- mouse five buttons, including both side buttons;
+- macros;
+- rapid simultaneous keyboard and mouse input;
+- detach-while-held release.
+
+**What kind of evidence this is.** This is operator confirmation only. No CDC
+capture, no log file and no counter readout accompanies it, and none is
+claimed. The plan's Step 7 sentence "All queue/host error counters remain
+zero" is therefore *not* satisfied by measurement: the counters were never
+read during this session, so this record asserts nothing about their values.
+It does not report them as zero and does not report them as non-zero.
+
+**Resulting state of Task 3 Step 7.** Every functional row of the gate -
+typing, modifiers, Fn F9-F12, movement, wheel, five buttons/side buttons,
+macros, rapid simultaneous input and detach-held release - is now closed by
+operator confirmation, at the strength of an operator statement rather than a
+capture. The counter row remains unmeasured and is carried forward as an
+accepted gap, not as a pass.
+
+The strict ACK timing FAIL/PARTIAL verdict recorded above is unchanged by this
+closure.
+
+**What would raise this to measured evidence.** A CDC capture on the same
+image that prints the queue-overflow and host-error counters after the same
+exercises, hashed and referenced here the way the EP0 ACK capture is. That
+capture has not been taken, and Task 4 proceeds without it.
