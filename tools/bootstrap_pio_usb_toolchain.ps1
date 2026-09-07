@@ -78,7 +78,7 @@ function Write-Step($message) {
 $Dependencies = @(
     @{ Name = 'pico-sdk';     Url = 'https://github.com/raspberrypi/pico-sdk';        Revision = '98a542c1a62fb549ffb5d66a3e5892b06276b670'; PatchedRevision = $null }
     @{ Name = 'tinyusb';      Url = 'https://github.com/hathach/tinyusb';             Revision = '86ad6e56c1700e85f1c5678607a762cfe3aa2f47'; PatchedRevision = '507766faf14f38a6752401fb4f324cc00cd145dd' }
-    @{ Name = 'pico-pio-usb'; Url = 'https://github.com/sekigon-gonnoc/Pico-PIO-USB'; Revision = '3c1eec341a5232640e4c00628b889b641af34b28'; PatchedRevision = '3e07f6b3b1fac410d49576c6177d87a26422b16a' }
+    @{ Name = 'pico-pio-usb'; Url = 'https://github.com/sekigon-gonnoc/Pico-PIO-USB'; Revision = '3c1eec341a5232640e4c00628b889b641af34b28'; PatchedRevision = 'ce67882de7c6e75734087e3181caeb2511f48c46' }
 )
 
 # Fixed so the patch commit hashes identically on every machine.

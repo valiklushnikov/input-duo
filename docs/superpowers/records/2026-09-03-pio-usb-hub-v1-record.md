@@ -1635,3 +1635,64 @@ record whether the device returns a DATA1 packet at all, whether that packet is
 64 bytes with no short packet following, and what handshake the host sends.
 Keep address 1's successful multi-packet fetches in the same trace as the
 working comparison case.
+
+## Lossless control trace: the Aula repeats DATA1 because it did not accept the ACK (2026-09-07)
+
+The temporary 2048-entry SPSC control ring was flashed from `d696d54` as U1
+UF2 SHA-256
+`BA8838E1F227B0C02D0B44608792F595F9A7D889633BB70E1AE27F213D216980`.
+The final capture began before a U1 power cycle and retained the whole raw CDC
+stream for 30 seconds after `DESC77_FAIL`. It contained control records
+`seq=0..234` with no gap and no `CTRL_LOST`; the evidence below is therefore a
+complete trace, not a sample selected by a filter.
+
+| seq | request/result | measured packets |
+| --- | --- | --- |
+| 208..213 | enumeration `81 06 00 22 00 00 4D 00` | `DATA1 len=64` four times, then `DONE act=64 tot=77`; mount continued with descriptor length 0 |
+| 220..225 | enumeration `81 06 00 22 01 00 DA 00` | `DATA1 len=64` four times, then `DONE act=64 tot=218` |
+| 226..228 | post-mount `81 06 00 22 00 00 40 00` | one `DATA1 len=64`, `DONE act=64`, exact `DESC64_MATCH` |
+| 229..234 | post-mount `81 06 00 22 00 00 4D 00` | `DATA1 len=64` four times, `DONE act=64`, `DESC77_FAIL r=xfer` |
+
+Each repeated packet carried the same valid beginning of the Aula golden
+descriptor. The first DATA1 is accepted, copied, advances `actual_len` to 64,
+and toggles the host expectation to DATA0. The next three DATA1 packets are
+therefore stale retransmissions; the bounded control-toggle guard rejects them
+and ends the transfer after its retry limit. The device retransmits DATA1 only
+when it did not accept the host's ACK for the first packet. A 64-byte request
+appears successful because the host reaches its requested length locally after
+that first packet and never needs the DATA0 that would expose the missing ACK.
+
+This also corrects two earlier interpretations:
+
+- Aula's TinyUSB callback instances are 3/4, but its actual
+  `bInterfaceNumber` values are 0/1. The request code already translated them
+  correctly; the raw SETUP bytes above settle the naming.
+- The earlier 52 us timestamp for a 64-byte receive plus ACK did not prove the
+  full-speed turnaround was safe. It included the roughly 45 us DATA packet
+  and the ACK transmission itself. The remaining software path is still far
+  larger than the full-speed 2..7.5 bit-time window (about 0.167..0.625 us).
+  The recorder after the send function proves an ACK attempt, not that a
+  timely and well-formed ACK reached the receiver.
+
+### Exact upstream correction
+
+The pinned Pico-PIO-USB 0.7.2 base is
+`3c1eec341a5232640e4c00628b889b641af34b28`. Its direct upstream child is
+`38ed543d5a5f7a4f4ec72dcb2c4bcd4f5c8001e7`, authored by hathach with subject
+`optimize to reduce delay between received DATA and sending handshake`.
+That commit changes only this critical path: it removes the no-inline
+handshake dispatcher, caches the RX PIO/SM/buffer locals, removes work from the
+hot byte loop, and starts pre-encoded ACK/NAK/STALL packets directly. Because
+its stated purpose and code surface exactly match the measured failure, the
+whole upstream diff is being backported before the Duo Input host guards and
+temporary trace, rather than inventing another timing change.
+
+The exact LF-normalised upstream diff is pinned by SHA-256
+`22474d37eb325ce980a96b1dba44f5a3199a81248cc3aae2d3c10fc712dc4135`.
+Bootstrap applies all three Pico-PIO-USB patches in order and reproducibly
+produces clean revision `ce67882de7c6e75734087e3181caeb2511f48c46`.
+
+The remaining behavioral gate is hardware, not a source-text claim: after the
+backport, the 77-byte transfer must show `DATA1 len=64`, then
+`DATA0 len=13`, complete with `actual_len=77`, match the checked-in descriptor,
+and mount the Aula keyboard with that descriptor rather than boot fallback.

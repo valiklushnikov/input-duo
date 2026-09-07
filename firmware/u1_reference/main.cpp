@@ -228,8 +228,9 @@ void service_input(std::uint32_t millis) {
                                       descriptor_request.instance,
                                       descriptor_request.length);
         // The public descriptor API takes bInterfaceNumber. The callback gives
-        // us TinyUSB's HID instance/index; they are not interchangeable (the
-        // Aula logs interfaces 3/4 while their instances are 0/1).
+        // us TinyUSB's global HID instance/index; they are not interchangeable
+        // (the Aula callbacks use instances 3/4 while its interface numbers
+        // are 0/1).
         //
         // Poison immediately before the attempt, with nothing in between. The
         // buffer is static and reused, so a transfer that reports a length

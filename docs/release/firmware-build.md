@@ -92,12 +92,13 @@ else CH375 depends on:
 |---|---|---|
 | Pico SDK | `98a542c1a62fb549ffb5d66a3e5892b06276b670` | unmodified |
 | TinyUSB | `86ad6e56c1700e85f1c5678607a762cfe3aa2f47` | `507766faf14f38a6752401fb4f324cc00cd145dd` (+ `patches/tinyusb/`) |
-| Pico-PIO-USB | `3c1eec341a5232640e4c00628b889b641af34b28` | `3e07f6b3b1fac410d49576c6177d87a26422b16a` (+ `patches/pico-pio-usb/`) |
+| Pico-PIO-USB | `3c1eec341a5232640e4c00628b889b641af34b28` | `ce67882de7c6e75734087e3181caeb2511f48c46` (+ `patches/pico-pio-usb/`) |
 
 These are exact commits, not tags - `cmake/pio_usb_toolchain_lock.cmake` is
 the single source of truth for them.
 
-TinyUSB and Pico-PIO-USB are built one commit past upstream. Four defects in
+TinyUSB and Pico-PIO-USB are built one commit past upstream. The exact upstream
+ACK-turnaround correction plus four Duo Input host defects in
 those pinned revisions stop this hardware working at all - a second device
 never enumerates, a keyboard never mounts, a control transfer can hang the host
 stack outright, and a single corrupted response ends hub port monitoring for the
@@ -109,7 +110,7 @@ with a clean working tree. What the defects are and how each was measured is in
 `docs/superpowers/records/2026-09-03-pio-usb-hub-v1-record.md`.
 
 Patches are numbered and applied in sorted order. Pico-PIO-USB currently
-carries a second one, `0002-duo-input-control-trace.patch`, which is not a fix:
+carries a third one, `0003-duo-input-control-trace.patch`, which is not a fix:
 it is a diagnostic instrument that records one entry per DATA packet on a
 control endpoint into a static RAM ring, after the handshake for that packet
 has already been sent, so the firmware can print a per-packet trace of control

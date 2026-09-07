@@ -8,7 +8,8 @@ hand-editing the clones - which
 fixes live here as patches under version control, and the bootstrap applies
 them and commits them into the clone.
 
-Pico-PIO-USB carries a second, numbered patch that is not a fix at all: the
+Pico-PIO-USB first carries the exact upstream ACK-turnaround backport, then the
+host guards, and finally a numbered patch that is not a fix at all: the
 control-transfer packet trace, a diagnostic instrument that is meant to be
 deleted once the question it was built to answer has been answered. It is a
 separate file so deleting it is deleting a file, and the last part of this
@@ -41,7 +42,7 @@ PICO_PIO_USB_BASE_REVISION = "3c1eec341a5232640e4c00628b889b641af34b28"
 #: bases above, with the fixed identity and date below. These are what the
 #: build is verified against.
 TINYUSB_PATCHED_REVISION = "507766faf14f38a6752401fb4f324cc00cd145dd"
-PICO_PIO_USB_PATCHED_REVISION = "3e07f6b3b1fac410d49576c6177d87a26422b16a"
+PICO_PIO_USB_PATCHED_REVISION = "ce67882de7c6e75734087e3181caeb2511f48c46"
 
 #: Fixed so the commit SHA is reproducible.
 PATCH_COMMIT_IDENTITY = "toolchain@duo-input.invalid"
@@ -113,7 +114,15 @@ def test_patches_are_tracked_text_and_not_empty():
         )
 
 
-def test_the_pico_pio_usb_patches_touch_only_the_host_transaction_file():
+def test_each_pico_pio_usb_patch_stays_inside_its_reviewed_surface():
+    expected = {
+        "0001-upstream-ep0-ack-turnaround.patch": {
+            "src/pio_usb.c",
+            "src/pio_usb_ll.h",
+        },
+        "0002-duo-input-host-fixes.patch": {"src/pio_usb_host.c"},
+        "0003-duo-input-control-trace.patch": {"src/pio_usb_host.c"},
+    }
     for patch in sorted((REPOSITORY_ROOT / "patches" / "pico-pio-usb").glob("*.patch")):
         text = patch.read_text(encoding="utf-8")
         touched = {
@@ -121,9 +130,9 @@ def test_the_pico_pio_usb_patches_touch_only_the_host_transaction_file():
             for line in text.splitlines()
             if line.startswith("diff --git ")
         }
-        assert touched == {"src/pio_usb_host.c"}, (
-            "the PIO programs and bus timing are deliberately left alone; "
-            f"{patch.name} touches {sorted(touched)}"
+        assert patch.name in expected, f"unreviewed Pico-PIO-USB patch: {patch.name}"
+        assert touched == expected[patch.name], (
+            f"{patch.name} escaped its reviewed surface: {sorted(touched)}"
         )
 
 
@@ -255,7 +264,7 @@ def _patched_file(patch: Path, path: str) -> str:
 
 
 CONTROL_TRACE_PATCH = (
-    REPOSITORY_ROOT / "patches" / "pico-pio-usb" / "0002-duo-input-control-trace.patch"
+    REPOSITORY_ROOT / "patches" / "pico-pio-usb" / "0003-duo-input-control-trace.patch"
 )
 
 
@@ -440,9 +449,9 @@ def test_the_control_trace_does_no_formatting_or_blocking_at_the_record_site():
 def test_the_control_trace_exposes_a_drain_api_without_a_shared_layout():
     """The firmware must not have to mirror a struct it cannot include.
 
-    ``test_the_pico_pio_usb_patches_touch_only_the_host_transaction_file``
-    keeps the patch out of the headers, so the drain has to hand back scalars
-    rather than an entry whose layout two files would have to agree on.
+    The control-trace patch itself stays out of the headers, so the drain has
+    to hand back scalars rather than an entry whose layout two files would
+    have to agree on.
     """
     source = _control_trace_source()
     assert "bool pio_usb_host_ctrl_trace_take(" in source
