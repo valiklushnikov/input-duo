@@ -963,3 +963,107 @@ TEST_CASE(the_descriptor_prefix_is_wide_enough_to_show_the_second_packet) {
                          "prefix=810005FF0903750895018102C005010906A101050819"
                          "0129\r\n"});
 }
+
+// The link to U2, as a line somebody can read.
+//
+// Task 4 puts SPI on Core 0, and this board has no LED that says whether the
+// far end answered - the RP2040-Zero's only lamp is a WS2812 nothing here
+// drives. Without a line on the wire, "U2 is answering" is an operator's
+// impression and not a measurement, which is exactly the kind of closure this
+// project has already had to record honestly once.
+//
+// One retained slot rather than a queue: the newest reading is the only
+// interesting one, and a link polled every pass would otherwise bury the
+// report trace under a thousand identical lines a second.
+
+TEST_CASE(a_link_status_nobody_published_prints_nothing) {
+    reference_queue_reset();
+
+    CdcWriter writer;
+    reference_service_cdc(writer);
+
+    CHECK(writer.output.empty());
+}
+
+TEST_CASE(a_published_link_status_prints_one_line) {
+    reference_queue_reset();
+
+    ReferenceLinkStatus status{};
+    status.answered = true;
+    status.frames_sent = 42;
+    status.crc_errors = 3;
+    status.echoed_frames = 1;
+    status.endpoint_drops = 2;
+    status.endpoint_release_ms = 100;
+    reference_link_status_publish(status);
+
+    CdcWriter writer;
+    reference_service_cdc(writer);
+
+    CHECK(writer.output == "LINK ans=1 tx=42 crc=3 echo=1 drops=2 rel=100\r\n");
+}
+
+TEST_CASE(a_link_that_never_answered_says_so_rather_than_saying_nothing) {
+    reference_queue_reset();
+
+    ReferenceLinkStatus status{};
+    status.answered = false;
+    reference_link_status_publish(status);
+
+    CdcWriter writer;
+    reference_service_cdc(writer);
+
+    CHECK(writer.output == "LINK ans=0 tx=0 crc=0 echo=0 drops=0 rel=0\r\n");
+}
+
+TEST_CASE(only_the_newest_link_status_is_printed) {
+    reference_queue_reset();
+
+    ReferenceLinkStatus older{};
+    older.frames_sent = 1;
+    reference_link_status_publish(older);
+
+    ReferenceLinkStatus newer{};
+    newer.answered = true;
+    newer.frames_sent = 9;
+    reference_link_status_publish(newer);
+
+    CdcWriter writer;
+    reference_service_cdc(writer);
+
+    CHECK(writer.output == "LINK ans=1 tx=9 crc=0 echo=0 drops=0 rel=0\r\n");
+}
+
+TEST_CASE(a_link_status_is_printed_once_and_not_repeated) {
+    reference_queue_reset();
+
+    ReferenceLinkStatus status{};
+    status.answered = true;
+    reference_link_status_publish(status);
+
+    CdcWriter first;
+    reference_service_cdc(first);
+    CHECK(!first.output.empty());
+
+    CdcWriter second;
+    reference_service_cdc(second);
+    CHECK(second.output.empty());
+}
+
+TEST_CASE(a_link_status_is_printed_ahead_of_report_traffic) {
+    reference_queue_reset();
+
+    const std::uint8_t report[] = {0x01, 0x02};
+    ReferenceTraceEntry entry =
+        reference_trace_from(report_record(2, 0, report, sizeof(report)));
+    CHECK(reference_trace_push(entry));
+
+    ReferenceLinkStatus status{};
+    status.answered = true;
+    reference_link_status_publish(status);
+
+    CdcWriter writer;
+    reference_service_cdc(writer);
+
+    CHECK(writer.output.rfind("LINK ", 0) == 0);
+}

@@ -164,6 +164,27 @@ def test_a_u2_that_came_back_is_told_to_let_go():
     )
 
 
+def test_the_link_is_reported_where_someone_can_read_it():
+    """A link nobody can observe cannot be gated on.
+
+    This board has no lamp to say whether U2 answered - its only LED is a
+    WS2812 nothing here drives - so the hardware gate for this task would
+    otherwise be closed on an impression. Core 0 publishes the reading it
+    already has into the CDC trace it already services.
+    """
+
+    core1_body, main_body = _main_bodies()
+
+    assert "reference_link_status_publish" in main_body, (
+        "main never publishes the link status; nothing on the wire says "
+        "whether U2 answered"
+    )
+    assert "reference_link_status_publish" not in core1_body, (
+        "the link status is published from core1_main, which cannot read a "
+        "peripheral Core 0 owns"
+    )
+
+
 def test_the_reference_build_compiles_the_link_and_not_a_copy_of_it():
     """The same two translation units the shipping backends link."""
 

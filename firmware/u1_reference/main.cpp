@@ -68,6 +68,10 @@ duo_input::u1::SpiMaster g_link;
 /// Whether U2 has just come back and has to be told to let go.
 duo_input::u1::reference::LinkReconnect g_link_reconnect;
 
+/// How often the link reading reaches the trace. Core 0 only.
+constexpr std::uint32_t kLinkReportIntervalMs = 1000;
+std::uint32_t g_last_link_report_ms = 0;
+
 /// Core 1's only reach into the output: the queue, and nothing else. A full
 /// queue is refused rather than waited on, because Core 1 cannot block on
 /// Core 0.
@@ -350,6 +354,22 @@ int main() {
         // heartbeats, so a quiet device neither saturates the bus nor looks
         // severed.
         g_link.poll(millis, g_outputs);
+
+        // And what the link had to say, once a second. Often enough to watch
+        // U2 come and go while somebody pulls a cable, rare enough that it
+        // cannot bury the report trace. Unsigned arithmetic, so the 49-day
+        // wrap costs at most one late line.
+        if (millis - g_last_link_report_ms >= kLinkReportIntervalMs) {
+            g_last_link_report_ms = millis;
+            ReferenceLinkStatus status;
+            status.answered = g_link.status().answered;
+            status.frames_sent = g_link.frames_sent();
+            status.crc_errors = g_link.status().crc_errors;
+            status.echoed_frames = g_link.status().echoed_frames;
+            status.endpoint_drops = g_link.status().endpoint_drops;
+            status.endpoint_release_ms = g_link.status().endpoint_release_ms;
+            reference_link_status_publish(status);
+        }
     }
 
     return 0;

@@ -134,6 +134,37 @@ std::uint32_t reference_trace_overflows();
 //: Tests only.
 void reference_trace_reset();
 
+// The link to U2, as a line somebody can read.
+//
+// This board has no lamp that can say whether the far end answered - the
+// RP2040-Zero's only LED is a WS2812 nothing here drives - so without this
+// line "U2 is answering" is an impression rather than a measurement.
+//
+// One retained slot rather than a queue: the link is polled every pass, and
+// the newest reading is the only interesting one. A queue would bury the
+// report trace under a thousand identical lines a second.
+struct ReferenceLinkStatus {
+    bool answered = false;
+    std::uint32_t frames_sent = 0;
+    std::uint32_t crc_errors = 0;
+    std::uint32_t echoed_frames = 0;
+    //: How many times U2 has lost the link and released everything. U2 counts
+    //: it because U1 cannot: at the moment the link dies there is nothing left
+    //: to carry the news.
+    std::uint8_t endpoint_drops = 0;
+    //: The silence that caused U2's most recent release, in milliseconds.
+    std::uint16_t endpoint_release_ms = 0;
+};
+
+//: Core 0 only. Replaces any reading not yet printed.
+void reference_link_status_publish(const ReferenceLinkStatus& status);
+
+//: Returns false when there is no unprinted reading.
+bool reference_link_status_take(ReferenceLinkStatus& status);
+
+//: Tests only.
+void reference_link_status_reset();
+
 enum class ReferenceDescriptorDiagnosticKind : std::uint8_t {
     Start,
     Match,

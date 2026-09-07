@@ -190,6 +190,34 @@ std::uint32_t reference_overflows() {
     return g_overflows.load(std::memory_order_relaxed);
 }
 
+namespace {
+
+//: Core 0 writes it in its loop and prints it from the same loop, so no
+//: cross-core ordering is involved and none is claimed.
+ReferenceLinkStatus g_link_status{};
+bool g_link_status_pending = false;
+
+}  // namespace
+
+void reference_link_status_publish(const ReferenceLinkStatus& status) {
+    g_link_status = status;
+    g_link_status_pending = true;
+}
+
+bool reference_link_status_take(ReferenceLinkStatus& status) {
+    if (!g_link_status_pending) {
+        return false;
+    }
+    status = g_link_status;
+    g_link_status_pending = false;
+    return true;
+}
+
+void reference_link_status_reset() {
+    g_link_status = ReferenceLinkStatus{};
+    g_link_status_pending = false;
+}
+
 void reference_queue_reset() {
     g_head.store(0, std::memory_order_relaxed);
     g_tail.store(0, std::memory_order_relaxed);
@@ -200,6 +228,7 @@ void reference_queue_reset() {
     reference_trace_reset();
     reference_descriptor_diagnostic_reset();
     reference_control_trace_reset();
+    reference_link_status_reset();
 }
 
 // --------------------------------------------------------------------------
@@ -648,6 +677,28 @@ void reference_service_cdc(IReferenceCdcWriter& writer) {
         return;
     }
     if (deliver_one_control_trace(writer)) {
+        return;
+    }
+
+    // Ahead of the report trace and behind both measurements: a keyboard
+    // produces thousands of reports a second, and a link line that queues
+    // behind them is a link line nobody sees.
+    ReferenceLinkStatus link{};
+    if (reference_link_status_take(link)) {
+        char line[64];
+        const int written = std::snprintf(
+            line, sizeof(line),
+            "LINK ans=%u tx=%lu crc=%lu echo=%lu drops=%u rel=%u\r\n",
+            link.answered ? 1u : 0u,
+            static_cast<unsigned long>(link.frames_sent),
+            static_cast<unsigned long>(link.crc_errors),
+            static_cast<unsigned long>(link.echoed_frames),
+            static_cast<unsigned>(link.endpoint_drops),
+            static_cast<unsigned>(link.endpoint_release_ms));
+        if (written > 0) {
+            writer.write(line, static_cast<std::size_t>(written));
+            writer.flush();
+        }
         return;
     }
 
