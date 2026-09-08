@@ -1013,11 +1013,17 @@ void ConfigService::emit_capture_event(const mapping::CapturedTrigger& trigger) 
     }
     capture_active_ = false;
 
-    // Exactly three bytes, in the order the host unpacks them.
-    std::uint8_t payload[3];
+    // Eight bytes, in the order the host unpacks them: kind, code, modifiers,
+    // then the source that produced the press - VID, PID, interface number.
+    // A host too old to read the last five still reads the first three the
+    // same way it always has.
+    std::uint8_t payload[ProtocolLimits::CAPTURE_EVENT_PAYLOAD_BYTES];
     payload[0] = static_cast<std::uint8_t>(trigger.kind);
     payload[1] = trigger.code;
     payload[2] = trigger.modifiers;
+    put_u16(payload + 3, trigger.vendor_id);
+    put_u16(payload + 5, trigger.product_id);
+    payload[7] = trigger.interface_number;
 
     // A session that has not seen a request yet has no count to continue, so
     // the device starts one - which is what a first request would have done.

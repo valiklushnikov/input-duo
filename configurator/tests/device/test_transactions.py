@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import struct
+
 import pytest
 
 from duo_input.device.transactions import (
@@ -9,12 +11,15 @@ from duo_input.device.transactions import (
     FrameAssembler,
     FrameOverflowError,
     SequenceGenerator,
+    parse_capture_event,
 )
+from duo_input.domain.models import TriggerSource
 from duo_input.generated.protocol import (
     CDC_MAX_PAYLOAD,
     PROTOCOL_VERSION_MAJOR,
     PROTOCOL_VERSION_MINOR,
     CdcMessageType,
+    TriggerKind,
 )
 from duo_input.protocol.cobs import cobs_encode
 from duo_input.protocol.frame import CdcFrame, encode_cdc_frame
@@ -234,3 +239,20 @@ def test_assembler_still_accepts_a_maximum_length_frame_split_across_reads():
     assert len(wire) <= MAX_PENDING_FRAME_BYTES
     assert collected == [_ping(1, payload)]
     assert len(collected[0].payload) == CDC_MAX_PAYLOAD
+
+
+# ----------------------------------------------------------- capture parsing
+
+
+def test_capture_event_carries_its_source():
+    payload = struct.pack("<BBBHHB", TriggerKind.KEYBOARD_USAGE, 0x4F, 0x01,
+                          0x3434, 0xD030, 1)
+    trigger = parse_capture_event(payload)
+    assert trigger.source == TriggerSource(0x3434, 0xD030, 1)
+
+
+def test_short_capture_event_still_parses():
+    # The emulator and older firmware send three bytes; refusing them would
+    # break the compatibility matrix this repository ships.
+    trigger = parse_capture_event(struct.pack("<BBB", TriggerKind.MOUSE_BUTTON, 4, 0))
+    assert trigger.source is None

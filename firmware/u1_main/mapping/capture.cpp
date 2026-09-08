@@ -68,6 +68,19 @@ bool CaptureController::forget(const InputEvent& event) {
     return false;
 }
 
+void CaptureController::fill_source(const InputEvent& event) {
+    input::SourceIdentity identity;
+    if (sources_ != nullptr && sources_->resolve(event.source_index, identity)) {
+        trigger_.vendor_id = identity.vendor_id;
+        trigger_.product_id = identity.product_id;
+        trigger_.interface_number = identity.interface_number;
+    } else {
+        trigger_.vendor_id = 0;
+        trigger_.product_id = 0;
+        trigger_.interface_number = 0;
+    }
+}
+
 bool CaptureController::take(CapturedTrigger& out) {
     if (!have_trigger_) {
         return false;
@@ -105,6 +118,7 @@ CaptureDisposition CaptureController::handle(const InputEvent& event) {
             trigger_.kind = config::TriggerKind::KEYBOARD_USAGE;
             trigger_.code = static_cast<std::uint8_t>(event.code);
             trigger_.modifiers = modifiers_;
+            fill_source(event);
             have_trigger_ = true;
             remember(event);
             active_ = false;
@@ -117,6 +131,7 @@ CaptureDisposition CaptureController::handle(const InputEvent& event) {
             // And refuses a mouse trigger carrying modifiers, whatever is
             // actually held at the time.
             trigger_.modifiers = 0;
+            fill_source(event);
             have_trigger_ = true;
             remember(event);
             active_ = false;

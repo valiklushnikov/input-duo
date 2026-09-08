@@ -22,6 +22,7 @@
 
 #include "config/format.hpp"
 #include "input/events.hpp"
+#include "input/source_table.hpp"
 
 namespace duo_input::u1::mapping {
 
@@ -37,6 +38,12 @@ struct CapturedTrigger {
     /// button: the host refuses a mouse trigger that carries any, and a
     /// refused payload is a capture the operator has to repeat for nothing.
     std::uint8_t modifiers = 0;
+    /// The source that produced the press, resolved through the source table
+    /// at the moment it was captured. All zero when the table could not
+    /// resolve it - the same "unknown" a caller that never wired one in gets.
+    std::uint16_t vendor_id = 0;
+    std::uint16_t product_id = 0;
+    std::uint8_t interface_number = 0;
 };
 
 enum class CaptureDisposition : std::uint8_t {
@@ -54,6 +61,12 @@ inline constexpr std::size_t kMaxSwallowed = 20;
 
 class CaptureController {
 public:
+    /// Attach on the input core before events arrive. The table must outlive
+    /// us. Without one, a captured trigger's source fields stay zero -
+    /// exactly what a caller that never wired a table in got before this
+    /// existed.
+    void set_sources(const input::SourceTable& sources) { sources_ = &sources; }
+
     void begin(std::uint32_t now_ms, std::uint32_t timeout_ms = kCaptureTimeoutMs);
     void cancel();
 
@@ -72,6 +85,13 @@ private:
     bool remember(const input::InputEvent& event);
     /// Was this input swallowed on the way down? Forgets it if so.
     bool forget(const input::InputEvent& event);
+    /// Resolve the event's source through the table and stamp trigger_ with
+    /// it. Leaves the fields zero when there is no table or the table cannot
+    /// resolve the index - the same "unknown" the host already reads a
+    /// three-byte payload as.
+    void fill_source(const input::InputEvent& event);
+
+    const input::SourceTable* sources_ = nullptr;
 
     bool active_ = false;
     std::uint32_t deadline_ms_ = 0;

@@ -868,6 +868,6 @@ target_link_libraries(duo_mapping_sources PUBLIC duo_common)
 target_include_directories(duo_mapping_sources PUBLIC ${CMAKE_SOURCE_DIR}/firmware/u1_main)
 foreach(target IN ITEMS duo_binding_engine_test duo_core1_runtime_test duo_core_bridge_test
         duo_stored_profiles_test duo_macro_reports_test duo_macro_publication_test
-        duo_pio_usb_keyboard_test)
+        duo_pio_usb_keyboard_test duo_capture_test duo_config_service_test)
     target_link_libraries(${target} PRIVATE duo_mapping_sources)
 endforeach()

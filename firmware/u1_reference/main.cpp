@@ -533,6 +533,7 @@ extern "C" void core1_main() {
     multicore_lockout_victim_init();
     duo_input::u1::set_core1_running(true);
     g_runtime.engine().set_sources(g_sources);
+    g_runtime.capture().set_sources(g_sources);
 
     // Before anything below changes a clock or touches the host stack:
     // whether it was already active, and the clock it is about to compute

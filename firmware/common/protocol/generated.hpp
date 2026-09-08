@@ -14,6 +14,7 @@ inline constexpr std::uint8_t PROTOCOL_VERSION_MINOR = 0;
 struct ProtocolLimits {
     static constexpr std::size_t BINARY_CONFIG_MAX_BYTES = 368640;
     static constexpr std::size_t BINDINGS_PER_PROFILE = 128;
+    static constexpr std::size_t CAPTURE_EVENT_PAYLOAD_BYTES = 8;
     static constexpr std::size_t CDC_MAX_PAYLOAD = 1024;
     static constexpr std::size_t CONFIG_CHUNK_MAX_BYTES = 512;
     static constexpr std::size_t MACRO_STEPS_PER_MACRO = 64;

@@ -1605,6 +1605,9 @@ TEST_CASE(a_completed_capture_is_reported_without_being_asked) {
     trigger.kind = TriggerKind::KEYBOARD_USAGE;
     trigger.code = 0x1A;
     trigger.modifiers = 0x02;
+    trigger.vendor_id = 0x3434;
+    trigger.product_id = 0xD030;
+    trigger.interface_number = 1;
     link.replies.clear();
     link.service.emit_capture_event(trigger);
 
@@ -1613,11 +1616,17 @@ TEST_CASE(a_completed_capture_is_reported_without_being_asked) {
     CHECK(event.type == CdcMessageType::CAPTURE_EVENT);
     // Nobody asked, so it takes the sequence the next request would have used.
     CHECK_EQ(event.sequence, static_cast<std::uint16_t>(asked + 1));
-    // Three bytes, in the order the host unpacks them.
-    CHECK_EQ(event.payload.size, 3u);
+    // Eight bytes, in the order the host unpacks them: kind, code, modifiers,
+    // then the source - VID and PID little-endian, then interface number.
+    CHECK_EQ(event.payload.size, ProtocolLimits::CAPTURE_EVENT_PAYLOAD_BYTES);
     CHECK_EQ(event.payload.data[0], static_cast<std::uint8_t>(TriggerKind::KEYBOARD_USAGE));
     CHECK_EQ(event.payload.data[1], 0x1Au);
     CHECK_EQ(event.payload.data[2], 0x02u);
+    CHECK_EQ(event.payload.data[3], 0x34u);
+    CHECK_EQ(event.payload.data[4], 0x34u);
+    CHECK_EQ(event.payload.data[5], 0x30u);
+    CHECK_EQ(event.payload.data[6], 0xD0u);
+    CHECK_EQ(event.payload.data[7], 0x01u);
 }
 
 TEST_CASE(a_mouse_capture_travels_as_the_host_will_accept_it) {

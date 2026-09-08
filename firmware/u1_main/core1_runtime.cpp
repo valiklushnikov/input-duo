@@ -346,26 +346,18 @@ void Core1Runtime::request_capture_cancel() {
 void Core1Runtime::publish_capture_state() {
     mapping::CapturedTrigger trigger;
     if (capture_.take(trigger)) {
-        const std::uint32_t packed =
-            kCaptureMailboxOccupied |
-            (static_cast<std::uint32_t>(trigger.kind) << 16) |
-            (static_cast<std::uint32_t>(trigger.code) << 8) |
-            static_cast<std::uint32_t>(trigger.modifiers);
-        capture_event_mailbox_.store(packed, std::memory_order_release);
+        capture_event_payload_ = trigger;
+        capture_event_occupied_.store(true, std::memory_order_release);
     }
     // Event first, state second. Main reads in the same order.
     capture_active_published_.store(capture_.active(), std::memory_order_release);
 }
 
 bool Core1Runtime::take_capture_event(mapping::CapturedTrigger& out) {
-    const std::uint32_t packed =
-        capture_event_mailbox_.exchange(0, std::memory_order_acq_rel);
-    if ((packed & kCaptureMailboxOccupied) == 0) {
+    if (!capture_event_occupied_.exchange(false, std::memory_order_acq_rel)) {
         return false;
     }
-    out.kind = static_cast<config::TriggerKind>((packed >> 16) & 0xFFu);
-    out.code = static_cast<std::uint8_t>((packed >> 8) & 0xFFu);
-    out.modifiers = static_cast<std::uint8_t>(packed & 0xFFu);
+    out = capture_event_payload_;
     return true;
 }
 

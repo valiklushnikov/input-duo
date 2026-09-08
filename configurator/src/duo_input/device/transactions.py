@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
-from duo_input.domain.models import Trigger
+from duo_input.domain.models import Trigger, TriggerSource
 
 # ErrorCode is defined exactly once, in protocol/schema.json, and reaches every
 # side of the link through generated code. Importing it here from the emulator -
@@ -45,7 +45,8 @@ _LATENCY_HEAD = struct.Struct("<II")
 _U32 = struct.Struct("<I")
 _PERIPHERAL = struct.Struct("<BBBHHBH32s")
 _CHUNK_ACK = struct.Struct("<BI")
-_CAPTURE_EVENT = struct.Struct("<BBB")
+_CAPTURE_EVENT_LEGACY = struct.Struct("<BBB")
+_CAPTURE_EVENT_FULL = struct.Struct("<BBBHHB")
 
 
 class PayloadError(ValueError):
@@ -1234,13 +1235,24 @@ def _parse_host_observation(block: bytes) -> tuple[HostObservation | None, bytes
 def parse_capture_event(payload: bytes) -> Trigger:
     """Turn one CAPTURE_EVENT payload into the trigger the operator pressed.
 
-    The payload is the trigger itself - kind, code and HID modifier byte - so
-    the value the device reports and the value the project stores are the same
-    three numbers, with no host-side interpretation in between.
+    Three bytes is the legacy shape: kind, code and the HID modifier byte,
+    with no host-side interpretation in between. The emulator and older
+    firmware still send exactly that, so it is read as "source unknown" -
+    refusing it would break the compatibility matrix this repository ships.
+    Eight bytes is the current shape: the same three bytes plus the VID, PID
+    and interface number of the source that produced the press. Any other
+    length is refused.
     """
-    if len(payload) != _CAPTURE_EVENT.size:
+    if len(payload) == _CAPTURE_EVENT_FULL.size:
+        kind, code, modifiers, vendor_id, product_id, interface_number = (
+            _CAPTURE_EVENT_FULL.unpack(payload)
+        )
+        source: TriggerSource | None = TriggerSource(vendor_id, product_id, interface_number)
+    elif len(payload) == _CAPTURE_EVENT_LEGACY.size:
+        kind, code, modifiers = _CAPTURE_EVENT_LEGACY.unpack(payload)
+        source = None
+    else:
         raise PayloadError("CAPTURE_EVENT payload has the wrong size")
-    kind, code, modifiers = _CAPTURE_EVENT.unpack(payload)
     try:
         trigger_kind = TriggerKind(kind)
     except ValueError as error:
@@ -1249,7 +1261,7 @@ def parse_capture_event(payload: bytes) -> Trigger:
         raise PayloadError("CAPTURE_EVENT mouse button is out of range")
     if not code:
         raise PayloadError("CAPTURE_EVENT carries no trigger code")
-    return Trigger(trigger_kind, code, modifiers)
+    return Trigger(trigger_kind, code, modifiers, source)
 
 
 def parse_chunk_ack(payload: bytes) -> int:

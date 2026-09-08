@@ -109,8 +109,7 @@ public:
             kCaptureRequestBegin) {
             return true;
         }
-        if ((capture_event_mailbox_.load(std::memory_order_acquire) &
-             kCaptureMailboxOccupied) != 0) {
+        if (capture_event_occupied_.load(std::memory_order_acquire)) {
             return true;
         }
         return capture_active_published_.load(std::memory_order_acquire);
@@ -183,13 +182,12 @@ public:
     }
 
     mapping::BindingEngine& engine() { return engine_; }
+    mapping::CaptureController& capture() { return capture_; }
 
 private:
     /// 1 begin, 2 cancel, 0 nothing asked for.
     static constexpr std::uint8_t kCaptureRequestBegin = 1;
     static constexpr std::uint8_t kCaptureRequestCancel = 2;
-    /// Bit 31 of the packed trigger says the mailbox holds one.
-    static constexpr std::uint32_t kCaptureMailboxOccupied = 0x80000000u;
 
     void submit(const runtime::OutputCommand& command);
     void apply(const mapping::Outcome& outcome, std::uint32_t now_ms);
@@ -225,8 +223,20 @@ private:
     /// Published after any captured event, so Core 0 cannot observe the end
     /// and discard the answer that caused it.
     std::atomic<bool> capture_active_published_{false};
-    /// Packed trigger, with bit 31 as the occupied flag. Core 1 -> Core 0.
-    std::atomic<std::uint32_t> capture_event_mailbox_{0};
+    /// Whether capture_event_payload_ holds a trigger Core 0 has not taken
+    /// yet. Core 1 writes the payload and only then this flag with release
+    /// order; take_capture_event's acquire on the same flag is what makes
+    /// reading that plain struct on Core 0 safe without a lock - the same
+    /// event-first-state-second ordering publish_capture_state already
+    /// relies on for capture_active_published_ below.
+    std::atomic<bool> capture_event_occupied_{false};
+    /// The trigger captured on Core 1, guarded by capture_event_occupied_
+    /// above. Not itself atomic: nothing reads it until that flag says it is
+    /// safe to. Outgrew the single packed std::atomic<uint32_t> this used to
+    /// be once it gained a source - kind, code and modifiers fit in three
+    /// bytes; VID, PID and interface number do not fit in the bits that were
+    /// left.
+    mapping::CapturedTrigger capture_event_payload_{};
 
     /// A release Core 0 has asked for and Core 1 has not performed yet.
     std::atomic<bool> release_all_requested_{false};

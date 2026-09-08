@@ -99,6 +99,7 @@
   "limits": {
     "binary_config_max_bytes": 368640,
     "bindings_per_profile": 128,
+    "capture_event_payload_bytes": 8,
     "cdc_max_payload": 1024,
     "config_chunk_max_bytes": 512,
     "macro_steps_per_macro": 64,
