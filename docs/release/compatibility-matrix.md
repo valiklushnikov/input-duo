@@ -96,6 +96,57 @@ own terms:
 **The MVP is not accepted on this page as it stands.** What it now holds is one
 honest run rather than an empty form.
 
+## Per-interface input sources: wire and configuration compatibility
+
+`CAPTURE_EVENT` now has an **8-byte** payload: trigger kind, trigger code,
+modifiers, source USB vendor ID (`u16`), source USB product ID (`u16`), and
+source USB interface number (`u8`). Hosts also accept the legacy **3-byte**
+form containing only kind, code, and modifiers; it represents a capture with
+no source qualifier.
+
+The binding schema minor is now **1.1**. A binding record remains **12
+bytes**: its former reserved bytes carry the source qualifier, and its final
+reserved byte remains zero. An all-zero binding source (vendor ID, product ID,
+and interface number all zero) means **any source**.
+
+## Per-interface input sources: required bench acceptance
+
+These are acceptance checks, not recorded measurements. Write the stated
+expected result down before running each check, then record what the bench
+actually measured. Do not claim no regression without the measurements named
+below.
+
+### Function — Keychron M3 side-button binding
+
+**Expected result before execution:** with the Keychron M3 attached, binding
+its side button through `Мышь → определить кнопку` makes that button switch
+the mouse between PC1 and PC2. Buttons 1–3 and the wheel remain unaffected.
+
+1. Attach the Keychron M3 and open `Мышь → определить кнопку`.
+2. Bind the side button to the mouse-switch action, then use it to switch from
+   PC1 to PC2 and back.
+3. Exercise buttons 1–3 and the wheel. Record the observed switching result
+   and each unaffected control's result; leave this check unmeasured until
+   those observations exist.
+
+### Cost — per-endpoint poll rate
+
+**Expected result before execution:** the same-hardware comparison records a
+per-endpoint poll rate for both the branch baseline and this branch. The poll
+interval is per endpoint while the token budget is per device; this branch
+changes the mouse from one polled endpoint to three.
+
+1. On the same hardware with the same devices, measure and record the
+   baseline branch's per-endpoint poll rate, including the mouse input
+   endpoint and every other endpoint included in the comparison.
+2. Without changing that hardware or device set, measure and record this
+   branch's per-endpoint poll rate for the corresponding endpoints.
+3. Record both before and after numbers, the endpoint identity for each
+   number, and the measurement interval. If the per-endpoint rate falls far
+   enough to be felt, apply the specified fallback: poll undecodable
+   interfaces at a lower rate than input interfaces. This is a possible bench
+   outcome, not a formality.
+
 ## The PIO USB backend: not yet run on hardware
 
 Task 13 wrote the three scenarios above and `docs/release/pio-usb-hardware-checklist-ru.md`,
