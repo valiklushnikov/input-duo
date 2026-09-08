@@ -46,6 +46,9 @@ struct ActionRequest {
     input::InputEvent event{};
     hid::Target target = hid::Target::Pc1;
     std::uint8_t parameter = 0;
+    /// RunMacro keeps the keyboard route at this action's position. Later
+    /// matching route bindings must not redirect an earlier macro request.
+    config::KeyboardRoute macro_route = config::KeyboardRoute::PC1;
 };
 
 /// Fixed output budget. Matching bindings run in stored order until the next

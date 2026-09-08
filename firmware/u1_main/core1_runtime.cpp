@@ -164,7 +164,7 @@ void Core1Runtime::apply(const mapping::Outcome& outcome, std::uint32_t now_ms) 
             }
 
             case mapping::ActionRequestKind::RunMacro:
-                run_macro(action.parameter, now_ms);
+                macros_.enqueue(action.parameter, route_of(action.macro_route), now_ms);
                 break;
 
             case mapping::ActionRequestKind::SetProfile:

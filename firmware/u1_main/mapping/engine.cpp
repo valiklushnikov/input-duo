@@ -235,6 +235,7 @@ bool BindingEngine::apply_binding(Outcome& outcome, const Binding& binding) {
             ActionRequest request;
             request.kind = ActionRequestKind::RunMacro;
             request.parameter = binding.parameter;
+            request.macro_route = routes_.keyboard();
             add(outcome, request);
             break;
         }

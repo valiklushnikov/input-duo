@@ -743,6 +743,51 @@ TEST_CASE(a_running_macro_is_stopped_by_a_profile_swap) {
 
 // ----------------------------------------------------------------- macros
 
+TEST_CASE(matching_macro_and_route_bindings_use_the_route_at_the_macros_position) {
+    using duo_input::config::KeyboardRoute;
+    using duo_input::runtime::Route;
+    struct Scenario {
+        bool route_first;
+        Route macro_route;
+    };
+    for (const Scenario scenario : {Scenario{false, Route::Pc1}, Scenario{true, Route::Pc2}}) {
+        RecordingSink sink;
+        TwoProfiles profiles;
+        const Binding macro = run_macro_on(0x3D, 3);
+        Binding move = macro;
+        move.action = ActionKind::SET_KEYBOARD_ROUTE;
+        move.parameter = static_cast<std::uint8_t>(KeyboardRoute::PC2);
+        profiles.profile_zero = scenario.route_first ? std::vector<Binding>{move, macro}
+                                                     : std::vector<Binding>{macro, move};
+        Core1Runtime runtime(sink, profiles);
+        MacroStep steps[] = {tap_step(0x05)};
+        runtime.define_macro(3, MacroDefinition{steps, 1});
+        runtime.handle_input(key(InputEventKind::KeyDown, 0x06), 999);
+        sink.commands.clear();
+
+        runtime.handle_input(key(InputEventKind::KeyDown, 0x3D), 1000);
+        CHECK(runtime.engine().keyboard_route() == KeyboardRoute::PC2);
+        CHECK_EQ(sink.commands.size(), 1u);
+        CHECK(sink.commands[0].kind == CommandKind::ReleaseRoute);
+        CHECK(sink.commands[0].route == Route::Pc1);
+        // The old physical input remains orphaned across either binding order.
+        runtime.handle_input(key(InputEventKind::KeyUp, 0x06), 1000);
+        CHECK_EQ(sink.commands.size(), 1u);
+
+        runtime.tick(1000);
+        runtime.tick(1001);
+        CHECK_EQ(sink.keys(CommandKind::KeyPress, 0x05), 1);
+        CHECK_EQ(sink.keys(CommandKind::KeyRelease, 0x05), 1);
+        for (const OutputCommand& command : sink.commands) {
+            if (command.code == 0x05 &&
+                (command.kind == CommandKind::KeyPress || command.kind == CommandKind::KeyRelease)) {
+                CHECK_EQ(command.owner, 3);
+                CHECK(command.route == scenario.macro_route);
+            }
+        }
+    }
+}
+
 TEST_CASE(a_macros_keystrokes_are_owned_by_the_macro) {
     RecordingSink sink;
     TwoProfiles profiles;
