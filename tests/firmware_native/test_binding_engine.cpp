@@ -14,6 +14,7 @@
 // every later keystroke there means, and you cannot fix it from here.
 
 #include "mapping/engine.hpp"
+#include "input/source_table.hpp"
 #include "test_support.hpp"
 
 using duo_input::config::ActionKind;
@@ -72,7 +73,158 @@ bool sends_input(const Outcome& outcome) {
     return count_of(outcome, ActionRequestKind::SendInput) > 0;
 }
 
+struct SourceFixture : duo_input::u1::input::IInputHandler {
+    duo_input::u1::input::SourceTable sources{*this};
+    void on_input(const InputEvent&, std::uint32_t) override {}
+
+    void attach(std::uint8_t id, std::uint16_t vid, std::uint16_t pid,
+                std::uint8_t interface_number) {
+        duo_input::u1::input::SourceEvent event;
+        event.kind = duo_input::u1::input::SourceEventKind::Ready;
+        event.source_id = id;
+        duo_input::u1::input::SourceIdentity identity;
+        identity.vendor_id = vid;
+        identity.product_id = pid;
+        identity.interface_number = interface_number;
+        sources.on_event(event, identity, 0);
+    }
+};
+
+Binding source_bound(std::uint8_t macro, std::uint16_t vid, std::uint16_t pid,
+                     std::uint8_t interface_number) {
+    Binding binding = bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, macro);
+    binding.source = {vid, pid, interface_number};
+    return binding;
+}
+
+void check_macros(const Outcome& outcome, std::initializer_list<std::uint8_t> expected) {
+    CHECK_EQ(outcome.count, expected.size());
+    std::size_t index = 0;
+    for (std::uint8_t macro : expected) {
+        if (index >= outcome.count) break;
+        CHECK(outcome.actions[index].kind == ActionRequestKind::RunMacro);
+        CHECK_EQ(outcome.actions[index].parameter, macro);
+        ++index;
+    }
+}
+
 }  // namespace
+
+TEST_CASE(all_matching_bindings_fire_in_order) {
+    BindingEngine engine;
+    engine.set_bindings({bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 1),
+                         bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 3)});
+    const Outcome outcome = engine.handle(key(InputEventKind::KeyDown, 0x3D));
+    CHECK_EQ(count_of(outcome, ActionRequestKind::RunMacro), 2);
+    if (outcome.count == 2) {
+        CHECK_EQ(outcome.actions[0].parameter, 1);
+        CHECK_EQ(outcome.actions[1].parameter, 3);
+    }
+}
+
+TEST_CASE(source_a_fires_its_binding_and_any_source_but_never_source_b) {
+    SourceFixture fixture;
+    fixture.attach(41, 0x1234, 0x5678, 0);
+    fixture.attach(42, 0x1234, 0x5678, 1);
+    BindingEngine engine;
+    engine.set_sources(fixture.sources);
+    engine.set_bindings({source_bound(1, 0x1234, 0x5678, 0),
+                         source_bound(2, 0x1234, 0x5678, 1),
+                         source_bound(3, 0, 0, 0)});
+    InputEvent event = key(InputEventKind::KeyDown, 0x3D);
+    event.source_index = 0;
+    check_macros(engine.handle(event), {1, 3});
+    event.kind = InputEventKind::KeyUp;
+    CHECK_EQ(engine.handle(event).count, 0u);
+    event.kind = InputEventKind::KeyDown;
+    event.source_index = 1;
+    check_macros(engine.handle(event), {2, 3});
+}
+
+TEST_CASE(unresolved_sources_fire_only_the_any_source_binding) {
+    SourceFixture fixture;
+    fixture.attach(41, 0x1234, 0x5678, 0);
+    for (std::uint8_t index : {std::uint8_t{1}, std::uint8_t{255}}) {
+        BindingEngine engine;
+        engine.set_sources(fixture.sources);
+        engine.set_bindings({source_bound(1, 0x1234, 0x5678, 0),
+                             source_bound(2, 0x1234, 0x5678, 1),
+                             source_bound(3, 0, 0, 0)});
+        InputEvent event = key(InputEventKind::KeyDown, 0x3D);
+        event.source_index = index;
+        check_macros(engine.handle(event), {3});
+    }
+    BindingEngine without_table;
+    without_table.set_bindings({source_bound(1, 0x1234, 0x5678, 0),
+                                source_bound(3, 0, 0, 0)});
+    check_macros(without_table.handle(key(InputEventKind::KeyDown, 0x3D)), {3});
+}
+
+TEST_CASE(source_matching_checks_each_identity_field_and_only_all_zero_means_any) {
+    SourceFixture fixture;
+    fixture.attach(41, 0x1234, 0x5678, 0);
+    BindingEngine engine;
+    engine.set_sources(fixture.sources);
+    engine.set_bindings({source_bound(1, 0x1235, 0x5678, 0),
+                         source_bound(2, 0x1234, 0x5679, 0),
+                         source_bound(3, 0x1234, 0x5678, 1),
+                         source_bound(4, 0, 0, 1),
+                         source_bound(5, 0, 0, 0)});
+    InputEvent event = key(InputEventKind::KeyDown, 0x3D);
+    event.source_index = 0;
+    check_macros(engine.handle(event), {5});
+}
+
+TEST_CASE(multiple_add_bindings_send_one_physical_press_and_release) {
+    BindingEngine engine;
+    engine.set_bindings({bound(0x3D, BindingMode::ADD, ActionKind::RUN_MACRO, 1),
+                         bound(0x3D, BindingMode::ADD, ActionKind::RUN_MACRO, 2)});
+    const Outcome outcome = engine.handle(key(InputEventKind::KeyDown, 0x3D));
+    CHECK_EQ(count_of(outcome, ActionRequestKind::RunMacro), 2);
+    CHECK_EQ(count_of(outcome, ActionRequestKind::SendInput), 1);
+    CHECK_EQ(engine.handle(key(InputEventKind::KeyDown, 0x3D)).count, 0u);
+    CHECK_EQ(count_of(engine.handle(key(InputEventKind::KeyUp, 0x3D)),
+                      ActionRequestKind::SendInput), 1);
+}
+
+TEST_CASE(any_matching_replace_suppresses_the_physical_press_and_release) {
+    BindingEngine engine;
+    engine.set_bindings({bound(0x3D, BindingMode::ADD, ActionKind::RUN_MACRO, 1),
+                         bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 2)});
+    check_macros(engine.handle(key(InputEventKind::KeyDown, 0x3D)), {1, 2});
+    CHECK_EQ(engine.handle(key(InputEventKind::KeyUp, 0x3D)).count, 0u);
+}
+
+TEST_CASE(full_outcomes_stop_before_a_route_change_that_cannot_release_both_targets) {
+    BindingEngine engine;
+    engine.set_keyboard_route(KeyboardRoute::BOTH);
+    engine.set_bindings({bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 1),
+                         bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 2),
+                         bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 3),
+                         bound(0x3D, BindingMode::REPLACE, ActionKind::TOGGLE_KEYBOARD_ROUTE),
+                         bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 4)});
+    check_macros(engine.handle(key(InputEventKind::KeyDown, 0x3D)), {1, 2, 3});
+    CHECK(engine.keyboard_route() == KeyboardRoute::BOTH);
+}
+
+TEST_CASE(full_outcomes_do_not_partially_release_for_a_profile_change) {
+    BindingEngine engine;
+    engine.set_bindings({bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 1),
+                         bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 2),
+                         bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 3),
+                         bound(0x3D, BindingMode::REPLACE, ActionKind::SET_PROFILE, 2)});
+    check_macros(engine.handle(key(InputEventKind::KeyDown, 0x3D)), {1, 2, 3});
+}
+
+TEST_CASE(multiple_matches_keep_the_existing_action_capacity) {
+    BindingEngine engine;
+    engine.set_bindings({bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 1),
+                         bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 2),
+                         bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 3),
+                         bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 4),
+                         bound(0x3D, BindingMode::REPLACE, ActionKind::RUN_MACRO, 5)});
+    check_macros(engine.handle(key(InputEventKind::KeyDown, 0x3D)), {1, 2, 3, 4});
+}
 
 // ------------------------------------------------------------ pass-through
 

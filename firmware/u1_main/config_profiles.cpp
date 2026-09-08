@@ -93,6 +93,7 @@ std::size_t StoredProfiles::bindings_for(std::uint8_t profile_id, mapping::Bindi
             slot.code = static_cast<std::uint16_t>(slot.code - 1);
         }
         slot.required_modifiers = binding.trigger_modifiers();
+        slot.source = binding.source();
         slot.mode = binding.mode();
         slot.action = binding.action_kind();
         slot.parameter = binding.action_argument();

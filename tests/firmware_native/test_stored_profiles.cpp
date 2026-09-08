@@ -180,6 +180,51 @@ TEST_CASE(a_mouse_binding_leaves_the_neighbouring_button_alone) {
     }
 }
 
+TEST_CASE(stored_source_qualifiers_reach_the_engine_and_legacy_reload_clears_them) {
+    auto blob = read_vector("valid_full.bin");
+    CHECK(!blob.empty());
+    if (blob.empty()) return;
+    const std::size_t offset_field = duo_input::config::CONFIG_HEADER_SIZE + 16;
+    std::size_t binding_offset = 0;
+    for (std::size_t byte = 0; byte < 4; ++byte) {
+        binding_offset |= static_cast<std::size_t>(blob[offset_field + byte]) << (8 * byte);
+    }
+    // Qualify the vector's second binding: mouse button 5, Add, SetProfile.
+    const std::size_t source = binding_offset + duo_input::config::BINDING_RECORD_SIZE + 6;
+    blob[source] = 0x34;
+    blob[source + 1] = 0x12;
+    blob[source + 2] = 0x78;
+    blob[source + 3] = 0x56;
+    blob[source + 4] = 1;
+    for (std::size_t byte = 12; byte < 16; ++byte) blob[byte] = 0;
+    const auto crc = duo_input::protocol::crc32_ieee({blob.data(), blob.size()});
+    for (std::size_t byte = 0; byte < 4; ++byte) {
+        blob[12 + byte] = static_cast<std::uint8_t>(crc >> (8 * byte));
+    }
+    StoredProfiles profiles;
+    CHECK(profiles.load({blob.data(), blob.size()}));
+    Binding bindings[kMaxBindings];
+    BindingEngine engine;
+    engine.set_bindings(bindings, profiles.bindings_for(1, bindings));
+    InputEvent event;
+    event.kind = InputEventKind::MouseButtonDown;
+    event.code = 4;
+    // Without a resolved source the qualified profile action must not run.
+    Outcome outcome = engine.handle(event);
+    CHECK_EQ(outcome.count, 1u);
+    CHECK(outcome.actions[0].kind == ActionRequestKind::SendInput);
+    event.kind = InputEventKind::MouseButtonUp;
+    engine.handle(event);
+
+    // Reuse the output buffer: a legacy binding must erase its old qualifier.
+    Loaded legacy;
+    engine.set_bindings(bindings, legacy.profiles.bindings_for(1, bindings));
+    event.kind = InputEventKind::MouseButtonDown;
+    outcome = engine.handle(event);
+    CHECK_EQ(outcome.count, 3u);
+    if (outcome.count == 3) CHECK(outcome.actions[2].kind == ActionRequestKind::SetProfile);
+}
+
 TEST_CASE(an_action_that_carries_no_argument_still_arrives_intact) {
     Loaded loaded;
     Binding bindings[kMaxBindings];

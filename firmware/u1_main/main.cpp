@@ -421,6 +421,7 @@ void core1_entry() {
     // landing in it would be a request that never returns.
     multicore_lockout_victim_init();
     duo_input::u1::set_core1_running(true);
+    g_runtime.engine().set_sources(g_sources);
 
 #ifndef DUO_INPUT_BACKEND_CH375
     // The physical input path is product functionality, not a bring-up

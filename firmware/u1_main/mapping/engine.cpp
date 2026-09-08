@@ -90,22 +90,19 @@ void BindingEngine::release_reached(Outcome& outcome, bool keyboard, bool mouse)
     }
 }
 
-const Binding* BindingEngine::find_binding(const InputEvent& event) const {
-    const config::TriggerKind kind = trigger_of(event.kind);
-    for (std::size_t index = 0; index < binding_count_; ++index) {
-        const Binding& binding = bindings_[index];
-        if (binding.trigger != kind || binding.code != event.code) {
-            continue;
-        }
-        // A binding that asks for modifiers applies only while they are held.
-        // Without them the key is unbound and does what it always did, which
-        // is what somebody pressing it expects.
-        if ((modifiers_ & binding.required_modifiers) != binding.required_modifiers) {
-            continue;
-        }
-        return &binding;
+bool BindingEngine::matches(const Binding& binding, const InputEvent& event,
+                            const input::SourceIdentity* source) const {
+    if (binding.trigger != trigger_of(event.kind) || binding.code != event.code ||
+        (modifiers_ & binding.required_modifiers) != binding.required_modifiers) {
+        return false;
     }
-    return nullptr;
+    const auto& required = binding.source;
+    const bool any_source = required.vendor_id == 0 && required.product_id == 0 &&
+                            required.interface_number == 0;
+    return any_source ||
+           (source != nullptr && required.vendor_id == source->vendor_id &&
+            required.product_id == source->product_id &&
+            required.interface_number == source->interface_number);
 }
 
 BindingEngine::Held* BindingEngine::find_held(InputEventKind kind, std::uint16_t code) {
@@ -165,6 +162,9 @@ void BindingEngine::orphan(bool keys, bool buttons) {
 
 Outcome BindingEngine::handle(const InputEvent& event) {
     Outcome outcome;
+    input::SourceIdentity identity;
+    const input::SourceIdentity* source =
+        sources_ != nullptr && sources_->resolve(event.source_index, identity) ? &identity : nullptr;
 
     // Modifiers are tracked before anything is matched, so a binding that asks
     // for shift sees the shift that arrived a moment earlier.
@@ -202,34 +202,39 @@ Outcome BindingEngine::handle(const InputEvent& event) {
         return outcome;
     }
 
-    const Binding* binding = find_binding(event);
-    const bool swallowed = binding != nullptr && binding->mode == config::BindingMode::REPLACE;
+    bool matched[kMaxBindings] = {};
+    bool swallowed = false;
+    for (std::size_t index = 0; index < binding_count_; ++index) {
+        matched[index] = matches(bindings_[index], event, source);
+        swallowed = swallowed ||
+                    (matched[index] && bindings_[index].mode == config::BindingMode::REPLACE);
+    }
     remember(event, swallowed);
 
-    if (binding == nullptr) {
-        ActionRequest request;
-        request.kind = ActionRequestKind::SendInput;
-        request.event = event;
-        add(outcome, request);
-        return outcome;
-    }
-
-    // Add lets the key through as well; Replace swallows it. That is the whole
-    // difference between the two modes, and getting it backwards gives either
-    // a key that seems to do nothing or one that does its job and types a
-    // character nobody wanted.
-    if (binding->mode == config::BindingMode::ADD) {
+    // All Add matches share one physical press; any Replace suppresses it and
+    // its eventual release, even if that binding is beyond the output budget.
+    if (!swallowed) {
         ActionRequest request;
         request.kind = ActionRequestKind::SendInput;
         request.event = event;
         add(outcome, request);
     }
 
-    switch (binding->action) {
+    for (std::size_t index = 0; index < binding_count_; ++index) {
+        if (matched[index] && !apply_binding(outcome, bindings_[index])) {
+            break;
+        }
+    }
+    return outcome;
+}
+
+bool BindingEngine::apply_binding(Outcome& outcome, const Binding& binding) {
+    switch (binding.action) {
         case config::ActionKind::RUN_MACRO: {
+            if (outcome.count == kMaxActionsPerEvent) return false;
             ActionRequest request;
             request.kind = ActionRequestKind::RunMacro;
-            request.parameter = binding->parameter;
+            request.parameter = binding.parameter;
             add(outcome, request);
             break;
         }
@@ -238,15 +243,25 @@ Outcome BindingEngine::handle(const InputEvent& event) {
         case config::ActionKind::TOGGLE_KEYBOARD_ROUTE:
         case config::ActionKind::SET_MOUSE_ROUTE:
         case config::ActionKind::TOGGLE_MOUSE_ROUTE: {
-            const bool keyboard = binding->action == config::ActionKind::SET_KEYBOARD_ROUTE ||
-                                  binding->action == config::ActionKind::TOGGLE_KEYBOARD_ROUTE;
-            const bool toggle = binding->action == config::ActionKind::TOGGLE_KEYBOARD_ROUTE ||
-                                binding->action == config::ActionKind::TOGGLE_MOUSE_ROUTE;
-            move_route(outcome, keyboard, toggle, binding->parameter);
+            const bool keyboard = binding.action == config::ActionKind::SET_KEYBOARD_ROUTE ||
+                                  binding.action == config::ActionKind::TOGGLE_KEYBOARD_ROUTE;
+            const bool toggle = binding.action == config::ActionKind::TOGGLE_KEYBOARD_ROUTE ||
+                                binding.action == config::ActionKind::TOGGLE_MOUSE_ROUTE;
+            if (!toggle &&
+                !(keyboard ? Routes::keyboard_route_is_valid(
+                                 static_cast<config::KeyboardRoute>(binding.parameter))
+                           : Routes::mouse_route_is_valid(
+                                 static_cast<config::MouseRoute>(binding.parameter)))) {
+                break;
+            }
+            if (!move_route(outcome, keyboard, toggle, binding.parameter)) return false;
             break;
         }
 
         case config::ActionKind::SET_PROFILE: {
+            Outcome releases;
+            release_reached(releases, true, true);
+            if (outcome.count + releases.count + 1 > kMaxActionsPerEvent) return false;
             // The new profile may bind a held key to something else entirely,
             // and the far side is holding it under the old meaning.
             release_reached(outcome, true, true);
@@ -254,13 +269,13 @@ Outcome BindingEngine::handle(const InputEvent& event) {
 
             ActionRequest request;
             request.kind = ActionRequestKind::SetProfile;
-            request.parameter = binding->parameter;
+            request.parameter = binding.parameter;
             add(outcome, request);
             break;
         }
     }
 
-    return outcome;
+    return true;
 }
 
 bool BindingEngine::move_route(Outcome& outcome, bool keyboard, bool toggle,
@@ -277,6 +292,10 @@ bool BindingEngine::move_route(Outcome& outcome, bool keyboard, bool toggle,
     if (!allowed) {
         return false;
     }
+
+    Outcome releases;
+    release_reached(releases, keyboard, !keyboard);
+    if (outcome.count + releases.count > kMaxActionsPerEvent) return false;
 
     // Released before the route moves, while "where this reaches" still means
     // the computer being left behind. That machine will never hear about these

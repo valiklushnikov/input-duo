@@ -23,6 +23,7 @@
 #include "config/format.hpp"
 #include "hid/types.hpp"
 #include "input/events.hpp"
+#include "input/source_table.hpp"
 #include "mapping/binding.hpp"
 #include "mapping/routes.hpp"
 
@@ -47,8 +48,8 @@ struct ActionRequest {
     std::uint8_t parameter = 0;
 };
 
-/// The most one input event can ask for: release both computers, and an
-/// action. Nothing produces more, and a fixed size costs nothing here.
+/// Fixed output budget. Matching bindings run in stored order until the next
+/// complete action (including prerequisite releases) no longer fits.
 inline constexpr std::size_t kMaxActionsPerEvent = 4;
 
 struct Outcome {
@@ -64,6 +65,9 @@ inline constexpr std::size_t kMaxHeld = 20;
 
 class BindingEngine {
 public:
+    /// Attach on the input core before events arrive. The table must outlive us.
+    void set_sources(const input::SourceTable& sources) { sources_ = &sources; }
+
     void set_bindings(std::initializer_list<Binding> bindings);
     void set_bindings(const Binding* bindings, std::size_t count);
 
@@ -96,7 +100,9 @@ private:
         bool suppressed = false;
     };
 
-    const Binding* find_binding(const input::InputEvent& event) const;
+    bool matches(const Binding& binding, const input::InputEvent& event,
+                 const input::SourceIdentity* source) const;
+    bool apply_binding(Outcome& outcome, const Binding& binding);
     bool remember(const input::InputEvent& event, bool suppressed);
     bool forget(const input::InputEvent& event);
     Held* find_held(input::InputEventKind kind, std::uint16_t code);
@@ -112,6 +118,7 @@ private:
     bool move_route(Outcome& outcome, bool keyboard, bool toggle, std::uint8_t parameter);
 
     Routes routes_;
+    const input::SourceTable* sources_ = nullptr;
     Binding bindings_[kMaxBindings];
     std::size_t binding_count_ = 0;
 

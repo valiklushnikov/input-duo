@@ -26,6 +26,8 @@ struct Binding {
     config::ActionKind action = config::ActionKind::RUN_MACRO;
     /// A macro index, a route, or a profile - whichever the action needs.
     std::uint8_t parameter = 0;
+    /// Persistent device identity; all zeros means any source.
+    config::TriggerSource source{};
 };
 
 /// How many bindings one profile may carry.
