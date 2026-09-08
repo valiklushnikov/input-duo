@@ -114,8 +114,8 @@ def test_a_string_blob_that_does_not_start_at_the_profile_table_end_is_refused()
 @pytest.mark.parametrize(
     "name", ("valid_full.bin", "valid_minimal.bin", "valid_wide_usages.bin")
 )
-def test_a_package_survives_being_read_and_written_again(name):
-    """Byte-identical output is the only proof that nothing was dropped.
+def test_a_minor_zero_package_upgrades_without_moving_its_content(name):
+    """Only the schema minor and its dependent CRC change on rewrite.
 
     valid_full.bin is the hard case: Cyrillic and emoji in names, a macro with
     nine steps, and the maximum macro ID.
@@ -126,8 +126,12 @@ def test_a_package_survives_being_read_and_written_again(name):
     original = _vector(name)
 
     config = parse_device_config(original)
+    rewritten = bytearray(compile_device_config(config))
+    assert original[5] == 0
+    assert rewritten[5] == 1
+    rewritten[5] = 0
 
-    assert compile_device_config(config) == original
+    assert _recrc(rewritten) == original
 
 
 def test_the_names_come_back_as_the_operator_typed_them():

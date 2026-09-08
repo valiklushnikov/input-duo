@@ -289,11 +289,17 @@ def test_the_two_configurations_are_not_the_same_package():
 
 
 def test_adding_a_second_configuration_did_not_move_the_first():
-    # The Step 4 acceptance ran against these exact bytes on hardware. A
-    # refactor that changed them would invalidate a passed acceptance.
+    # The Step 4 acceptance ran against schema-minor 0. Normalize the current
+    # minor and its CRC to prove no other byte moved from that hardware run.
     import hashlib
+    import zlib
 
-    assert hashlib.sha256(build_package()).hexdigest() == S4_PACKAGE_SHA256
+    package = bytearray(build_package())
+    assert package[5] == 1
+    package[5] = 0
+    package[12:16] = b"\0" * 4
+    package[12:16] = zlib.crc32(package).to_bytes(4, "little")
+    assert hashlib.sha256(package).hexdigest() == S4_PACKAGE_SHA256
 
 
 def test_the_configuration_registry_offers_both_acceptance_rigs_by_name():

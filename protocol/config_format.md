@@ -6,8 +6,9 @@ order, strings and data records appear in the order described below, all reserve
 alignment padding are zero, and no region may overlap or leave trailing bytes.
 
 The maximum package size is the generated `BINARY_CONFIG_MAX_BYTES` value (368640 bytes).
-Schema-major mismatches are incompatible. Schema-minor 0 is written by this version; readers
-accept any minor while all flags remain zero.
+Schema-major mismatches are incompatible. Schema-minor 1 is written by this version; it assigns
+the binding record's former reserved bytes to the source qualifier. Readers accept any minor while
+all flags remain zero, so minor-0 packages with zero-filled binding source bytes remain compatible.
 
 ## Stable values
 

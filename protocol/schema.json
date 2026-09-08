@@ -126,7 +126,7 @@
   },
   "schema_version": {
     "major": 1,
-    "minor": 0
+    "minor": 1
   },
   "spi_messages": {
     "CONSUMER_STATE": 3,

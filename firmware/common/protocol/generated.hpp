@@ -7,7 +7,7 @@
 namespace duo_input::protocol {
 
 inline constexpr std::uint8_t SCHEMA_VERSION_MAJOR = 1;
-inline constexpr std::uint8_t SCHEMA_VERSION_MINOR = 0;
+inline constexpr std::uint8_t SCHEMA_VERSION_MINOR = 1;
 inline constexpr std::uint8_t PROTOCOL_VERSION_MAJOR = 1;
 inline constexpr std::uint8_t PROTOCOL_VERSION_MINOR = 0;
 

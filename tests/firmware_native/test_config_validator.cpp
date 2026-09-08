@@ -39,6 +39,7 @@ static_assert(std::is_same_v<duo_input::config::ActionKind,
                              duo_input::protocol::ActionKind>);
 static_assert(std::is_same_v<decltype(std::declval<const duo_input::config::BindingView&>().source()),
                              duo_input::config::TriggerSource>);
+static_assert(duo_input::protocol::SCHEMA_VERSION_MINOR == 1U);
 static_assert(!std::is_constructible_v<ValidationResult, ValidationError>);
 static_assert(!std::is_constructible_v<ValidationResult, ValidationError, ConfigView>);
 static_assert(std::is_same_v<decltype(std::declval<const ValidationResult&>().error()),
@@ -201,13 +202,47 @@ TEST_CASE(config_validator_rejects_exact_trigger_source_duplicate) {
     CHECK(rejects(bytes));
 }
 
-TEST_CASE(config_validator_rejects_partially_zero_source) {
+TEST_CASE(config_validator_rejects_every_partially_zero_source) {
+    const std::array<duo_input::config::TriggerSource, 5> invalid_sources{{
+        {0x3434U, 0U, 0U},
+        {0x3434U, 0U, 1U},
+        {0U, 0xD030U, 0U},
+        {0U, 0xD030U, 1U},
+        {0U, 0U, 1U},
+    }};
+
+    for (const auto source : invalid_sources) {
+        std::vector<std::uint8_t> bytes = read_vector("valid_full.bin");
+        const std::size_t binding_offset = read_u32(bytes, 64U + 16U);
+        write_u16(bytes, binding_offset + 6U, source.vendor_id);
+        write_u16(bytes, binding_offset + 8U, source.product_id);
+        bytes[binding_offset + 10U] = source.interface_number;
+        repair_crc(bytes);
+
+        CHECK(rejects(bytes));
+    }
+}
+
+TEST_CASE(config_validator_accepts_nonzero_ids_with_interface_zero) {
     std::vector<std::uint8_t> bytes = read_vector("valid_full.bin");
     const std::size_t binding_offset = read_u32(bytes, 64U + 16U);
     write_u16(bytes, binding_offset + 6U, 0x3434U);
+    write_u16(bytes, binding_offset + 8U, 0xD030U);
+    bytes[binding_offset + 10U] = 0U;
     repair_crc(bytes);
 
-    CHECK(rejects(bytes));
+    const auto result = validate_config({bytes.data(), bytes.size()});
+    CHECK(result);
+    if (!result) {
+        return;
+    }
+    duo_input::config::ProfileView profile{};
+    duo_input::config::BindingView binding{};
+    CHECK(result.view().profile_at(0U, profile));
+    CHECK(profile.binding_at(0U, binding));
+    CHECK_EQ(binding.source().vendor_id, 0x3434U);
+    CHECK_EQ(binding.source().product_id, 0xD030U);
+    CHECK_EQ(binding.source().interface_number, 0U);
 }
 
 TEST_CASE(config_binding_view_exposes_source_and_legacy_any_source) {

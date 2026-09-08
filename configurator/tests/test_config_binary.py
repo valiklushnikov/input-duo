@@ -110,6 +110,7 @@ def test_binding_round_trips_its_source():
     binding_offset = int.from_bytes(encoded[64 + 16 : 64 + 20], "little")
     decoded = decode_device_config(encoded)
 
+    assert encoded[5] == 1
     assert int.from_bytes(encoded[64 + 20 : 64 + 22], "little") == 12
     assert encoded[binding_offset : binding_offset + 6] == b"\x01\x4f\x01\x01\x06\x01"
     assert encoded[binding_offset + 6 : binding_offset + 12] == b"\x34\x34\x30\xd0\x01\x00"
@@ -123,6 +124,7 @@ def test_all_zero_source_decodes_as_any():
 
     decoded = decode_device_config(legacy_blob)
 
+    assert legacy_blob[5] == 0
     assert decoded.profiles[0].bindings[0].trigger.source is None
 
 
@@ -144,13 +146,42 @@ def test_compile_accepts_same_trigger_from_distinct_sources_and_rejects_exact_so
         compile_device_config(config_with_first_profile(duplicate_profile))
 
 
-def test_decode_rejects_partially_zero_source():
+@pytest.mark.parametrize(
+    ("vendor_id", "product_id", "interface_number"),
+    [
+        (0x3434, 0, 0),
+        (0x3434, 0, 1),
+        (0, 0xD030, 0),
+        (0, 0xD030, 1),
+        (0, 0, 1),
+    ],
+)
+def test_decode_rejects_every_partially_zero_source(
+    vendor_id, product_id, interface_number
+):
     malformed = bytearray((VECTOR_DIRECTORY / "valid_full.bin").read_bytes())
     binding_offset = int.from_bytes(malformed[64 + 16 : 64 + 20], "little")
-    malformed[binding_offset + 6 : binding_offset + 8] = (0x3434).to_bytes(2, "little")
+    malformed[binding_offset + 6 : binding_offset + 8] = vendor_id.to_bytes(2, "little")
+    malformed[binding_offset + 8 : binding_offset + 10] = product_id.to_bytes(2, "little")
+    malformed[binding_offset + 10] = interface_number
 
     with pytest.raises(ConfigError, match="binding"):
         decode_device_config(repair_crc(malformed))
+
+
+def test_binding_round_trips_nonzero_ids_with_interface_zero():
+    source = TriggerSource(vendor_id=0x3434, product_id=0xD030, interface_number=0)
+    binding = Binding(
+        Trigger(TriggerKind.KEYBOARD_USAGE, 0x4F, source=source),
+        BindingMode.REPLACE,
+        Action(ActionKind.SET_PROFILE, 1),
+    )
+    profile = replace(empty_profile(1), bindings=(binding,))
+
+    encoded = compile_device_config(config_with_first_profile(profile))
+    decoded = decode_device_config(encoded)
+
+    assert decoded.profiles[0].bindings[0].trigger.source == source
 
 
 def test_compile_rejects_mutable_collections_that_cannot_round_trip_equal():
@@ -167,9 +198,15 @@ def test_compile_reports_invalid_nested_domain_objects_as_config_errors():
         compile_device_config(config)
 
 
-def test_committed_vectors_match_deterministic_python_compiler():
-    assert (VECTOR_DIRECTORY / "valid_minimal.bin").read_bytes() == compile_device_config(minimal_config())
-    assert (VECTOR_DIRECTORY / "valid_full.bin").read_bytes() == compile_device_config(full_config())
+def test_committed_minor_zero_vectors_match_compiler_content():
+    for name, config in (
+        ("valid_minimal.bin", minimal_config()),
+        ("valid_full.bin", full_config()),
+    ):
+        legacy_equivalent = bytearray(compile_device_config(config))
+        legacy_equivalent[5] = 0
+
+        assert (VECTOR_DIRECTORY / name).read_bytes() == repair_crc(legacy_equivalent)
 
 
 @pytest.mark.parametrize(
