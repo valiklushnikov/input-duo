@@ -264,11 +264,6 @@
         <translation>Detect a key or button</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="110" />
-        <source>Press the mouse button you want to use.</source>
-        <translation>Press the mouse button you want to use.</translation>
-    </message>
-    <message>
         <location filename="../../ui/bindings.py" line="112" />
         <source>Press the key or mouse button you want to bind.</source>
         <translation>Press the key or mouse button you want to bind.</translation>
@@ -1190,6 +1185,11 @@
         <location filename="../../ui/mouse.py" line="154" />
         <source>Detect button</source>
         <translation>Detect button</translation>
+    </message>
+    <message>
+        <location filename="../../ui/mouse.py" line="331" />
+        <source>Press the button or key on the mouse you want to use.</source>
+        <translation>Press the button or key on the mouse you want to use.</translation>
     </message>
     <message>
         <location filename="../../ui/mouse.py" line="156" />

@@ -17,8 +17,9 @@ from PySide6.QtCore import (
     Qt,
 )
 from PySide6.QtCore import QT_TRANSLATE_NOOP
+from PySide6.QtGui import QBrush, QColor
 
-from duo_input.domain.models import Action, Binding, Profile, Trigger
+from duo_input.domain.models import Action, Binding, Profile, Trigger, TriggerSource
 from duo_input.generated.protocol import (
     ActionKind,
     Capability,
@@ -26,6 +27,7 @@ from duo_input.generated.protocol import (
     MouseRoute,
     TriggerKind,
 )
+from duo_input.ui.theme import INK_FAINT
 
 # HID keyboard modifier bits, in report order.
 LEFT_CTRL = 0x01
@@ -145,13 +147,35 @@ def modifier_label(modifiers: int) -> str:
     return "+".join(label for _, label, bit in MODIFIER_BITS if modifiers & bit)
 
 
+def source_label(source: TriggerSource) -> str:
+    """The device a trigger is qualified to, as the operator can check it.
+
+    ``VID:PID`` and the interface, because that triple is everything the
+    device says about a source: a peripheral report carries no product string
+    and nothing here may invent one. The same identifiers appear in the
+    diagnostics, so a screenshot and an export name the same device.
+    """
+    return (
+        f"{source.vendor_id:04X}:{source.product_id:04X}"
+        f" (interface {source.interface_number})"
+    )
+
+
+def qualified_label(label: str, source: TriggerSource | None) -> str:
+    """``label``, followed by the device it came from when it names one."""
+    return label if source is None else f"{label} - {source_label(source)}"
+
+
 def trigger_label(trigger: Trigger) -> str:
     """One trigger as the operator reads it. Never localised."""
     if trigger.kind == TriggerKind.MOUSE_BUTTON:
-        return f"Button {trigger.code}"
-    prefix = modifier_label(trigger.modifiers)
-    name = key_name(trigger.code)
-    return f"{prefix}+{name}" if prefix else name
+        name = f"Button {trigger.code}"
+    else:
+        prefix = modifier_label(trigger.modifiers)
+        name = key_name(trigger.code)
+        if prefix:
+            name = f"{prefix}+{name}"
+    return qualified_label(name, trigger.source)
 
 
 #: What each action does, said the way the operator would say it. The protocol
@@ -251,7 +275,7 @@ def _enum_name(enum_type: type, value: int) -> str:
 
 @dataclass(frozen=True)
 class MouseCapabilities:
-    """Which mouse buttons this configurator is willing to offer.
+    """What the hardware attached right now can produce.
 
     Protocol v1 tells the host that a mouse is attached, not how many buttons
     it has. Rather than offer Button 4 and 5 to every operator and let the
@@ -259,10 +283,21 @@ class MouseCapabilities:
     device has actually reported one through a capture event. Reconnecting a
     different mouse starts the observation over, which is what makes a binding
     on Button 4 show up as unavailable.
+
+    A binding may also name the device it belongs to, so the same question -
+    "can this be pressed on what is attached?" - is asked of the source as
+    well as of the button. Only a diagnostics read carries the identities, and
+    until one lands nothing here has grounds to call anything absent.
     """
 
     advertised: bool = False
     observed: frozenset[int] = frozenset()
+    #: ``(vendor_id, product_id)`` of every device U1 reported on its own bus.
+    #: ``None`` while no report has said - which is not the same as an empty
+    #: set, and is why an unread device greys nothing out.
+    attached_ids: frozenset[tuple[int, int]] | None = None
+    #: The one of them that enumerated as a mouse, when U1 named one.
+    mouse_id: tuple[int, int] | None = None
 
     @classmethod
     def from_device_info(cls, info: object | None) -> MouseCapabilities:
@@ -270,6 +305,41 @@ class MouseCapabilities:
         if capabilities is None:
             return cls()
         return cls(advertised=bool(int(capabilities) & int(Capability.MOUSE_HID)))
+
+    def with_peripherals(self, ports: object | None) -> MouseCapabilities:
+        """Adopt the peripheral ports of a diagnostics read.
+
+        ``None`` - no read yet, or a device that answered without the block -
+        clears the identities rather than reading as "nothing is attached":
+        the two look the same from here and only one of them is evidence.
+        """
+        if ports is None:
+            return replace(self, attached_ids=None, mouse_id=None)
+        present = [port for port in ports if getattr(port, "attached", False)]
+        mouse = next(
+            (port for port in present if getattr(port, "kind", "") == "mouse"), None
+        )
+        return replace(
+            self,
+            attached_ids=frozenset(
+                (int(port.vendor_id), int(port.product_id)) for port in present
+            ),
+            mouse_id=(
+                None if mouse is None else (int(mouse.vendor_id), int(mouse.product_id))
+            ),
+        )
+
+    def is_mouse(self, source: TriggerSource | None) -> bool:
+        """Did the mouse that is attached right now produce ``source``?
+
+        Only a report can answer yes: an unqualified press and an unread
+        device are both "nobody said", and neither is the mouse saying so.
+        The interface number is deliberately not compared - a peripheral
+        report names a port and its device, never one of its interfaces.
+        """
+        if source is None or self.mouse_id is None:
+            return False
+        return (int(source.vendor_id), int(source.product_id)) == self.mouse_id
 
     @property
     def buttons(self) -> tuple[int, ...]:
@@ -285,7 +355,18 @@ class MouseCapabilities:
         return replace(self, observed=self.observed | {int(button)})
 
     def allows(self, trigger: Trigger) -> bool:
-        """Can ``trigger`` be pressed on the hardware that is attached now?"""
+        """Can ``trigger`` be pressed on the hardware that is attached now?
+
+        A trigger qualified to a device U1 did not report is unavailable
+        whatever its kind - the key is on hardware that is not here. It takes
+        a report to say that: with ``attached_ids`` unread, nothing is called
+        absent, which is what leaves an unqualified binding exactly as
+        available as it has always been.
+        """
+        if trigger.source is not None and self.attached_ids is not None:
+            identity = (int(trigger.source.vendor_id), int(trigger.source.product_id))
+            if identity not in self.attached_ids:
+                return False
         if trigger.kind != TriggerKind.MOUSE_BUTTON:
             return True
         return trigger.code in self.buttons
@@ -299,11 +380,23 @@ class BindingTableModel(QAbstractTableModel):
     def __init__(self, parent: object | None = None) -> None:
         super().__init__(parent)
         self._profile: Profile | None = None
+        self._capabilities = MouseCapabilities()
 
     def set_profile(self, profile: Profile | None) -> None:
         self.beginResetModel()
         self._profile = profile
         self.endResetModel()
+
+    def set_capabilities(self, capabilities: MouseCapabilities) -> None:
+        """Say what is attached, so a row nothing can press can say so."""
+        self._capabilities = capabilities
+        rows = self.rowCount()
+        if rows:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(rows - 1, self.columnCount() - 1),
+                [Qt.ItemDataRole.ForegroundRole],
+            )
 
     @property
     def profile(self) -> Profile | None:
@@ -336,10 +429,19 @@ class BindingTableModel(QAbstractTableModel):
         return 3
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
-        if not index.isValid() or role != Qt.ItemDataRole.DisplayRole:
+        if not index.isValid():
             return None
         binding = self.binding_at(index.row())
         if binding is None:
+            return None
+        if role == Qt.ItemDataRole.ForegroundRole:
+            # A binding whose trigger cannot be pressed on what is attached is
+            # still stored and still written to the device; it is only unusable
+            # right now, so it is dimmed rather than hidden or removed.
+            if self._capabilities.allows(binding.trigger):
+                return None
+            return QBrush(QColor(INK_FAINT))
+        if role != Qt.ItemDataRole.DisplayRole:
             return None
         if index.column() == self.TRIGGER:
             return trigger_label(binding.trigger)
@@ -373,5 +475,7 @@ __all__ = [
     "action_label",
     "key_name",
     "modifier_label",
+    "qualified_label",
+    "source_label",
     "trigger_label",
 ]

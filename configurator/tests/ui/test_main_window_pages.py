@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 
 from duo_input.device.emulator import U1Emulator
 from duo_input.device.service import DeviceService
-from duo_input.domain.models import Action, Binding, Trigger
+from duo_input.domain.models import Action, Binding, Trigger, TriggerSource
 from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.generated.protocol import ActionKind, BindingMode, TriggerKind
 from duo_input.ui.main_window import MainWindow
@@ -16,12 +18,35 @@ from duo_input.ui.models.binding_table import MouseCapabilities
 from duo_input.ui.models.project_session import AddBinding, RenameProfile, default_project
 
 
-def _binding(code: int = 0x04) -> Binding:
+#: The mouse this emulator puts on U1's bus, and a device that is not there.
+#: Test data: nothing in the program may know either pair.
+BUS_MOUSE = TriggerSource(0x3434, 0xD030, 1)
+ELSEWHERE = TriggerSource(0x1234, 0x5678, 0)
+
+
+def _binding(code: int = 0x04, *, source: TriggerSource | None = None) -> Binding:
     return Binding(
-        trigger=Trigger(TriggerKind.KEYBOARD_USAGE, code, 0),
+        trigger=Trigger(TriggerKind.KEYBOARD_USAGE, code, 0, source),
         mode=BindingMode.REPLACE,
         action=Action(ActionKind.TOGGLE_KEYBOARD_ROUTE, 0),
     )
+
+
+def _settle(qtbot, window: MainWindow) -> None:
+    """Wait out the read every connect queues, so a test starts from its answer."""
+    settled = [False]
+
+    def _mark(result: object) -> None:
+        if getattr(result, "operation", None) == "read_config":
+            settled[0] = True
+
+    window.service.operation_succeeded.connect(_mark)
+    window.service.operation_failed.connect(_mark)
+    try:
+        qtbot.waitUntil(lambda: settled[0], timeout=5000)
+    finally:
+        window.service.operation_succeeded.disconnect(_mark)
+        window.service.operation_failed.disconnect(_mark)
 
 
 @pytest.fixture
@@ -93,6 +118,53 @@ def test_a_binding_added_on_the_mouse_page_shows_up_on_the_bindings_page(window)
 
     assert window.bindings.model.rowCount() == 1
     assert window.session.project.profiles[0].bindings[0].trigger.code == 3
+
+
+def test_the_shell_tells_the_table_which_devices_are_on_the_bus(
+    window, qtbot, emulator
+):
+    """The greying has to be reached the way the operator reaches it.
+
+    Nothing here sets a capability by hand: the peripheral report comes off
+    the emulator, through the Refresh button on the Diagnostics page, and out
+    into the pages the shell repaints afterwards.
+    """
+    emulator.input_backend = 2
+    emulator.peripheral_ports = (
+        (1, 1, 2, BUS_MOUSE.vendor_id, BUS_MOUSE.product_id, 5, 0, bytes(32)),
+        (0, 0, 0, 0, 0, 0, 0, bytes(32)),
+    )
+    with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
+        window.connect_device(emulator)
+    _settle(qtbot, window)
+    here = _binding(0x07, source=BUS_MOUSE)
+    away = _binding(0x08, source=ELSEWHERE)
+    window.apply_command(AddBinding(window.session.project.active_profile_id, here))
+    window.apply_command(AddBinding(window.session.project.active_profile_id, away))
+
+    window.show_page(window.PAGE_DIAGNOSTICS)
+    with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
+        QTest.mouseClick(
+            window.diagnostics.refresh_button, Qt.MouseButton.LeftButton
+        )
+
+    assert window.bindings.capabilities.mouse_id == (
+        BUS_MOUSE.vendor_id,
+        BUS_MOUSE.product_id,
+    )
+    model = window.bindings.model
+    present = model.index(model.row_of(here.uuid), model.TRIGGER)
+    absent = model.index(model.row_of(away.uuid), model.TRIGGER)
+    assert model.data(present, Qt.ItemDataRole.ForegroundRole) is None
+    assert model.data(absent, Qt.ItemDataRole.ForegroundRole) is not None
+    assert "1234:5678 (interface 0)" in model.data(absent)
+
+    # Unplugging takes the report with it: nothing is left saying the device
+    # is missing, so nothing may go on claiming it is.
+    window.disconnect_device()
+
+    assert window.bindings.capabilities.mouse_id is None
+    assert model.data(absent, Qt.ItemDataRole.ForegroundRole) is None
 
 
 # ------------------------------------------------------------------- validation

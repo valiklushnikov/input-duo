@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import struct
+
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QLabel
 
 from duo_input.device.emulator import U1Emulator
 from duo_input.device.qt_transport import SynchronousTransportLink
 from duo_input.device.service import DeviceService
-from duo_input.domain.models import Action, Binding, Trigger
+from duo_input.device.transactions import PeripheralPort
+from duo_input.domain.models import Action, Binding, Trigger, TriggerSource
 from duo_input.generated.protocol import (
     ActionKind,
     BindingMode,
@@ -30,9 +35,47 @@ from duo_input.ui.mouse import MouseSwitchPage
 from duo_input.ui import theme
 
 
-def _switch(code: int, *, kind=TriggerKind.MOUSE_BUTTON, action=None) -> Binding:
+#: The mouse U1 reports on its own bus in these tests. Test data, never a
+#: production constant: nothing in the program may know this pair.
+MOUSE_VID = 0x3434
+MOUSE_PID = 0xD030
+
+#: A "Right" arrow with Ctrl, on interface 1 of that mouse - the shape a mouse
+#: whose side button is wired to a keyboard usage actually reports.
+CAPTURED_SOURCE = TriggerSource(MOUSE_VID, MOUSE_PID, 1)
+CAPTURED_KEY = 0x4F
+
+
+def _attached_mouse() -> PeripheralPort:
+    return PeripheralPort(
+        attached=True,
+        ready=True,
+        kind="mouse",
+        vendor_id=MOUSE_VID,
+        product_id=MOUSE_PID,
+        buttons=5,
+        report_descriptor_bytes=0,
+        descriptor_hash=None,
+    )
+
+
+def _capture_payload(kind: int, code: int, modifiers: int, source: TriggerSource) -> bytes:
+    return struct.pack(
+        "<BBBHHB",
+        int(kind),
+        code,
+        modifiers,
+        source.vendor_id,
+        source.product_id,
+        source.interface_number,
+    )
+
+
+def _switch(
+    code: int, *, kind=TriggerKind.MOUSE_BUTTON, action=None, source=None
+) -> Binding:
     return Binding(
-        trigger=Trigger(kind, code, 0),
+        trigger=Trigger(kind, code, 0, source),
         mode=BindingMode.REPLACE,
         action=action or Action(ActionKind.TOGGLE_MOUSE_ROUTE, 0),
     )
@@ -228,6 +271,112 @@ def test_a_detected_side_button_is_selected(qtbot):
     assert page.mouse_combo.currentText() == "Side button 2"
 
 
+def test_a_key_the_attached_mouse_sends_is_captured_and_selected(qtbot):
+    """A mouse whose side button reports a keyboard usage is still the mouse.
+
+    Driven through the real Detect button and a real capture payload, because
+    a handler production never reaches is a handler a test must not reach
+    either.
+    """
+    service = DeviceService(timeout_ms=5000)
+    emulator = U1Emulator()
+    link = SynchronousTransportLink(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(link)
+    page = MouseSwitchPage(service)
+    qtbot.addWidget(page)
+    page.set_capabilities(
+        MouseCapabilities(advertised=True).with_peripherals((_attached_mouse(),))
+    )
+    page.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        QTest.mouseClick(page.capture_button, Qt.MouseButton.LeftButton)
+    dialogs = page.findChildren(CaptureDialog)
+    assert len(dialogs) == 1
+    dialog = dialogs[0]
+    assert emulator.queue_capture_event(
+        _capture_payload(
+            TriggerKind.KEYBOARD_USAGE, CAPTURED_KEY, LEFT_CTRL, CAPTURED_SOURCE
+        )
+    )
+
+    with qtbot.waitSignal(service.capture_received, timeout=5000):
+        link.poll()
+
+    expected = Trigger(
+        TriggerKind.KEYBOARD_USAGE, CAPTURED_KEY, LEFT_CTRL, CAPTURED_SOURCE
+    )
+    assert dialog.trigger == expected
+    assert page.trigger_kind.currentData() is TriggerKind.KEYBOARD_USAGE
+    assert page.key_combo.currentData() == CAPTURED_KEY
+    assert page.modifier_boxes["ctrl"].isChecked() is True
+    assert page.current_trigger() == expected
+
+
+def test_a_key_from_another_device_is_refused_and_the_window_stays_open(qtbot):
+    """The page is about one mouse: a press on the keyboard is not its press."""
+    service = DeviceService(timeout_ms=5000)
+    emulator = U1Emulator()
+    link = SynchronousTransportLink(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(link)
+    page = MouseSwitchPage(service)
+    qtbot.addWidget(page)
+    page.set_capabilities(
+        MouseCapabilities(advertised=True).with_peripherals((_attached_mouse(),))
+    )
+    page.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        QTest.mouseClick(page.capture_button, Qt.MouseButton.LeftButton)
+    dialog = page.findChildren(CaptureDialog)[0]
+    assert emulator.queue_capture_event(
+        _capture_payload(
+            TriggerKind.KEYBOARD_USAGE,
+            CAPTURED_KEY,
+            LEFT_CTRL,
+            TriggerSource(0x1234, 0x5678, 0),
+        )
+    )
+
+    with qtbot.waitSignal(service.capture_received, timeout=5000):
+        link.poll()
+
+    assert dialog.trigger is None
+    assert page.trigger_kind.currentData() is TriggerKind.MOUSE_BUTTON
+
+
+def test_a_key_the_operator_then_changes_loses_the_device_it_named(qtbot):
+    """The source describes the press that was captured, not the editor."""
+    service = DeviceService(timeout_ms=5000)
+    emulator = U1Emulator()
+    link = SynchronousTransportLink(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(link)
+    page = MouseSwitchPage(service)
+    qtbot.addWidget(page)
+    page.set_capabilities(
+        MouseCapabilities(advertised=True).with_peripherals((_attached_mouse(),))
+    )
+    page.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        QTest.mouseClick(page.capture_button, Qt.MouseButton.LeftButton)
+    assert emulator.queue_capture_event(
+        _capture_payload(
+            TriggerKind.KEYBOARD_USAGE, CAPTURED_KEY, LEFT_CTRL, CAPTURED_SOURCE
+        )
+    )
+    with qtbot.waitSignal(service.capture_received, timeout=5000):
+        link.poll()
+
+    page.key_combo.setCurrentIndex(page.key_combo.findData(0x04))
+
+    assert page.current_trigger() == Trigger(
+        TriggerKind.KEYBOARD_USAGE, 0x04, LEFT_CTRL, None
+    )
+
+
 def test_binding_a_new_button_replaces_the_old_mouse_switch(page):
     old = _switch(4)
     page.set_session(page.session.apply(AddBinding(1, old)))
@@ -253,6 +402,34 @@ def test_the_page_lists_the_switch_bindings_of_the_active_profile(page):
 
     assert page.existing_list.count() == 1
     assert "Middle button (wheel)" in page.existing_list.item(0).text()
+
+
+def test_a_listed_binding_names_the_device_it_is_qualified_to(page):
+    page.set_session(
+        page.session.apply(
+            AddBinding(
+                1,
+                _switch(
+                    CAPTURED_KEY,
+                    kind=TriggerKind.KEYBOARD_USAGE,
+                    source=CAPTURED_SOURCE,
+                ),
+            )
+        )
+    )
+
+    assert "Right - 3434:D030 (interface 1)" in page.existing_list.item(0).text()
+
+
+def test_a_listed_mouse_button_names_its_device_too(page):
+    page.set_session(
+        page.session.apply(AddBinding(1, _switch(3, source=CAPTURED_SOURCE)))
+    )
+
+    assert (
+        "Middle button (wheel) - 3434:D030 (interface 1)"
+        in page.existing_list.item(0).text()
+    )
 
 
 def test_a_binding_that_is_not_about_the_mouse_route_is_not_listed(page):

@@ -10,7 +10,8 @@ from duo_input.device.emulator import U1Emulator
 from duo_input.device.qt_transport import SynchronousTransportLink
 from duo_input.device.service import DeviceService
 from duo_input.device.transactions import PayloadError, parse_capture_event
-from duo_input.domain.models import Action, Binding, Macro, Trigger
+from duo_input.device.transactions import PeripheralPort
+from duo_input.domain.models import Action, Binding, Macro, Trigger, TriggerSource
 from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.generated.protocol import (
     ActionKind,
@@ -31,6 +32,7 @@ from duo_input.ui.models.binding_table import (
     BindingTableModel,
     MouseCapabilities,
     action_label,
+    source_label,
     trigger_label,
 )
 from duo_input.ui.models.project_session import (
@@ -42,11 +44,56 @@ from duo_input.ui.models.project_session import (
 from duo_input.ui import theme
 
 
-def _binding(code: int = 0x04, *, modifiers: int = 0, kind=TriggerKind.KEYBOARD_USAGE) -> Binding:
+#: The mouse U1 reports on its own bus in these tests, and a device that is
+#: nowhere near it. Test data: no production code may know either pair.
+ATTACHED = TriggerSource(0x3434, 0xD030, 1)
+ABSENT = TriggerSource(0x1234, 0x5678, 0)
+
+
+def _binding(
+    code: int = 0x04,
+    *,
+    modifiers: int = 0,
+    kind=TriggerKind.KEYBOARD_USAGE,
+    source: TriggerSource | None = None,
+) -> Binding:
     return Binding(
-        trigger=Trigger(kind, code, modifiers),
+        trigger=Trigger(kind, code, modifiers, source),
         mode=BindingMode.REPLACE,
         action=Action(ActionKind.TOGGLE_KEYBOARD_ROUTE, 0),
+    )
+
+
+def _mouse_only(trigger: Trigger) -> bool:
+    """The acceptance predicate a page that binds only mouse buttons passes."""
+    return trigger.kind is TriggerKind.MOUSE_BUTTON
+
+
+def _attached_capabilities() -> MouseCapabilities:
+    """What the shell hands the pages once a diagnostics read has landed."""
+    return MouseCapabilities(advertised=True).with_peripherals(
+        (
+            PeripheralPort(
+                attached=True,
+                ready=True,
+                kind="mouse",
+                vendor_id=ATTACHED.vendor_id,
+                product_id=ATTACHED.product_id,
+                buttons=5,
+                report_descriptor_bytes=0,
+                descriptor_hash=None,
+            ),
+            PeripheralPort(
+                attached=False,
+                ready=False,
+                kind="none",
+                vendor_id=0,
+                product_id=0,
+                buttons=None,
+                report_descriptor_bytes=0,
+                descriptor_hash=None,
+            ),
+        )
     )
 
 
@@ -98,6 +145,28 @@ def test_a_mouse_trigger_reads_as_its_button_number():
     label = trigger_label(Trigger(TriggerKind.MOUSE_BUTTON, 4, 0))
 
     assert label == "Button 4"
+
+
+def test_a_qualified_trigger_names_the_device_it_came_from():
+    label = trigger_label(
+        Trigger(TriggerKind.KEYBOARD_USAGE, 0x4F, LEFT_CTRL, ATTACHED)
+    )
+
+    assert label == "Ctrl+Right - 3434:D030 (interface 1)"
+
+
+def test_a_qualified_mouse_button_names_its_device_too():
+    label = trigger_label(Trigger(TriggerKind.MOUSE_BUTTON, 4, 0, ABSENT))
+
+    assert label == "Button 4 - 1234:5678 (interface 0)"
+
+
+def test_a_device_reads_as_its_identifiers_and_interface():
+    assert source_label(ATTACHED) == "3434:D030 (interface 1)"
+
+
+def test_an_unqualified_trigger_names_no_device():
+    assert trigger_label(Trigger(TriggerKind.KEYBOARD_USAGE, 0x04, 0)) == "A"
 
 
 def test_a_run_macro_action_reads_as_the_macro_it_runs():
@@ -190,6 +259,77 @@ def test_a_button_the_device_reported_becomes_available():
 
 def test_an_observation_is_ignored_while_no_mouse_is_advertised():
     assert MouseCapabilities().observing(4).buttons == ()
+
+
+def test_a_report_names_the_mouse_on_the_bus():
+    capabilities = _attached_capabilities()
+
+    assert capabilities.is_mouse(ATTACHED) is True
+    assert capabilities.is_mouse(ABSENT) is False
+    assert capabilities.is_mouse(None) is False
+
+
+def test_an_unread_device_names_no_mouse_at_all():
+    """Nothing has reported, so nothing may be claimed - either way."""
+    capabilities = MouseCapabilities(advertised=True)
+
+    assert capabilities.is_mouse(ATTACHED) is False
+    assert capabilities.allows(Trigger(TriggerKind.KEYBOARD_USAGE, 0x04, 0, ABSENT))
+
+
+def test_a_device_that_reports_nothing_takes_its_bus_away_with_it():
+    """Unplugging is not an empty bus. Every binding is available again the
+    moment nothing is there to say otherwise - the alternative is a project
+    that reads as half-broken whenever the device is unplugged."""
+    capabilities = _attached_capabilities().with_peripherals(None)
+
+    assert capabilities.is_mouse(ATTACHED) is False
+    assert capabilities.allows(Trigger(TriggerKind.KEYBOARD_USAGE, 0x04, 0, ABSENT))
+
+
+def test_a_trigger_from_a_device_that_is_not_there_is_unavailable():
+    capabilities = _attached_capabilities()
+
+    assert capabilities.allows(Trigger(TriggerKind.KEYBOARD_USAGE, 0x04, 0, ATTACHED))
+    assert not capabilities.allows(
+        Trigger(TriggerKind.KEYBOARD_USAGE, 0x04, 0, ABSENT)
+    )
+
+
+def test_an_unqualified_trigger_is_as_available_as_it_ever_was():
+    capabilities = _attached_capabilities()
+
+    assert capabilities.allows(Trigger(TriggerKind.KEYBOARD_USAGE, 0x04, 0))
+    assert capabilities.allows(Trigger(TriggerKind.MOUSE_BUTTON, 3, 0))
+    assert not capabilities.allows(Trigger(TriggerKind.MOUSE_BUTTON, 4, 0))
+
+
+# ------------------------------------------------------------- availability
+
+
+def test_a_binding_from_a_device_that_is_not_there_is_greyed_out(page):
+    page.set_session(
+        page.session.apply(AddBinding(1, _binding(0x04, source=ABSENT))).apply(
+            AddBinding(1, _binding(0x05, source=ATTACHED))
+        )
+    )
+
+    page.set_capabilities(_attached_capabilities())
+
+    absent = page.model.index(0, BindingTableModel.TRIGGER)
+    present = page.model.index(1, BindingTableModel.TRIGGER)
+    assert page.model.data(absent, Qt.ItemDataRole.ForegroundRole) is not None
+    assert page.model.data(present, Qt.ItemDataRole.ForegroundRole) is None
+
+
+def test_nothing_is_greyed_out_before_a_device_has_reported(page):
+    """An unread device is not evidence that anything is missing."""
+    page.set_session(page.session.apply(AddBinding(1, _binding(0x04, source=ABSENT))))
+
+    page.set_capabilities(MouseCapabilities(advertised=True))
+
+    index = page.model.index(0, BindingTableModel.TRIGGER)
+    assert page.model.data(index, Qt.ItemDataRole.ForegroundRole) is None
 
 
 # ----------------------------------------------------------- capture parsing
@@ -543,7 +683,7 @@ def test_each_action_keeps_its_protocol_name_within_reach(page):
 
 
 def test_a_mouse_only_capture_ignores_keyboard_events(qtbot, service):
-    dialog = CaptureDialog(service, accepted_kind=TriggerKind.MOUSE_BUTTON)
+    dialog = CaptureDialog(service, accepts=_mouse_only)
     qtbot.addWidget(dialog)
     dialog.open()
 
@@ -562,7 +702,7 @@ def test_a_mouse_only_capture_ignores_keyboard_events(qtbot, service):
 
 def test_a_mouse_only_capture_still_gives_up_on_time(qtbot, service):
     """An ignored keypress must not hand the operator a fresh ten seconds."""
-    dialog = CaptureDialog(service, accepted_kind=TriggerKind.MOUSE_BUTTON)
+    dialog = CaptureDialog(service, accepts=_mouse_only)
     qtbot.addWidget(dialog)
     dialog.open()
 
@@ -583,7 +723,7 @@ def test_a_mouse_only_capture_rearms_after_a_keyboard_event(
     link = SynchronousTransportLink(emulator)
     with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
         service.connect_device(link)
-    dialog = CaptureDialog(service, accepted_kind=TriggerKind.MOUSE_BUTTON)
+    dialog = CaptureDialog(service, accepts=_mouse_only)
     qtbot.addWidget(dialog)
 
     with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
@@ -661,7 +801,7 @@ def test_a_payload_after_a_dismissal_neither_binds_nor_rearms(
     link = SynchronousTransportLink(emulator)
     with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
         service.connect_device(link)
-    dialog = CaptureDialog(service, accepted_kind=TriggerKind.MOUSE_BUTTON)
+    dialog = CaptureDialog(service, accepts=_mouse_only)
     qtbot.addWidget(dialog)
     dialog.open()
     with qtbot.waitSignal(service.operation_succeeded, timeout=5000):

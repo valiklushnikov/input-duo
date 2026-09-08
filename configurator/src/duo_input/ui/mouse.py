@@ -9,6 +9,8 @@ until it is answered.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -31,6 +33,7 @@ from duo_input.ui.models.binding_table import (
     SELECTABLE_USAGES,
     MouseCapabilities,
     key_name,
+    qualified_label,
     trigger_label,
 )
 from duo_input.ui.bindings import CaptureDialog
@@ -88,6 +91,7 @@ class MouseSwitchPage(QWidget):
         self._service = service
         self._session = ProjectSession.new()
         self._capabilities = MouseCapabilities()
+        self._captured: Trigger | None = None
         self._updating = False
 
         outer = QVBoxLayout(self)
@@ -262,7 +266,9 @@ class MouseSwitchPage(QWidget):
         kind = self.trigger_kind.currentData()
         if kind is TriggerKind.MOUSE_BUTTON:
             button = self.mouse_combo.currentData()
-            return None if button is None else Trigger(kind, int(button), 0)
+            if button is None:
+                return None
+            return self._qualify(Trigger(kind, int(button), 0))
         if kind is TriggerKind.KEYBOARD_USAGE:
             usage = self.key_combo.currentData()
             if usage is None:
@@ -270,8 +276,22 @@ class MouseSwitchPage(QWidget):
             modifiers = sum(
                 bit for key, _label, bit in MODIFIER_BITS if self.modifier_boxes[key].isChecked()
             )
-            return Trigger(kind, int(usage), modifiers)
+            return self._qualify(Trigger(kind, int(usage), modifiers))
         return None
+
+    def _qualify(self, trigger: Trigger) -> Trigger:
+        """Name the device this trigger came from, when it is still that press.
+
+        The source belongs to the capture, not to the editor: a trigger the
+        operator then changed by hand is a different press, and carrying the
+        old device onto it would qualify a key to hardware that never sent it.
+        """
+        captured = self._captured
+        if captured is None or captured.source is None:
+            return trigger
+        if replace(captured, source=None) != trigger:
+            return trigger
+        return replace(trigger, source=captured.source)
 
     def current_binding(self) -> Binding | None:
         trigger = self.current_trigger()
@@ -284,26 +304,58 @@ class MouseSwitchPage(QWidget):
         )
 
     def apply_captured_trigger(self, trigger: Trigger) -> None:
-        """Select a mouse button reported by the device."""
-        if trigger.kind is not TriggerKind.MOUSE_BUTTON:
+        """Select the key or button the device reported.
+
+        A press the attached mouse produced belongs on this page whatever kind
+        it is: the extra buttons of many mice are wired to keyboard usages, and
+        discarding those is what used to hide them here.
+        """
+        if trigger.kind is TriggerKind.MOUSE_BUTTON:
+            self._capabilities = self._capabilities.observing(trigger.code)
+        elif trigger.kind is not TriggerKind.KEYBOARD_USAGE:
             return
-        self._capabilities = self._capabilities.observing(trigger.code)
+        elif self.key_combo.findData(trigger.code) < 0:
+            # A usage this chooser does not offer - F13 upwards and the three
+            # keys almost nothing has. Selecting it would empty the combo and
+            # leave the page describing no trigger at all.
+            return
+        self._captured = trigger
         self._updating = True
         try:
-            self.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
-            self._rebuild_mouse_buttons()
-            self.mouse_combo.setCurrentIndex(
-                self.mouse_combo.findData(trigger.code)
-            )
+            self.select_trigger_kind(TriggerKind(trigger.kind))
+            if trigger.kind is TriggerKind.MOUSE_BUTTON:
+                self._rebuild_mouse_buttons()
+                self.mouse_combo.setCurrentIndex(
+                    self.mouse_combo.findData(trigger.code)
+                )
+            else:
+                self.key_combo.setCurrentIndex(self.key_combo.findData(trigger.code))
+                for key, _label, bit in MODIFIER_BITS:
+                    self.modifier_boxes[key].setChecked(bool(trigger.modifiers & bit))
         finally:
             self._updating = False
         self._refresh()
-        # The shell owns the observations: a page-local memory of them would be
-        # wiped by the next device operation, which re-reads what is advertised.
-        self.button_observed.emit(int(trigger.code))
+        if trigger.kind is TriggerKind.MOUSE_BUTTON:
+            # The shell owns the observations: a page-local memory of them
+            # would be wiped by the next device operation, which re-reads what
+            # is advertised.
+            self.button_observed.emit(int(trigger.code))
+
+    def accepts_capture(self, trigger: Trigger) -> bool:
+        """Is this press one the mouse this page is about produced?
+
+        A mouse button is taken on its own word, the way it always was: a
+        press that names no source is what firmware predating the source
+        table sends, and refusing those would strand every such device.
+        Anything else has to say which device it came from, and that device
+        has to be the mouse U1 reports on its own bus.
+        """
+        if trigger.kind is TriggerKind.MOUSE_BUTTON:
+            return True
+        return self._capabilities.is_mouse(trigger.source)
 
     def capture_mouse_button(self) -> CaptureDialog | None:
-        """Open the ten-second, mouse-only capture dialog."""
+        """Open the ten-second capture dialog for this mouse's presses."""
         if (
             self._service is None
             or not self._service.is_connected
@@ -313,7 +365,8 @@ class MouseSwitchPage(QWidget):
         dialog = CaptureDialog(
             self._service,
             self,
-            accepted_kind=TriggerKind.MOUSE_BUTTON,
+            accepts=self.accepts_capture,
+            prompt=self.tr("Press the button or key on the mouse you want to use."),
         )
         dialog.accepted.connect(lambda: self._on_capture_accepted(dialog))
         dialog.open()
@@ -362,7 +415,9 @@ class MouseSwitchPage(QWidget):
 
     def _trigger_label(self, trigger: Trigger) -> str:
         if trigger.kind is TriggerKind.MOUSE_BUTTON:
-            return self._mouse_button_label(trigger.code)
+            return qualified_label(
+                self._mouse_button_label(trigger.code), trigger.source
+            )
         return trigger_label(trigger)
 
     def _unavailable_buttons(self) -> tuple[int, ...]:

@@ -9,6 +9,8 @@ so the operator sees the reason next to the button instead of a failed write.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -93,11 +95,17 @@ class CaptureDialog(QDialog):
         service: DeviceService,
         parent: QWidget | None = None,
         *,
-        accepted_kind: TriggerKind | None = None,
+        accepts: Callable[[Trigger], bool] | None = None,
+        prompt: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._service = service
-        self._accepted_kind = accepted_kind
+        # Which presses this dialog is willing to hand back. A page that binds
+        # anything passes nothing; a page that binds one device's presses asks
+        # about the trigger as a whole, because what a device sends is not
+        # decided by what kind of device it is - a mouse side button often
+        # arrives as a keyboard usage.
+        self._accepts = accepts
         self._trigger: Trigger | None = None
         self._remaining = CAPTURE_SECONDS
         self._listening = False
@@ -106,11 +114,8 @@ class CaptureDialog(QDialog):
         self.setModal(True)
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         layout = QVBoxLayout(self)
-        prompt = (
-            self.tr("Press the mouse button you want to use.")
-            if accepted_kind is TriggerKind.MOUSE_BUTTON
-            else self.tr("Press the key or mouse button you want to bind.")
-        )
+        if prompt is None:
+            prompt = self.tr("Press the key or mouse button you want to bind.")
         self.prompt_label = QLabel(prompt, self)
         self.prompt_label.setWordWrap(True)
         layout.addWidget(self.prompt_label)
@@ -165,7 +170,7 @@ class CaptureDialog(QDialog):
             # A payload this host cannot read is not a trigger; keep waiting
             # rather than binding something the operator never pressed.
             return
-        if self._accepted_kind is not None and self._trigger.kind is not self._accepted_kind:
+        if self._accepts is not None and not self._accepts(self._trigger):
             self._trigger = None
             # Capture mode ends after the first physical press.  Start another
             # window without resetting the visible ten-second countdown.
@@ -395,6 +400,7 @@ class BindingsPage(QWidget):
 
     def set_capabilities(self, capabilities: MouseCapabilities) -> None:
         self._capabilities = capabilities
+        self.model.set_capabilities(capabilities)
         self._refresh()
 
     # -------------------------------------------------------------- editing

@@ -561,6 +561,13 @@ class MainWindow(QMainWindow):
         # runs after every successful operation, a write included.
         for button in sorted(self._observed_buttons):
             capabilities = capabilities.observing(button)
+        # Which devices are on U1's own bus is a diagnostics answer, and the
+        # operator has to ask for one: until they do this is None and nothing
+        # is called absent.
+        diagnostics = self._service.diagnostics if connected else None
+        capabilities = capabilities.with_peripherals(
+            getattr(diagnostics, "peripherals", None)
+        )
         self.bindings.set_capabilities(capabilities)
         self.mouse.set_capabilities(capabilities)
         self.set_session(

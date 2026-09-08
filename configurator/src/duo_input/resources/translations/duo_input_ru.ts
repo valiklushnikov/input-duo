@@ -265,11 +265,6 @@
         <translation>Определение клавиши или кнопки</translation>
     </message>
     <message>
-        <location filename="../../ui/bindings.py" line="110"/>
-        <source>Press the mouse button you want to use.</source>
-        <translation>Нажмите кнопку мыши, которую хотите использовать.</translation>
-    </message>
-    <message>
         <location filename="../../ui/bindings.py" line="112"/>
         <source>Press the key or mouse button you want to bind.</source>
         <translation>Нажмите клавишу или кнопку мыши, которую хотите назначить.</translation>
@@ -1191,6 +1186,11 @@
         <location filename="../../ui/mouse.py" line="154"/>
         <source>Detect button</source>
         <translation>Определить кнопку</translation>
+    </message>
+    <message>
+        <location filename="../../ui/mouse.py" line="331"/>
+        <source>Press the button or key on the mouse you want to use.</source>
+        <translation>Нажмите на мыши кнопку или клавишу, которую хотите использовать.</translation>
     </message>
     <message>
         <location filename="../../ui/mouse.py" line="156"/>
