@@ -274,10 +274,8 @@ TEST_CASE(first_usable_role_owner_is_stable_and_extra_interfaces_are_diagnosed) 
     CHECK_EQ(rig.registry.owner(DeviceKind::Keyboard)->dev_addr, 2u);
     CHECK_EQ(rig.registry.find(3, 0)->role, LogicalRole::Ignored);
     CHECK_EQ(rig.registry.ignored_interface_count(), 1u);
-    // V1 accepts one logical keyboard and one logical mouse, so the second
-    // keyboard is ignored deterministically - and the reason is kept apart
-    // from "this firmware could not classify it at all", because on a bench
-    // those two are a spare keyboard and a broken one.
+    // The second source is accepted; the first keeps diagnostic ownership.
+    // Count that separately from a source whose layout could not be read.
     CHECK_EQ(rig.registry.ignored_role_taken_count(), 1u);
 }
 
@@ -686,6 +684,35 @@ TEST_CASE(the_sof_frame_count_is_read_live_rather_than_cached_by_a_pass) {
     // No task() call in between: the count moved without a pass, which is the
     // case this field exists to be able to report.
     CHECK_EQ(backend.observe().core1_passes, 0u);
+}
+
+TEST_CASE(pio_identity_uses_descriptor_interface_number_and_polls_transport_instance) {
+    RegistryRig rig;
+    rig.device(3, 0x1234, 0x5678);
+    duo::test::tinyusb_host::set_protocol(3, 2, kProtocolNone);
+    duo::test::tinyusb_host::set_interface_number(3, 2, 7);
+    tuh_hid_mount_cb(3, 2, nullptr, 0);
+    rig.registry.process_pending(0);
+    SourceEvent event{};
+    SourceIdentity identity{};
+    CHECK(rig.registry.take_event(event, identity));
+    CHECK_EQ(event.kind, SourceEventKind::Ready);
+    CHECK_EQ(identity.interface_number, 7u);
+    const auto source_id = event.source_id;
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(3, 2), 1u);
+    const std::uint8_t bytes[] = {0xA5, 0x5A};
+    tuh_hid_report_received_cb(3, 2, bytes, sizeof(bytes));
+    rig.registry.process_pending(1);
+    CHECK(rig.registry.take_event(event, identity));
+    CHECK_EQ(event.kind, SourceEventKind::Report);
+    CHECK_EQ(identity.interface_number, 7u);
+    CHECK_EQ(event.source_id, source_id);
+    CHECK_EQ(event.report_size, 2u);
+    CHECK_EQ(event.report[0], 0xA5u);
+    CHECK_EQ(event.report[1], 0x5Au);
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(3, 2), 2u);
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(3, 7), 0u);
+    CHECK_FALSE(rig.registry.take_event(event, identity));
 }
 
 TEST_CASE(host_callbacks_count_device_mount_unmount_and_hid_mount_even_without_a_registry) {

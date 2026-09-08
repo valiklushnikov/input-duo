@@ -10,6 +10,16 @@
 // ep_slot_map and enum_progress_mask need, so the fake has to agree with it.
 #define CFG_TUH_HUB 1u
 
+typedef struct {
+    uint8_t bLength, bDescriptorType, bInterfaceNumber, bAlternateSetting;
+    uint8_t bNumEndpoints, bInterfaceClass, bInterfaceSubClass;
+    uint8_t bInterfaceProtocol, iInterface;
+} tusb_desc_interface_t;
+typedef struct {
+    uint8_t daddr;
+    tusb_desc_interface_t desc;
+} tuh_itf_info_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -30,6 +40,12 @@ bool tuh_mounted(uint8_t dev_addr);
 // device is addressed AND its device descriptor has been read, which is what
 // makes it the second half of enum_progress_mask.
 bool tuh_vid_pid_get(uint8_t dev_addr, uint16_t* vendor_id, uint16_t* product_id);
+bool tuh_hid_itf_get_info(uint8_t dev_addr, uint8_t instance, tuh_itf_info_t* info);
+uint8_t tuh_hid_interface_protocol(uint8_t dev_addr, uint8_t instance);
+bool tuh_hid_receive_report(uint8_t dev_addr, uint8_t instance);
+uint32_t tud_cdc_write_available(void);
+uint32_t tud_cdc_write(const void* buffer, uint32_t size);
+uint32_t tud_cdc_write_flush(void);
 
 #ifdef __cplusplus
 }

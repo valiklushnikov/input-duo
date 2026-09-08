@@ -166,6 +166,7 @@ bool reference_capture(const ReferenceCallbackRecord& record) {
     slot.kind = record.kind;
     slot.dev_addr = record.dev_addr;
     slot.instance = record.instance;
+    slot.interface_number = record.interface_number;
     slot.protocol = record.protocol;
     slot.vid = record.vid;
     slot.pid = record.pid;
@@ -195,6 +196,7 @@ bool reference_take(ReferenceCallbackRecord& record) {
     record.kind = slot.kind;
     record.dev_addr = slot.dev_addr;
     record.instance = slot.instance;
+    record.interface_number = slot.interface_number;
     record.protocol = slot.protocol;
     record.vid = slot.vid;
     record.pid = slot.pid;

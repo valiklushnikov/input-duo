@@ -83,11 +83,13 @@ bool DeviceRegistry::capture_hid_mount(std::uint8_t dev_addr, std::uint8_t insta
                                        std::uint16_t vendor_id, std::uint16_t product_id,
                                        std::uint8_t interface_protocol,
                                        const std::uint8_t* descriptor,
-                                       std::uint16_t descriptor_size) {
+                                       std::uint16_t descriptor_size,
+                                       std::uint8_t interface_number) {
     CallbackRecord record;
     record.kind = CallbackKind::HidMount;
     record.dev_addr = dev_addr;
     record.instance = instance;
+    record.interface_number = interface_number;
     record.vendor_id = vendor_id;
     record.product_id = product_id;
     record.interface_protocol = interface_protocol;
@@ -502,7 +504,7 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
             interface->identity);
         interface->identity.vendor_id = record.vendor_id;
         interface->identity.product_id = record.product_id;
-        interface->identity.interface_number = record.instance;
+        interface->identity.interface_number = record.interface_number;
 
         const LogicalRole wanted =
             classified ? role_for_kind(interface->identity.kind)
@@ -514,11 +516,8 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
             interface->role = LogicalRole::Ignored;
             ++ignored_interfaces_;
             if (wanted != LogicalRole::Ignored) {
-                // It was a usable keyboard or mouse; the only thing wrong with
-                // it is that V1 already has one of those. Counted apart from
-                // the unclassifiable case because a spare device and a device
-                // this firmware cannot read are different problems, and the
-                // diagnostics reply is the only outward sign of either.
+                // Accepted as a source, while the first interface retains
+                // ownership of the legacy per-kind diagnostic summary.
                 ++ignored_role_taken_;
             }
         }

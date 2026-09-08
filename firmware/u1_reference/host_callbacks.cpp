@@ -115,9 +115,14 @@ void tuh_hid_mount_cb(uint8_t dev_addr,
     tuh_vid_pid_get(dev_addr, &vid, &pid);
     uint8_t const itf_protocol = tuh_hid_interface_protocol(dev_addr, instance);
 
-    reference_capture(reference_make_mount(dev_addr, instance, itf_protocol,
-                                           vid, pid, desc_report, desc_len,
-                                           time_us_32()));
+    auto record = reference_make_mount(dev_addr, instance, itf_protocol,
+                                      vid, pid, desc_report, desc_len,
+                                      time_us_32());
+    tuh_itf_info_t info{};
+    if (tuh_hid_itf_get_info(dev_addr, instance, &info)) {
+        record.interface_number = info.desc.bInterfaceNumber;
+    }
+    reference_capture(record);
 
     // The stack delivers nothing until the interface is armed. Unknown HID
     // layouts still have to be serviced: keeping every interface polled is a

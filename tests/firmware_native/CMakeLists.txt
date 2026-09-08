@@ -830,6 +830,9 @@ add_test(NAME reference_link_reconnect COMMAND duo_reference_link_reconnect_test
 add_executable(duo_reference_source_adapter_test
     test_main.cpp
     test_reference_source_adapter.cpp
+    fakes/tinyusb_host.cpp
+    fakes/reference_callback_platform.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_reference/host_callbacks.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_reference/callback_queue.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_reference/source_adapter.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/hid_setup.cpp
@@ -838,6 +841,7 @@ add_executable(duo_reference_source_adapter_test
 
 target_link_libraries(duo_reference_source_adapter_test PRIVATE duo_common)
 target_include_directories(duo_reference_source_adapter_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/fakes
     ${CMAKE_SOURCE_DIR}/firmware/u1_reference
     ${CMAKE_SOURCE_DIR}/firmware/u1_main
     ${CMAKE_CURRENT_SOURCE_DIR}

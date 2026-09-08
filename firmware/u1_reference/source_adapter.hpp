@@ -31,9 +31,7 @@ void dispatch_source_event(Runtime& runtime,
 
 class ReferenceSourceAdapter {
 public:
-    //: The pipeline instance each role's events are addressed to. The
-    //: pipeline never interprets a source_id, so these only have to be
-    //: distinct and stable.
+    // Legacy diagnostic port labels. Input source IDs come from table slots.
     static constexpr std::uint8_t kKeyboardPort = 0;
     static constexpr std::uint8_t kMousePort = 1;
 
@@ -134,16 +132,14 @@ public:
     /// The same reading for the mouse role.
     bool mouse_ready() const { return mouse_owned_; }
 
-    /// Interfaces that mounted and earned no logical role, for any reason:
-    /// nothing here could classify them, or the role they wanted was already
-    /// held by another interface. A second keyboard behind the hub is the
-    /// harmless case; this count is the only place that says either happened
-    /// at all, the same reason the shipping PIO USB backend keeps one.
+    /// Legacy diagnostic counter: sources without per-kind diagnostic
+    /// ownership, including unknown layouts and additional same-kind sources.
+    /// Every accepted source still emits Ready and ordinary Report events.
     std::uint32_t ignored_interface_count() const { return ignored_interface_count_; }
 
 private:
     enum class Role : std::uint8_t {
-        /// Known, and deliberately carrying nothing.
+        /// No per-kind diagnostic ownership; still an accepted input source.
         Ignored,
         Keyboard,
         Mouse,
@@ -229,10 +225,7 @@ private:
     DescriptorRequest descriptor_attempted_request_{};
     bool descriptor_followup_armed_ = false;
 
-    //: Every interface that mounted and was left in Role::Ignored, counted at
-    //: the two places that decide it: an interface classify_hid could not
-    //: read at all, and a second claimant for a role another interface
-    //: already holds.
+    // Legacy diagnostic count of sources without per-kind ownership.
     std::uint32_t ignored_interface_count_ = 0;
 };
 

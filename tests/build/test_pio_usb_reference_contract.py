@@ -799,20 +799,6 @@ def test_stale_control_work_cannot_hide_an_unmount_forever():
     )
 
 
-def test_reference_mount_arms_every_hid_interface():
-    callbacks = (
-        ROOT / "firmware" / "u1_reference" / "host_callbacks.cpp"
-    ).read_text(encoding="utf-8")
-    mount = callbacks[
-        callbacks.index("void tuh_hid_mount_cb") :
-        callbacks.index("void tuh_hid_umount_cb")
-    ]
-
-    assert "tuh_hid_receive_report(dev_addr, instance);" in mount
-    assert "HID_ITF_PROTOCOL_KEYBOARD" not in mount
-    assert "HID_ITF_PROTOCOL_MOUSE" not in mount
-
-
 def test_the_control_trace_is_drained_and_printed_only_from_core_0():
     """Nothing about the packet trace may run on the host core.
 

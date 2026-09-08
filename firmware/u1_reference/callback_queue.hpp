@@ -44,6 +44,8 @@ struct ReferenceCallbackRecord {
     ReferenceCallbackKind kind{};
     std::uint8_t dev_addr{};
     std::uint8_t instance{};
+    // USB descriptor identity; instance remains TinyUSB's transport index.
+    std::uint8_t interface_number{0xFF};
     //: The HID interface protocol byte (0 none, 1 keyboard, 2 mouse). Only the
     //: callback can ask TinyUSB for it, and the adapter cannot classify an
     //: interface without it - a descriptor that will not parse leaves this as

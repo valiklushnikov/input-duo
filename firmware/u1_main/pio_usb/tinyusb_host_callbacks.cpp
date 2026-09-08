@@ -24,6 +24,7 @@
 // hand. The native test build shadows this header from fakes/, the same way
 // it already shadows hardware/clocks.h for set_sys_clock_khz.
 #include "hardware/timer.h"
+#include "tusb.h"
 
 #include "pio_usb/backend.hpp"
 
@@ -279,9 +280,13 @@ void tuh_hid_mount_cb(std::uint8_t dev_addr, std::uint8_t instance,
     std::uint16_t vendor_id = 0;
     std::uint16_t product_id = 0;
     (void)tuh_vid_pid_get(dev_addr, &vendor_id, &product_id);
+    tuh_itf_info_t info{};
+    const std::uint8_t interface_number =
+        tuh_hid_itf_get_info(dev_addr, instance, &info)
+            ? info.desc.bInterfaceNumber : 0xFF;
     registry->capture_hid_mount(dev_addr, instance, vendor_id, product_id,
                                 tuh_hid_interface_protocol(dev_addr, instance),
-                                report_desc, desc_len);
+                                report_desc, desc_len, interface_number);
 }
 
 void tuh_hid_umount_cb(std::uint8_t dev_addr, std::uint8_t instance) {

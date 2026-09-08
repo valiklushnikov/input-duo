@@ -1,4 +1,5 @@
 #include "fakes/tinyusb_host.hpp"
+#include "tusb.h"
 
 // The same header firmware/u1_main/pio_usb/tinyusb_host_callbacks.cpp
 // includes; in this build it resolves to fakes/hardware/timer.h, whose
@@ -37,6 +38,7 @@ struct Interface {
     std::uint8_t address = 0;
     std::uint8_t instance = 0;
     std::uint8_t protocol = 0;
+    std::uint8_t interface_number = 0;
 };
 
 struct ReceiveCall {
@@ -132,13 +134,24 @@ void set_protocol(std::uint8_t dev_addr, std::uint8_t instance,
     for (Interface& interface : interfaces) {
         if (!interface.present || (interface.address == dev_addr &&
                                    interface.instance == instance)) {
-            interface = Interface{true, dev_addr, instance, protocol};
+            interface = Interface{true, dev_addr, instance, protocol, instance};
             return;
         }
     }
 }
 
 void set_receive_result(bool result) { receive_result = result; }
+
+void set_interface_number(std::uint8_t dev_addr, std::uint8_t instance,
+                          std::uint8_t interface_number) {
+    for (Interface& interface : interfaces) {
+        if (interface.present && interface.address == dev_addr &&
+            interface.instance == instance) {
+            interface.interface_number = interface_number;
+            return;
+        }
+    }
+}
 
 void set_now_us(std::uint32_t value) { now_us = value; }
 
@@ -265,6 +278,20 @@ extern "C" bool tuh_hid_receive_report(std::uint8_t dev_addr,
         receive_calls[receive_calls_used++] = ReceiveCall{dev_addr, instance};
     }
     return receive_result;
+}
+
+extern "C" bool tuh_hid_itf_get_info(std::uint8_t dev_addr,
+                                    std::uint8_t instance, tuh_itf_info_t* info) {
+    for (const Interface& interface : interfaces) {
+        if (interface.present && interface.address == dev_addr &&
+            interface.instance == instance) {
+            *info = {dev_addr, {9, 4, interface.interface_number, 0, 1, 3,
+                               static_cast<std::uint8_t>(interface.protocol != 0),
+                               interface.protocol, 0}};
+            return true;
+        }
+    }
+    return false;
 }
 
 extern "C" bool set_sys_clock_khz(std::uint32_t requested_khz, bool required) {

@@ -1,7 +1,7 @@
 // What a captured USB callback record turns into at the neutral boundary.
 //
 // The adapter is the only place in the reference target that decides what a
-// device is and which of the two roles it may occupy, so these tests assert
+// interface is and which source it represents, so these tests assert
 // the SourceEvent and SourceIdentity values literally rather than through the
 // adapter's own helpers - a wrong answer that both the code and the test agree
 // on is exactly what this file has to be unable to produce.
@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "callback_queue.hpp"
+#include "fakes/tinyusb_host.hpp"
 #include "host_control_state.hpp"
 #include "source_adapter.hpp"
 #include "test_support.hpp"
@@ -156,9 +157,13 @@ ReferenceCallbackRecord mount(std::uint8_t dev_addr,
                               std::uint16_t vid,
                               std::uint16_t pid,
                               const std::vector<std::uint8_t>& bytes) {
-    return reference_make_mount(dev_addr, instance, protocol, vid, pid,
+    auto record = reference_make_mount(dev_addr, instance, protocol, vid, pid,
                                 bytes.empty() ? nullptr : bytes.data(),
                                 static_cast<std::uint16_t>(bytes.size()), 0);
+    // These existing synthetic fixtures use contiguous interface numbers.
+    // Callback tests configure a deliberately different USB descriptor value.
+    record.interface_number = instance;
+    return record;
 }
 
 ReferenceCallbackRecord report(std::uint8_t dev_addr,
@@ -288,7 +293,7 @@ TEST_CASE(a_mouse_keeps_the_layout_its_report_descriptor_declared) {
     CHECK(taken.identity.mouse_layout.wheel.present);
 }
 
-TEST_CASE(the_first_claimant_owns_a_role_and_a_second_is_ignored) {
+TEST_CASE(the_first_source_owns_diagnostics_and_a_second_is_also_accepted) {
     ReferenceSourceAdapter adapter;
     adapter.consume(mount(1, 0, kProtocolKeyboard, 0x1111, 0x2222,
                           descriptor("boot_keyboard.bin")),
@@ -298,7 +303,7 @@ TEST_CASE(the_first_claimant_owns_a_role_and_a_second_is_ignored) {
     CHECK_EQ(adapter.ignored_interface_count(), 0u);
 
     // A second keyboard-shaped interface, on a different device, must not
-    // displace the one already routing.
+    // displace the diagnostic owner.
     adapter.consume(mount(3, 0, kProtocolKeyboard, 0x3333, 0x4444,
                           descriptor("boot_keyboard.bin")),
                     0);
@@ -354,7 +359,7 @@ TEST_CASE(an_unmount_detaches_the_role_and_frees_it_for_the_next_device) {
     CHECK(detached.event.kind == SourceEventKind::Detached);
     CHECK_EQ(detached.event.source_id, adapter.logical_port(DeviceKind::Keyboard));
 
-    // Freed, so a replacement is announced rather than ignored.
+    // Freed, so the replacement also becomes the diagnostic owner.
     adapter.consume(mount(4, 0, kProtocolKeyboard, 0x5555, 0x6666,
                           descriptor("boot_keyboard.bin")),
                     0);
@@ -441,7 +446,7 @@ TEST_CASE(a_descriptor_that_will_not_parse_does_not_take_a_role_on_its_shape) {
     CHECK_FALSE(adapter.keyboard_ready());
 }
 
-TEST_CASE(a_vendor_only_interface_is_ignored_rather_than_given_a_role) {
+TEST_CASE(a_vendor_only_interface_is_accepted_without_diagnostic_ownership) {
     ReferenceSourceAdapter adapter;
     adapter.consume(mount(1, 1, kProtocolNone, 0x3434, 0xD030,
                           descriptor("vendor_only.bin")),
@@ -1137,24 +1142,92 @@ TEST_CASE(refused_unmount_capture_retires_descriptor_state_before_replug) {
     CHECK_FALSE(coordinator.active());
 }
 
-TEST_CASE(an_ignored_interface_asks_for_no_protocol_change) {
+TEST_CASE(each_accepted_descriptor_source_requests_its_own_report_protocol) {
+    // Generic keyboard descriptor with a Report ID, so boot wire bytes cannot
+    // satisfy the announced layout. No device-specific fixture is involved.
+    const std::vector<std::uint8_t> keyboard{
+        0x05,0x01,0x09,0x06,0xA1,0x01,0x85,0x04,
+        0x05,0x07,0x19,0xE0,0x29,0xE7,0x15,0x00,0x25,0x01,
+        0x75,0x01,0x95,0x08,0x81,0x02,0x75,0x08,0x95,0x01,
+        0x81,0x01,0x19,0x00,0x29,0x65,0x15,0x00,0x25,0x65,
+        0x75,0x08,0x95,0x06,0x81,0x00,0xC0};
+    for (const bool is_mouse : {false, true}) {
+        ReferenceSourceAdapter adapter;
+        const auto desc = is_mouse ? report_id_wheel_mouse() : keyboard;
+        const std::vector<std::uint8_t> bytes = is_mouse
+            ? std::vector<std::uint8_t>{1, 0, 2, 0, 3, 0, 0}
+            : std::vector<std::uint8_t>{4, 0, 0, 4, 0, 0, 0, 0, 0};
+        std::uint8_t ids[2]{};
+        for (std::uint8_t instance = 0; instance < 2; ++instance) {
+            adapter.consume(mount(3, instance,
+                is_mouse ? kProtocolMouse : kProtocolKeyboard,
+                0x1234, 0x5678, desc), 0);
+            const Taken ready = take(adapter);
+            CHECK(ready.ok);
+            CHECK_EQ(ready.event.kind, SourceEventKind::Ready);
+            CHECK_EQ(ready.identity.kind,
+                     is_mouse ? DeviceKind::Mouse : DeviceKind::Keyboard);
+            CHECK_EQ(is_mouse ? ready.identity.mouse_layout.report_id_value
+                              : ready.identity.keyboard_layout.report_id_value,
+                     is_mouse ? 1u : 4u);
+            ids[instance] = ready.event.source_id;
+            ReferenceSourceAdapter::ProtocolRequest request{};
+            CHECK(adapter.take_protocol_request(request));
+            CHECK_EQ(request.dev_addr, 3u);
+            CHECK_EQ(request.instance, instance);
+            CHECK_EQ(request.protocol, 1u);
+            CHECK_FALSE(adapter.take_protocol_request(request));
+            adapter.consume(report(3, instance, bytes), 1);
+            const Taken received = take(adapter);
+            CHECK(received.ok);
+            CHECK_EQ(received.event.kind, SourceEventKind::Report);
+            CHECK_EQ(received.event.source_id, ids[instance]);
+            CHECK_EQ(received.event.report_size, bytes.size());
+            CHECK(std::equal(bytes.begin(), bytes.end(), received.event.report));
+            CHECK_FALSE(take(adapter).ok);
+        }
+        CHECK(ids[0] != ids[1]);
+    }
+}
+
+TEST_CASE(reference_callbacks_poll_unknown_source_and_keep_ordinary_reports) {
+    duo::test::tinyusb_host::reset();
+    reference_queue_reset();
     ReferenceSourceAdapter adapter;
-
-    // Second claimant for a role already taken.
-    adapter.consume(mount(1, 0, kProtocolMouse, 0x1BCF, 0x0005,
-                          descriptor("boot_mouse.bin")),
-                    0);
-    CHECK(take(adapter).ok);
-    ReferenceSourceAdapter::ProtocolRequest first{};
-    adapter.take_protocol_request(first);
-
-    adapter.consume(mount(3, 0, kProtocolMouse, 0x2222, 0x3333,
-                          report_id_wheel_mouse()),
-                    0);
-    CHECK(take(adapter).ok);
-
-    ReferenceSourceAdapter::ProtocolRequest request{};
-    CHECK_FALSE(adapter.take_protocol_request(request));
+    duo::test::tinyusb_host::add_device(3, 0x1234, 0x5678);
+    duo::test::tinyusb_host::set_protocol(3, 2, kProtocolNone);
+    duo::test::tinyusb_host::set_interface_number(3, 2, 7);
+    tuh_hid_mount_cb(3, 2, nullptr, 0);
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(3, 2), 1u);
+    ReferenceCallbackRecord captured{};
+    CHECK(reference_take(captured));
+    CHECK_EQ(captured.instance, 2u);
+    adapter.consume(captured, 0);
+    const Taken ready = take(adapter);
+    CHECK(ready.ok);
+    CHECK_EQ(ready.event.kind, SourceEventKind::Ready);
+    CHECK_EQ(ready.identity.kind, DeviceKind::Unknown);
+    CHECK_EQ(ready.identity.interface_number, 7u);
+    CHECK_FALSE(reference_take(captured));
+    CHECK_FALSE(take(adapter).ok);
+    const std::uint8_t bytes[] = {0xA5, 0x5A};
+    for (std::uint32_t count = 2; count <= 3; ++count) {
+        tuh_hid_report_received_cb(3, 2, bytes, sizeof(bytes));
+        CHECK_EQ(duo::test::tinyusb_host::receive_count(3, 2), count);
+        CHECK(reference_take(captured));
+        adapter.consume(captured, count);
+        const Taken received = take(adapter);
+        CHECK(received.ok);
+        CHECK_EQ(received.event.kind, SourceEventKind::Report);
+        CHECK_EQ(received.event.source_id, ready.event.source_id);
+        CHECK_EQ(received.identity.interface_number, 7u);
+        CHECK_EQ(received.event.report_size, 2u);
+        CHECK_EQ(received.event.report[0], 0xA5u);
+        CHECK_EQ(received.event.report[1], 0x5Au);
+        CHECK_FALSE(reference_take(captured));
+        CHECK_FALSE(take(adapter).ok);
+    }
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(3, 7), 0u);
 }
 
 // --------------------------------------------------------------------------

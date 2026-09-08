@@ -128,7 +128,7 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
     const bool classified = layout_source != pio_usb::HidLayoutSource::None;
     identity.vendor_id = record.vid;
     identity.product_id = record.pid;
-    identity.interface_number = record.instance;
+    identity.interface_number = record.interface_number;
 
     Interface* const existing = find(record.dev_addr, record.instance);
     Interface* entry = claim_slot(record.dev_addr, record.instance);
@@ -174,10 +174,13 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
         return;
     }
 
+    // Every accepted descriptor source needs its own matching wire format,
+    // independently of who owns the legacy keyboard/mouse diagnostics.
+    if (wants_report_protocol) {
+        request_protocol(record.dev_addr, record.instance, kHidProtocolReport);
+    }
+
     if (identity.kind == DeviceKind::Keyboard && !keyboard_owned_) {
-        if (wants_report_protocol) {
-            request_protocol(record.dev_addr, record.instance, kHidProtocolReport);
-        }
         entry->role = Role::Keyboard;
         keyboard_owned_ = true;
         keyboard_identity_ = identity;
@@ -194,9 +197,6 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
     }
 
     if (identity.kind == DeviceKind::Mouse && !mouse_owned_) {
-        if (wants_report_protocol) {
-            request_protocol(record.dev_addr, record.instance, kHidProtocolReport);
-        }
         entry->role = Role::Mouse;
         mouse_owned_ = true;
         mouse_identity_ = identity;
@@ -204,9 +204,8 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
         return;
     }
 
-    // A second claimant for a role that is already taken. Accepted onto the
-    // bus and ignored, deterministically, rather than displacing the device
-    // that is already routing.
+    // This source is accepted and routes reports; the first source retains
+    // ownership of the legacy per-kind diagnostic summary.
     entry->role = Role::Ignored;
     ++ignored_interface_count_;
     push(SourceEventKind::Ready, entry->source_id, identity);

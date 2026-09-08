@@ -8,6 +8,7 @@
 namespace duo_input::u1::pio_usb {
 
 enum class LogicalRole : std::uint8_t {
+    // Legacy diagnostic ownership only; these sources are accepted and polled.
     Ignored,
     Keyboard,
     Mouse,
@@ -111,7 +112,8 @@ public:
     bool capture_hid_mount(std::uint8_t dev_addr, std::uint8_t instance,
                            std::uint16_t vendor_id, std::uint16_t product_id,
                            std::uint8_t interface_protocol,
-                           const std::uint8_t* descriptor, std::uint16_t descriptor_size);
+                           const std::uint8_t* descriptor, std::uint16_t descriptor_size,
+                           std::uint8_t interface_number = 0xFF);
     /// ``captured_us`` is the moment TinyUSB's own callback handed this
     /// report over - read by the callback itself, before this call, so it
     /// names when the report actually arrived rather than when this pass
@@ -155,16 +157,10 @@ public:
     std::uint32_t callback_overflow_count() const { return callback_overflows_; }
     std::uint32_t duplicate_mount_count() const { return duplicate_mounts_; }
     std::uint32_t ignored_interface_count() const { return ignored_interfaces_; }
-    /// How many of ignored_interface_count() were ignored only because the
-    /// logical role they wanted was already held by another interface - V1's
-    /// "exactly one keyboard and one mouse" rule, applied deterministically to
-    /// the first usable claimant.
-    ///
-    /// Kept apart from the total on purpose: the remainder is "nothing here
-    /// could classify this interface", and on a bench a spare second keyboard
-    /// and a device this firmware cannot read are entirely different problems
-    /// with entirely different fixes. A single total cannot tell them apart,
-    /// and the reply that carries it is the only outward sign of either.
+    /// Accepted sources without diagnostic ownership because the first
+    /// same-kind source already owns the summary. The remainder of the legacy
+    /// ignored counter represents unknown layouts. Both cases remain polled
+    /// and emit their own Ready and ordinary Report events.
     std::uint32_t ignored_role_taken_count() const { return ignored_role_taken_; }
     std::uint32_t arm_failure_count() const { return arm_failures_; }
     /// How many Ready/Report/Fault SourceEvents could not be queued because
@@ -213,6 +209,7 @@ private:
         CallbackKind kind = CallbackKind::DeviceMount;
         std::uint8_t dev_addr = 0;
         std::uint8_t instance = 0;
+        std::uint8_t interface_number = 0xFF;
         std::uint8_t interface_protocol = 0;
         std::uint16_t vendor_id = 0;
         std::uint16_t product_id = 0;

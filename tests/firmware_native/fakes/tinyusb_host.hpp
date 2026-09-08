@@ -22,6 +22,8 @@ void add_device(std::uint8_t dev_addr, std::uint16_t vendor_id,
 void set_protocol(std::uint8_t dev_addr, std::uint8_t instance,
                   std::uint8_t protocol);
 void set_receive_result(bool result);
+void set_interface_number(std::uint8_t dev_addr, std::uint8_t instance,
+                          std::uint8_t interface_number);
 void set_host_initialization_result(bool configure_result, bool initialize_result);
 /// Whether tuh_rhport_is_active() reports the host stack already up.
 ///
