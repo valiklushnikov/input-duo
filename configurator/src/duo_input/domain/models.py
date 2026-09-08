@@ -17,10 +17,18 @@ from duo_input.generated.protocol import (
 
 
 @dataclass(frozen=True)
+class TriggerSource:
+    vendor_id: int
+    product_id: int
+    interface_number: int
+
+
+@dataclass(frozen=True)
 class Trigger:
     kind: TriggerKind
     code: int
     modifiers: int = 0
+    source: TriggerSource | None = None
 
 
 @dataclass(frozen=True)

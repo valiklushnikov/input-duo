@@ -220,6 +220,10 @@ bool validate_binding(protocol::ByteView bytes, std::size_t offset, std::size_t 
     const std::uint8_t mode = bytes.data[offset + 3U];
     const std::uint8_t action = bytes.data[offset + 4U];
     const std::uint8_t argument = bytes.data[offset + 5U];
+    const std::uint16_t vendor_id = read_u16(bytes, offset + 6U);
+    const std::uint16_t product_id = read_u16(bytes, offset + 8U);
+    const std::uint8_t interface_number = bytes.data[offset + 10U];
+    const bool any_source = vendor_id == 0U && product_id == 0U && interface_number == 0U;
     if ((kind != static_cast<std::uint8_t>(TriggerKind::KEYBOARD_USAGE) &&
          kind != static_cast<std::uint8_t>(TriggerKind::MOUSE_BUTTON)) ||
         code == 0U ||
@@ -227,7 +231,8 @@ bool validate_binding(protocol::ByteView bytes, std::size_t offset, std::size_t 
          (code > 5U || modifiers != 0U)) ||
         (mode != static_cast<std::uint8_t>(BindingMode::REPLACE) &&
          mode != static_cast<std::uint8_t>(BindingMode::ADD)) ||
-        !all_zero(bytes, offset + 6U, offset + BINDING_RECORD_SIZE)) {
+        (!any_source && (vendor_id == 0U || product_id == 0U)) ||
+        bytes.data[offset + 11U] != 0U) {
         return false;
     }
     switch (static_cast<ActionKind>(action)) {
@@ -388,7 +393,10 @@ ValidationResult validate_config(protocol::ByteView input) {
                 const std::size_t earlier = binding_offset + previous * BINDING_RECORD_SIZE;
                 if (input.data[earlier] == input.data[binding] &&
                     input.data[earlier + 1U] == input.data[binding + 1U] &&
-                    input.data[earlier + 2U] == input.data[binding + 2U]) {
+                    input.data[earlier + 2U] == input.data[binding + 2U] &&
+                    read_u16(input, earlier + 6U) == read_u16(input, binding + 6U) &&
+                    read_u16(input, earlier + 8U) == read_u16(input, binding + 8U) &&
+                    input.data[earlier + 10U] == input.data[binding + 10U]) {
                     return ValidationResult::failure(ValidationError::INVALID_FORMAT);
                 }
             }
@@ -439,6 +447,10 @@ bool ProfileView::macro_at(std::size_t index, MacroView& output) const {
 TriggerKind BindingView::trigger_kind() const { return static_cast<TriggerKind>(bytes_.data[offset_]); }
 std::uint8_t BindingView::trigger_code() const { return bytes_.data[offset_ + 1U]; }
 std::uint8_t BindingView::trigger_modifiers() const { return bytes_.data[offset_ + 2U]; }
+TriggerSource BindingView::source() const {
+    return {read_u16(bytes_, offset_ + 6U), read_u16(bytes_, offset_ + 8U),
+            bytes_.data[offset_ + 10U]};
+}
 BindingMode BindingView::mode() const { return static_cast<BindingMode>(bytes_.data[offset_ + 3U]); }
 ActionKind BindingView::action_kind() const { return static_cast<ActionKind>(bytes_.data[offset_ + 4U]); }
 std::uint8_t BindingView::action_argument() const { return bytes_.data[offset_ + 5U]; }

@@ -37,6 +37,8 @@ static_assert(std::is_same_v<duo_input::config::BindingMode,
                              duo_input::protocol::BindingMode>);
 static_assert(std::is_same_v<duo_input::config::ActionKind,
                              duo_input::protocol::ActionKind>);
+static_assert(std::is_same_v<decltype(std::declval<const duo_input::config::BindingView&>().source()),
+                             duo_input::config::TriggerSource>);
 static_assert(!std::is_constructible_v<ValidationResult, ValidationError>);
 static_assert(!std::is_constructible_v<ValidationResult, ValidationError, ConfigView>);
 static_assert(std::is_same_v<decltype(std::declval<const ValidationResult&>().error()),
@@ -161,6 +163,77 @@ TEST_CASE(config_validator_accepts_python_vectors_and_exposes_bounded_views) {
     CHECK(macro.step_at(4U, step));
     CHECK_EQ(step.payload().size, 4U);
     CHECK_FALSE(macro.step_at(9U, step));
+}
+
+TEST_CASE(config_validator_accepts_same_trigger_from_distinct_sources) {
+    std::vector<std::uint8_t> bytes = read_vector("valid_full.bin");
+    const std::size_t binding_offset = read_u32(bytes, 64U + 16U);
+    const std::size_t second = binding_offset + 12U;
+    for (std::size_t index = 0; index < 6U; ++index) {
+        bytes[second + index] = bytes[binding_offset + index];
+    }
+    write_u16(bytes, binding_offset + 6U, 0x3434U);
+    write_u16(bytes, binding_offset + 8U, 0xD030U);
+    bytes[binding_offset + 10U] = 1U;
+    write_u16(bytes, second + 6U, 0x3434U);
+    write_u16(bytes, second + 8U, 0xD030U);
+    bytes[second + 10U] = 2U;
+    repair_crc(bytes);
+
+    CHECK(validate_config({bytes.data(), bytes.size()}));
+}
+
+TEST_CASE(config_validator_rejects_exact_trigger_source_duplicate) {
+    std::vector<std::uint8_t> bytes = read_vector("valid_full.bin");
+    const std::size_t binding_offset = read_u32(bytes, 64U + 16U);
+    const std::size_t second = binding_offset + 12U;
+    for (std::size_t index = 0; index < 11U; ++index) {
+        bytes[second + index] = bytes[binding_offset + index];
+    }
+    write_u16(bytes, binding_offset + 6U, 0x3434U);
+    write_u16(bytes, binding_offset + 8U, 0xD030U);
+    bytes[binding_offset + 10U] = 1U;
+    write_u16(bytes, second + 6U, 0x3434U);
+    write_u16(bytes, second + 8U, 0xD030U);
+    bytes[second + 10U] = 1U;
+    repair_crc(bytes);
+
+    CHECK(rejects(bytes));
+}
+
+TEST_CASE(config_validator_rejects_partially_zero_source) {
+    std::vector<std::uint8_t> bytes = read_vector("valid_full.bin");
+    const std::size_t binding_offset = read_u32(bytes, 64U + 16U);
+    write_u16(bytes, binding_offset + 6U, 0x3434U);
+    repair_crc(bytes);
+
+    CHECK(rejects(bytes));
+}
+
+TEST_CASE(config_binding_view_exposes_source_and_legacy_any_source) {
+    std::vector<std::uint8_t> bytes = read_vector("valid_full.bin");
+    const auto legacy_result = validate_config({bytes.data(), bytes.size()});
+    CHECK(legacy_result);
+    duo_input::config::ProfileView profile{};
+    duo_input::config::BindingView binding{};
+    CHECK(legacy_result.view().profile_at(0U, profile));
+    CHECK(profile.binding_at(0U, binding));
+    CHECK_EQ(binding.source().vendor_id, 0U);
+    CHECK_EQ(binding.source().product_id, 0U);
+    CHECK_EQ(binding.source().interface_number, 0U);
+
+    const std::size_t binding_offset = read_u32(bytes, 64U + 16U);
+    write_u16(bytes, binding_offset + 6U, 0x3434U);
+    write_u16(bytes, binding_offset + 8U, 0xD030U);
+    bytes[binding_offset + 10U] = 1U;
+    repair_crc(bytes);
+    const auto qualified_result = validate_config({bytes.data(), bytes.size()});
+    CHECK(qualified_result);
+    CHECK(qualified_result.view().profile_at(0U, profile));
+    CHECK(profile.binding_at(0U, binding));
+    CHECK_EQ(binding.source().vendor_id, 0x3434U);
+    CHECK_EQ(binding.source().product_id, 0xD030U);
+    CHECK_EQ(binding.source().interface_number, 1U);
 }
 
 TEST_CASE(config_validator_accepts_ru_and_ua_layouts_from_python_vector) {

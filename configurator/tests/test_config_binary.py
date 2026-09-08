@@ -21,6 +21,7 @@ from duo_input.domain.models import (
     TextLayout,
     Trigger,
     TriggerKind,
+    TriggerSource,
 )
 from duo_input.generated.protocol import MacroStepType
 
@@ -97,6 +98,59 @@ def test_compile_is_deterministic_and_round_trips(config):
 
     assert first == compile_device_config(config)
     assert decode_device_config(first) == config
+
+
+def test_binding_round_trips_its_source():
+    source = TriggerSource(vendor_id=0x3434, product_id=0xD030, interface_number=1)
+    trigger = Trigger(TriggerKind.KEYBOARD_USAGE, 0x4F, modifiers=0x01, source=source)
+    binding = Binding(trigger, BindingMode.REPLACE, Action(ActionKind.SET_PROFILE, 1))
+    profile = replace(empty_profile(1), bindings=(binding,))
+
+    encoded = compile_device_config(config_with_first_profile(profile))
+    binding_offset = int.from_bytes(encoded[64 + 16 : 64 + 20], "little")
+    decoded = decode_device_config(encoded)
+
+    assert int.from_bytes(encoded[64 + 20 : 64 + 22], "little") == 12
+    assert encoded[binding_offset : binding_offset + 6] == b"\x01\x4f\x01\x01\x06\x01"
+    assert encoded[binding_offset + 6 : binding_offset + 12] == b"\x34\x34\x30\xd0\x01\x00"
+    assert decoded.profiles[0].bindings[0].trigger.source == source
+
+
+def test_all_zero_source_decodes_as_any():
+    # This committed vector was written by the old encoder, when bytes 6..11
+    # of every binding record were reserved and zero.
+    legacy_blob = (VECTOR_DIRECTORY / "valid_full.bin").read_bytes()
+
+    decoded = decode_device_config(legacy_blob)
+
+    assert decoded.profiles[0].bindings[0].trigger.source is None
+
+
+def test_compile_accepts_same_trigger_from_distinct_sources_and_rejects_exact_source_duplicate():
+    first_source = TriggerSource(0x3434, 0xD030, 1)
+    second_source = TriggerSource(0x3434, 0xD030, 2)
+    first = Binding(
+        Trigger(TriggerKind.KEYBOARD_USAGE, 0x4F, modifiers=0x01, source=first_source),
+        BindingMode.REPLACE,
+        Action(ActionKind.SET_PROFILE, 1),
+    )
+    second = replace(first, trigger=replace(first.trigger, source=second_source))
+    distinct_profile = replace(empty_profile(1), bindings=(first, second))
+
+    compile_device_config(config_with_first_profile(distinct_profile))
+
+    duplicate_profile = replace(empty_profile(1), bindings=(first, replace(first)))
+    with pytest.raises(ConfigError, match="duplicate trigger"):
+        compile_device_config(config_with_first_profile(duplicate_profile))
+
+
+def test_decode_rejects_partially_zero_source():
+    malformed = bytearray((VECTOR_DIRECTORY / "valid_full.bin").read_bytes())
+    binding_offset = int.from_bytes(malformed[64 + 16 : 64 + 20], "little")
+    malformed[binding_offset + 6 : binding_offset + 8] = (0x3434).to_bytes(2, "little")
+
+    with pytest.raises(ConfigError, match="binding"):
+        decode_device_config(repair_crc(malformed))
 
 
 def test_compile_rejects_mutable_collections_that_cannot_round_trip_equal():

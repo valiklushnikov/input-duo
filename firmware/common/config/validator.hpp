@@ -59,6 +59,7 @@ public:
     TriggerKind trigger_kind() const;
     std::uint8_t trigger_code() const;
     std::uint8_t trigger_modifiers() const;
+    TriggerSource source() const;
     BindingMode mode() const;
     ActionKind action_kind() const;
     std::uint8_t action_argument() const;

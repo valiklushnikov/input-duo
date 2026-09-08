@@ -19,6 +19,7 @@ from duo_input.domain.models import (
     TextLayout,
     Trigger,
     TriggerKind,
+    TriggerSource,
 )
 from duo_input.generated.protocol import (
     BINARY_CONFIG_MAX_BYTES,
@@ -46,7 +47,10 @@ STEP_SIZE = 12
 
 _HEADER = struct.Struct("<4sBBBBIIBBBBIIIII24s")
 _PROFILE = struct.Struct("<BBBB3sBIHHIHHIHHI")
-_BINDING = struct.Struct("<BBBBBBHI")
+# kind, code, modifiers, mode, action kind, argument, VID, PID, interface,
+# reserved. Twelve bytes, as before: the source occupies bytes 6-10, which
+# were reserved and zero, and byte 11 stays reserved.
+_BINDING = struct.Struct("<BBBBBBHHBB")
 _MACRO = struct.Struct("<BBHIHHIHHI")
 _STEP = struct.Struct("<BBHII")
 
@@ -67,6 +71,12 @@ def _enum(value: object, enum_type: type, field: str):
 def _u8(value: object, field: str, *, minimum: int = 0) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= 0xFF:
         raise ConfigError(f"{field} is outside its u8 range")
+    return value
+
+
+def _u16(value: object, field: str, *, minimum: int = 0) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not minimum <= value <= 0xFFFF:
+        raise ConfigError(f"{field} is outside its u16 range")
     return value
 
 
@@ -180,7 +190,7 @@ def _validate_model(config: DeviceConfig):
                 )
             )
 
-        triggers: set[tuple[int, int, int]] = set()
+        triggers: set[tuple[int, int, int, int, int, int]] = set()
         validated_bindings = []
         for binding in profile.bindings:
             if (
@@ -194,7 +204,15 @@ def _validate_model(config: DeviceConfig):
             modifiers = _u8(binding.trigger.modifiers, "trigger modifiers")
             if kind is TriggerKind.MOUSE_BUTTON and (code > 5 or modifiers != 0):
                 raise ConfigError("mouse trigger must be button 1..5 without modifiers")
-            key = (int(kind), code, modifiers)
+            if binding.trigger.source is None:
+                vendor_id = product_id = interface_number = 0
+            elif isinstance(binding.trigger.source, TriggerSource):
+                vendor_id = _u16(binding.trigger.source.vendor_id, "trigger source vendor ID", minimum=1)
+                product_id = _u16(binding.trigger.source.product_id, "trigger source product ID", minimum=1)
+                interface_number = _u8(binding.trigger.source.interface_number, "trigger source interface number")
+            else:
+                raise ConfigError("trigger source must be a TriggerSource or None")
+            key = (int(kind), code, modifiers, vendor_id, product_id, interface_number)
             if key in triggers:
                 raise ConfigError("duplicate trigger within profile")
             triggers.add(key)
@@ -214,7 +232,10 @@ def _validate_model(config: DeviceConfig):
             elif action_kind is ActionKind.SET_PROFILE:
                 if argument not in ids:
                     raise ConfigError("set-profile action references an unknown profile")
-            validated_bindings.append((kind, code, modifiers, mode, action_kind, argument))
+            validated_bindings.append(
+                (kind, code, modifiers, mode, action_kind, argument,
+                 vendor_id, product_id, interface_number)
+            )
         validated.append(
             (profile, profile_name, keyboard_route, mouse_route, text_layout,
              tuple(validated_bindings), tuple(validated_macros))
@@ -259,8 +280,12 @@ def compile_device_config(config: DeviceConfig) -> bytes:
     profile_tables = []
     for profile_index, (_, _, _, _, _, bindings, macros) in enumerate(validated):
         binding_offset = data_start + len(data)
-        for kind, code, modifiers, mode, action_kind, argument in bindings:
-            append_data(_BINDING.pack(kind, code, modifiers, mode, action_kind, argument, 0, 0))
+        for (kind, code, modifiers, mode, action_kind, argument,
+             vendor_id, product_id, interface_number) in bindings:
+            append_data(_BINDING.pack(
+                kind, code, modifiers, mode, action_kind, argument,
+                vendor_id, product_id, interface_number, 0,
+            ))
         macro_offset = data_start + len(data)
         macro_table_start = len(data)
         append_data(b"\0" * (len(macros) * MACRO_SIZE))
@@ -466,18 +491,25 @@ def decode_device_config(data: bytes) -> DeviceConfig:
             macros.append(Macro(macro_id, macro_name, target, tuple(steps)))
 
         bindings = []
-        triggers: set[tuple[int, int, int]] = set()
+        triggers: set[tuple[int, int, int, int, int, int]] = set()
         for binding_index in range(binding_count):
             values = _BINDING.unpack_from(data, binding_offset + binding_index * BINDING_SIZE)
-            kind, code, modifiers, mode, action_kind, argument, reserved1, reserved2 = values
-            if reserved1 or reserved2:
+            (kind, code, modifiers, mode, action_kind, argument,
+             vendor_id, product_id, interface_number, reserved) = values
+            if reserved:
                 raise ConfigError("binding reserved fields must be zero")
+            if vendor_id == 0 and product_id == 0 and interface_number == 0:
+                source = None
+            elif vendor_id == 0 or product_id == 0:
+                raise ConfigError("binding source is partially zero")
+            else:
+                source = TriggerSource(vendor_id, product_id, interface_number)
             trigger_kind = _enum(kind, TriggerKind, "trigger kind")
             mode_value = _enum(mode, BindingMode, "binding mode")
             action_value = _enum(action_kind, ActionKind, "action kind")
-            trigger = Trigger(trigger_kind, code, modifiers)
+            trigger = Trigger(trigger_kind, code, modifiers, source)
             binding = Binding(trigger, mode_value, Action(action_value, argument))
-            key = (kind, code, modifiers)
+            key = (kind, code, modifiers, vendor_id, product_id, interface_number)
             if key in triggers:
                 raise ConfigError("duplicate trigger within profile")
             triggers.add(key)

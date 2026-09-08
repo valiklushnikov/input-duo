@@ -100,10 +100,14 @@ four-byte boundary. A zero-count table has its canonical cursor as its offset.
 | 3 | 1 | binding mode |
 | 4 | 1 | action kind |
 | 5 | 1 | action argument |
-| 6 | 2 | reserved, zero |
-| 8 | 4 | reserved, zero |
+| 6 | 2 | source USB vendor ID |
+| 8 | 2 | source USB product ID |
+| 10 | 1 | source USB interface number |
+| 11 | 1 | reserved, zero |
 
-Exact `(kind, code, modifiers)` trigger duplicates are invalid within a profile. RUN_MACRO refers
+The all-zero `(vendor ID, product ID, interface number)` source means any source. Otherwise both
+vendor ID and product ID must be nonzero; interface zero is valid. Exact
+`(kind, code, modifiers, source)` trigger duplicates are invalid within a profile. RUN_MACRO refers
 to an existing macro ID. Toggle actions require argument zero. SET_KEYBOARD_ROUTE uses
 KeyboardRoute. SET_MOUSE_ROUTE uses MouseRoute and therefore rejects value 3; mouse toggle has
 its own action kind. SET_PROFILE refers to profile 1..8.

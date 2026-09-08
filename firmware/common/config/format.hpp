@@ -13,6 +13,12 @@ inline constexpr std::size_t BINDING_RECORD_SIZE = 12U;
 inline constexpr std::size_t MACRO_DESCRIPTOR_SIZE = 24U;
 inline constexpr std::size_t STEP_DESCRIPTOR_SIZE = 12U;
 
+struct TriggerSource {
+    std::uint16_t vendor_id;
+    std::uint16_t product_id;
+    std::uint8_t interface_number;
+};
+
 using KeyboardRoute = protocol::KeyboardRoute;
 using MouseRoute = protocol::MouseRoute;
 using TargetMode = protocol::TargetMode;
