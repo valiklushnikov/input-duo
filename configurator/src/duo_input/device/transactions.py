@@ -1242,12 +1242,26 @@ def parse_capture_event(payload: bytes) -> Trigger:
     Eight bytes is the current shape: the same three bytes plus the VID, PID
     and interface number of the source that produced the press. Any other
     length is refused.
+
+    All zero in the eight-byte form means the same "unknown" the three-byte
+    form means - the firmware sends exactly that whenever its source table
+    could not resolve the press - so it decodes to ``None`` rather than to
+    ``TriggerSource(0, 0, 0)``. This mirrors the identical wire triple's other
+    decoder, the stored-binding source at ``config_binary.py`` around line
+    501, so the wire has exactly one representation of "unknown" reaching the
+    domain layer. A triple that is zero in only one of VID/PID is neither
+    shape and is refused, the same way that decoder refuses it.
     """
     if len(payload) == _CAPTURE_EVENT_FULL.size:
         kind, code, modifiers, vendor_id, product_id, interface_number = (
             _CAPTURE_EVENT_FULL.unpack(payload)
         )
-        source: TriggerSource | None = TriggerSource(vendor_id, product_id, interface_number)
+        if vendor_id == 0 and product_id == 0 and interface_number == 0:
+            source: TriggerSource | None = None
+        elif vendor_id == 0 or product_id == 0:
+            raise PayloadError("CAPTURE_EVENT source is partially zero")
+        else:
+            source = TriggerSource(vendor_id, product_id, interface_number)
     elif len(payload) == _CAPTURE_EVENT_LEGACY.size:
         kind, code, modifiers = _CAPTURE_EVENT_LEGACY.unpack(payload)
         source = None

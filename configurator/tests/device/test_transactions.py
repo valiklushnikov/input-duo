@@ -10,6 +10,7 @@ from duo_input.device.transactions import (
     MAX_PENDING_FRAME_BYTES,
     FrameAssembler,
     FrameOverflowError,
+    PayloadError,
     SequenceGenerator,
     parse_capture_event,
 )
@@ -256,3 +257,22 @@ def test_short_capture_event_still_parses():
     # break the compatibility matrix this repository ships.
     trigger = parse_capture_event(struct.pack("<BBB", TriggerKind.MOUSE_BUTTON, 4, 0))
     assert trigger.source is None
+
+
+def test_an_all_zero_source_in_the_full_payload_reads_as_unknown():
+    # The firmware sends exactly this whenever its source table could not
+    # resolve the press - the same "unknown" the three-byte form means, and
+    # the same convention the stored-binding source already uses.
+    payload = struct.pack("<BBBHHB", TriggerKind.MOUSE_BUTTON, 4, 0, 0, 0, 0)
+
+    trigger = parse_capture_event(payload)
+
+    assert trigger.source is None
+
+
+def test_a_partially_zero_source_is_refused():
+    payload = struct.pack("<BBBHHB", TriggerKind.KEYBOARD_USAGE, 0x4F, 0x01,
+                          0x3434, 0, 1)
+
+    with pytest.raises(PayloadError):
+        parse_capture_event(payload)

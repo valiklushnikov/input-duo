@@ -15,6 +15,7 @@
 // a key nor invents one.
 
 #include "core1_runtime.hpp"
+#include "input/source_table.hpp"
 #include "test_support.hpp"
 
 #include <vector>
@@ -31,6 +32,10 @@ using duo_input::u1::ICommandSink;
 using duo_input::u1::IProfileSource;
 using duo_input::u1::input::InputEvent;
 using duo_input::u1::input::InputEventKind;
+using duo_input::u1::input::SourceEvent;
+using duo_input::u1::input::SourceEventKind;
+using duo_input::u1::input::SourceIdentity;
+using duo_input::u1::input::SourceTable;
 using duo_input::u1::macros::MacroDefinition;
 using duo_input::u1::macros::MacroStep;
 using duo_input::u1::mapping::Binding;
@@ -149,6 +154,28 @@ struct TwoProfiles final : IProfileSource {
     }
 };
 
+/// A one-source table, wired into a runtime's CaptureController the way
+/// main.cpp wires the real one in - the same fixture test_capture.cpp and
+/// test_binding_engine.cpp use for the same reason: only what
+/// SourceTable::resolve hands back matters here, not how a backend fills it
+/// in.
+struct SourceFixture : duo_input::u1::input::IInputHandler {
+    SourceTable sources{*this};
+    void on_input(const InputEvent&, std::uint32_t) override {}
+
+    /// Occupies slot 0, since it is the first and only attach.
+    void attach(std::uint16_t vid, std::uint16_t pid, std::uint8_t interface_number) {
+        SourceEvent event;
+        event.kind = SourceEventKind::Ready;
+        event.source_id = 1;
+        SourceIdentity identity;
+        identity.vendor_id = vid;
+        identity.product_id = pid;
+        identity.interface_number = interface_number;
+        sources.on_event(event, identity, 0);
+    }
+};
+
 Binding run_macro_on(std::uint16_t usage, std::uint8_t macro_id) {
     Binding binding;
     binding.trigger = TriggerKind::KEYBOARD_USAGE;
@@ -260,6 +287,32 @@ TEST_CASE(the_first_key_pressed_is_the_one_captured) {
     CHECK(runtime.take_capture_event(trigger));
     CHECK_EQ(static_cast<int>(trigger.kind), static_cast<int>(TriggerKind::KEYBOARD_USAGE));
     CHECK_EQ(static_cast<int>(trigger.code), 0x1A);
+}
+
+TEST_CASE(a_captured_trigger_s_source_crosses_from_core_1_to_core_0) {
+    // CaptureController resolves the source on Core 1; take_capture_event is
+    // what hands the trigger to Core 0 across the mailbox. A mailbox that
+    // narrowed the copy back to kind/code/modifiers would pass every other
+    // test in this file - none of them look at vendor_id - while silently
+    // dropping the one thing this test exists to catch.
+    SourceFixture fixture;
+    fixture.attach(0x3434, 0xD030, 1);
+
+    RecordingSink sink;
+    TwoProfiles profiles;
+    Core1Runtime runtime(sink, profiles);
+    runtime.capture().set_sources(fixture.sources);
+    runtime.begin_capture(1000);
+
+    InputEvent press = key(InputEventKind::KeyDown, 0x1A);
+    press.source_index = 0;  // the slot attach() just filled
+    runtime.handle_input(press, 1000);
+
+    CapturedTrigger trigger;
+    CHECK(runtime.take_capture_event(trigger));
+    CHECK_EQ(trigger.vendor_id, 0x3434u);
+    CHECK_EQ(trigger.product_id, 0xD030u);
+    CHECK_EQ(static_cast<int>(trigger.interface_number), 1);
 }
 
 TEST_CASE(the_captured_key_never_reaches_the_computer) {

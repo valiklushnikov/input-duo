@@ -165,3 +165,36 @@ TEST_CASE(a_controller_with_no_table_wired_in_leaves_the_source_zero) {
     CHECK_EQ(trigger.product_id, 0u);
     CHECK_EQ(static_cast<int>(trigger.interface_number), 0);
 }
+
+TEST_CASE(a_second_capture_from_an_unresolvable_source_does_not_keep_the_first_ones) {
+    // CaptureController is long-lived - one instance sits inside Core1Runtime
+    // for the life of the program - and trigger_ is a member neither begin()
+    // nor take() clears. If fill_source only wrote the resolved case, a
+    // second capture whose index the table cannot resolve would report
+    // whatever source the previous, successful capture last wrote: a binding
+    // qualified to the wrong device.
+    SourceFixture fixture;
+    fixture.attach(0x3434, 0xD030, 1);
+
+    CaptureController capture;
+    capture.set_sources(fixture.sources);
+
+    capture.begin(1000);
+    InputEvent first = key(InputEventKind::KeyDown, 0x04);
+    first.source_index = 0;  // the slot attach() filled
+    CHECK(capture.handle(first) == CaptureDisposition::Swallow);
+    CapturedTrigger taken;
+    CHECK(capture.take(taken));
+    CHECK_EQ(taken.vendor_id, 0x3434u);
+
+    capture.begin(2000);
+    InputEvent second = key(InputEventKind::KeyDown, 0x05);
+    second.source_index = 1;  // nothing attached here
+    CHECK(capture.handle(second) == CaptureDisposition::Swallow);
+
+    CapturedTrigger trigger;
+    CHECK(capture.take(trigger));
+    CHECK_EQ(trigger.vendor_id, 0u);
+    CHECK_EQ(trigger.product_id, 0u);
+    CHECK_EQ(static_cast<int>(trigger.interface_number), 0);
+}
