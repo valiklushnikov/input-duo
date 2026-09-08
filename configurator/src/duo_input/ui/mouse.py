@@ -155,9 +155,9 @@ class MouseSwitchPage(QWidget):
         button_row.setContentsMargins(0, 0, 0, 0)
         button_row.setSpacing(SPACE_SM)
         button_row.addWidget(self.mouse_combo, 1)
-        self.capture_button = QPushButton(self.tr("Detect button"), box)
+        self.capture_button = QPushButton(self.tr("Detect button or key"), box)
         self.capture_button.setAccessibleName(
-            self.tr("Detect a mouse button on the device")
+            self.tr("Detect a button or key on the mouse")
         )
         self.capture_button.clicked.connect(self.capture_mouse_button)
         button_row.addWidget(self.capture_button)
@@ -344,14 +344,15 @@ class MouseSwitchPage(QWidget):
     def accepts_capture(self, trigger: Trigger) -> bool:
         """Is this press one the mouse this page is about produced?
 
-        A mouse button is taken on its own word, the way it always was: a
-        press that names no source is what firmware predating the source
-        table sends, and refusing those would strand every such device.
-        Anything else has to say which device it came from, and that device
-        has to be the mouse U1 reports on its own bus.
+        A press that names no source is what firmware predating the source
+        table sends; nothing can be asked of it beyond what was always asked,
+        so a mouse button is taken and anything else is not. A press that does
+        name a source is judged on that source alone, whatever its kind: a
+        button on another device on U1's bus is no more this page's press than
+        a key on that device is.
         """
-        if trigger.kind is TriggerKind.MOUSE_BUTTON:
-            return True
+        if trigger.source is None:
+            return trigger.kind is TriggerKind.MOUSE_BUTTON
         return self._capabilities.is_mouse(trigger.source)
 
     def capture_mouse_button(self) -> CaptureDialog | None:
@@ -359,7 +360,7 @@ class MouseSwitchPage(QWidget):
         if (
             self._service is None
             or not self._service.is_connected
-            or self.trigger_kind.currentData() is not TriggerKind.MOUSE_BUTTON
+            or self.trigger_kind.currentData() is None
         ):
             return None
         dialog = CaptureDialog(
@@ -447,8 +448,12 @@ class MouseSwitchPage(QWidget):
                 box.setEnabled(kind is TriggerKind.KEYBOARD_USAGE)
             self.action_combo.setEnabled(kind is not None)
             self.mode_combo.setEnabled(kind is not None)
+            # Not gated on the trigger kind: a press detected on the mouse
+            # may arrive as a keyboard usage, and selecting that kind must not
+            # be what takes the button away from the operator who then wants
+            # to try a different key.
             self.capture_button.setEnabled(
-                kind is TriggerKind.MOUSE_BUTTON
+                kind is not None
                 and self._service is not None
                 and self._service.is_connected
             )

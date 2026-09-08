@@ -144,6 +144,12 @@ class MainWindow(QMainWindow):
         #: which arrives on ``operation_succeeded`` several chunks later - is
         #: only adopted when it is actually the read this window asked for.
         self._reading_device = False
+        #: Set by a connect, cleared by the counter read it asks for. Which
+        #: devices are on U1's own bus is a GET_DIAGNOSTICS answer, and the
+        #: Mouse page cannot tell one device's press from another's without
+        #: it - so the shell asks on every attach rather than waiting for
+        #: someone to open Diagnostics and press Refresh.
+        self._counters_wanted = False
         #: The project a write is currently sending, held from the moment it
         #: was compiled until the device confirms it. A write is chunks, then
         #: WRITE_COMMIT, then a read-back - every step a full event-loop turn,
@@ -353,6 +359,13 @@ class MainWindow(QMainWindow):
         return holder
 
     def _connect_service(self) -> None:
+        # Owned by this window rather than QTimer.singleShot, so it dies with
+        # the window: a shot still pending when the shell is torn down would
+        # fire into pages whose widgets are already gone.
+        self._counters_timer = QTimer(self)
+        self._counters_timer.setSingleShot(True)
+        self._counters_timer.setInterval(0)
+        self._counters_timer.timeout.connect(self.diagnostics.request_counters)
         self._service.state_changed.connect(self._on_state_changed)
         self._service.status_changed.connect(self._on_status_changed)
         self._service.progress_changed.connect(self._on_progress_changed)
@@ -706,6 +719,25 @@ class MainWindow(QMainWindow):
         """Said once when the socket is empty, and recognised when clearing it."""
         return self.tr("No device found. Load a copy from a file, or plug the device in.")
 
+    def _request_counters_if_wanted(self) -> None:
+        """Read the counters once per attach, after the connect's own read.
+
+        The service runs one operation at a time, so this cannot be issued
+        beside the configuration read every connect queues; it waits for that
+        read to end, whichever way it ends, and is deferred a tick for the
+        same reason that read is - this runs inside the service's own unwind
+        of the operation that just finished.
+
+        It lives here rather than in the capture dialog because the shell is
+        what sequences device operations: a page cannot ask for the counters
+        and then begin capture without a chain of its own, and the answer is
+        needed by more than the one dialog.
+        """
+        if not self._counters_wanted or not self._service.is_connected:
+            return
+        self._counters_wanted = False
+        self._counters_timer.start()
+
     def read_device_project(self) -> None:
         """Ask the device for the configuration it is running.
 
@@ -737,6 +769,7 @@ class MainWindow(QMainWindow):
         # not a guarantee, and this round has already seen what happens when
         # something else clears it at the wrong moment.
         self._reading_device = False
+        self._counters_wanted = False
         self._writing_project = None
         self._service.disconnect_device()
         self._sync_device_state()
@@ -816,11 +849,19 @@ class MainWindow(QMainWindow):
             # inside DeviceService's own unwind of "connect_device", and
             # starting a second operation synchronously here would
             # re-enter the service mid-transaction.
+            self._counters_wanted = True
             QTimer.singleShot(0, self.read_device_project)
         self.overview.append_event(result.operation, "ok")
         self.diagnostics.refresh()
         self.progress.setVisible(False)
         self._sync_device_state()
+        if result.operation != "connect_device":
+            # Not after the connect itself: the read it just queued has not
+            # started yet, so a counter request made here would reach the
+            # service first, be answered BUSY, and the counters would never
+            # be read at all. The end of that read is the moment the service
+            # is idle and this can be asked.
+            self._request_counters_if_wanted()
 
     def _commit_pending_edits(self) -> None:
         """Ask every editor page to commit text that is still being typed.
@@ -914,6 +955,10 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         self.statusBar().showMessage(f"{failure.operation}: {failure.reason.value}")
         self._sync_device_state()
+        if failure.operation != "connect_device":
+            # A read that failed still leaves the service idle, and the
+            # counters are as worth having then as after one that landed.
+            self._request_counters_if_wanted()
 
     # ------------------------------------------------------------------ close
 

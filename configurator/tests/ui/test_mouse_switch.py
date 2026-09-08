@@ -228,7 +228,14 @@ def test_mouse_buttons_have_names_a_person_can_recognise(page):
 # -------------------------------------------------------------------- capture
 
 
-def test_detecting_a_button_needs_the_device_and_mouse_trigger(qtbot):
+def test_detecting_a_press_needs_the_device_and_a_chosen_trigger(qtbot):
+    """The kind is not the gate any more.
+
+    A press detected on the mouse may arrive as a keyboard usage, and the page
+    selects that kind when it does. Gating Detect on "mouse button" meant the
+    very capture this page now exists to allow switched the button off behind
+    the operator who wanted to try another key.
+    """
     service = DeviceService(timeout_ms=5000)
     page = MouseSwitchPage(service)
     qtbot.addWidget(page)
@@ -243,6 +250,9 @@ def test_detecting_a_button_needs_the_device_and_mouse_trigger(qtbot):
     assert page.capture_button.isEnabled() is True
 
     page.select_trigger_kind(TriggerKind.KEYBOARD_USAGE)
+    assert page.capture_button.isEnabled() is True
+
+    page.select_trigger_kind(None)
     assert page.capture_button.isEnabled() is False
 
 
@@ -375,6 +385,100 @@ def test_a_key_the_operator_then_changes_loses_the_device_it_named(qtbot):
     assert page.current_trigger() == Trigger(
         TriggerKind.KEYBOARD_USAGE, 0x04, LEFT_CTRL, None
     )
+
+
+def test_detect_control_describes_button_or_key_capture(page):
+    assert "button or key" in page.capture_button.text().lower()
+    assert "button or key" in page.capture_button.accessibleName().lower()
+
+
+def test_detect_can_be_pressed_again_after_a_key_was_detected(qtbot):
+    """The operator who detected one key must be able to try another."""
+    service = DeviceService(timeout_ms=5000)
+    emulator = U1Emulator()
+    link = SynchronousTransportLink(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(link)
+    page = MouseSwitchPage(service)
+    qtbot.addWidget(page)
+    page.set_capabilities(
+        MouseCapabilities(advertised=True).with_peripherals((_attached_mouse(),))
+    )
+    page.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        QTest.mouseClick(page.capture_button, Qt.MouseButton.LeftButton)
+    assert emulator.queue_capture_event(
+        _capture_payload(
+            TriggerKind.KEYBOARD_USAGE, CAPTURED_KEY, LEFT_CTRL, CAPTURED_SOURCE
+        )
+    )
+    with qtbot.waitSignal(service.capture_received, timeout=5000):
+        link.poll()
+    assert page.trigger_kind.currentData() is TriggerKind.KEYBOARD_USAGE
+
+    assert page.capture_button.isEnabled() is True
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        QTest.mouseClick(page.capture_button, Qt.MouseButton.LeftButton)
+
+    dialogs = page.findChildren(CaptureDialog)
+    assert len(dialogs) == 2
+    assert dialogs[-1].isVisible() is True
+
+
+def test_a_mouse_button_from_another_device_is_refused(qtbot):
+    """A button is not this page's press just because it is a button.
+
+    Only a press with no source at all is taken on trust - that is what
+    firmware predating the source table sends. One that names a device is
+    judged on the device, whatever kind of press it is.
+    """
+    service = DeviceService(timeout_ms=5000)
+    emulator = U1Emulator()
+    link = SynchronousTransportLink(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(link)
+    page = MouseSwitchPage(service)
+    qtbot.addWidget(page)
+    page.set_capabilities(
+        MouseCapabilities(advertised=True).with_peripherals((_attached_mouse(),))
+    )
+    page.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        QTest.mouseClick(page.capture_button, Qt.MouseButton.LeftButton)
+    dialog = page.findChildren(CaptureDialog)[0]
+    assert emulator.queue_capture_event(
+        _capture_payload(
+            TriggerKind.MOUSE_BUTTON, 5, 0, TriggerSource(0x1234, 0x5678, 0)
+        )
+    )
+
+    with qtbot.waitSignal(service.capture_received, timeout=5000):
+        link.poll()
+
+    assert dialog.trigger is None
+    assert page.mouse_combo.findData(5) < 0
+
+
+def test_a_mouse_button_that_names_no_device_is_still_accepted(qtbot):
+    """Firmware predating the source table must keep working exactly as before."""
+    service = DeviceService(timeout_ms=5000)
+    emulator = U1Emulator()
+    link = SynchronousTransportLink(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(link)
+    page = MouseSwitchPage(service)
+    qtbot.addWidget(page)
+    page.set_capabilities(MouseCapabilities(advertised=True))
+    page.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        QTest.mouseClick(page.capture_button, Qt.MouseButton.LeftButton)
+    assert emulator.queue_capture_event(bytes((TriggerKind.MOUSE_BUTTON, 5, 0)))
+
+    with qtbot.waitSignal(service.capture_received, timeout=5000):
+        link.poll()
+
+    assert page.mouse_combo.currentData() == 5
+    assert page.current_trigger() == Trigger(TriggerKind.MOUSE_BUTTON, 5, 0)
 
 
 def test_binding_a_new_button_replaces_the_old_mouse_switch(page):

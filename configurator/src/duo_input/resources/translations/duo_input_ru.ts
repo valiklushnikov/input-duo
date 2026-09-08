@@ -1184,8 +1184,8 @@
     </message>
     <message>
         <location filename="../../ui/mouse.py" line="154"/>
-        <source>Detect button</source>
-        <translation>Определить кнопку</translation>
+        <source>Detect button or key</source>
+        <translation>Определить кнопку или клавишу</translation>
     </message>
     <message>
         <location filename="../../ui/mouse.py" line="331"/>
@@ -1194,8 +1194,8 @@
     </message>
     <message>
         <location filename="../../ui/mouse.py" line="156"/>
-        <source>Detect a mouse button on the device</source>
-        <translation>Определить кнопку мыши на устройстве</translation>
+        <source>Detect a button or key on the mouse</source>
+        <translation>Определить кнопку или клавишу на мыши</translation>
     </message>
     <message>
         <location filename="../../ui/mouse.py" line="162"/>

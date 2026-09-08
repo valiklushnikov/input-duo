@@ -56,23 +56,28 @@ def _connect(qtbot, window: MainWindow, emulator: U1Emulator) -> None:
     with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
         window.connect_device(emulator)
     assert window.service.state is DeviceState.READY
-    # Every connect queues the window's own read of what the device is
-    # running (see read_device_project); the request is deferred to the next
-    # tick and its answer a few more after that. A caller that goes straight
-    # on to its own device operation must not race it, so every test that
-    # uses this helper waits for it to land - successfully or not - first.
-    # The listener is attached before anything pumps the event loop, so it
-    # cannot miss a read that lands on the very first tick.
-    settled = [False]
+    # Every connect queues two reads of its own: the window's read of what
+    # the device is running (see read_device_project), and then the counter
+    # read that says which devices are on U1's own bus (see
+    # _request_counters_if_wanted). Both are deferred to a later tick and
+    # their answers a few more after that, and the second only starts once
+    # the first has ended. A caller that goes straight on to its own device
+    # operation must not race either, so every test that uses this helper
+    # waits for both to land - successfully or not - first. The listener is
+    # attached before anything pumps the event loop, so it cannot miss a
+    # read that lands on the very first tick.
+    wanted = {"read_config", "get_diagnostics"}
+    settled: set[str] = set()
 
     def _mark_settled(result: object) -> None:
-        if getattr(result, "operation", None) == "read_config":
-            settled[0] = True
+        operation = getattr(result, "operation", None)
+        if operation in wanted:
+            settled.add(operation)
 
     window.service.operation_succeeded.connect(_mark_settled)
     window.service.operation_failed.connect(_mark_settled)
     try:
-        qtbot.waitUntil(lambda: settled[0], timeout=5000)
+        qtbot.waitUntil(lambda: settled >= wanted, timeout=5000)
     finally:
         window.service.operation_succeeded.disconnect(_mark_settled)
         window.service.operation_failed.disconnect(_mark_settled)
@@ -835,6 +840,15 @@ def test_a_board_arriving_does_not_wipe_a_message_it_did_not_post(
 
     assert window._said_no_device is False
     assert window.statusBar().currentMessage() == posted
+
+    # Drain the reads this connect queued. A test that walks away from work it
+    # started leaves it to run inside the next test's event loop, against a
+    # window whose widgets are being deleted underneath it.
+    qtbot.waitUntil(
+        lambda: window.service.diagnostics is not None
+        and window.service.state is not DeviceState.BUSY,
+        timeout=5000,
+    )
 
 
 def test_a_template_saved_before_the_board_arrives_still_lets_the_board_be_read(

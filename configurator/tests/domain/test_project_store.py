@@ -22,6 +22,7 @@ from duo_input.domain.models import (
     TextLayout,
     Trigger,
     TriggerKind,
+    TriggerSource,
 )
 from duo_input.domain.project_store import (
     PROJECT_SCHEMA_VERSION,
@@ -187,6 +188,95 @@ def test_validation_rejects_unsupported_enums_at_their_positions(project: Device
     assert "/profiles/0/bindings/0/mode" in paths
     assert "/profiles/0/macros/0/target" in paths
     assert "/profiles/0/macros/0/steps/0/type" in paths
+
+
+@pytest.mark.parametrize(
+    "other_source",
+    (
+        None,
+        TriggerSource(0x1234, 0xD030, 1),
+        TriggerSource(0x3434, 0x5678, 1),
+        TriggerSource(0x3434, 0xD030, 2),
+    ),
+)
+def test_two_triggers_that_differ_only_by_their_source_are_not_duplicates(
+    project: DeviceProject, other_source: TriggerSource | None,
+):
+    """Ctrl+Right from the mouse and Ctrl+Right from the keyboard are two
+    bindings, and being able to have both is the whole point of qualifying a
+    trigger. The binary decoder has always keyed duplicates on the full
+    six-tuple; the validator was still keying on three."""
+    first = project.profiles[0]
+    trigger = Trigger(TriggerKind.KEYBOARD_USAGE, 0x4F, 0x01)
+    qualified = replace(
+        first.bindings[0],
+        uuid=UUID("55555555-5555-4555-8555-555555555555"),
+        trigger=replace(trigger, source=TriggerSource(0x3434, 0xD030, 1)),
+    )
+    unqualified = replace(
+        first.bindings[0],
+        uuid=UUID("66666666-6666-4666-8666-666666666666"),
+        trigger=replace(trigger, source=other_source),
+    )
+    target = replace(
+        project,
+        profiles=(replace(first, bindings=(qualified, unqualified)),)
+        + project.profiles[1:],
+    )
+
+    assert validate_project(target) == ()
+
+
+def test_two_triggers_from_the_same_device_are_still_duplicates(
+    project: DeviceProject,
+):
+    first = project.profiles[0]
+    trigger = Trigger(
+        TriggerKind.KEYBOARD_USAGE, 0x4F, 0x01, TriggerSource(0x3434, 0xD030, 1)
+    )
+    one = replace(
+        first.bindings[0],
+        uuid=UUID("77777777-7777-4777-8777-777777777777"),
+        trigger=trigger,
+    )
+    two = replace(
+        first.bindings[0],
+        uuid=UUID("88888888-8888-4888-8888-888888888888"),
+        trigger=trigger,
+    )
+    invalid = replace(
+        project,
+        profiles=(replace(first, bindings=(one, two)),) + project.profiles[1:],
+    )
+
+    paths = {issue.path for issue in validate_project(invalid)}
+
+    assert "/profiles/0/bindings/1/trigger" in paths
+
+
+def test_an_all_zero_source_is_the_same_key_as_no_source(project: DeviceProject):
+    """The wire spells "unknown" as the all-zero triple; the two spellings
+    must not become two different bindings on the same key."""
+    first = project.profiles[0]
+    trigger = Trigger(TriggerKind.KEYBOARD_USAGE, 0x4F, 0x01)
+    spelled = replace(
+        first.bindings[0],
+        uuid=UUID("99999999-9999-4999-8999-999999999999"),
+        trigger=replace(trigger, source=TriggerSource(0, 0, 0)),
+    )
+    unspelled = replace(
+        first.bindings[0],
+        uuid=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        trigger=trigger,
+    )
+    invalid = replace(
+        project,
+        profiles=(replace(first, bindings=(spelled, unspelled)),) + project.profiles[1:],
+    )
+
+    paths = {issue.path for issue in validate_project(invalid)}
+
+    assert "/profiles/0/bindings/1/trigger" in paths
 
 
 def test_validation_accepts_an_action_targeting_a_later_profile(project: DeviceProject):

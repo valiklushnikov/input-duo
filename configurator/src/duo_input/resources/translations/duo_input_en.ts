@@ -1183,8 +1183,8 @@
     </message>
     <message>
         <location filename="../../ui/mouse.py" line="154" />
-        <source>Detect button</source>
-        <translation>Detect button</translation>
+        <source>Detect button or key</source>
+        <translation>Detect button or key</translation>
     </message>
     <message>
         <location filename="../../ui/mouse.py" line="331" />
@@ -1193,8 +1193,8 @@
     </message>
     <message>
         <location filename="../../ui/mouse.py" line="156" />
-        <source>Detect a mouse button on the device</source>
-        <translation>Detect a mouse button on the device</translation>
+        <source>Detect a button or key on the mouse</source>
+        <translation>Detect a button or key on the mouse</translation>
     </message>
     <message>
         <location filename="../../ui/mouse.py" line="162" />

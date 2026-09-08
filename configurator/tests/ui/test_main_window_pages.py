@@ -4,15 +4,19 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import struct
+
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 
 from duo_input.device.emulator import U1Emulator
+from duo_input.device.qt_transport import SynchronousTransportLink
 from duo_input.device.service import DeviceService
 from duo_input.domain.models import Action, Binding, Trigger, TriggerSource
 from duo_input.domain.text_compiler import compile_project_to_binary
 from duo_input.generated.protocol import ActionKind, BindingMode, TriggerKind
+from duo_input.ui.models.binding_table import LEFT_CTRL
 from duo_input.ui.main_window import MainWindow
 from duo_input.ui.models.binding_table import MouseCapabilities
 from duo_input.ui.models.project_session import AddBinding, RenameProfile, default_project
@@ -165,6 +169,58 @@ def test_the_shell_tells_the_table_which_devices_are_on_the_bus(
 
     assert window.bindings.capabilities.mouse_id is None
     assert model.data(absent, Qt.ItemDataRole.ForegroundRole) is None
+
+
+def _mouse_bus_ports() -> tuple[tuple, ...]:
+    return (
+        (1, 1, 2, BUS_MOUSE.vendor_id, BUS_MOUSE.product_id, 5, 0, bytes(32)),
+        (0, 0, 0, 0, 0, 0, 0, bytes(32)),
+    )
+
+
+def test_a_key_the_mouse_sends_can_be_detected_straight_after_a_connect(
+    window, qtbot, emulator
+):
+    """The whole feature, on the path the operator actually walks.
+
+    Nothing here sets a capability by hand: the window attaches, asks the
+    device what is on its bus as part of that attach, and the Mouse page then
+    accepts a keyboard usage the mouse itself produced. Before the shell asked
+    for the counters, this worked only in a test that installed the answer.
+    """
+    emulator.input_backend = 2
+    emulator.peripheral_ports = _mouse_bus_ports()
+    link = SynchronousTransportLink(emulator)
+    with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
+        window.connect_device(link)
+    qtbot.waitUntil(lambda: window.service.diagnostics is not None, timeout=5000)
+
+    window.show()
+    window.show_page(window.PAGE_MOUSE)
+    page = window.mouse
+    assert page.capabilities.mouse_id == (BUS_MOUSE.vendor_id, BUS_MOUSE.product_id)
+    page.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+    with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
+        QTest.mouseClick(page.capture_button, Qt.MouseButton.LeftButton)
+    assert emulator.queue_capture_event(
+        struct.pack(
+            "<BBBHHB",
+            int(TriggerKind.KEYBOARD_USAGE),
+            0x4F,
+            LEFT_CTRL,
+            BUS_MOUSE.vendor_id,
+            BUS_MOUSE.product_id,
+            BUS_MOUSE.interface_number,
+        )
+    )
+
+    with qtbot.waitSignal(window.service.capture_received, timeout=5000):
+        link.poll()
+
+    assert page.trigger_kind.currentData() is TriggerKind.KEYBOARD_USAGE
+    assert page.current_trigger() == Trigger(
+        TriggerKind.KEYBOARD_USAGE, 0x4F, LEFT_CTRL, BUS_MOUSE
+    )
 
 
 # ------------------------------------------------------------------- validation
