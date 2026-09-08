@@ -45,7 +45,7 @@
 #include "pio_usb/backend.hpp"
 #include "pio_usb/host_observation_mapping.hpp"
 #endif
-#include "input/pipeline.hpp"
+#include "input/source_table.hpp"
 #include "output_runtime.hpp"
 #include "pico_flash.hpp"
 #include "spi_master.hpp"
@@ -199,8 +199,7 @@ public:
 };
 
 RuntimeInput g_input;
-duo_input::u1::input::InputPipeline g_keyboard_pipeline(g_input);
-duo_input::u1::input::InputPipeline g_mouse_pipeline(g_input);
+duo_input::u1::input::SourceTable g_sources(g_input);
 
 #ifdef DUO_INPUT_BACKEND_CH375
 // Reads CH375's own events and setup across the neutral source boundary. The
@@ -467,8 +466,6 @@ void core1_entry() {
 #ifdef DUO_INPUT_BACKEND_CH375
         duo_input::u1::ch375::Ch375Device* devices[2] = {&g_keyboard_device, &g_mouse_device};
         duo_input::u1::ch375::DescriptorSetup* setups[2] = {&g_keyboard_setup, &g_mouse_setup};
-        duo_input::u1::input::InputPipeline* pipelines[2] = {&g_keyboard_pipeline,
-                                                             &g_mouse_pipeline};
         duo_input::u1::input::Ch375SourceAdapter* sources[2] = {&g_keyboard_source,
                                                                  &g_mouse_source};
 #if DUO_CH375_PROBE
@@ -528,8 +525,8 @@ void core1_entry() {
                 // pass or two ago, and timing it from now would hide exactly
                 // the backlog worth knowing about.
                 g_runtime.set_event_origin_us(source_event.received_us);
-                pipelines[index]->on_event(source_event, sources[index]->identity(*setups[index]),
-                                           now_ms);
+                g_sources.on_event(source_event,
+                                   sources[index]->identity(*setups[index]), now_ms);
                 // Cleared immediately. A stamp left standing would be attached
                 // to whatever the device did next - a macro step, a timeout's
                 // release - and the further from the report that happened, the
@@ -541,29 +538,15 @@ void core1_entry() {
         // One backend, one door: task() services tuh_task() and whatever it
         // queues comes out through take_event(), in the same neutral shape
         // Ch375SourceAdapter::convert() produces on the CH375 side above.
-        // logical_port() is this board's only routing decision - which of
-        // the two InputPipelines a resolved DeviceKind belongs to - the same
-        // one CH375's per-channel adapters make by construction, having one
-        // adapter per physical port.
         g_pio_usb_backend.task(now_us);
 
-        duo_input::u1::input::InputPipeline* pipelines[2] = {&g_keyboard_pipeline,
-                                                             &g_mouse_pipeline};
         // Static for the same reason as CH375's own event/source_event
         // above: this core's stack is two kilobytes for everything below it.
         static duo_input::u1::input::SourceEvent source_event;
         static duo_input::u1::input::SourceIdentity source_identity;
         while (g_pio_usb_backend.take_event(source_event, source_identity)) {
-            const int port = duo_input::u1::pio_usb::PioUsbBackend::logical_port(
-                source_identity.kind);
-            if (port < 0) {
-                // Unknown resolves to nothing to route - the same thing an
-                // Attached CH375 event above resolves to before convert()
-                // ever returns true for it.
-                continue;
-            }
             g_runtime.set_event_origin_us(source_event.received_us);
-            pipelines[port]->on_event(source_event, source_identity, now_ms);
+            g_sources.on_event(source_event, source_identity, now_ms);
             g_runtime.set_event_origin_us(0);
         }
 #endif  // DUO_INPUT_BACKEND_CH375
@@ -813,47 +796,6 @@ namespace {
     // over narration and ends with a marker that makes truncation visible.
     static char text[1023] = {};
     int used = 0;
-    used += snprintf(
-        text + used, sizeof(text) - static_cast<std::size_t>(used),
-        "side kaux=%lu/%lu/%u maux=%lu/%lu/%u\n",
-        static_cast<unsigned long>(g_keyboard_pipeline.keychron_side_presses()),
-        static_cast<unsigned long>(g_keyboard_pipeline.keychron_side_releases()),
-        g_keyboard_pipeline.keychron_side_held() ? 1u : 0u,
-        static_cast<unsigned long>(g_mouse_pipeline.keychron_side_presses()),
-        static_cast<unsigned long>(g_mouse_pipeline.keychron_side_releases()),
-        g_mouse_pipeline.keychron_side_held() ? 1u : 0u);
-
-    // What the keyboard normalizer made of what it was handed.
-    //
-    // kerr is a histogram: how many reports carried exactly N ErrorRollOver
-    // values in their key field, for N of 0 through 5. HID 1.11 8.3 has a
-    // keyboard that has lost count put ErrorRollOver in *every* array field,
-    // and this firmware treats six of them as that signal - so a keyboard
-    // that declares five slots can never raise it. If the fifth bucket is
-    // climbing while somebody types, reports meaning "I cannot say what is
-    // held" are being read as "nothing is held", and that releases keys
-    // nobody let go of.
-    for (int side = 0; side < 2 && used < static_cast<int>(sizeof(text)) - 1; ++side) {
-        const auto& normalizer = (side == 0 ? g_keyboard_pipeline : g_mouse_pipeline)
-                                     .keyboard_normalizer();
-        used += snprintf(
-            text + used, sizeof(text) - static_cast<std::size_t>(used),
-            "kerr %s=%u/%u/%u/%u/%u/%u roll=%u ref=%u rej=%u down=%u/%u up=%u unpaced=%u\n"
-            "kusb sent=%u same=%u busy=%u\n",
-            side == 0 ? "k" : "m",
-            normalizer.probe_error_slots(0), normalizer.probe_error_slots(1),
-            normalizer.probe_error_slots(2), normalizer.probe_error_slots(3),
-            normalizer.probe_error_slots(4), normalizer.probe_error_slots(5),
-            normalizer.probe_rollovers(), normalizer.probe_refused(),
-            normalizer.probe_rejected(),
-            normalizer.probe_key_downs(), normalizer.probe_modifier_downs(),
-            normalizer.probe_key_ups(), g_outputs.keyboard_unpaced(),
-            usb.keyboard_sent(), usb.keyboard_same(), usb.keyboard_busy());
-        if (used < 0 || used > static_cast<int>(sizeof(text)) - 1) {
-            used = static_cast<int>(sizeof(text)) - 1;
-            break;
-        }
-    }
     const char* names[2] = {"keyboard", "mouse"};
     for (int index = 0; index < 2 && used < static_cast<int>(sizeof(text)) - 1; ++index) {
         const duo_input::u1::ch375::Ch375Device& device = *devices[index];

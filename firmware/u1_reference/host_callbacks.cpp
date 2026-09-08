@@ -119,12 +119,11 @@ void tuh_hid_mount_cb(uint8_t dev_addr,
                                            vid, pid, desc_report, desc_len,
                                            time_us_32()));
 
-    // Upstream arms the report here for boot keyboards and mice, and the stack
-    // delivers nothing until it is armed. Keep that, and only that.
-    if (itf_protocol == HID_ITF_PROTOCOL_KEYBOARD ||
-        itf_protocol == HID_ITF_PROTOCOL_MOUSE) {
-        tuh_hid_receive_report(dev_addr, instance);
-    }
+    // The stack delivers nothing until the interface is armed. Unknown HID
+    // layouts still have to be serviced: keeping every interface polled is a
+    // transport requirement, independent of whether its reports can be
+    // decoded yet.
+    tuh_hid_receive_report(dev_addr, instance);
 }
 
 void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {

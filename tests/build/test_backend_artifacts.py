@@ -69,7 +69,7 @@ REFERENCE_EXCLUDED_SYMBOL_FRAGMENTS = (
 #: Common to both backends (firmware/u1_main/input/pipeline.cpp is compiled
 #: unconditionally), so its presence alone proves nothing about which
 #: backend an image is - it only rules out a build that links neither.
-SHARED_SYMBOL_FRAGMENT = "InputPipeline8on_event"
+SHARED_SYMBOL_FRAGMENT = "SourceTable8on_event"
 
 
 def _build_dir() -> Path:
@@ -123,7 +123,7 @@ def test_a_ch375_declared_build_actually_links_ch375_and_not_pio_usb():
     symbols = linked_symbols(U1_ELF)
 
     assert any(SHARED_SYMBOL_FRAGMENT in name for name in symbols), (
-        f"{U1_ELF} contains no InputPipeline::on_event at all"
+        f"{U1_ELF} contains no SourceTable::on_event at all"
     )
     assert any(CH375_ONLY_SYMBOL_FRAGMENT in name for name in symbols), (
         f"{U1_ELF}'s build directory is configured for CH375 (CMakeCache.txt) "
@@ -145,7 +145,7 @@ def test_a_pio_usb_declared_build_actually_links_pio_usb_and_not_ch375():
     symbols = linked_symbols(U1_ELF)
 
     assert any(SHARED_SYMBOL_FRAGMENT in name for name in symbols), (
-        f"{U1_ELF} contains no InputPipeline::on_event at all"
+        f"{U1_ELF} contains no SourceTable::on_event at all"
     )
     for fragment in PIO_USB_ONLY_SYMBOL_FRAGMENTS:
         assert any(fragment in name for name in symbols), (

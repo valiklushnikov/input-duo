@@ -297,8 +297,8 @@ def test_pio_usb_elf_contains_tuh_hid_receive_report():
 @pio_usb_elf_required
 def test_pio_usb_elf_contains_input_pipeline_on_event():
     symbols = _symbols(_pio_elf)
-    assert any("InputPipeline8on_event" in name for name in symbols), (
-        "PIO USB ELF does not contain InputPipeline::on_event - Core 1's "
+    assert any("SourceTable8on_event" in name for name in symbols), (
+        "PIO USB ELF does not contain SourceTable::on_event - Core 1's "
         "drain loop is not wired to the same pipeline entry point the "
         "CH375 build feeds"
     )

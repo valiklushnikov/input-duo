@@ -48,7 +48,7 @@ extern "C" void reference_drain_one_callback();
 #include "core1_runtime.hpp"
 #include "core_bridge.hpp"
 #include "host_control_state.hpp"
-#include "input/pipeline.hpp"
+#include "input/source_table.hpp"
 #include "link_reconnect.hpp"
 #include "output_runtime.hpp"
 #include "pico_flash.hpp"
@@ -67,8 +67,6 @@ extern "C" void reference_drain_one_callback();
 extern "C" root_port_t pio_usb_root_port[PIO_USB_ROOT_PORT_CNT];
 
 namespace {
-
-using duo_input::u1::input::DeviceKind;
 
 /// Core 0 owns this. Core 1 only ever submits to it, so there is exactly one
 /// writer and no locking between a keypress and a USB report.
@@ -347,10 +345,7 @@ public:
 };
 
 RuntimeInput g_input;
-
-/// One pipeline per logical device, addressed by the adapter's source_id.
-duo_input::u1::input::InputPipeline g_keyboard_pipeline(g_input);
-duo_input::u1::input::InputPipeline g_mouse_pipeline(g_input);
+duo_input::u1::input::SourceTable g_sources(g_input);
 
 using duo_input::u1::reference::poison_descriptor_buffer;
 using duo_input::u1::reference::ReferenceSourceAdapter;
@@ -419,13 +414,8 @@ void service_input(std::uint32_t millis) {
     duo_input::u1::input::SourceEvent event{};
     duo_input::u1::input::SourceIdentity identity{};
     if (g_adapter.take_event(event, identity)) {
-        auto* pipeline =
-            (event.source_id ==
-             g_adapter.logical_port(DeviceKind::Keyboard))
-                ? &g_keyboard_pipeline
-                : &g_mouse_pipeline;
         duo_input::u1::reference::dispatch_source_event(
-            g_runtime, *pipeline, event, identity, millis);
+            g_runtime, g_sources, event, identity, millis);
         return;
     }
 

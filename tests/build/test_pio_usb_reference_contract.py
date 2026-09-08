@@ -477,10 +477,9 @@ def test_reference_elf_contains_only_the_upstream_host_device_path(
         f"{REFERENCE_ELF} contains no exact tud_cdc_n_write symbol"
     )
 
-    # Task 3 admits the input path, so the pipeline is now required rather
-    # than forbidden. What stays out is the old host backend, CH375, and
-    # everything Task 5 has yet to admit.
-    for required_symbol in ("InputPipeline8on_event", "OutputRuntime",
+    # The input path is now entered through the per-interface source table.
+    # What stays out is the old host backend and CH375.
+    for required_symbol in ("SourceTable8on_event", "OutputRuntime",
                             "Core1Runtime", "ReferenceSourceAdapter"):
         assert any(required_symbol in name for name in symbols), (
             f"{REFERENCE_ELF} contains no {required_symbol}"
@@ -798,6 +797,20 @@ def test_stale_control_work_cannot_hide_an_unmount_forever():
         "reference_descriptor_unmounted(dev_addr, instance, time_us_32())"
         in umount
     )
+
+
+def test_reference_mount_arms_every_hid_interface():
+    callbacks = (
+        ROOT / "firmware" / "u1_reference" / "host_callbacks.cpp"
+    ).read_text(encoding="utf-8")
+    mount = callbacks[
+        callbacks.index("void tuh_hid_mount_cb") :
+        callbacks.index("void tuh_hid_umount_cb")
+    ]
+
+    assert "tuh_hid_receive_report(dev_addr, instance);" in mount
+    assert "HID_ITF_PROTOCOL_KEYBOARD" not in mount
+    assert "HID_ITF_PROTOCOL_MOUSE" not in mount
 
 
 def test_the_control_trace_is_drained_and_printed_only_from_core_0():

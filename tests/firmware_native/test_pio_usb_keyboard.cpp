@@ -33,6 +33,7 @@ using duo_input::u1::Core1Runtime;
 using duo_input::u1::ICommandSink;
 using duo_input::u1::IProfileSource;
 using duo_input::u1::input::IInputHandler;
+using duo_input::u1::input::DeviceKind;
 using duo_input::u1::input::InputEvent;
 using duo_input::u1::input::InputEventKind;
 using duo_input::u1::input::InputPipeline;
@@ -465,7 +466,7 @@ TEST_CASE(a_refusal_cannot_republish_a_stale_event) {
 
     CHECK(registry.take_event(event, identity));
     CHECK_EQ(static_cast<int>(event.kind), static_cast<int>(SourceEventKind::Report));
-    CHECK_EQ(event.source_id, std::uint8_t{9});
+    CHECK_EQ(event.source_id, std::uint8_t{0});
     // The two fields the original assertion block never looked at. endpoint
     // must be the interface's own instance, and received_us the clock read
     // at capture - neither the 0xAB/0xAAAAAAAA sentinel nor a zero.
@@ -607,10 +608,10 @@ TEST_CASE(two_reports_captured_in_one_core1_pass_carry_their_own_timestamps) {
         if (event.kind != SourceEventKind::Report) {
             continue;
         }
-        if (event.source_id == kKeyboardAddress) {
+        if (identity.kind == DeviceKind::Keyboard) {
             saw_keyboard = true;
             CHECK_EQ(event.received_us, kKeyboardCaptureUs);
-        } else if (event.source_id == kMouseAddress) {
+        } else if (identity.kind == DeviceKind::Mouse) {
             saw_mouse = true;
             CHECK_EQ(event.received_us, kMouseCaptureUs);
         }

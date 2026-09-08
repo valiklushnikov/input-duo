@@ -63,6 +63,7 @@ target_sources(duo_u1_reference PRIVATE
     ${_duo_u1_main_dir}/config_service.cpp
     ${_duo_u1_main_dir}/core_bridge.cpp
     ${_duo_u1_main_dir}/input/pipeline.cpp
+    ${_duo_u1_main_dir}/input/source_table.cpp
     ${_duo_u1_main_dir}/input/keyboard_normalizer.cpp
     ${_duo_u1_main_dir}/input/mouse_normalizer.cpp
     ${_duo_u1_main_dir}/input/hid/report_descriptor.cpp

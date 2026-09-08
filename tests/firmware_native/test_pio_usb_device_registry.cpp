@@ -1429,6 +1429,44 @@ TEST_CASE(a_wedge_that_survives_its_own_recovery_is_retried_twice_then_left_quie
     CHECK_EQ(backend.observe().enum_stall_recoveries, 2u);
 }
 
+TEST_CASE(every_composite_interface_is_announced_and_polled_as_its_own_source) {
+    RegistryRig rig;
+    rig.device(3, 0x1234, 0x5678);
+    rig.hid(3, 0, kProtocolMouse);
+    rig.hid(3, 1, kProtocolKeyboard);
+    rig.hid(3, 2, kProtocolNone, nullptr, 0);
+    rig.registry.process_pending(0);
+
+    std::array<std::uint8_t, 3> source_ids{};
+    for (std::uint8_t interface_number = 0; interface_number < 3;
+         ++interface_number) {
+        SourceEvent event{};
+        SourceIdentity identity{};
+        CHECK(rig.registry.take_event(event, identity));
+        CHECK_EQ(event.kind, SourceEventKind::Ready);
+        CHECK_EQ(identity.interface_number, interface_number);
+        source_ids[interface_number] = event.source_id;
+    }
+    CHECK(source_ids[0] != source_ids[1]);
+    CHECK(source_ids[0] != source_ids[2]);
+    CHECK(source_ids[1] != source_ids[2]);
+
+    // The unreadable interface still owns an armed receive. Dropping it at
+    // mount would leave this endpoint unserviced and can wedge its siblings.
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(3, 2), 1u);
+    constexpr std::uint8_t bytes[] = {0xA5, 0x5A};
+    tuh_hid_report_received_cb(3, 2, bytes, sizeof(bytes));
+    rig.registry.process_pending(1);
+
+    SourceEvent report{};
+    SourceIdentity identity{};
+    CHECK(rig.registry.take_event(report, identity));
+    CHECK_EQ(report.kind, SourceEventKind::Report);
+    CHECK_EQ(report.source_id, source_ids[2]);
+    CHECK_EQ(identity.interface_number, 2u);
+    CHECK_FALSE(rig.registry.take_event(report, identity));
+}
+
 TEST_CASE(a_mounted_downstream_child_suppresses_and_rearms_address_zero_recovery) {
     duo::test::tinyusb_host::reset();
     PioUsbBackend backend;

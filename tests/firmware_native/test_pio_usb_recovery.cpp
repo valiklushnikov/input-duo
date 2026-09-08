@@ -579,8 +579,8 @@ TEST_CASE(
     while (registry.take_event(event, identity)) {
         if (event.kind == SourceEventKind::Detached) {
             ++detached_count;
-            saw_x = saw_x || event.source_id == kDeviceX;
-            saw_y = saw_y || event.source_id == kDeviceY;
+            saw_x = saw_x || identity.vendor_id == 0x1111;
+            saw_y = saw_y || identity.vendor_id == 0x2222;
         }
     }
 
@@ -659,18 +659,17 @@ TEST_CASE(a_detached_that_overflows_its_queue_escalates_instead_of_dropping_the_
     CHECK_EQ(keyboard_recorder.of(InputEventKind::KeyDown, 0x04), 1);
     CHECK_EQ(mouse_recorder.of(InputEventKind::MouseButtonDown, 0), 1);
 
-    // From here nothing is drained at all. Fill the detach FIFO to the brim
-    // with Ready-free Detached from a receiver whose own mouse channel is
-    // refused the Mouse role (the composite above owns it) and whose auxiliary
-    // channel therefore contributes the only role this device gets.
+    // From here nothing is drained at all. One single-interface cycle adds
+    // one Ready to the ordinary event queue and one Detached to the detach
+    // FIFO. Their capacities permit exactly this many cycles without an
+    // overflow, after which the composite's two interface releases exercise
+    // the overflow path.
     for (std::size_t cycle = 0; cycle < DeviceRegistry::kDetachQueueCapacity; ++cycle) {
-        duo::test::tinyusb_host::add_device(kKeychronAddress, kKeychronVendorId,
-                                            kKeychronProductId);
+        duo::test::tinyusb_host::add_device(kKeychronAddress, kVendorId,
+                                            kProductId);
         tuh_mount_cb(kKeychronAddress);
         duo::test::tinyusb_host::set_protocol(kKeychronAddress, 0, kProtocolMouse);
         tuh_hid_mount_cb(kKeychronAddress, 0, nullptr, 0);
-        duo::test::tinyusb_host::set_protocol(kKeychronAddress, 1, kProtocolKeyboard);
-        tuh_hid_mount_cb(kKeychronAddress, 1, nullptr, 0);
         registry.process_pending(0);
 
         tuh_umount_cb(kKeychronAddress);
@@ -919,85 +918,6 @@ TEST_CASE(an_escalated_interface_gives_its_role_back_so_a_replacement_can_claim_
     registry.process_pending(8000000);
     drain_all();
     CHECK_EQ(recorder.of(InputEventKind::KeyDown, 0x05), 1);
-
-    duo_input::u1::pio_usb::set_callback_registry(nullptr);
-}
-
-TEST_CASE(the_highest_generation_sharing_a_role_slot_is_what_retires_it) {
-    // The Keychron receiver's auxiliary channel shares the mouse's role slot
-    // and can only mount AFTER the mouse (has_mouse_sibling requires the
-    // mouse already mounted), so it always carries the HIGHER generation of
-    // the two. remove_device() used to retire the FIRST interface it found
-    // for the slot - the mouse's, the lower one - which let every
-    // AuxiliaryReport the auxiliary channel had queued escape pop_event()'s
-    // stale filter entirely.
-    //
-    // It is harmless TODAY only because a Detached is delivered ahead of the
-    // event queue and pipeline.cpp's on_auxiliary_report then finds the state
-    // it gates on already cleared - exactly the "coincidentally harmless"
-    // argument this file refuses to accept for the keyboard case. So the
-    // assertion is at the registry boundary, where the difference is real: a
-    // stale AuxiliaryReport is either discarded or handed out.
-    duo::test::tinyusb_host::reset();
-    DeviceRegistry registry;
-    duo_input::u1::pio_usb::set_callback_registry(&registry);
-
-    Recorder recorder;
-    InputPipeline pipeline(recorder);
-    int auxiliary_reports_delivered = 0;
-    const auto drain_all = [&] {
-        SourceEvent event;
-        SourceIdentity identity;
-        while (registry.take_event(event, identity)) {
-            if (event.kind == SourceEventKind::AuxiliaryReport) {
-                ++auxiliary_reports_delivered;
-            }
-            if (PioUsbBackend::logical_port(identity.kind) == 1) {
-                pipeline.on_event(event, identity, 1);
-            }
-        }
-    };
-
-    duo::test::tinyusb_host::add_device(kKeychronAddress, kKeychronVendorId, kKeychronProductId);
-    tuh_mount_cb(kKeychronAddress);
-    duo::test::tinyusb_host::set_protocol(kKeychronAddress, 0, kProtocolMouse);
-    tuh_hid_mount_cb(kKeychronAddress, 0, nullptr, 0);
-    duo::test::tinyusb_host::set_protocol(kKeychronAddress, 1, kProtocolKeyboard);
-    tuh_hid_mount_cb(kKeychronAddress, 1, nullptr, 0);
-    registry.process_pending(0);
-    drain_all();
-
-    const auto* mouse = registry.find(kKeychronAddress, 0);
-    const auto* auxiliary = registry.find(kKeychronAddress, 1);
-    CHECK(mouse != nullptr);
-    CHECK(auxiliary != nullptr);
-    if (mouse != nullptr && auxiliary != nullptr) {
-        CHECK_EQ(mouse->role, LogicalRole::Mouse);
-        CHECK_EQ(auxiliary->role, LogicalRole::Auxiliary);
-        // The whole reason the "first one wins" bug was invisible: the
-        // auxiliary channel's generation is always the higher of the pair.
-        CHECK(auxiliary->generation > mouse->generation);
-    }
-
-    // A side-button press is queued and NOT drained...
-    duo::test::tinyusb_host::set_now_us(10);
-    tuh_hid_report_received_cb(kKeychronAddress, 1, kKeychronSidePress,
-                               sizeof(kKeychronSidePress));
-    registry.process_pending(0);
-    CHECK_EQ(auxiliary_reports_delivered, 0);
-
-    // ...and the receiver is unplugged before anything drains it.
-    tuh_umount_cb(kKeychronAddress);
-    registry.process_pending(0);
-
-    drain_all();
-
-    // The Detached that jumped ahead of it retired the AUXILIARY channel's own
-    // generation, so the report behind it is stale and was discarded rather
-    // than handed out after its source had already been released.
-    CHECK_EQ(auxiliary_reports_delivered, 0);
-    CHECK(registry.stale_event_discard_count() > 0);
-    CHECK_EQ(recorder.count(InputEventKind::MouseButtonDown), 0);
 
     duo_input::u1::pio_usb::set_callback_registry(nullptr);
 }

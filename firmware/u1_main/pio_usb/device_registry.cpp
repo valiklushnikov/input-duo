@@ -19,23 +19,6 @@ LogicalRole role_for_kind(input::DeviceKind kind) {
     return LogicalRole::Ignored;
 }
 
-std::size_t detach_slot(LogicalRole role) {
-    // Auxiliary shares Mouse's slot deliberately: both are the same physical
-    // device's interfaces and target the same InputPipeline instance, so
-    // remove_device()'s "first one claims the slot" guard below already
-    // collapses their teardown into the single Detached that pipeline needs -
-    // never two, which would double-run its release-all harmlessly but is
-    // not what a single detach is.
-    return role == LogicalRole::Keyboard ? 0u : 1u;
-}
-
-/// The fixed "endpoint" value input/pipeline.cpp's on_auxiliary_report
-/// requires of a Keychron side-button report. Not this interface's own
-/// TinyUSB instance number - enumeration order does not guarantee that is 1 -
-/// but the same constant the CH375 quirk this replaces used for the same
-/// physical channel (interface 2, endpoint 1 on that transport).
-constexpr std::uint8_t kKeychronAuxiliaryEndpoint = 1;
-
 }  // namespace
 
 void DeviceRegistry::record_host_initialization(bool configure_succeeded,
@@ -219,31 +202,6 @@ bool DeviceRegistry::role_is_owned(LogicalRole role) const {
     return false;
 }
 
-bool DeviceRegistry::has_mouse_sibling(std::uint8_t dev_addr) const {
-    // Classified as Mouse, not granted the Mouse ROLE: a competing mouse
-    // elsewhere can win role_is_owned(Mouse) and leave this receiver's own
-    // mouse interface LogicalRole::Ignored while classify_hid's verdict on it
-    // - identity.kind - is untouched and still Mouse (process() only
-    // overwrites identity.kind for an interface this function itself has
-    // already approved as Auxiliary). Gating on the role instead would make
-    // that the exact pre-task defect return: this receiver's auxiliary
-    // channel would find no sibling, fall through to role_for_kind(Keyboard),
-    // and - since the real Mouse role is free precisely because the
-    // competing mouse is occupying it, not this receiver - win the Keyboard
-    // role and type every side-button press as a phantom modifier keystroke.
-    // Excluding Auxiliary keeps this a one-hop check: an already-approved
-    // auxiliary channel's own overridden identity.kind must never itself
-    // count as "the mouse" for some third interface on the same device.
-    for (const Interface& candidate : interfaces_) {
-        if (candidate.mounted && candidate.dev_addr == dev_addr &&
-            candidate.role != LogicalRole::Auxiliary &&
-            candidate.identity.kind == input::DeviceKind::Mouse) {
-            return true;
-        }
-    }
-    return false;
-}
-
 const DeviceRegistry::Interface* DeviceRegistry::owner(input::DeviceKind kind) const {
     const LogicalRole role = kind == input::DeviceKind::Keyboard
                                  ? LogicalRole::Keyboard
@@ -338,33 +296,13 @@ void DeviceRegistry::latch_fault(Interface& interface) {
     // InputPipeline's release_all a no-op the second time - harmless - but
     // still spends a slot this interface's own stream may still need before
     // Task 10's recovery gives it a fresh generation.
-    if (interface.role != LogicalRole::Ignored && !was_already_faulted) {
+    if (!was_already_faulted) {
         if (!push_event(interface, input::SourceEventKind::Fault, 0, nullptr, 0, 0)) {
             ++event_overflows_;
         }
-        // The release-all is now queued, so this source has been given up on -
-        // but the interface is NOT forgotten: it stays mounted until its
-        // device physically unmounts, and while it holds a role,
-        // role_is_owned() refuses that role to every replacement device. The
-        // design spec (docs/superpowers/specs/2026-09-02-pio-usb-hub-v1-design
-        // .md:239-254) requires held buttons released "before the source is
-        // forgotten"; it never mentions re-enumeration, and this project's own
-        // history records that the one wedge actually observed on this
-        // hardware - the Keychron receiver's side-button lockup - SURVIVES
-        // re-enumeration, so a bus reset from here would cure nothing while
-        // dropping this role's independently-arming sibling. Releasing the
-        // role slot is the half that matters: the user can unplug the dead
-        // device and plug in another, and the new one is granted the role
-        // instead of being ignored for ever.
-        //
-        // This cannot loop back on itself. The only place a role is granted is
-        // process()'s FRESH-HidMount branch; a HidMount naming an interface
-        // that is still mounted - which this one is - takes the
-        // duplicate-mount branch above it and never re-runs role assignment,
-        // and arm_if_needed() returns immediately on a faulted interface. So
-        // the interface that just released the role can never re-claim it and
-        // re-fault in a loop; only a genuinely new (dev_addr, instance) can
-        // take it.
+        // The source remains mounted but is no longer a diagnostic role owner.
+        // A duplicate mount cannot reclaim it: that path only tries to re-arm,
+        // and arm_if_needed() refuses a faulted interface.
         interface.role = LogicalRole::Ignored;
     }
 }
@@ -375,56 +313,20 @@ void DeviceRegistry::remove_device(std::uint8_t dev_addr) {
             device = {};
         }
     }
-    // Collapse this device's interfaces into at most one Detached per role
-    // slot. The guard is local to this one call, not persistent registry
-    // state: a PERSISTENT "already pending" guard was tried first and was
-    // wrong - it also suppressed a DIFFERENT, later device's own genuine
-    // Detached for the same role slot if an earlier one had not been drained
-    // yet, which is a real dropped release, not a harmless double-send.
-    //
-    // Two passes rather than one, because the two things this decides need
-    // different interfaces of the same device. The Detached itself is built
-    // from the FIRST role-bearing interface found for the slot (any of them
-    // carries the identity that pipeline needs), but the generation retired
-    // for the slot must be the HIGHEST of them, not the first: the Keychron
-    // receiver's auxiliary channel can only mount AFTER the mouse whose slot
-    // it shares (has_mouse_sibling requires the mouse already mounted), so it
-    // always carries the higher generation, and retiring only the mouse's
-    // would let every AuxiliaryReport the auxiliary channel had queued escape
-    // pop_event()'s stale-generation filter entirely. That is harmless today
-    // only because pipeline.cpp's on_auxiliary_report gates on state the
-    // Detached ahead of it already cleared - the "coincidentally harmless"
-    // argument this file refuses to rely on for the keyboard case, and it
-    // must not rely on it here either.
-    bool queued_slot[2] = {false, false};
-    PendingEvent pending_slot[2] = {};
-    std::uint32_t highest_generation[2] = {0, 0};
-    Interface* slot_interface[2] = {nullptr, nullptr};
+    // Each mounted interface owns its own SourceTable slot, so each needs its
+    // own release before the registry forgets it.
     for (Interface& interface : interfaces_) {
-        if (!interface.mounted || interface.dev_addr != dev_addr ||
-            interface.role == LogicalRole::Ignored) {
+        if (!interface.mounted || interface.dev_addr != dev_addr) {
             continue;
         }
-        const std::size_t slot = detach_slot(interface.role);
-        if (!queued_slot[slot]) {
-            queued_slot[slot] = true;
-            pending_slot[slot].event.kind = input::SourceEventKind::Detached;
-            pending_slot[slot].event.source_id = interface.dev_addr;
-            pending_slot[slot].identity = interface.identity;
-            slot_interface[slot] = &interface;
-        }
-        if (interface.generation > highest_generation[slot]) {
-            highest_generation[slot] = interface.generation;
-        }
-    }
-    for (std::size_t slot = 0; slot < 2; ++slot) {
-        if (!queued_slot[slot]) {
-            continue;
-        }
-        pending_slot[slot].generation = highest_generation[slot];
-        if (push_detach(pending_slot[slot])) {
-            if (highest_generation[slot] > retired_generation_[slot]) {
-                retired_generation_[slot] = highest_generation[slot];
+        PendingEvent pending{};
+        pending.event.kind = input::SourceEventKind::Detached;
+        pending.event.source_id = interface.source_id;
+        pending.identity = interface.identity;
+        pending.generation = interface.generation;
+        if (push_detach(pending)) {
+            if (interface.generation > retired_generation_[interface.source_id]) {
+                retired_generation_[interface.source_id] = interface.generation;
             }
             continue;
         }
@@ -441,7 +343,7 @@ void DeviceRegistry::remove_device(std::uint8_t dev_addr) {
         // the same identity the lost Detached would have, so it reaches the
         // same pipeline and runs the same release_all.
         ++detach_overflows_;
-        latch_fault(*slot_interface[slot]);
+        latch_fault(interface);
     }
     // Stop accepting reports and free layout/held state together: clearing
     // mounted here is what makes find_mutable() refuse any report already in
@@ -458,31 +360,9 @@ void DeviceRegistry::remove_device(std::uint8_t dev_addr) {
 bool DeviceRegistry::push_event(const Interface& interface, input::SourceEventKind kind,
                                 std::uint8_t endpoint, const std::uint8_t* report,
                                 std::size_t report_size, std::uint32_t received_us) {
-    // Fault keeps the last kFaultReservedSlots for itself - one per
-    // independently-arming role-bearing interface V1 accepts (Keyboard,
-    // Mouse, and the Keychron receiver's Auxiliary channel), not one slot in
-    // total and not one slot per downstream InputPipeline. Two reserved slots
-    // are not enough for three such interfaces: fill to capacity with
-    // ordinary traffic, fault the keyboard (spends one reserved slot), fault
-    // the mouse (spends the other), and the auxiliary channel's next report
-    // then finds the queue full, latches its own Fault into a queue with
-    // nothing left, and loses it - or, in whatever order the callback queue
-    // happens to drain in, the keyboard's Fault can just as easily be the one
-    // that finds nothing left, since push_event() processes records FIFO, not
-    // grouped by which interface or pipeline they belong to. That lost Fault
-    // is a dropped release-all, which this queue exists to make impossible -
-    // and the interface is faulted afterwards, so nothing will ever produce
-    // it again. Reserving one slot per interface means every Ready/Report/
-    // AuxiliaryReport push here refuses three slots early and every source's
-    // overflow Fault, pushed straight after its own push already failed,
-    // always has room, in any arrival order.
-    //
-    // The seventeen slots this leaves ordinary traffic are still far more
-    // than a genuine pass can use - about thirteen at worst; the derivation
-    // is on kEventQueueCapacity in the header, where it was re-checked
-    // against this task's fix round (latch_fault() now releases the role
-    // slot, and a detach-FIFO overflow now escalates through it) - neither
-    // raises the ceiling.
+    // Ready and Report can use the callback-pass-sized ordinary portion.
+    // Fault may also use the final per-interface reservation so a failed push
+    // can still be followed by the source's terminal release-all.
     const std::size_t capacity = kind == input::SourceEventKind::Fault
                                      ? kEventQueueCapacity
                                      : kEventQueueCapacity - kFaultReservedSlots;
@@ -493,7 +373,7 @@ bool DeviceRegistry::push_event(const Interface& interface, input::SourceEventKi
     PendingEvent& slot = event_queue_[index];
     slot.event = input::SourceEvent{};
     slot.event.kind = kind;
-    slot.event.source_id = interface.dev_addr;
+    slot.event.source_id = interface.source_id;
     slot.event.endpoint = endpoint;
     slot.event.received_us = received_us;
     if (report != nullptr && report_size != 0) {
@@ -537,25 +417,23 @@ bool DeviceRegistry::pop_detach(PendingEvent& event) {
 bool DeviceRegistry::pop_event(input::SourceEvent& event, input::SourceIdentity& identity) {
     while (event_count_ != 0) {
         PendingEvent& slot = event_queue_[event_head_];
-        // Ready/Report/AuxiliaryReport from a generation whose Detached has
+        // Ready/Report from a generation whose Detached has
         // already been delivered are stale: a Detached is delivered ahead of
         // this queue (take_event() drains detach_events_ first), so by the
         // time one of these is reached here its own release has already run
         // and delivering it now would either be a no-op read against an
         // already-torn-down pipeline or - if a newer generation has since
-        // claimed the same role - misrouted into that NEW device's state.
+        // claimed the same source slot - misrouted into that NEW device's state.
         // Fault/Detached themselves are never filtered: this file's own
         // ordering keeps a Fault self-consistent with whatever of the same
         // generation precedes it (Fault shares this same queue, so anything
         // still ahead of it here genuinely arrived first), and Detached
         // never reaches this queue at all - see push_detach().
         const bool filterable = slot.event.kind == input::SourceEventKind::Ready ||
-                                 slot.event.kind == input::SourceEventKind::Report ||
-                                 slot.event.kind == input::SourceEventKind::AuxiliaryReport;
-        const std::size_t role_slot =
-            slot.identity.kind == input::DeviceKind::Keyboard ? 0u : 1u;
+                                 slot.event.kind == input::SourceEventKind::Report;
+        const std::size_t source_slot = slot.event.source_id;
         if (filterable && slot.generation != 0 &&
-            slot.generation <= retired_generation_[role_slot]) {
+            slot.generation <= retired_generation_[source_slot]) {
             ++stale_events_discarded_;
             slot = PendingEvent{};
             event_head_ = (event_head_ + 1) % kEventQueueCapacity;
@@ -606,13 +484,14 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
         interface->mounted = true;
         interface->dev_addr = record.dev_addr;
         interface->instance = record.instance;
+        interface->source_id = static_cast<std::uint8_t>(interface - interfaces_);
         interface->interface_protocol = record.interface_protocol;
         interface->descriptor_present = record.payload_present;
         interface->descriptor_bytes = record.payload_present ? record.size : 0;
         // Assigned once, here, from the registry-wide monotonic counter -
         // never on the duplicate-mount branch above, which re-arms the same
         // still-mounted interface rather than claiming a fresh one. This is
-        // what lets pop_event() tell "this role slot's current occupant"
+        // what lets pop_event() tell "this source slot's current occupant"
         // apart from whatever an older, already-detached occupant of the
         // same slot left queued.
         interface->generation = ++next_generation_;
@@ -623,48 +502,13 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
             interface->identity);
         interface->identity.vendor_id = record.vendor_id;
         interface->identity.product_id = record.product_id;
+        interface->identity.interface_number = record.instance;
 
-        // The Keychron M3 receiver's side button is emitted by a second
-        // interface shaped like a keyboard - never a real keyboard. Granting
-        // it the Keyboard role would read its side-button reports at boot
-        // offsets and invent a modifier keystroke on every press; associating
-        // it with the mouse's own channel instead means its bytes only ever
-        // reach InputPipeline's report-shape check (pipeline.cpp's
-        // keychron_side_state), which still refuses everything but the exact
-        // side-button trace. Gated on the exact vendor/product this receiver
-        // reports, not on shape alone, so every other composite device's
-        // keyboard-shaped interface keeps the Keyboard role it would
-        // otherwise earn - and further gated on this device already having a
-        // sibling interface classify_hid found to be a mouse (see
-        // has_mouse_sibling), so a lone keyboard that merely reports this
-        // vendor/product (nothing else of this receiver's shape present) is
-        // not pulled out of the Keyboard role it should still be free to
-        // earn. The sibling check reads identity.kind, not LogicalRole::
-        // Mouse, on purpose: a second, unrelated mouse can win
-        // role_is_owned(Mouse) and leave this receiver's own mouse interface
-        // Ignored while classify_hid still calls it a mouse, and gating on
-        // the role would misread that as "no sibling" - handing the
-        // Keyboard role to the auxiliary channel after all.
-        const bool auxiliary_of_mouse =
-            classified &&
-            is_keychron_auxiliary_interface(record.vendor_id, record.product_id,
-                                            interface->identity.kind) &&
-            has_mouse_sibling(record.dev_addr);
-        LogicalRole wanted = LogicalRole::Ignored;
-        if (auxiliary_of_mouse) {
-            // Transport association only: the neutral identity says Mouse so
-            // this reaches the same InputPipeline instance the receiver's own
-            // mouse interface does. Its keyboard-shaped layout fields are
-            // left as classify_hid set them but are never read - AuxiliaryReport
-            // is handled from the raw bytes, not through a layout.
-            interface->identity.kind = input::DeviceKind::Mouse;
-        } else if (classified) {
-            wanted = role_for_kind(interface->identity.kind);
-        }
+        const LogicalRole wanted =
+            classified ? role_for_kind(interface->identity.kind)
+                       : LogicalRole::Ignored;
 
-        if (auxiliary_of_mouse) {
-            interface->role = LogicalRole::Auxiliary;
-        } else if (wanted != LogicalRole::Ignored && !role_is_owned(wanted)) {
+        if (wanted != LogicalRole::Ignored && !role_is_owned(wanted)) {
             interface->role = wanted;
         } else {
             interface->role = LogicalRole::Ignored;
@@ -678,19 +522,13 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
                 ++ignored_role_taken_;
             }
         }
-        if (interface->role == LogicalRole::Keyboard || interface->role == LogicalRole::Mouse) {
-            // Told once, before its first Report: InputPipeline::on_event
-            // reads Ready to learn what this source is and which layout to
-            // read its reports through, and a Report ahead of that would be
-            // read under whatever the pipeline was left holding from before.
-            // Auxiliary never reaches here - it is not a source the pipeline
-            // is separately told about, only a second channel of the Mouse
-            // one already was.
-            if (!push_event(*interface, input::SourceEventKind::Ready, 0, nullptr, 0, 0)) {
-                ++event_overflows_;
-                latch_fault(*interface);
-                return;
-            }
+        // Told once, before its first Report. Unknown layouts still claim a
+        // source slot: their pipeline intentionally decodes nothing, while
+        // the backend continues servicing the interface.
+        if (!push_event(*interface, input::SourceEventKind::Ready, 0, nullptr, 0, 0)) {
+            ++event_overflows_;
+            latch_fault(*interface);
+            return;
         }
         arm_if_needed(*interface, now_us);
         return;
@@ -704,14 +542,6 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
         latch_fault(*interface);
         return;
     }
-    if (interface->role == LogicalRole::Ignored) {
-        // Serviced so a second, unrouted interface on the same device cannot
-        // stall the bus behind an un-drained endpoint - never turned into an
-        // event, because nothing above this line would know which owner's
-        // stream it belonged to.
-        arm_if_needed(*interface, now_us);
-        return;
-    }
     if (record.size == 0) {
         // A stalled or errored transfer, not an idle one (Task 10). Real
         // TinyUSB's hidh_xfer_cb forwards xferred_bytes to
@@ -720,7 +550,7 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
         // completing at all - an idle, healthy device that simply has
         // nothing new to report produces no CallbackRecord whatsoever,
         // which is why this can never mistake "nobody typed anything" for a
-        // fault. Never turned into a Report/AuxiliaryReport SourceEvent -
+        // fault. Never turned into a Report SourceEvent -
         // InputPipeline has no zero-length shape to read - and given the
         // same bounded-retry budget a synchronous receive-arm refusal uses:
         // repeated signals in a row escalate to a release-all, one
@@ -740,23 +570,6 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
     // before this real report, the interface has just proven itself
     // healthy again.
     interface->arm_retry_count = 0;
-    if (interface->role == LogicalRole::Auxiliary) {
-        // The Keychron receiver's side-button channel. AuxiliaryReport, not
-        // Report - InputPipeline reads this from raw bytes through its own
-        // shape check, never through a keyboard or mouse layout - and the
-        // fixed endpoint that check requires, not this interface's own
-        // instance number.
-        if (!push_event(*interface, input::SourceEventKind::AuxiliaryReport,
-                        kKeychronAuxiliaryEndpoint,
-                        record.payload_present ? record.payload : nullptr, record.size,
-                        record.received_us)) {
-            ++event_overflows_;
-            latch_fault(*interface);
-            return;
-        }
-        arm_if_needed(*interface, now_us);
-        return;
-    }
     if (!push_event(*interface, input::SourceEventKind::Report, record.instance,
                     record.payload_present ? record.payload : nullptr, record.size,
                     record.received_us)) {

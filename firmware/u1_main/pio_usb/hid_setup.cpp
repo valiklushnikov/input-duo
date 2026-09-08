@@ -58,10 +58,4 @@ bool classify_hid(std::uint8_t protocol, const std::uint8_t* descriptor,
           HidLayoutSource::None;
 }
 
-bool is_keychron_auxiliary_interface(std::uint16_t vendor_id, std::uint16_t product_id,
-                                     input::DeviceKind classified_kind) {
-    return vendor_id == kKeychronAuxiliaryVendorId && product_id == kKeychronAuxiliaryProductId &&
-          classified_kind == input::DeviceKind::Keyboard;
-}
-
 }  // namespace duo_input::u1::pio_usb

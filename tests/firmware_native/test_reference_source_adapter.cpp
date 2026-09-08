@@ -214,7 +214,8 @@ TEST_CASE(a_boot_mouse_mount_is_announced_as_a_ready_mouse) {
     CHECK(taken.identity.kind == DeviceKind::Mouse);
     CHECK_EQ(taken.identity.vendor_id, 0x1BCFu);
     CHECK_EQ(taken.identity.product_id, 0x0005u);
-    CHECK_EQ(taken.event.source_id, adapter.logical_port(DeviceKind::Mouse));
+    CHECK_EQ(taken.event.source_id, 0u);
+    CHECK_EQ(taken.identity.interface_number, 0u);
     CHECK_EQ(taken.event.report_size, static_cast<std::size_t>(0));
 
     CHECK_FALSE(take(adapter).ok);
@@ -230,9 +231,41 @@ TEST_CASE(a_boot_keyboard_mount_is_announced_as_a_ready_keyboard) {
     CHECK(taken.ok);
     CHECK(taken.event.kind == SourceEventKind::Ready);
     CHECK(taken.identity.kind == DeviceKind::Keyboard);
-    CHECK_EQ(taken.event.source_id, adapter.logical_port(DeviceKind::Keyboard));
-    CHECK(adapter.logical_port(DeviceKind::Keyboard) !=
-          adapter.logical_port(DeviceKind::Mouse));
+    CHECK_EQ(taken.event.source_id, 0u);
+    CHECK_EQ(taken.identity.interface_number, 0u);
+}
+
+TEST_CASE(every_reference_interface_is_announced_and_reports_as_its_own_source) {
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(3, 0, kProtocolMouse, 0x1234, 0x5678,
+                          descriptor("boot_mouse.bin")),
+                    0);
+    adapter.consume(mount(3, 1, kProtocolKeyboard, 0x1234, 0x5678,
+                          descriptor("boot_keyboard.bin")),
+                    0);
+    adapter.consume(mount(3, 2, kProtocolNone, 0x1234, 0x5678, {}), 0);
+
+    std::array<std::uint8_t, 3> source_ids{};
+    for (std::uint8_t interface_number = 0; interface_number < 3;
+         ++interface_number) {
+        const Taken ready = take(adapter);
+        CHECK(ready.ok);
+        CHECK_EQ(ready.event.kind, SourceEventKind::Ready);
+        CHECK_EQ(ready.identity.interface_number, interface_number);
+        source_ids[interface_number] = ready.event.source_id;
+    }
+    CHECK(source_ids[0] != source_ids[1]);
+    CHECK(source_ids[0] != source_ids[2]);
+    CHECK(source_ids[1] != source_ids[2]);
+
+    const std::vector<std::uint8_t> bytes{0xA5, 0x5A};
+    adapter.consume(report(3, 2, bytes), 1);
+    const Taken unknown = take(adapter);
+    CHECK(unknown.ok);
+    CHECK_EQ(unknown.event.kind, SourceEventKind::Report);
+    CHECK_EQ(unknown.event.source_id, source_ids[2]);
+    CHECK_EQ(unknown.identity.interface_number, 2u);
+    CHECK_FALSE(take(adapter).ok);
 }
 
 TEST_CASE(a_mouse_keeps_the_layout_its_report_descriptor_declared) {
@@ -269,9 +302,11 @@ TEST_CASE(the_first_claimant_owns_a_role_and_a_second_is_ignored) {
     adapter.consume(mount(3, 0, kProtocolKeyboard, 0x3333, 0x4444,
                           descriptor("boot_keyboard.bin")),
                     0);
-    CHECK_FALSE(take(adapter).ok);
-    // The diagnostics reply's only record that a second keyboard behind the
-    // hub was seen at all - nothing downstream is ever told about it.
+    const Taken second = take(adapter);
+    CHECK(second.ok);
+    CHECK_EQ(second.event.kind, SourceEventKind::Ready);
+    CHECK_EQ(second.event.source_id, 1u);
+    // The diagnostics still records that a second keyboard role was seen.
     CHECK_EQ(adapter.ignored_interface_count(), 1u);
 }
 
@@ -288,7 +323,7 @@ TEST_CASE(reports_from_the_owning_interface_carry_their_bytes_unchanged) {
     const Taken taken = take(adapter);
     CHECK(taken.ok);
     CHECK(taken.event.kind == SourceEventKind::Report);
-    CHECK_EQ(taken.event.source_id, adapter.logical_port(DeviceKind::Mouse));
+    CHECK_EQ(taken.event.source_id, 0u);
     CHECK_EQ(taken.event.endpoint, 0u);
     CHECK_EQ(taken.event.received_us, 4242u);
     CHECK_EQ(taken.event.report_size, static_cast<std::size_t>(3));
@@ -304,39 +339,6 @@ TEST_CASE(a_report_from_an_interface_that_owns_nothing_produces_no_event) {
     adapter.consume(report(9, 4, bytes), 0);
 
     CHECK_FALSE(take(adapter).ok);
-}
-
-TEST_CASE(the_keychron_side_channel_is_auxiliary_and_never_the_keyboard) {
-    ReferenceSourceAdapter adapter;
-
-    // The receiver's mouse interface takes the Mouse role.
-    adapter.consume(mount(1, 0, kProtocolMouse, 0x3434, 0xD030,
-                          descriptor("boot_mouse.bin")),
-                    0);
-    CHECK(take(adapter).ok);
-
-    // Its keyboard-shaped side-button interface must not become the Keyboard.
-    adapter.consume(mount(1, 2, kProtocolKeyboard, 0x3434, 0xD030,
-                          descriptor("boot_keyboard.bin")),
-                    0);
-    CHECK_FALSE(take(adapter).ok);
-
-    // A real keyboard elsewhere can still claim the role afterwards.
-    adapter.consume(mount(2, 0, kProtocolKeyboard, 0x3554, 0xFA09,
-                          descriptor("boot_keyboard.bin")),
-                    0);
-    const Taken keyboard = take(adapter);
-    CHECK(keyboard.ok);
-    CHECK(keyboard.identity.kind == DeviceKind::Keyboard);
-
-    // And the side channel's reports reach the mouse, as auxiliary.
-    const std::vector<std::uint8_t> side{0x00, 0x00, 0x50, 0, 0, 0, 0, 0};
-    adapter.consume(report(1, 2, side), 0);
-    const Taken auxiliary = take(adapter);
-    CHECK(auxiliary.ok);
-    CHECK(auxiliary.event.kind == SourceEventKind::AuxiliaryReport);
-    CHECK_EQ(auxiliary.event.source_id, adapter.logical_port(DeviceKind::Mouse));
-    CHECK_EQ(auxiliary.event.endpoint, 2u);
 }
 
 TEST_CASE(an_unmount_detaches_the_role_and_frees_it_for_the_next_device) {
@@ -421,7 +423,10 @@ TEST_CASE(a_descriptor_that_will_not_parse_does_not_take_a_role_on_its_shape) {
     adapter.consume(mount(1, 0, kProtocolNone, 0x9999, 0x8888,
                           descriptor("truncated_item.bin")),
                     0);
-    CHECK_FALSE(take(adapter).ok);
+    const Taken unknown = take(adapter);
+    CHECK(unknown.ok);
+    CHECK_EQ(unknown.event.kind, SourceEventKind::Ready);
+    CHECK_EQ(unknown.identity.kind, DeviceKind::Unknown);
     // Nothing here could classify it - the same fact GET_DIAGNOSTICS'
     // ignored-interfaces field exists to report.
     CHECK_EQ(adapter.ignored_interface_count(), 1u);
@@ -441,7 +446,10 @@ TEST_CASE(a_vendor_only_interface_is_ignored_rather_than_given_a_role) {
     adapter.consume(mount(1, 1, kProtocolNone, 0x3434, 0xD030,
                           descriptor("vendor_only.bin")),
                     0);
-    CHECK_FALSE(take(adapter).ok);
+    const Taken ready = take(adapter);
+    CHECK(ready.ok);
+    CHECK_EQ(ready.event.kind, SourceEventKind::Ready);
+    CHECK_EQ(ready.identity.kind, DeviceKind::Unknown);
     CHECK_EQ(adapter.ignored_interface_count(), 1u);
 }
 
@@ -1143,26 +1151,9 @@ TEST_CASE(an_ignored_interface_asks_for_no_protocol_change) {
     adapter.consume(mount(3, 0, kProtocolMouse, 0x2222, 0x3333,
                           report_id_wheel_mouse()),
                     0);
-    CHECK_FALSE(take(adapter).ok);
-
-    ReferenceSourceAdapter::ProtocolRequest request{};
-    CHECK_FALSE(adapter.take_protocol_request(request));
-}
-
-TEST_CASE(the_keychron_side_channel_stays_in_boot_protocol) {
-    ReferenceSourceAdapter adapter;
-    adapter.consume(mount(1, 0, kProtocolMouse, 0x3434, 0xD030,
-                          descriptor("boot_mouse.bin")),
-                    0);
     CHECK(take(adapter).ok);
-    ReferenceSourceAdapter::ProtocolRequest request{};
-    while (adapter.take_protocol_request(request)) {
-    }
 
-    // Its reports are matched by shape, and that shape is boot protocol's.
-    adapter.consume(mount(1, 2, kProtocolKeyboard, 0x3434, 0xD030,
-                          descriptor("boot_keyboard.bin")),
-                    0);
+    ReferenceSourceAdapter::ProtocolRequest request{};
     CHECK_FALSE(adapter.take_protocol_request(request));
 }
 

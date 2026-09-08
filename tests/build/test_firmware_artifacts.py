@@ -196,7 +196,7 @@ def test_a_release_image_contains_the_real_peripheral_input_path():
     SPI, PIO USB runs a TinyUSB host - so the declared backend (read the same
     way ``tests/build/test_backend_artifacts.py`` does, from CMakeCache.txt)
     selects which of the two this test requires. Either way,
-    ``InputPipeline::on_event`` must be present: both backends feed it.
+    ``SourceTable::on_event`` must be present: both backends feed it.
     """
     import sys
 
@@ -206,8 +206,8 @@ def test_a_release_image_contains_the_real_peripheral_input_path():
     symbols = Elf32(_u1_elf().read_bytes()).symbols()
     backend = _declared_backend()
 
-    assert any("InputPipeline8on_event" in name for name in symbols), (
-        "release ELF does not contain InputPipeline::on_event"
+    assert any("SourceTable8on_event" in name for name in symbols), (
+        "release ELF does not contain SourceTable::on_event"
     )
 
     if backend in ("PIO_USB", "PIO_USB_REFERENCE"):

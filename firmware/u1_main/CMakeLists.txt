@@ -18,6 +18,7 @@ set(_duo_u1_sources
     core1_runtime.cpp
     core_bridge.cpp
     input/pipeline.cpp
+    input/source_table.cpp
 )
 
 if(DUO_INPUT_BACKEND STREQUAL "CH375")

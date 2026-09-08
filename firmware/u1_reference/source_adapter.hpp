@@ -2,17 +2,13 @@
 
 // What a captured callback record means, decided in ordinary task context.
 //
-// This is the only place in the reference target that decides what a device is
-// and which of the two roles it may occupy. It reuses the neutral pieces
-// rather than re-deriving them: classify_hid for what an interface is, the
-// shared report-descriptor parsers underneath it, and the receiver-specific
-// check that tells a real keyboard from the Keychron side-button channel.
-// Everything else here is role ownership, which is small and stated once.
+// This is the only place in the reference target that decides what an
+// interface is. It reuses classify_hid and the shared report-descriptor
+// parsers underneath it; every mounted interface is then announced as a
+// distinct source, including one whose layout remains unknown.
 //
 // Bounded like everything on this path. Interfaces live in a fixed table, and
-// one record produces at most one event per role that has to be told
-// something - two, when an overflow means both are holding keys nobody can
-// account for any more.
+// an overflow can produce at most one terminal event per occupied source.
 
 #include <cstddef>
 #include <cstdint>
@@ -151,17 +147,15 @@ private:
         Ignored,
         Keyboard,
         Mouse,
-        /// The Keychron receiver's side-button channel: reports reach the
-        /// mouse's pipeline as AuxiliaryReport, and it never becomes the
-        /// keyboard.
-        Auxiliary,
     };
 
     struct Interface {
         bool used = false;
         std::uint8_t dev_addr = 0;
         std::uint8_t instance = 0;
+        std::uint8_t source_id = 0;
         Role role = Role::Ignored;
+        input::SourceIdentity identity{};
     };
 
     //: Two devices behind the hub, each of which may present a mouse, a
@@ -173,8 +167,8 @@ private:
         input::SourceIdentity identity{};
     };
 
-    //: One per role. An overflow is the only record that has to tell both.
-    static constexpr std::size_t kPendingCapacity = 2;
+    //: One event for every interface can be produced by an overflow record.
+    static constexpr std::size_t kPendingCapacity = kInterfaceCapacity;
 
     Interface* find(std::uint8_t dev_addr, std::uint8_t instance);
     Interface* claim_slot(std::uint8_t dev_addr, std::uint8_t instance);

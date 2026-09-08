@@ -48,13 +48,13 @@ ReferenceSourceAdapter::Interface* ReferenceSourceAdapter::claim_slot(
             entry.used = true;
             entry.dev_addr = dev_addr;
             entry.instance = instance;
+            entry.source_id = static_cast<std::uint8_t>(&entry - interfaces_);
             entry.role = Role::Ignored;
             return &entry;
         }
     }
-    // The table is full. Refusing here means the interface earns no role and
-    // its reports are ignored, which is the safe end of the trade: a device
-    // that is never announced holds nothing that has to be released.
+    // The table is full. An interface that cannot be assigned a source slot
+    // cannot be announced safely.
     return nullptr;
 }
 
@@ -67,7 +67,7 @@ void ReferenceSourceAdapter::push(SourceEventKind kind,
                                   std::uint32_t received_us) {
     if (pending_count_ >= kPendingCapacity) {
         // Unreachable by construction: the caller drains before consuming
-        // again, and no record produces more events than there are roles.
+        // again, and no record produces more events than there are sources.
         return;
     }
 
@@ -126,30 +126,13 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
         record.descriptor_size != 0 ? record.descriptor.data() : nullptr,
         record.descriptor_size, identity);
     const bool classified = layout_source != pio_usb::HidLayoutSource::None;
-    if (!classified || identity.kind == DeviceKind::Unknown) {
-        // Nothing here this firmware can read. Deliberately not given a role:
-        // an interface that cannot be parsed must not keep the real device
-        // that follows it from ever claiming one.
-        ++ignored_interface_count_;
-        return;
-    }
-
     identity.vendor_id = record.vid;
     identity.product_id = record.pid;
+    identity.interface_number = record.instance;
 
     Interface* const existing = find(record.dev_addr, record.instance);
     Interface* entry = claim_slot(record.dev_addr, record.instance);
     if (entry == nullptr) {
-        return;
-    }
-
-    if (pio_usb::is_keychron_auxiliary_interface(identity.vendor_id,
-                                                 identity.product_id,
-                                                 identity.kind)) {
-        // Shaped like a keyboard, and never one. Its reports belong to the
-        // mouse this receiver also presents; it is not a source of its own, so
-        // nothing downstream is told it appeared.
-        entry->role = Role::Auxiliary;
         return;
     }
 
@@ -158,8 +141,6 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
     // fell back to the boot layout must stay where it is: moving it would make
     // the device send a format nothing here knows how to read.
     //
-    // Not requested for the auxiliary channel above: its reports are matched
-    // by shape rather than by layout, and that shape is boot protocol's.
     const bool wants_report_protocol =
         layout_source == pio_usb::HidLayoutSource::ReportDescriptor;
 
@@ -171,15 +152,25 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
         identity.kind == DeviceKind::Keyboard && wants_report_protocol) {
         const SourceIdentity boot_identity = keyboard_identity_;
         keyboard_identity_ = identity;
+        entry->identity = identity;
         request_protocol(record.dev_addr, record.instance, kHidProtocolReport);
-        push(SourceEventKind::Detached, kKeyboardPort, boot_identity);
-        push(SourceEventKind::Ready, kKeyboardPort, identity);
+        push(SourceEventKind::Detached, entry->source_id, boot_identity);
+        push(SourceEventKind::Ready, entry->source_id, identity);
         return;
     }
     if (existing != nullptr) {
         // A late descriptor may only refine the role this exact interface
         // already owns. A truncated or unrelated document must not turn an
         // existing keyboard into a mouse while leaving keyboard_owned_ set.
+        return;
+    }
+
+    entry->identity = identity;
+
+    if (!classified || identity.kind == DeviceKind::Unknown) {
+        entry->role = Role::Ignored;
+        ++ignored_interface_count_;
+        push(SourceEventKind::Ready, entry->source_id, identity);
         return;
     }
 
@@ -198,7 +189,7 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
             descriptor_request_.next_offer_us = now_us + kDescriptorQuietUs;
             descriptor_request_.offers = 0;
         }
-        push(SourceEventKind::Ready, kKeyboardPort, identity);
+        push(SourceEventKind::Ready, entry->source_id, identity);
         return;
     }
 
@@ -209,7 +200,7 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
         entry->role = Role::Mouse;
         mouse_owned_ = true;
         mouse_identity_ = identity;
-        push(SourceEventKind::Ready, kMousePort, identity);
+        push(SourceEventKind::Ready, entry->source_id, identity);
         return;
     }
 
@@ -218,6 +209,7 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
     // that is already routing.
     entry->role = Role::Ignored;
     ++ignored_interface_count_;
+    push(SourceEventKind::Ready, entry->source_id, identity);
 }
 
 void ReferenceSourceAdapter::on_unmount(const ReferenceCallbackRecord& record) {
@@ -229,27 +221,28 @@ void ReferenceSourceAdapter::on_unmount(const ReferenceCallbackRecord& record) {
     }
 
     const Role role = entry->role;
+    const std::uint8_t source_id = entry->source_id;
+    const SourceIdentity identity = entry->identity;
     entry->used = false;
     entry->role = Role::Ignored;
 
     if (role == Role::Keyboard && keyboard_owned_) {
         // Announced before the identity is cleared: what the pipeline releases
         // it releases as this device, not as an anonymous one.
-        push(SourceEventKind::Detached, kKeyboardPort, keyboard_identity_);
+        push(SourceEventKind::Detached, source_id, identity);
         keyboard_owned_ = false;
         keyboard_identity_ = SourceIdentity{};
         return;
     }
 
     if (role == Role::Mouse && mouse_owned_) {
-        push(SourceEventKind::Detached, kMousePort, mouse_identity_);
+        push(SourceEventKind::Detached, source_id, identity);
         mouse_owned_ = false;
         mouse_identity_ = SourceIdentity{};
+        return;
     }
 
-    // An Auxiliary or Ignored interface owns nothing downstream, so there is
-    // nothing to release and nobody to tell. The mouse it belongs to announces
-    // its own departure through its own interface.
+    push(SourceEventKind::Detached, source_id, identity);
 }
 
 void ReferenceSourceAdapter::on_report(const ReferenceCallbackRecord& record,
@@ -262,50 +255,24 @@ void ReferenceSourceAdapter::on_report(const ReferenceCallbackRecord& record,
     const std::uint32_t received =
         record.received_us != 0 ? record.received_us : now_us;
 
-    switch (entry->role) {
-        case Role::Keyboard:
-            push(SourceEventKind::Report, kKeyboardPort, keyboard_identity_,
-                 record.instance, record.report.data(), record.report_size,
-                 received);
-            return;
-        case Role::Mouse:
-            push(SourceEventKind::Report, kMousePort, mouse_identity_,
-                 record.instance, record.report.data(), record.report_size,
-                 received);
-            return;
-        case Role::Auxiliary: {
-            // Serviced so it cannot block the mouse's own reports, and carried
-            // to the same pipeline - never read as that pipeline's own layout.
-            SourceIdentity identity = mouse_identity_;
-            identity.kind = DeviceKind::Mouse;
-            push(SourceEventKind::AuxiliaryReport, kMousePort, identity,
-                 record.instance, record.report.data(), record.report_size,
-                 received);
-            return;
-        }
-        case Role::Ignored:
-        default:
-            return;
-    }
+    push(SourceEventKind::Report, entry->source_id, entry->identity,
+         record.instance, record.report.data(), record.report_size, received);
 }
 
 void ReferenceSourceAdapter::on_overflow() {
     // Input was handed to this firmware and not kept, so nothing downstream
-    // can still be trusted to know what is held. Every role that is holding
-    // something is told, before its identity is cleared.
-    if (keyboard_owned_) {
-        push(SourceEventKind::Fault, kKeyboardPort, keyboard_identity_);
-        keyboard_owned_ = false;
-        keyboard_identity_ = SourceIdentity{};
-    }
-    if (mouse_owned_) {
-        push(SourceEventKind::Fault, kMousePort, mouse_identity_);
-        mouse_owned_ = false;
-        mouse_identity_ = SourceIdentity{};
-    }
+    // can still be trusted to know what is held. Every mounted source is told
+    // before its identity is cleared.
     for (Interface& entry : interfaces_) {
+        if (entry.used) {
+            push(SourceEventKind::Fault, entry.source_id, entry.identity);
+        }
         entry = Interface{};
     }
+    keyboard_owned_ = false;
+    mouse_owned_ = false;
+    keyboard_identity_ = SourceIdentity{};
+    mouse_identity_ = SourceIdentity{};
     note_descriptor_giveup(ReferenceDescriptorReason::Overflow);
     descriptor_request_ = PendingDescriptorRequest{};
 }
