@@ -17,6 +17,7 @@
 // what is held on a computer nobody is looking at.
 
 #include <atomic>
+#include "runtime/spsc_queue.hpp"
 #include <cstddef>
 #include <cstdint>
 
@@ -109,7 +110,7 @@ public:
             kCaptureRequestBegin) {
             return true;
         }
-        if (capture_event_occupied_.load(std::memory_order_acquire)) {
+        if (!capture_events_.empty()) {
             return true;
         }
         return capture_active_published_.load(std::memory_order_acquire);
@@ -223,20 +224,10 @@ private:
     /// Published after any captured event, so Core 0 cannot observe the end
     /// and discard the answer that caused it.
     std::atomic<bool> capture_active_published_{false};
-    /// Whether capture_event_payload_ holds a trigger Core 0 has not taken
-    /// yet. Core 1 writes the payload and only then this flag with release
-    /// order; take_capture_event's acquire on the same flag is what makes
-    /// reading that plain struct on Core 0 safe without a lock - the same
-    /// event-first-state-second ordering publish_capture_state already
-    /// relies on for capture_active_published_ below.
-    std::atomic<bool> capture_event_occupied_{false};
-    /// The trigger captured on Core 1, guarded by capture_event_occupied_
-    /// above. Not itself atomic: nothing reads it until that flag says it is
-    /// safe to. Outgrew the single packed std::atomic<uint32_t> this used to
-    /// be once it gained a source - kind, code and modifiers fit in three
-    /// bytes; VID, PID and interface number do not fit in the bits that were
-    /// left.
-    mapping::CapturedTrigger capture_event_payload_{};
+    /// Core 1 publishes one result; Core 0 releases its slot only after copying.
+    /// Begin requests wait for pending delivery. Cancel stops active capture
+    /// but an already captured result remains deliverable exactly once.
+    duo_input::runtime::SpscQueue<mapping::CapturedTrigger, 2> capture_events_;
 
     /// A release Core 0 has asked for and Core 1 has not performed yet.
     std::atomic<bool> release_all_requested_{false};

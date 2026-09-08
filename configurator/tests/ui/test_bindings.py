@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+import struct
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel
 
@@ -341,6 +342,24 @@ def test_a_capture_event_carries_one_trigger():
     assert trigger == Trigger(TriggerKind.MOUSE_BUTTON, 4, 0)
 
 
+def test_consumer_capture_and_editor_support_wide_usage(page, service, emulator, qtbot):
+    link = SynchronousTransportLink(emulator)
+    with qtbot.waitSignal(service.operation_succeeded):
+        service.connect_device(link)
+    page.set_capabilities(MouseCapabilities(advertised=True))
+    with qtbot.waitSignal(service.operation_succeeded):
+        qtbot.mouseClick(page.capture_button, Qt.MouseButton.LeftButton)
+    assert emulator.queue_capture_event(bytes.fromhex("03 B1 01 34 34 30 D0 01"))
+    with qtbot.waitSignal(service.capture_received):
+        link.poll()
+    trigger = Trigger(3, 0x1B1, 0, ATTACHED)
+    assert page.current_trigger() == trigger
+    assert "Consumer" in trigger_label(trigger)
+    with qtbot.waitSignal(page.command_requested) as added:
+        qtbot.mouseClick(page.add_button, Qt.MouseButton.LeftButton)
+    assert added.args[0].binding.trigger == trigger
+
+
 def test_a_capture_event_of_the_wrong_size_is_refused():
     with pytest.raises(PayloadError):
         parse_capture_event(b"\x01\x04")
@@ -358,6 +377,41 @@ def test_the_editor_starts_on_a_keyboard_trigger(page):
     assert page.trigger_kind.currentData() is TriggerKind.KEYBOARD_USAGE
     assert page.key_combo.isVisibleTo(page) is True
     assert page.mouse_combo.isVisibleTo(page) is False
+
+
+def test_qualified_binding_action_edit_and_deliberate_trigger_edit(page, qtbot):
+    binding = _binding(0x4F, modifiers=0x91, source=ATTACHED)
+    page.set_session(page.session.apply(AddBinding(1, binding)))
+    page.select_binding_row(0)
+    page.select_action_kind(ActionKind.TOGGLE_MOUSE_ROUTE)
+    with qtbot.waitSignal(page.command_requested) as changed:
+        qtbot.mouseClick(page.apply_button, Qt.MouseButton.LeftButton)
+    assert changed.args[0].binding.trigger == binding.trigger
+    page.key_combo.setCurrentIndex(page.key_combo.findData(0x50))
+    page.key_combo.setCurrentIndex(page.key_combo.findData(0x4F))
+    assert page.current_trigger().source is None
+
+
+@pytest.mark.parametrize("kind, code, modifiers", [(1, 0x68, 0x91), (3, 0x1B1, 0)])
+def test_detect_then_apply_keeps_complete_binding_trigger(page, service, emulator, qtbot, kind, code, modifiers):
+    link = SynchronousTransportLink(emulator)
+    with qtbot.waitSignal(service.operation_succeeded):
+        service.connect_device(link)
+    page.set_session(page.session.apply(AddBinding(1, _binding())))
+    page.select_binding_row(0)
+    page.set_capabilities(MouseCapabilities(advertised=True))
+    with qtbot.waitSignal(service.operation_succeeded):
+        qtbot.mouseClick(page.capture_button, Qt.MouseButton.LeftButton)
+    assert emulator.queue_capture_event(struct.pack("<BBBHHB", kind, code & 0xFF, code >> 8 if kind == 3 else modifiers, 0x3434, 0xD030, 1))
+    with qtbot.waitSignal(service.capture_received):
+        link.poll()
+    if kind == 3:
+        assert page.consumer_usage.value() == code
+    else:
+        assert page.key_combo.currentData() == code
+    with qtbot.waitSignal(page.command_requested) as changed:
+        qtbot.mouseClick(page.apply_button, Qt.MouseButton.LeftButton)
+    assert changed.args[0].binding.trigger == Trigger(TriggerKind(kind), code, modifiers, ATTACHED)
 
 
 def test_choosing_a_mouse_trigger_swaps_the_key_chooser(page):

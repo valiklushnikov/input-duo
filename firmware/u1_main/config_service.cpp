@@ -438,7 +438,8 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
     if (!backend_publishes_counters_) {
         out[at++] = 0;
         at += write_host_observation(out + at);
-        return at + write_reference_counters(out + at);
+        at += write_reference_counters(out + at);
+        return at + write_input_sources(out + at);
     }
     out[at++] = static_cast<std::uint8_t>(kBackendCounterCount);
     // Written out one by one, in the order BackendCounters declares them,
@@ -464,8 +465,32 @@ std::size_t ConfigService::diagnostics_payload(CdcError error, std::uint8_t* out
     }
     at += write_host_observation(out + at);
     at += write_reference_counters(out + at);
+    at += write_input_sources(out + at);
     return at;
 #endif
+}
+
+std::size_t ConfigService::write_input_sources(std::uint8_t* out) const {
+    if (!input_sources_published_) return 0;
+    const auto count = std::min<std::size_t>(input_sources_.count, input::kSourceCapacity);
+    const std::size_t size = 8 + count * (7 + input::kProductNameBytes);
+    out[0] = 1;
+    put_u16(out + 1, static_cast<std::uint16_t>(size));
+    out[3] = static_cast<std::uint8_t>(count);
+    put_u32(out + 4, input_sources_.rejected_interfaces);
+    std::size_t at = 8;
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& source = input_sources_.sources[i];
+        put_u16(out + at, source.vendor_id);
+        put_u16(out + at + 2, source.product_id);
+        out[at + 4] = source.interface_number;
+        out[at + 5] = source.kind;
+        out[at + 6] = source.device_address;
+        std::memcpy(out + at + 7, source.product_name, input::kProductNameBytes);
+        out[at + 7 + input::kProductNameBytes - 1] = 0;
+        at += 7 + input::kProductNameBytes;
+    }
+    return size;
 }
 
 std::size_t ConfigService::write_reference_counters(std::uint8_t* out) const {
@@ -1005,7 +1030,9 @@ void ConfigService::emit_capture_event(const mapping::CapturedTrigger& trigger) 
 
     const bool keyboard = trigger.kind == config::TriggerKind::KEYBOARD_USAGE;
     const bool mouse = trigger.kind == config::TriggerKind::MOUSE_BUTTON;
-    if ((!keyboard && !mouse) || trigger.code == 0 ||
+    const bool consumer = trigger.kind == config::TriggerKind::CONSUMER_USAGE;
+    if ((!keyboard && !mouse && !consumer) || trigger.code == 0 ||
+        (keyboard && trigger.code > 0xFF) || (consumer && trigger.modifiers != 0) ||
         (mouse && (trigger.code > 5 || trigger.modifiers != 0))) {
         // The configurator would reject this payload. Keep the capture alive
         // so the operator can answer again instead of silently losing it.
@@ -1017,10 +1044,11 @@ void ConfigService::emit_capture_event(const mapping::CapturedTrigger& trigger) 
     // then the source that produced the press - VID, PID, interface number.
     // A host too old to read the last five still reads the first three the
     // same way it always has.
-    std::uint8_t payload[ProtocolLimits::CAPTURE_EVENT_PAYLOAD_BYTES];
+    static_assert(ProtocolLimits::CAPTURE_EVENT_PAYLOAD_BYTES == 8, "capture serializer must match schema");
+    std::uint8_t payload[ProtocolLimits::CAPTURE_EVENT_PAYLOAD_BYTES] = {};
     payload[0] = static_cast<std::uint8_t>(trigger.kind);
-    payload[1] = trigger.code;
-    payload[2] = trigger.modifiers;
+    payload[1] = static_cast<std::uint8_t>(trigger.code);
+    payload[2] = consumer ? static_cast<std::uint8_t>(trigger.code >> 8) : trigger.modifiers;
     put_u16(payload + 3, trigger.vendor_id);
     put_u16(payload + 5, trigger.product_id);
     payload[7] = trigger.interface_number;

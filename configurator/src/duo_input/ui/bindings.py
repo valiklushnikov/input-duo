@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QPushButton,
+    QSpinBox,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -226,6 +227,7 @@ class BindingsPage(QWidget):
         self._session = ProjectSession.new()
         self._capabilities = MouseCapabilities()
         self._updating = False
+        self._retained_trigger: Trigger | None = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
@@ -266,6 +268,7 @@ class BindingsPage(QWidget):
         self.trigger_kind.setAccessibleName(self.tr("Trigger kind"))
         self.trigger_kind.addItem(self.tr("Keyboard key"), TriggerKind.KEYBOARD_USAGE)
         self.trigger_kind.addItem(self.tr("Mouse button"), TriggerKind.MOUSE_BUTTON)
+        self.trigger_kind.addItem(self.tr("Consumer control"), TriggerKind.CONSUMER_USAGE)
         self.trigger_kind.currentIndexChanged.connect(self._on_trigger_kind_changed)
         form.addRow(field_label(self.tr("Trigger:"), box), self.trigger_kind)
 
@@ -273,13 +276,21 @@ class BindingsPage(QWidget):
         self.key_combo.setAccessibleName(self.tr("Keyboard key"))
         for usage in SELECTABLE_USAGES:
             self.key_combo.addItem(key_name(usage), usage)
-        self.key_combo.currentIndexChanged.connect(self._on_editor_changed)
+        self.key_combo.currentIndexChanged.connect(self._on_trigger_edited)
         self.key_label = field_label(self.tr("Key:"), box)
         form.addRow(self.key_label, self.key_combo)
+        self.consumer_usage = QSpinBox(box)
+        self.consumer_usage.setRange(1, 0xFFFF)
+        self.consumer_usage.setDisplayIntegerBase(16)
+        self.consumer_usage.setPrefix("0x")
+        self.consumer_usage.setAccessibleName(self.tr("Consumer usage"))
+        self.consumer_usage.valueChanged.connect(self._on_trigger_edited)
+        self.consumer_label = field_label(self.tr("Consumer usage:"), box)
+        form.addRow(self.consumer_label, self.consumer_usage)
 
         self.mouse_combo = QComboBox(box)
         self.mouse_combo.setAccessibleName(self.tr("Mouse button"))
-        self.mouse_combo.currentIndexChanged.connect(self._on_editor_changed)
+        self.mouse_combo.currentIndexChanged.connect(self._on_trigger_edited)
         self.mouse_label = field_label(self.tr("Button:"), box)
         form.addRow(self.mouse_label, self.mouse_combo)
 
@@ -288,7 +299,7 @@ class BindingsPage(QWidget):
         for key, label, _bit in MODIFIER_BITS:
             check = QCheckBox(label, box)
             check.setAccessibleName(self.tr("{0} modifier").format(label))
-            check.toggled.connect(self._on_editor_changed)
+            check.toggled.connect(self._on_trigger_edited)
             self.modifier_boxes[key] = check
             modifier_row.addWidget(check)
         modifier_row.addStretch(1)
@@ -390,6 +401,7 @@ class BindingsPage(QWidget):
     def set_session(self, session: ProjectSession) -> None:
         """Render ``session``; the selected binding stays selected if it lives."""
         selected = self.selected_binding()
+        self._retained_trigger = None
         self._session = session
         self.model.set_profile(session.active_profile)
         if selected is not None:
@@ -423,7 +435,11 @@ class BindingsPage(QWidget):
 
     def current_trigger(self) -> Trigger | None:
         """The trigger the editor describes, or ``None`` when it describes none."""
+        if self._retained_trigger is not None:
+            return self._retained_trigger
         kind = self.trigger_kind.currentData()
+        if kind is TriggerKind.CONSUMER_USAGE:
+            return Trigger(kind, self.consumer_usage.value())
         if kind is TriggerKind.MOUSE_BUTTON:
             button = self.mouse_combo.currentData()
             if button is None:
@@ -460,10 +476,14 @@ class BindingsPage(QWidget):
         self._updating = True
         try:
             self.select_trigger_kind(TriggerKind(binding.trigger.kind))
+            if binding.trigger.kind == TriggerKind.CONSUMER_USAGE:
+                self.consumer_usage.setValue(binding.trigger.code)
             if binding.trigger.kind == TriggerKind.MOUSE_BUTTON:
                 self._rebuild_mouse_buttons(include=binding.trigger.code)
                 self.mouse_combo.setCurrentIndex(self.mouse_combo.findData(binding.trigger.code))
             else:
+                if self.key_combo.findData(binding.trigger.code) < 0:
+                    self.key_combo.addItem(key_name(binding.trigger.code), binding.trigger.code)
                 self.key_combo.setCurrentIndex(self.key_combo.findData(binding.trigger.code))
             for key, _label, bit in MODIFIER_BITS:
                 self.modifier_boxes[key].setChecked(bool(binding.trigger.modifiers & bit))
@@ -475,6 +495,7 @@ class BindingsPage(QWidget):
                 self.argument_combo.setCurrentIndex(index)
         finally:
             self._updating = False
+        self._retained_trigger = binding.trigger
         self._refresh()
 
     def apply_captured_trigger(self, trigger: Trigger) -> None:
@@ -484,15 +505,20 @@ class BindingsPage(QWidget):
         self._updating = True
         try:
             self.select_trigger_kind(TriggerKind(trigger.kind))
+            if trigger.kind == TriggerKind.CONSUMER_USAGE:
+                self.consumer_usage.setValue(trigger.code)
             if trigger.kind == TriggerKind.MOUSE_BUTTON:
                 self._rebuild_mouse_buttons()
                 self.mouse_combo.setCurrentIndex(self.mouse_combo.findData(trigger.code))
             else:
+                if self.key_combo.findData(trigger.code) < 0:
+                    self.key_combo.addItem(key_name(trigger.code), trigger.code)
                 self.key_combo.setCurrentIndex(self.key_combo.findData(trigger.code))
                 for key, _label, bit in MODIFIER_BITS:
                     self.modifier_boxes[key].setChecked(bool(trigger.modifiers & bit))
         finally:
             self._updating = False
+        self._retained_trigger = trigger
         self._refresh()
         if trigger.kind == TriggerKind.MOUSE_BUTTON:
             self.button_observed.emit(int(trigger.code))
@@ -555,10 +581,13 @@ class BindingsPage(QWidget):
         self._updating = True
         try:
             keyboard = self.trigger_kind.currentData() is TriggerKind.KEYBOARD_USAGE
+            consumer = self.trigger_kind.currentData() is TriggerKind.CONSUMER_USAGE
+            self.consumer_usage.setVisible(consumer)
+            self.consumer_label.setVisible(consumer)
             self.key_combo.setVisible(keyboard)
             self.key_label.setVisible(keyboard)
-            self.mouse_combo.setVisible(not keyboard)
-            self.mouse_label.setVisible(not keyboard)
+            self.mouse_combo.setVisible(not keyboard and not consumer)
+            self.mouse_label.setVisible(not keyboard and not consumer)
             for box in self.modifier_boxes.values():
                 box.setEnabled(keyboard)
             if not keyboard:
@@ -601,6 +630,11 @@ class BindingsPage(QWidget):
     # ----------------------------------------------------------------- slots
 
     def _on_trigger_kind_changed(self, _index: int) -> None:
+        self._on_trigger_edited()
+
+    def _on_trigger_edited(self, *_args: object) -> None:
+        if not self._updating:
+            self._retained_trigger = None
         self._refresh()
 
     def _on_action_kind_changed(self, _index: int) -> None:
@@ -614,6 +648,7 @@ class BindingsPage(QWidget):
         if binding is not None:
             self.load_binding(binding)
         else:
+            self._retained_trigger = None
             self._refresh()
 
     def _on_add_clicked(self) -> None:

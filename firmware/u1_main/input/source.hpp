@@ -20,6 +20,7 @@
 #include <type_traits>
 
 #include "input/hid/report_descriptor.hpp"
+#include "input/source_inventory.hpp"
 
 namespace duo_input::u1::input {
 
@@ -29,6 +30,7 @@ enum class DeviceKind : std::uint8_t {
     Unknown,
     Keyboard,
     Mouse,
+    Consumer,
 };
 
 /// The most a source event's report can carry.
@@ -38,6 +40,8 @@ enum class DeviceKind : std::uint8_t {
 /// backend that produced more would be a device this firmware cannot read,
 /// not a reason to widen the boundary.
 inline constexpr std::size_t kMaxSourceReportBytes = 64;
+/// A Fault with this source ID invalidates the whole host, including every interface.
+inline constexpr std::uint8_t kWholeHostSource = 0xFF;
 
 enum class SourceEventKind : std::uint8_t {
     /// The source has been identified and configured; its reports are coming.
@@ -87,6 +91,8 @@ struct SourceEvent {
 /// give it up), and the descriptor's hash - the one thing that tells two
 /// devices sharing a VID and PID apart.
 struct SourceIdentity {
+    std::uint8_t device_address = 0;
+    char product_name[kProductNameBytes] = {};
     DeviceKind kind = DeviceKind::Unknown;
     std::uint16_t vendor_id = 0;
     std::uint16_t product_id = 0;

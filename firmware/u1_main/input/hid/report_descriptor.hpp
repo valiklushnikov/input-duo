@@ -74,6 +74,10 @@ MouseReportLayout boot_mouse_layout();
 enum class KeyboardFieldKind : std::uint8_t { None, Array, Bitmap };
 inline constexpr std::uint16_t kNoKeyboardBit = 0xFFFF;
 struct KeyboardReportLayout {
+    bool consumer = false;
+    /// Explicit bitmap usages; zero count means the contiguous range below.
+    std::uint8_t explicit_usage_count = 0;
+    std::uint16_t explicit_usages[16] = {};
     bool report_id = false;
     std::uint8_t report_id_value = 0;
     std::uint16_t modifier_bits[8] = {
@@ -125,6 +129,8 @@ ReportDescriptorError parse_mouse_report_descriptor(protocol::ByteView descripto
 ///
 /// A failure never changes ``out``.
 ReportDescriptorError parse_keyboard_report_descriptor(protocol::ByteView descriptor,
+                                                       KeyboardReportLayout& out);
+ReportDescriptorError parse_consumer_report_descriptor(protocol::ByteView descriptor,
                                                        KeyboardReportLayout& out);
 
 /// Try both bounded parsers and retain a layout only when exactly one role is

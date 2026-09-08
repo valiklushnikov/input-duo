@@ -100,6 +100,41 @@ def test_atomic_round_trip_preserves_unicode(tmp_path: Path, project: DeviceProj
     assert not path.with_suffix(path.suffix + ".tmp").exists()
 
 
+def test_source_distinct_bindings_survive_project_export_import(tmp_path, project):
+    original = project.profiles[0].bindings[0]
+    sources = (None, TriggerSource(0x1234, 0x5678, 0), TriggerSource(0x1234, 0x5678, 2))
+    bindings = tuple(replace(original, uuid=UUID(int=100 + i), trigger=replace(original.trigger, source=source))
+                     for i, source in enumerate(sources))
+    project = replace(project, profiles=(replace(project.profiles[0], bindings=bindings),) + project.profiles[1:])
+    path = tmp_path / "sources.duoinput.json"
+    save_project_atomic(project, path)
+    assert load_project(path) == project
+    records = json.loads(path.read_text("utf-8"))["profiles"][0]["bindings"]
+    assert records[1]["trigger"]["source"] == {"vendor_id": 0x1234, "product_id": 0x5678, "interface_number": 0}
+
+
+@pytest.mark.parametrize("source", [[], {}, {"vendor_id": True, "product_id": 2, "interface_number": 0},
+                                    {"vendor_id": 1, "product_id": 0, "interface_number": 0},
+                                    {"vendor_id": 1, "product_id": 2, "interface_number": 256}])
+def test_project_import_rejects_malformed_source(tmp_path, project, source):
+    path = tmp_path / "invalid-source.duoinput.json"
+    save_project_atomic(project, path)
+    document = json.loads(path.read_text("utf-8"))
+    document["profiles"][0]["bindings"][0]["trigger"]["source"] = source
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(ProjectError):
+        load_project(path)
+
+
+def test_consumer_project_export_import_preserves_wide_usage(tmp_path, project):
+    from duo_input.generated.protocol import TriggerKind
+    binding = replace(project.profiles[0].bindings[0], trigger=Trigger(TriggerKind(3), 0x1B1, 0, TriggerSource(0x1234, 0x5678, 2)))
+    project = replace(project, profiles=(replace(project.profiles[0], bindings=(binding,)),) + project.profiles[1:])
+    path = tmp_path / "consumer.duoinput.json"
+    save_project_atomic(project, path)
+    assert load_project(path) == project
+
+
 def test_committed_minimal_vector_loads_as_a_valid_project(project: DeviceProject):
     assert load_project(VECTOR) == project
     assert validate_project(load_project(VECTOR)) == ()

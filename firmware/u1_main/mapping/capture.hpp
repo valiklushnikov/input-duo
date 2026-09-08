@@ -33,7 +33,7 @@ inline constexpr std::uint32_t kCaptureTimeoutMs = 10000;
 struct CapturedTrigger {
     config::TriggerKind kind = config::TriggerKind::KEYBOARD_USAGE;
     /// A HID usage, or a mouse button counting from one.
-    std::uint8_t code = 0;
+    std::uint16_t code = 0;
     /// Modifiers held at the moment of the press. Always zero for a mouse
     /// button: the host refuses a mouse trigger that carries any, and a
     /// refused payload is a capture the operator has to repeat for nothing.
@@ -57,7 +57,7 @@ enum class CaptureDisposition : std::uint8_t {
 ///
 /// Six keys, eight modifiers and five buttons is what a person can physically
 /// hold; the capture ends long before anyone gets near it.
-inline constexpr std::size_t kMaxSwallowed = 20;
+inline constexpr std::size_t kMaxSwallowed = 20 * input::SourceTable::kMaxSources;
 
 class CaptureController {
 public:
@@ -85,6 +85,7 @@ private:
     bool remember(const input::InputEvent& event);
     /// Was this input swallowed on the way down? Forgets it if so.
     bool forget(const input::InputEvent& event);
+    std::uint8_t source_modifiers(std::uint8_t source_index) const;
     /// Resolve the event's source through the table and stamp trigger_ with
     /// it. Leaves the fields zero when there is no table or the table cannot
     /// resolve the index - the same "unknown" the host already reads a

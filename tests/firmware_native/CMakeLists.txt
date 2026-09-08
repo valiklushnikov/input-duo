@@ -159,6 +159,9 @@ add_executable(duo_config_service_test
     test_config_service.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/config_service.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/mapping/capture.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_reference/source_adapter.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/hid_setup.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/device_registry.cpp
 )
 
 target_link_libraries(duo_config_service_test PRIVATE duo_common)
@@ -477,6 +480,7 @@ endif()
 add_test(NAME input_pipeline COMMAND duo_input_pipeline_test)
 
 add_executable(duo_source_table_test
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/pio_usb/hid_setup.cpp
     test_main.cpp
     test_source_table.cpp
     ${CMAKE_SOURCE_DIR}/firmware/u1_main/input/source_table.cpp

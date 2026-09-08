@@ -1,4 +1,5 @@
 #include "input/source_table.hpp"
+#include <cstring>
 
 namespace duo_input::u1::input {
 
@@ -10,6 +11,15 @@ SourceTable::SourceTable(IInputHandler& handler) : handler_(handler) {
 
 void SourceTable::on_event(const SourceEvent& event, const SourceIdentity& identity,
                            std::uint32_t now_ms) {
+    if (event.kind == SourceEventKind::Fault && event.source_id == kWholeHostSource) {
+        for (auto& source : slots_) {
+            if (!source.occupied) continue;
+            source.pipeline.on_detached(now_ms);
+            source.occupied = false;
+        }
+        ++revision_;
+        return;
+    }
     Slot* slot = find(event.source_id);
 
     if (event.kind == SourceEventKind::Ready) {
@@ -23,12 +33,14 @@ void SourceTable::on_event(const SourceEvent& event, const SourceIdentity& ident
         }
         if (slot == nullptr) {
             ++unclaimed_interfaces_;
+            ++revision_;
             return;
         }
 
         slot->occupied = true;
         slot->source_id = event.source_id;
         slot->identity = identity;
+        ++revision_;
         slot->pipeline.set_kind(identity.kind, identity.keyboard_layout, identity.mouse_layout);
         return;
     }
@@ -47,6 +59,7 @@ void SourceTable::on_event(const SourceEvent& event, const SourceIdentity& ident
         case SourceEventKind::Fault:
             slot->pipeline.on_detached(now_ms);
             slot->occupied = false;
+            ++revision_;
             return;
 
         case SourceEventKind::Ready:
@@ -63,6 +76,30 @@ bool SourceTable::resolve(std::uint8_t index, SourceIdentity& out) const {
 }
 
 std::uint32_t SourceTable::unclaimed_interfaces() const { return unclaimed_interfaces_; }
+
+void SourceTable::inventory(SourceInventory& out, std::uint32_t backend_rejections) const {
+    out = {};
+    out.rejected_interfaces = unclaimed_interfaces_ + backend_rejections;
+    for (const auto& slot : slots_) {
+        if (!slot.occupied) continue;
+        auto& info = out.sources[out.count++];
+        info.vendor_id = slot.identity.vendor_id; info.product_id = slot.identity.product_id;
+        info.interface_number = slot.identity.interface_number;
+        info.device_address = slot.identity.device_address;
+        info.kind = static_cast<std::uint8_t>(slot.identity.kind);
+        std::memcpy(info.product_name, slot.identity.product_name, sizeof(info.product_name));
+        info.product_name[sizeof(info.product_name) - 1] = 0;
+    }
+}
+
+void SourceTable::set_product_name(std::uint8_t address, const char* name) {
+    for (auto& slot : slots_) {
+        if (!slot.occupied || slot.identity.device_address != address) continue;
+        std::strncpy(slot.identity.product_name, name, kProductNameBytes - 1);
+        slot.identity.product_name[kProductNameBytes - 1] = 0;
+        ++revision_;
+    }
+}
 
 SourceTable::Slot* SourceTable::find(std::uint8_t source_id) {
     for (Slot& slot : slots_) {

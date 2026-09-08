@@ -37,6 +37,12 @@ HidLayoutSource classify_hid_layout(std::uint8_t protocol,
             out.mouse_layout = mouse;
             return HidLayoutSource::ReportDescriptor;
         }
+        if (input::hid::parse_consumer_report_descriptor({descriptor, length}, keyboard) ==
+            input::hid::ReportDescriptorError::None) {
+            out.kind = input::DeviceKind::Consumer;
+            out.keyboard_layout = keyboard;
+            return HidLayoutSource::ReportDescriptor;
+        }
     }
 
     if (protocol == kProtocolKeyboard) {

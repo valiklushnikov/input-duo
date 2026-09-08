@@ -46,6 +46,19 @@ def minimal_config() -> DeviceConfig:
     return DeviceConfig(active_profile_id=1, profiles=tuple(empty_profile(i) for i in range(1, 9)))
 
 
+@pytest.mark.parametrize("usage", [0xE9, 0x100, 0x1B1, 0xFFFF])
+def test_consumer_trigger_round_trip_keeps_u16_usage_and_source(usage):
+    config = minimal_config()
+    trigger = Trigger(3, usage, 0, TriggerSource(0x1234, 0x5678, 2))
+    binding = Binding(trigger, BindingMode.REPLACE, Action(ActionKind.TOGGLE_MOUSE_ROUTE))
+    config = replace(config, profiles=(replace(config.profiles[0], bindings=(binding,)),) + config.profiles[1:])
+    encoded = compile_device_config(config)
+    assert decode_device_config(encoded).profiles[0].bindings[0].trigger == trigger
+    offset = int.from_bytes(encoded[80:84], "little")
+    assert encoded[offset:offset + 3] == bytes((3, usage & 255, usage >> 8))
+    assert encoded[offset + 6:offset + 12] == bytes.fromhex("34 12 78 56 02 00")
+
+
 def full_config() -> DeviceConfig:
     all_steps = (
         MacroStep(MacroStepType.KEY_TAP, b"\x02\x04"),

@@ -23,6 +23,7 @@ void InputPipeline::on_report(protocol::ByteView report, std::uint32_t now_ms) {
 
     switch (kind_) {
         case DeviceKind::Keyboard:
+        case DeviceKind::Consumer:
             emit(events, keyboard_.apply(report, events, kMaxEventsPerReport), now_ms);
             return;
         case DeviceKind::Mouse:
@@ -46,6 +47,7 @@ void InputPipeline::on_detached(std::uint32_t now_ms) {
     // that has no way to find out, and it types until somebody reboots it.
     switch (kind_) {
         case DeviceKind::Keyboard:
+        case DeviceKind::Consumer:
             count = keyboard_.release_all(events, kMaxEventsPerReport);
             break;
         case DeviceKind::Mouse:

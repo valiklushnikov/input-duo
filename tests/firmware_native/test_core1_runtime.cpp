@@ -449,6 +449,22 @@ TEST_CASE(a_captured_mouse_button_carries_no_modifiers) {
     CHECK_EQ(static_cast<int>(trigger.modifiers), 0);
 }
 
+TEST_CASE(pending_capture_cannot_be_overwritten_by_rearm_and_cancel) {
+    RecordingSink sink; TwoProfiles profiles; Core1Runtime runtime(sink, profiles);
+    runtime.request_capture_begin(); runtime.tick(100);
+    runtime.handle_input(key(InputEventKind::KeyDown, 0x04), 101);
+    runtime.request_capture_begin(); runtime.tick(102);
+    runtime.handle_input(key(InputEventKind::KeyDown, 0x05), 103);
+    CapturedTrigger trigger;
+    CHECK(runtime.take_capture_event(trigger)); CHECK(trigger.code == 0x04);
+    CHECK(!runtime.take_capture_event(trigger));
+    runtime.tick(104);
+    runtime.handle_input(key(InputEventKind::KeyDown, 0x06), 105);
+    runtime.request_capture_cancel(); runtime.tick(106);
+    CHECK(runtime.take_capture_event(trigger)); CHECK(trigger.code == 0x06);
+    CHECK(!runtime.take_capture_event(trigger)); CHECK(!runtime.capture_active());
+}
+
 TEST_CASE(a_capture_nobody_answers_gives_up_after_ten_seconds) {
     RecordingSink sink;
     TwoProfiles profiles;
@@ -808,11 +824,14 @@ TEST_CASE(matching_macro_and_route_bindings_use_the_route_at_the_macros_position
         TwoProfiles profiles;
         const Binding macro = run_macro_on(0x3D, 3);
         Binding move = macro;
+        move.source = {0x1234, 0x5678, 0};
         move.action = ActionKind::SET_KEYBOARD_ROUTE;
         move.parameter = static_cast<std::uint8_t>(KeyboardRoute::PC2);
         profiles.profile_zero = scenario.route_first ? std::vector<Binding>{move, macro}
                                                      : std::vector<Binding>{macro, move};
         Core1Runtime runtime(sink, profiles);
+        SourceFixture sources; sources.attach(0x1234, 0x5678, 0);
+        runtime.engine().set_sources(sources.sources);
         MacroStep steps[] = {tap_step(0x05)};
         runtime.define_macro(3, MacroDefinition{steps, 1});
         runtime.handle_input(key(InputEventKind::KeyDown, 0x06), 999);

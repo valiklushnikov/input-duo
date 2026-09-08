@@ -46,6 +46,10 @@ void CaptureController::tick(std::uint32_t now_ms) {
 }
 
 bool CaptureController::remember(const InputEvent& event) {
+    for (std::size_t i = 0; i < swallowed_count_; ++i) {
+        if (swallowed_[i].kind == event.kind && swallowed_[i].code == event.code &&
+            swallowed_[i].source_index == event.source_index) return true;
+    }
     if (swallowed_count_ >= kMaxSwallowed) {
         return false;
     }
@@ -59,13 +63,26 @@ bool CaptureController::forget(const InputEvent& event) {
                               event.kind == InputEventKind::KeyUp;
         const bool same_button = swallowed_[index].kind == InputEventKind::MouseButtonDown &&
                                  event.kind == InputEventKind::MouseButtonUp;
-        if ((same_key || same_button) && swallowed_[index].code == event.code) {
+        const bool same_consumer = swallowed_[index].kind == InputEventKind::ConsumerDown &&
+                                   event.kind == InputEventKind::ConsumerUp;
+        if ((same_key || same_button || same_consumer) && swallowed_[index].code == event.code &&
+            swallowed_[index].source_index == event.source_index) {
             swallowed_[index] = swallowed_[swallowed_count_ - 1];
             --swallowed_count_;
             return true;
         }
     }
     return false;
+}
+
+std::uint8_t CaptureController::source_modifiers(std::uint8_t source_index) const {
+    std::uint8_t modifiers = 0;
+    for (std::size_t i = 0; i < swallowed_count_; ++i) {
+        const auto& event = swallowed_[i];
+        if (event.source_index == source_index && event.kind == InputEventKind::KeyDown && is_modifier(event.code))
+            modifiers = static_cast<std::uint8_t>(modifiers | modifier_bit(event.code));
+    }
+    return modifiers;
 }
 
 void CaptureController::fill_source(const InputEvent& event) {
@@ -94,7 +111,7 @@ CaptureDisposition CaptureController::handle(const InputEvent& event) {
     // A release of something swallowed on the way down is swallowed whether or
     // not a capture is still running - the press happened during one, and the
     // far side was never told about it.
-    if (event.kind == InputEventKind::KeyUp || event.kind == InputEventKind::MouseButtonUp) {
+    if (event.kind == InputEventKind::KeyUp || event.kind == InputEventKind::MouseButtonUp || event.kind == InputEventKind::ConsumerUp) {
         if (forget(event)) {
             if (event.kind == InputEventKind::KeyUp && is_modifier(event.code)) {
                 modifiers_ = static_cast<std::uint8_t>(modifiers_ & ~modifier_bit(event.code));
@@ -117,7 +134,7 @@ CaptureDisposition CaptureController::handle(const InputEvent& event) {
             }
             trigger_.kind = config::TriggerKind::KEYBOARD_USAGE;
             trigger_.code = static_cast<std::uint8_t>(event.code);
-            trigger_.modifiers = modifiers_;
+            trigger_.modifiers = source_modifiers(event.source_index);
             fill_source(event);
             have_trigger_ = true;
             remember(event);
@@ -138,10 +155,16 @@ CaptureDisposition CaptureController::handle(const InputEvent& event) {
             return CaptureDisposition::Swallow;
 
         case InputEventKind::ConsumerDown:
-        case InputEventKind::ConsumerUp:
-            // Not a trigger the configuration can express, and not something
-            // to send to a computer that is waiting to be told about a key.
+            trigger_.kind = config::TriggerKind::CONSUMER_USAGE;
+            trigger_.code = event.code;
+            trigger_.modifiers = 0;
+            fill_source(event);
+            have_trigger_ = true;
+            remember(event);
+            active_ = false;
             return CaptureDisposition::Swallow;
+        case InputEventKind::ConsumerUp:
+            return CaptureDisposition::Pass;
 
         default:
             // Motion, wheel, connections. The operator has to be able to see

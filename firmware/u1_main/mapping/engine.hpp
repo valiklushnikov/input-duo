@@ -64,7 +64,7 @@ struct Outcome {
 ///
 /// Six keys is what a boot keyboard reports, plus eight modifiers and five
 /// mouse buttons.
-inline constexpr std::size_t kMaxHeld = 20;
+inline constexpr std::size_t kMaxHeld = 20 * input::SourceTable::kMaxSources;
 
 class BindingEngine {
 public:
@@ -95,6 +95,7 @@ private:
     struct Held {
         input::InputEventKind kind = input::InputEventKind::None;
         std::uint16_t code = 0;
+        std::uint8_t source_index = 0;
         /// True once the route moved underneath it. The input stays down
         /// physically, and is ignored until it is let go.
         bool orphaned = false;
@@ -108,7 +109,9 @@ private:
     bool apply_binding(Outcome& outcome, const Binding& binding);
     bool remember(const input::InputEvent& event, bool suppressed);
     bool forget(const input::InputEvent& event);
-    Held* find_held(input::InputEventKind kind, std::uint16_t code);
+    Held* find_held(input::InputEventKind kind, std::uint16_t code, std::uint8_t source_index);
+    bool forwarded(input::InputEventKind kind, std::uint16_t code) const;
+    std::uint8_t held_modifiers() const;
     /// Mark held inputs as belonging to where they were pressed. A keyboard
     /// route change does not orphan mouse buttons, or the other way round.
     void orphan(bool keys, bool buttons);

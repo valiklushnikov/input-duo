@@ -225,8 +225,9 @@ bool validate_binding(protocol::ByteView bytes, std::size_t offset, std::size_t 
     const std::uint8_t interface_number = bytes.data[offset + 10U];
     const bool any_source = vendor_id == 0U && product_id == 0U && interface_number == 0U;
     if ((kind != static_cast<std::uint8_t>(TriggerKind::KEYBOARD_USAGE) &&
-         kind != static_cast<std::uint8_t>(TriggerKind::MOUSE_BUTTON)) ||
-        code == 0U ||
+         kind != static_cast<std::uint8_t>(TriggerKind::MOUSE_BUTTON) &&
+         kind != static_cast<std::uint8_t>(TriggerKind::CONSUMER_USAGE)) ||
+        (code == 0U && (kind != static_cast<std::uint8_t>(TriggerKind::CONSUMER_USAGE) || modifiers == 0U)) ||
         (kind == static_cast<std::uint8_t>(TriggerKind::MOUSE_BUTTON) &&
          (code > 5U || modifiers != 0U)) ||
         (mode != static_cast<std::uint8_t>(BindingMode::REPLACE) &&
@@ -445,8 +446,12 @@ bool ProfileView::macro_at(std::size_t index, MacroView& output) const {
 }
 
 TriggerKind BindingView::trigger_kind() const { return static_cast<TriggerKind>(bytes_.data[offset_]); }
-std::uint8_t BindingView::trigger_code() const { return bytes_.data[offset_ + 1U]; }
-std::uint8_t BindingView::trigger_modifiers() const { return bytes_.data[offset_ + 2U]; }
+std::uint16_t BindingView::trigger_code() const {
+    return trigger_kind() == TriggerKind::CONSUMER_USAGE ? read_u16(bytes_, offset_ + 1U) : bytes_.data[offset_ + 1U];
+}
+std::uint8_t BindingView::trigger_modifiers() const {
+    return trigger_kind() == TriggerKind::CONSUMER_USAGE ? 0 : bytes_.data[offset_ + 2U];
+}
 TriggerSource BindingView::source() const {
     return {read_u16(bytes_, offset_ + 6U), read_u16(bytes_, offset_ + 8U),
             bytes_.data[offset_ + 10U]};

@@ -46,6 +46,7 @@
 #include "pio_usb/host_observation_mapping.hpp"
 #endif
 #include "input/source_table.hpp"
+#include "input/product_names.hpp"
 #include "output_runtime.hpp"
 #include "pico_flash.hpp"
 #include "spi_master.hpp"
@@ -200,6 +201,13 @@ public:
 
 RuntimeInput g_input;
 duo_input::u1::input::SourceTable g_sources(g_input);
+duo_input::runtime::SpscQueue<duo_input::u1::input::SourceInventory, 2> g_source_inventory;
+#ifndef DUO_INPUT_BACKEND_CH375
+duo_input::u1::input::ProductNames g_product_names;
+void product_name_complete(tuh_xfer_t* transfer) {
+    g_product_names.complete(transfer->result == XFER_RESULT_SUCCESS, transfer->actual_len);
+}
+#endif
 
 #ifdef DUO_INPUT_BACKEND_CH375
 // Reads CH375's own events and setup across the neutral source boundary. The
@@ -554,6 +562,22 @@ void core1_entry() {
 #endif  // DUO_INPUT_BACKEND_CH375
 
         g_runtime.tick(now_ms);
+
+#ifndef DUO_INPUT_BACKEND_CH375
+        g_product_names.poll(g_sources, [](std::uint8_t address, std::uint8_t* buffer, std::size_t size) {
+            return tuh_descriptor_get_product_string(address, 0x0409, buffer, static_cast<std::uint16_t>(size), product_name_complete, 0);
+        });
+#endif
+
+        if (g_source_inventory.empty()) {
+            static duo_input::u1::input::SourceInventory snapshot;
+#if DUO_INPUT_BACKEND_CH375
+            g_sources.inventory(snapshot);
+#else
+            g_sources.inventory(snapshot, g_pio_usb_backend.registry().interface_overflow_count());
+#endif
+            g_source_inventory.push(snapshot);
+        }
 
         // A swap happened - a binding, a macro, or the host asked for one. The
         // bindings moved with it and the macros have to follow.
@@ -1293,6 +1317,8 @@ int main() {
         // being applied here - and not a keystroke's journey to a far screen,
         // which this board has no way to observe either end of.
         config.set_input_latency(g_outputs.keyboard_latency(), g_outputs.mouse_latency());
+        static duo_input::u1::input::SourceInventory source_snapshot;
+        if (g_source_inventory.pop(source_snapshot)) config.set_input_sources(source_snapshot);
 
         // What is on the two peripheral ports, published every pass. A device
         // plugged into U1 is on U1's bus and not on either computer's, so this

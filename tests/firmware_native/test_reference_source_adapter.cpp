@@ -180,6 +180,17 @@ struct Taken {
     SourceIdentity identity{};
 };
 
+TEST_CASE(reference_capacity_refusal_counts_the_rejecting_boundary) {
+    ReferenceSourceAdapter adapter;
+    for (std::uint8_t i = 0; i < 9; ++i) {
+        adapter.consume(mount(1, i, kProtocolMouse, 0x1234, 0x5678, {}), 0);
+        SourceEvent event{}; SourceIdentity identity{};
+        const bool accepted = adapter.take_event(event, identity);
+        CHECK_EQ(accepted, i < 8);
+    }
+    CHECK_EQ(adapter.rejected_interfaces(), 1u);
+}
+
 Taken take(ReferenceSourceAdapter& adapter) {
     Taken taken;
     taken.ok = adapter.take_event(taken.event, taken.identity);

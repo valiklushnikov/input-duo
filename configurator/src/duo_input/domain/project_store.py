@@ -15,6 +15,7 @@ from duo_input.domain.models import (
     MacroStep,
     Profile,
     Trigger,
+    TriggerSource,
 )
 from duo_input.domain.validation import ValidationIssue, validate_project
 from duo_input.generated.protocol import (
@@ -154,6 +155,11 @@ def _binding_to_json(binding: Binding) -> dict[str, Any]:
             "code": binding.trigger.code,
             "kind": _enum_name(binding.trigger.kind),
             "modifiers": binding.trigger.modifiers,
+            "source": None if binding.trigger.source is None else {
+                "vendor_id": binding.trigger.source.vendor_id,
+                "product_id": binding.trigger.source.product_id,
+                "interface_number": binding.trigger.source.interface_number,
+            },
         },
         "uuid": str(binding.uuid),
     }
@@ -220,6 +226,7 @@ def _binding_from_json(value: object) -> Binding:
             _enum_from_name(TriggerKind, _required(trigger, "kind", str)),
             _required(trigger, "code", int),
             _required(trigger, "modifiers", int),
+            _source_from_json(trigger.get("source")),
         ),
         mode=_enum_from_name(BindingMode, _required(data, "mode", str)),
         action=Action(
@@ -228,6 +235,18 @@ def _binding_from_json(value: object) -> Binding:
         ),
         uuid=UUID(_required(data, "uuid", str)),
     )
+
+
+def _source_from_json(value: object) -> TriggerSource | None:
+    if value is None:
+        return None
+    data = _object(value, "trigger source")
+    source = TriggerSource(
+        _required(data, "vendor_id", int),
+        _required(data, "product_id", int),
+        _required(data, "interface_number", int),
+    )
+    return None if source == TriggerSource(0, 0, 0) else source
 
 
 def _macro_from_json(value: object) -> Macro:

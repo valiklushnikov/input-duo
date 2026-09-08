@@ -116,6 +116,7 @@ class TextLayout(IntEnum):
     US = 0x01
 
 class TriggerKind(IntEnum):
+    CONSUMER_USAGE = 0x03
     KEYBOARD_USAGE = 0x01
     MOUSE_BUTTON = 0x02
 

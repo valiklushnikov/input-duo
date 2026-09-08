@@ -513,10 +513,10 @@ KeyboardReportState* keyboard_report(KeyboardReportState* reports,
 
 bool keyboard_range(const KeyboardLocalState& locals,
                     std::uint16_t& minimum,
-                    std::uint16_t& maximum) {
+                    std::uint16_t& maximum, std::uint16_t page) {
     if (!locals.have_minimum || !locals.have_maximum ||
-        locals.minimum.page != kPageKeyboard ||
-        locals.maximum.page != kPageKeyboard) {
+        locals.minimum.page != page ||
+        locals.maximum.page != page) {
         return false;
     }
     minimum = locals.minimum.value;
@@ -602,8 +602,8 @@ KeyboardReportLayout boot_keyboard_layout() {
     return layout;
 }
 
-ReportDescriptorError parse_keyboard_report_descriptor(protocol::ByteView descriptor,
-                                                       KeyboardReportLayout& out) {
+static ReportDescriptorError parse_usage_report_descriptor(protocol::ByteView descriptor,
+                                                       KeyboardReportLayout& out, std::uint16_t page) {
     if (descriptor.data == nullptr || descriptor.size == 0) {
         return ReportDescriptorError::Truncated;
     }
@@ -732,14 +732,14 @@ ReportDescriptorError parse_keyboard_report_descriptor(protocol::ByteView descri
 
             const bool constant = (data & kInputConstant) != 0;
             const bool variable = (data & kInputVariable) != 0;
-            if (!constant) {
+            if (!constant && !(page == kPageConsumer && (data & 4U) != 0)) {
                 std::uint16_t usage_minimum = 0;
                 std::uint16_t usage_maximum = 0;
                 const bool have_keyboard_range =
-                    keyboard_range(locals, usage_minimum, usage_maximum);
+                    keyboard_range(locals, usage_minimum, usage_maximum, page);
 
                 if (variable) {
-                    if (!record_keyboard_modifiers(*report,
+                    if (page == kPageKeyboard && !record_keyboard_modifiers(*report,
                                                    locals,
                                                    globals.report_size,
                                                    globals.report_count,
@@ -747,7 +747,7 @@ ReportDescriptorError parse_keyboard_report_descriptor(protocol::ByteView descri
                         return ReportDescriptorError::UnsupportedLayout;
                     }
                     const bool modifier_range =
-                        have_keyboard_range &&
+                        page == kPageKeyboard && have_keyboard_range &&
                         usage_minimum >= kModifierMinimum &&
                         usage_maximum <= kModifierMaximum;
                     if (have_keyboard_range && !modifier_range) {
@@ -765,8 +765,20 @@ ReportDescriptorError parse_keyboard_report_descriptor(protocol::ByteView descri
                             return ReportDescriptorError::UnsupportedLayout;
                         }
                     }
+                    if (page == kPageConsumer && !have_keyboard_range && locals.usage_count != 0 &&
+                        locals.usages[0].page == page) {
+                        if (globals.report_size != 1 || globals.report_count != locals.usage_count ||
+                            !record_keyboard_keys(*report, KeyboardFieldKind::Bitmap, report->input_bits,
+                                                  1, globals.report_count, 0, 0))
+                            return ReportDescriptorError::UnsupportedLayout;
+                        report->layout.explicit_usage_count = static_cast<std::uint8_t>(locals.usage_count);
+                        for (std::size_t i = 0; i < locals.usage_count; ++i) {
+                            if (locals.usages[i].page != page) return ReportDescriptorError::UnsupportedLayout;
+                            report->layout.explicit_usages[i] = locals.usages[i].value;
+                        }
+                    }
                 } else {
-                    if (!have_keyboard_range && globals.usage_page == kPageKeyboard) {
+                    if (!have_keyboard_range && globals.usage_page == page) {
                         const std::int64_t maximum = logical_maximum(globals);
                         if (globals.logical_minimum < 0 || maximum > 0xFFFF) {
                             return ReportDescriptorError::UnsupportedLayout;
@@ -774,7 +786,7 @@ ReportDescriptorError parse_keyboard_report_descriptor(protocol::ByteView descri
                         usage_minimum = static_cast<std::uint16_t>(globals.logical_minimum);
                         usage_maximum = static_cast<std::uint16_t>(maximum);
                     }
-                    if (have_keyboard_range || globals.usage_page == kPageKeyboard) {
+                    if (have_keyboard_range || globals.usage_page == page) {
                         if (globals.report_size > 16 ||
                             !record_keyboard_keys(*report,
                                                   KeyboardFieldKind::Array,
@@ -813,11 +825,22 @@ ReportDescriptorError parse_keyboard_report_descriptor(protocol::ByteView descri
         return ReportDescriptorError::UnsupportedLayout;
     }
 
+    found->layout.consumer = page == kPageConsumer;
     found->layout.report_id = any_report_id;
     found->layout.minimum_body_bytes =
         static_cast<std::uint8_t>((found->required_bits + 7) / 8);
     out = found->layout;
     return ReportDescriptorError::None;
+}
+
+ReportDescriptorError parse_keyboard_report_descriptor(protocol::ByteView descriptor,
+                                                       KeyboardReportLayout& out) {
+    return parse_usage_report_descriptor(descriptor, out, kPageKeyboard);
+}
+
+ReportDescriptorError parse_consumer_report_descriptor(protocol::ByteView descriptor,
+                                                       KeyboardReportLayout& out) {
+    return parse_usage_report_descriptor(descriptor, out, kPageConsumer);
 }
 
 ReportDescriptorRole classify_report_descriptor(protocol::ByteView descriptor,

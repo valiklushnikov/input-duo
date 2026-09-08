@@ -234,6 +234,17 @@ class DeviceService(QObject):
     def begin_capture(self) -> None:
         if not self._begin_operation(_BEGIN_CAPTURE):
             return
+        if self._device_info is not None and self._device_info.capabilities & Capability.DIAGNOSTICS:
+            self._request(CdcMessageType.GET_DIAGNOSTICS, CdcMessageType.GET_DIAGNOSTICS, b"", self._capture_after_inventory)
+            return
+        self._request_capture_begin()
+
+    def _capture_after_inventory(self, payload: bytes) -> None:
+        self._diagnostics = parse_diagnostics(payload)
+        self.status_changed.emit(self._status)
+        self._request_capture_begin()
+
+    def _request_capture_begin(self) -> None:
         self._request(
             CdcMessageType.CAPTURE_BEGIN, CdcMessageType.CAPTURE_BEGIN, b"", self._on_acknowledged
         )

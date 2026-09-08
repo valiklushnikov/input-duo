@@ -20,6 +20,7 @@ from duo_input.domain.models import Trigger, TriggerSource
 # come to disagree about an error code without either of them changing.
 from duo_input.generated.protocol import (
     CdcMessageType,
+    CAPTURE_EVENT_PAYLOAD_BYTES,
     ErrorCode,
     InputBackend,
     TriggerKind,
@@ -47,6 +48,7 @@ _PERIPHERAL = struct.Struct("<BBBHHBH32s")
 _CHUNK_ACK = struct.Struct("<BI")
 _CAPTURE_EVENT_LEGACY = struct.Struct("<BBB")
 _CAPTURE_EVENT_FULL = struct.Struct("<BBBHHB")
+assert _CAPTURE_EVENT_FULL.size == CAPTURE_EVENT_PAYLOAD_BYTES
 
 
 class PayloadError(ValueError):
@@ -579,6 +581,36 @@ class DeviceDiagnostics:
     # the same reason it was appended after the backend block. ``None`` means
     # the firmware predates Task 5 - a valid older payload, not a parse error.
     reference_counters: ReferenceCounters | None = None
+    input_sources: tuple[InputSource, ...] | None = None
+    rejected_interfaces: int | None = None
+
+
+@dataclass(frozen=True)
+class InputSource:
+    vendor_id: int
+    product_id: int
+    interface_number: int
+    kind: str
+    device_address: int
+    product_name: str = ""
+
+
+def _parse_input_sources(block: bytes) -> tuple[tuple[InputSource, ...] | None, int | None]:
+    if not block:
+        return None, None
+    if len(block) < 8:
+        raise PayloadError("input source inventory is truncated")
+    version, size, count, rejected = struct.unpack_from("<BHBI", block)
+    if version != 1:
+        return None, None
+    record = struct.Struct("<HHBBB48s")
+    if count > 8 or size != 8 + count * record.size or len(block) < size:
+        raise PayloadError("input source inventory has the wrong size")
+    sources = []
+    for offset in range(8, size, record.size):
+        vid, pid, interface, kind, address, name = record.unpack_from(block, offset)
+        sources.append(InputSource(vid, pid, interface, {1: "keyboard", 2: "mouse", 3: "consumer"}.get(kind, "unknown"), address, name.split(b"\0", 1)[0].decode("utf-8", errors="replace")))
+    return tuple(sources), rejected
 
 
 @dataclass(frozen=True)
@@ -778,6 +810,8 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
     backend, after_backend = _parse_backend(appended)
     host_observation, after_host = _parse_host_observation(after_backend)
     reference_counters = _parse_reference_counters(after_host)
+    after_reference = after_host[1 + after_host[0]:] if after_host else b""
+    input_sources, rejected_interfaces = _parse_input_sources(after_reference)
 
     return DeviceDiagnostics(
         bad_crc,
@@ -800,6 +834,8 @@ def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
         backend=backend,
         host_observation=host_observation,
         reference_counters=reference_counters,
+        input_sources=input_sources,
+        rejected_interfaces=rejected_interfaces,
     )
 
 
@@ -1273,6 +1309,9 @@ def parse_capture_event(payload: bytes) -> Trigger:
         raise PayloadError("CAPTURE_EVENT carries an unknown trigger kind") from error
     if trigger_kind is TriggerKind.MOUSE_BUTTON and (not 1 <= code <= 5 or modifiers):
         raise PayloadError("CAPTURE_EVENT mouse button is out of range")
+    if trigger_kind is TriggerKind.CONSUMER_USAGE:
+        code |= modifiers << 8
+        modifiers = 0
     if not code:
         raise PayloadError("CAPTURE_EVENT carries no trigger code")
     return Trigger(trigger_kind, code, modifiers, source)

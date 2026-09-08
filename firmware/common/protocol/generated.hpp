@@ -118,6 +118,7 @@ enum class TextLayout : std::uint8_t {
 };
 
 enum class TriggerKind : std::uint8_t {
+    CONSUMER_USAGE = 0x03,
     KEYBOARD_USAGE = 0x01,
     MOUSE_BUTTON = 0x02,
 };

@@ -159,7 +159,7 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
             usage = static_cast<std::uint16_t>(
                 read_bits(body, first_bit + index * element_bits,
                           layout_.key_element_bits));
-            if (usage == kRollover) {
+            if (!layout_.consumer && usage == kRollover) {
                 // Not a usage anybody can press, so it never joins the set.
                 // How many there are is what decides the report: HID 1.11 8.3
                 // has a keyboard that has lost count put this in *every* array
@@ -171,7 +171,9 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
             if (read_bits(body, first_bit + index, 1) == 0) {
                 continue;
             }
-            usage = static_cast<std::uint16_t>(layout_.key_usage_minimum + index);
+            usage = layout_.explicit_usage_count != 0
+                        ? (index < layout_.explicit_usage_count ? layout_.explicit_usages[index] : 0)
+                        : static_cast<std::uint16_t>(layout_.key_usage_minimum + index);
         }
         if (usage == 0 || contains(now, now_count, usage)) {
             continue;
@@ -239,7 +241,7 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
     if (!rollover) {
         for (std::size_t index = 0; index < held_count_; ++index) {
             if (!contains(now, now_count, held_[index])) {
-                emit(out, capacity, used, InputEventKind::KeyUp, held_[index]);
+                emit(out, capacity, used, layout_.consumer ? InputEventKind::ConsumerUp : InputEventKind::KeyUp, held_[index]);
 #if DUO_CH375_PROBE
                 ++probe_key_ups_;
 #endif
@@ -247,7 +249,7 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
         }
         for (std::size_t index = 0; index < now_count; ++index) {
             if (!contains(held_, held_count_, now[index])) {
-                emit(out, capacity, used, InputEventKind::KeyDown, now[index]);
+                emit(out, capacity, used, layout_.consumer ? InputEventKind::ConsumerDown : InputEventKind::KeyDown, now[index]);
 #if DUO_CH375_PROBE
                 ++probe_key_downs_;
 #endif
@@ -293,7 +295,7 @@ std::size_t KeyboardNormalizer::release_all(InputEvent* out, std::size_t capacit
     std::size_t used = 0;
 
     for (std::size_t index = 0; index < held_count_; ++index) {
-        emit(out, capacity, used, InputEventKind::KeyUp, held_[index]);
+        emit(out, capacity, used, layout_.consumer ? InputEventKind::ConsumerUp : InputEventKind::KeyUp, held_[index]);
     }
     held_count_ = 0;
 

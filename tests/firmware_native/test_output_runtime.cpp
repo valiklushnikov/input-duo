@@ -56,6 +56,37 @@ void both_computers_told(OutputRuntime& runtime) {
 
 // -------------------------------------------------------------------- queue
 
+namespace {
+struct CopyInterleaving {
+    int first = 0;
+    int last = 0;
+    void (*during_copy)() = nullptr;
+    CopyInterleaving& operator=(const CopyInterleaving& other) {
+        first = other.first;
+        if (during_copy != nullptr) during_copy();
+        last = other.last;
+        return *this;
+    }
+};
+SpscQueue<CopyInterleaving, 2>* copying_queue = nullptr;
+void attempt_overwrite_during_copy() {
+    CopyInterleaving later; later.first = 33; later.last = 44;
+    CHECK_FALSE(copying_queue->push(later));
+}
+}
+
+TEST_CASE(spsc_producer_cannot_reuse_payload_until_consumer_finishes_copying) {
+    SpscQueue<CopyInterleaving, 2> queue;
+    copying_queue = &queue;
+    CopyInterleaving first; first.first = 11; first.last = 22;
+    CHECK(queue.push(first));
+    CopyInterleaving out; out.during_copy = attempt_overwrite_during_copy;
+    CHECK(queue.pop(out)); CHECK(out.first == 11); CHECK(out.last == 22);
+    out.during_copy = nullptr;
+    CHECK(queue.push(first)); CHECK(queue.pop(out)); CHECK(queue.empty());
+    copying_queue = nullptr;
+}
+
 TEST_CASE(a_fresh_queue_is_empty) {
     SpscQueue<int, 8> queue;
 

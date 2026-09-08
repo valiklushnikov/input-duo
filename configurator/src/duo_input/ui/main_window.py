@@ -580,7 +580,7 @@ class MainWindow(QMainWindow):
         diagnostics = self._service.diagnostics if connected else None
         capabilities = capabilities.with_peripherals(
             getattr(diagnostics, "peripherals", None)
-        )
+        ).with_sources(getattr(diagnostics, "input_sources", None))
         self.bindings.set_capabilities(capabilities)
         self.mouse.set_capabilities(capabilities)
         self.set_session(

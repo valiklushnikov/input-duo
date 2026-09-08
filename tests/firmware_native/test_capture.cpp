@@ -25,6 +25,44 @@ using duo_input::u1::mapping::CaptureController;
 using duo_input::u1::mapping::CaptureDisposition;
 using duo_input::u1::mapping::CapturedTrigger;
 
+TEST_CASE(capture_does_not_swallow_another_sources_equal_key_release) {
+    for (auto down : {InputEventKind::KeyDown, InputEventKind::MouseButtonDown}) {
+        CaptureController capture; capture.begin(0);
+        InputEvent event; event.kind = down; event.code = 4; event.source_index = 1;
+        CHECK(capture.handle(event) == CaptureDisposition::Swallow);
+        event.kind = down == InputEventKind::KeyDown ? InputEventKind::KeyUp : InputEventKind::MouseButtonUp;
+        event.source_index = 0;
+        CHECK(capture.handle(event) == CaptureDisposition::Pass);
+        event.source_index = 1;
+        CHECK(capture.handle(event) == CaptureDisposition::Swallow);
+    }
+}
+
+TEST_CASE(capture_modifiers_belong_to_the_captured_interface) {
+    CaptureController capture; capture.begin(0);
+    InputEvent event; event.kind = InputEventKind::KeyDown; event.code = 0xE0;
+    capture.handle(event);
+    event.source_index = 1; capture.handle(event);
+    event.kind = InputEventKind::KeyUp; event.source_index = 0; capture.handle(event);
+    event.kind = InputEventKind::KeyDown; event.code = 0x4F; event.source_index = 1;
+    capture.handle(event);
+    CapturedTrigger out; CHECK(capture.take(out)); CHECK(out.modifiers == 1);
+    capture.begin(10);
+    event.source_index = 2; event.code = 0x50; capture.handle(event);
+    CHECK(capture.take(out)); CHECK(out.modifiers == 0);
+}
+
+TEST_CASE(consumer_capture_keeps_a_wide_usage_and_suppresses_its_release) {
+    CaptureController capture; capture.begin(0);
+    InputEvent event; event.kind = InputEventKind::ConsumerDown; event.code = 0x1B1;
+    CHECK(capture.handle(event) == CaptureDisposition::Swallow);
+    CapturedTrigger out; CHECK(capture.take(out));
+    CHECK(static_cast<unsigned>(out.kind) == 3); CHECK(out.code == 0x1B1); CHECK(out.modifiers == 0);
+    event.kind = InputEventKind::ConsumerUp;
+    CHECK(capture.handle(event) == CaptureDisposition::Swallow);
+    CHECK(capture.handle(event) == CaptureDisposition::Pass);
+}
+
 namespace {
 
 InputEvent key(InputEventKind kind, std::uint16_t usage) {

@@ -26,6 +26,27 @@ from duo_input.protocol.cobs import cobs_encode
 from duo_input.protocol.frame import CdcFrame, encode_cdc_frame
 
 
+def test_inventory_tail_keeps_interfaces_names_and_rejections_and_old_reply():
+    from duo_input.device.transactions import parse_diagnostics
+    from duo_input.domain.models import Trigger
+    from duo_input.ui.models.binding_table import MouseCapabilities
+
+    legacy = bytearray(252)
+    legacy[43] = 9
+    assert parse_diagnostics(bytes(legacy)).input_sources is None
+    record = struct.pack("<HHBBB48s", 0x1234, 0x5678, 3, 2, 4, b"Receiver")
+    diagnostics = parse_diagnostics(bytes(legacy) + struct.pack("<BHBI", 1, 63, 1, 7) + record)
+    assert diagnostics.rejected_interfaces == 7
+    assert len(diagnostics.input_sources) == 1
+    source = diagnostics.input_sources[0]
+    assert (source.vendor_id, source.product_id, source.interface_number, source.product_name) == (0x1234, 0x5678, 3, "Receiver")
+    capabilities = MouseCapabilities(advertised=True).with_sources(diagnostics.input_sources)
+    assert capabilities.allows(Trigger(TriggerKind.KEYBOARD_USAGE, 4, source=TriggerSource(0x1234, 0x5678, 3)))
+    assert not capabilities.allows(Trigger(TriggerKind.KEYBOARD_USAGE, 4, source=TriggerSource(0x1234, 0x5678, 2)))
+    assert capabilities.is_mouse(TriggerSource(0x1234, 0x5678, 2))
+    assert capabilities.label(Trigger(TriggerKind.KEYBOARD_USAGE, 4, source=TriggerSource(0x1234, 0x5678, 3))) == "A - Receiver (interface 3)"
+
+
 def _wire(sequence: int, payload: bytes) -> bytes:
     return encode_cdc_frame(CdcFrame(CdcMessageType.PING, sequence, payload))
 

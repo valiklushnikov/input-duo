@@ -96,13 +96,20 @@ foreach ($language in @('ru', 'en')) {
 
 # --- the tests ---------------------------------------------------------------
 
+# Nuitka is invoked with the package's app.py as its entry point.  Install the
+# src-layout project before either testing or compiling so imports of
+# ``duo_input`` resolve to the package root (including __init__.py), and so
+# lazy production imports such as QtSerialPort are visible to Nuitka.  This is
+# a build prerequisite, not a test prerequisite: -SkipTests must skip only the
+# suite, not the package installation the compiler needs.
+& $BuildPython -m pip install --editable $ConfiguratorRoot --quiet
+if ($LASTEXITCODE -ne 0) { throw 'the configurator did not install' }
+
 if (-not $SkipTests) {
     Write-Step 'Running the test suite'
     Push-Location $RepositoryRoot
     try {
         $env:QT_QPA_PLATFORM = 'offscreen'
-        & $BuildPython -m pip install --editable $ConfiguratorRoot --quiet
-        if ($LASTEXITCODE -ne 0) { throw 'the configurator did not install' }
         & $BuildPython -m pytest configurator/tests -q
         if ($LASTEXITCODE -ne 0) { throw 'the test suite failed; nothing was built' }
     }

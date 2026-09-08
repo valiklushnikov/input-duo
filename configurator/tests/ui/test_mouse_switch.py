@@ -324,6 +324,43 @@ def test_a_key_the_attached_mouse_sends_is_captured_and_selected(qtbot):
     assert page.current_trigger() == expected
 
 
+@pytest.mark.parametrize("kind, code, modifiers", [(1, 0x68, 0xF1), (3, 0x1B1, 0)])
+def test_detect_apply_preserves_extended_key_and_all_modifiers_and_clears_provenance(qtbot, kind, code, modifiers):
+    service = DeviceService(timeout_ms=5000)
+    emulator = U1Emulator()
+    link = SynchronousTransportLink(emulator)
+    with qtbot.waitSignal(service.operation_succeeded):
+        service.connect_device(link)
+    page = MouseSwitchPage(service)
+    qtbot.addWidget(page)
+    page.set_capabilities(MouseCapabilities(advertised=True).with_peripherals((_attached_mouse(),)))
+    page.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+    with qtbot.waitSignal(service.operation_succeeded):
+        qtbot.mouseClick(page.capture_button, Qt.MouseButton.LeftButton)
+    assert emulator.queue_capture_event(_capture_payload(kind, code & 0xFF, code >> 8 if kind == 3 else modifiers, CAPTURED_SOURCE))
+    with qtbot.waitSignal(service.capture_received):
+        link.poll()
+    if kind == 3:
+        assert page.consumer_usage.value() == code
+    else:
+        assert page.key_combo.currentData() == code
+    page.select_action(ActionKind.SET_MOUSE_ROUTE, MouseRoute.PC2)
+    with qtbot.waitSignal(page.command_requested) as changed:
+        qtbot.mouseClick(page.apply_button, Qt.MouseButton.LeftButton)
+    assert changed.args[0].binding.trigger == Trigger(TriggerKind(kind), code, modifiers, CAPTURED_SOURCE)
+    if kind == 3:
+        page.consumer_usage.setValue(0xE9)
+        page.consumer_usage.setValue(code)
+        assert page.current_trigger().source is None
+        return
+    page.key_combo.setCurrentIndex(page.key_combo.findData(0x4F))
+    page.key_combo.setCurrentIndex(page.key_combo.findData(0x68))
+    assert page.current_trigger().source is None
+    page.apply_captured_trigger(Trigger(TriggerKind.KEYBOARD_USAGE, 0x68, 0xF1, CAPTURED_SOURCE))
+    page.set_session(ProjectSession.new())
+    assert page.current_trigger().source is None
+
+
 def test_a_key_from_another_device_is_refused_and_the_window_stays_open(qtbot):
     """The page is about one mouse: a press on the keyboard is not its press."""
     service = DeviceService(timeout_ms=5000)

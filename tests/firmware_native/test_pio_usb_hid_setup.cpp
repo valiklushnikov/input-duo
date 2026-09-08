@@ -170,7 +170,7 @@ TEST_CASE(captured_aula_descriptor_is_classified_as_its_five_slot_keyboard_shape
 }
 
 TEST_CASE(valid_unsupported_descriptors_fall_back_only_for_a_matching_boot_protocol) {
-    for (const auto descriptor : {vendor_only_hid(), consumer_control()}) {
+    for (const auto descriptor : {vendor_only_hid()}) {
         SourceIdentity ignored;
         CHECK_FALSE(classify_hid(kProtocolNone, descriptor.data(), descriptor.size(), ignored));
         CHECK_EQ(ignored.kind, DeviceKind::Unknown);

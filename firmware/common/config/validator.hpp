@@ -57,7 +57,7 @@ class BindingView {
 public:
     BindingView() = default;
     TriggerKind trigger_kind() const;
-    std::uint8_t trigger_code() const;
+    std::uint16_t trigger_code() const;
     std::uint8_t trigger_modifiers() const;
     TriggerSource source() const;
     BindingMode mode() const;

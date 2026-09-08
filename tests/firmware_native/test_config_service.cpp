@@ -14,6 +14,9 @@
 #include "config_service.hpp"
 #include "crypto/sha256.hpp"
 #include "pio_usb/host_observation_mapping.hpp"
+#include "pio_usb/device_registry.hpp"
+#include "../../firmware/u1_reference/source_adapter.hpp"
+#include "input/source_table.hpp"
 #include "storage/ab_store.hpp"
 #include "test_support.hpp"
 
@@ -34,6 +37,8 @@ using duo_input::u1::input::InputEvent;
 using duo_input::u1::input::InputEventKind;
 using duo_input::u1::mapping::CaptureController;
 using duo_input::u1::mapping::CapturedTrigger;
+
+extern "C" bool tuh_hid_receive_report(std::uint8_t, std::uint8_t) { return true; }
 
 namespace {
 
@@ -785,6 +790,65 @@ TEST_CASE(a_reply_type_sent_as_a_request_is_refused) {
     CHECK_EQ(error_of(reply), CdcError::InvalidRequest);
 }
 
+TEST_CASE(diagnostics_append_interface_inventory_and_capacity_refusals) {
+    Link link;
+    link.hello();
+    duo_input::u1::input::SourceInventory inventory{};
+    inventory.count = 1;
+    inventory.rejected_interfaces = 7;
+    inventory.sources[0].vendor_id = 0x1234;
+    inventory.sources[0].product_id = 0x5678;
+    inventory.sources[0].interface_number = 3;
+    inventory.sources[0].kind = 2;
+    inventory.sources[0].device_address = 4;
+    std::strcpy(inventory.sources[0].product_name, "Receiver");
+    link.service.set_input_sources(inventory);
+    const auto reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::size_t at = 252;
+    CHECK_EQ(reply.payload.size, at + 8 + 55);
+    CHECK_EQ(reply.payload.data[at], 1);
+    CHECK_EQ(reply.payload.data[at + 3], 1);
+    CHECK_EQ(read_u32(reply.payload.data + at + 4), 7u);
+    CHECK_EQ(reply.payload.data[at + 8], 0x34);
+    CHECK_EQ(reply.payload.data[at + 12], 3);
+    CHECK_EQ(std::strcmp(reinterpret_cast<const char*>(reply.payload.data + at + 15), "Receiver"), 0);
+}
+
+TEST_CASE(both_target_rejection_boundaries_reach_the_operator_diagnostics) {
+    struct Handler : duo_input::u1::input::IInputHandler {
+        void on_input(const InputEvent&, std::uint32_t) override {}
+    } handler;
+    for (bool reference : {false, true}) {
+        duo_input::u1::input::SourceTable sources(handler);
+        duo_input::u1::pio_usb::DeviceRegistry registry;
+        duo_input::u1::reference::ReferenceSourceAdapter adapter;
+        for (std::uint8_t i = 0; i < 9; ++i) {
+            if (reference) {
+                ReferenceCallbackRecord record{};
+                record.kind = ReferenceCallbackKind::Mount;
+                record.dev_addr = 1; record.instance = i; record.protocol = 2;
+                record.vid = 0x1234; record.pid = 0x5678; record.interface_number = i;
+                adapter.consume(record, 0);
+            } else {
+                registry.capture_hid_mount(1, i, 0x1234, 0x5678, 2, nullptr, 0, i);
+                registry.process_pending(0);
+            }
+            duo_input::u1::input::SourceEvent event{};
+            duo_input::u1::input::SourceIdentity identity{};
+            while (reference ? adapter.take_event(event, identity) : registry.take_event(event, identity))
+                sources.on_event(event, identity, 0);
+        }
+        duo_input::u1::input::SourceInventory inventory{};
+        sources.inventory(inventory, reference ? adapter.rejected_interfaces() : registry.interface_overflow_count());
+        Link link; link.hello(); link.service.set_input_sources(inventory);
+        const auto reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
+        CHECK_EQ(reply.payload.data[255], 8);
+        CHECK_EQ(read_u32(reply.payload.data + 256), 1u);
+        CHECK_EQ(reply.payload.data[264], 0);
+        CHECK_EQ(reply.payload.data[264 + 7 * 55], 7);
+    }
+}
+
 TEST_CASE(diagnostics_carry_every_counter_the_host_expects) {
     Link link;
     link.hello();
@@ -1147,7 +1211,7 @@ TEST_CASE(the_diagnostics_carry_what_the_host_stack_and_root_port_are_doing) {
     // own single not-published marker byte instead of the full ten.
     CHECK_EQ(reply.payload.size,
              duo_input::u1::kDiagnosticsPayloadSize -
-                 duo_input::u1::kReferenceCounterFieldBytes);
+                 duo_input::u1::kReferenceCounterFieldBytes - 448);
 }
 
 // The two clocks are the whole point of carrying both. A host brought up at
@@ -1251,7 +1315,7 @@ TEST_CASE(the_host_block_leaves_the_prefix_byte_for_byte_unchanged) {
     // test above.
     CHECK_EQ(published.payload.size,
              duo_input::u1::kDiagnosticsPayloadSize -
-                 duo_input::u1::kReferenceCounterFieldBytes);
+                 duo_input::u1::kReferenceCounterFieldBytes - 448);
     for (std::size_t index = 0; index < sizeof(kFrozenLegacyDiagnosticsPrefix); ++index) {
         CHECK_EQ(published.payload.data[index], kFrozenLegacyDiagnosticsPrefix[index]);
     }
@@ -1627,6 +1691,29 @@ TEST_CASE(a_completed_capture_is_reported_without_being_asked) {
     CHECK_EQ(event.payload.data[5], 0x30u);
     CHECK_EQ(event.payload.data[6], 0xD0u);
     CHECK_EQ(event.payload.data[7], 0x01u);
+}
+
+TEST_CASE(consumer_capture_serializes_u16_usage_in_the_existing_eight_bytes) {
+    Link link; link.hello(); link.send(CdcMessageType::CAPTURE_BEGIN);
+    CapturedTrigger trigger; trigger.kind = static_cast<TriggerKind>(3); trigger.code = 0x1B1;
+    trigger.vendor_id = 0x1234; trigger.product_id = 0x5678; trigger.interface_number = 2;
+    link.replies.clear(); link.service.emit_capture_event(trigger);
+    CHECK(link.replies.count() == 1);
+    if (link.replies.count() == 1) {
+        const auto event = link.decode_last();
+        const std::uint8_t expected[] = {3, 0xB1, 1, 0x34, 0x12, 0x78, 0x56, 2};
+        CHECK(event.payload.size == sizeof(expected));
+        CHECK(std::memcmp(event.payload.data, expected, sizeof(expected)) == 0);
+    }
+}
+
+TEST_CASE(input_source_inventory_is_an_explicit_empty_current_snapshot) {
+    Link link; link.hello();
+    link.service.set_input_sources({});
+    const auto response = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    CHECK_EQ(response.payload.size, 260u);
+    CHECK_EQ(response.payload.data[252], 1);
+    CHECK_EQ(response.payload.data[255], 0);
 }
 
 TEST_CASE(a_mouse_capture_travels_as_the_host_will_accept_it) {

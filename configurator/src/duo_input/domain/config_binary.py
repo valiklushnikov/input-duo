@@ -200,8 +200,11 @@ def _validate_model(config: DeviceConfig):
             ):
                 raise ConfigError("profile bindings must contain Binding, Trigger, and Action values")
             kind = _enum(binding.trigger.kind, TriggerKind, "trigger kind")
-            code = _u8(binding.trigger.code, "trigger code", minimum=1)
+            consumer = kind is TriggerKind.CONSUMER_USAGE
+            code = (_u16 if consumer else _u8)(binding.trigger.code, "trigger code", minimum=1)
             modifiers = _u8(binding.trigger.modifiers, "trigger modifiers")
+            if consumer and modifiers:
+                raise ConfigError("consumer trigger must not carry modifiers")
             if kind is TriggerKind.MOUSE_BUTTON and (code > 5 or modifiers != 0):
                 raise ConfigError("mouse trigger must be button 1..5 without modifiers")
             if binding.trigger.source is None:
@@ -283,7 +286,7 @@ def compile_device_config(config: DeviceConfig) -> bytes:
         for (kind, code, modifiers, mode, action_kind, argument,
              vendor_id, product_id, interface_number) in bindings:
             append_data(_BINDING.pack(
-                kind, code, modifiers, mode, action_kind, argument,
+                kind, code & 0xFF, code >> 8 if kind is TriggerKind.CONSUMER_USAGE else modifiers, mode, action_kind, argument,
                 vendor_id, product_id, interface_number, 0,
             ))
         macro_offset = data_start + len(data)
@@ -505,6 +508,9 @@ def decode_device_config(data: bytes) -> DeviceConfig:
             else:
                 source = TriggerSource(vendor_id, product_id, interface_number)
             trigger_kind = _enum(kind, TriggerKind, "trigger kind")
+            if trigger_kind is TriggerKind.CONSUMER_USAGE:
+                code |= modifiers << 8
+                modifiers = 0
             mode_value = _enum(mode, BindingMode, "binding mode")
             action_value = _enum(action_kind, ActionKind, "action kind")
             trigger = Trigger(trigger_kind, code, modifiers, source)

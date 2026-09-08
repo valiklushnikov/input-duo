@@ -49,6 +49,7 @@ extern "C" void reference_drain_one_callback();
 #include "core_bridge.hpp"
 #include "host_control_state.hpp"
 #include "input/source_table.hpp"
+#include "input/product_names.hpp"
 #include "link_reconnect.hpp"
 #include "output_runtime.hpp"
 #include "pico_flash.hpp"
@@ -346,6 +347,11 @@ public:
 
 RuntimeInput g_input;
 duo_input::u1::input::SourceTable g_sources(g_input);
+duo_input::runtime::SpscQueue<duo_input::u1::input::SourceInventory, 2> g_source_inventory;
+duo_input::u1::input::ProductNames g_product_names;
+void product_name_complete(tuh_xfer_t* transfer) {
+    g_product_names.complete(transfer->result == XFER_RESULT_SUCCESS, transfer->actual_len);
+}
 
 using duo_input::u1::reference::poison_descriptor_buffer;
 using duo_input::u1::reference::ReferenceSourceAdapter;
@@ -621,6 +627,14 @@ extern "C" void core1_main() {
         const std::uint32_t millis = now_ms();
         service_input(millis);
         g_runtime.tick(millis);
+        g_product_names.poll(g_sources, [](std::uint8_t address, std::uint8_t* buffer, std::size_t size) {
+            return tuh_descriptor_get_product_string(address, 0x0409, buffer, static_cast<std::uint16_t>(size), product_name_complete, 0);
+        });
+        if (g_source_inventory.empty()) {
+            static duo_input::u1::input::SourceInventory snapshot;
+            g_sources.inventory(snapshot, g_adapter.rejected_interfaces());
+            g_source_inventory.push(snapshot);
+        }
 
         // A swap happened - a binding, a macro, or the host asked for one.
         // The bindings moved with it and the macros have to follow, exactly
@@ -764,6 +778,8 @@ int main() {
             state.endpoint_drops = g_link.status().endpoint_drops;
             state.endpoint_release_ms = g_link.status().endpoint_release_ms;
             g_config.set_link_state(state);
+            static duo_input::u1::input::SourceInventory source_snapshot;
+            if (g_source_inventory.pop(source_snapshot)) g_config.set_input_sources(source_snapshot);
         }
 
         // Published every pass for the same reason: dropped_commands says

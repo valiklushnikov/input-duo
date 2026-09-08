@@ -512,6 +512,7 @@ def test_capture_event_is_delivered_and_sequence_resynchronises(qtbot, service, 
     _connect(qtbot, service, link)
 
     _succeed(qtbot, service, service.begin_capture)
+    assert service.diagnostics is not None
     assert emulator.capture_active
     assert emulator.queue_capture_event(b"\x01\x02\x03")
 

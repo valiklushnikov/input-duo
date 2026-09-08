@@ -42,6 +42,7 @@ public:
 
     /// Take one event this adapter has produced. False when there is none.
     bool take_event(input::SourceEvent& event, input::SourceIdentity& identity);
+    std::uint32_t rejected_interfaces() const { return rejected_interfaces_; }
 
     //: HID interface protocol values, named here so this stays transport
     //: neutral and unit-testable without TinyUSB.
@@ -157,6 +158,7 @@ private:
     //: Two devices behind the hub, each of which may present a mouse, a
     //: keyboard-shaped channel and a vendor interface that earns no role.
     static constexpr std::size_t kInterfaceCapacity = 8;
+    std::uint32_t rejected_interfaces_ = 0;
 
     struct Pending {
         input::SourceEvent event{};

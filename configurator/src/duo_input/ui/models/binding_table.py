@@ -41,6 +41,10 @@ MODIFIER_BITS: tuple[tuple[str, str, int], ...] = (
     ("shift", "Shift", LEFT_SHIFT),
     ("alt", "Alt", LEFT_ALT),
     ("gui", "Win", LEFT_GUI),
+    ("right_ctrl", "Right Ctrl", 0x10),
+    ("right_shift", "Right Shift", 0x20),
+    ("right_alt", "Right Alt", 0x40),
+    ("right_gui", "Right Win", 0x80),
 )
 
 #: Buttons every HID mouse reports; 4 and 5 have to be seen before they exist.
@@ -170,6 +174,8 @@ def trigger_label(trigger: Trigger) -> str:
     """One trigger as the operator reads it. Never localised."""
     if trigger.kind == TriggerKind.MOUSE_BUTTON:
         name = f"Button {trigger.code}"
+    elif trigger.kind == TriggerKind.CONSUMER_USAGE:
+        name = f"Consumer 0x{trigger.code:04X}"
     else:
         prefix = modifier_label(trigger.modifiers)
         name = key_name(trigger.code)
@@ -298,6 +304,28 @@ class MouseCapabilities:
     attached_ids: frozenset[tuple[int, int]] | None = None
     #: The one of them that enumerated as a mouse, when U1 named one.
     mouse_id: tuple[int, int] | None = None
+    attached_sources: frozenset[tuple[int, int, int]] | None = None
+    source_names: tuple[tuple[tuple[int, int, int], str], ...] = ()
+
+    def label(self, trigger: Trigger, base_label: str | None = None) -> str:
+        label = base_label or trigger_label(replace(trigger, source=None))
+        source = trigger.source
+        if source is not None:
+            name = dict(self.source_names).get((source.vendor_id, source.product_id, source.interface_number))
+            if name:
+                return f"{label} - {name} (interface {source.interface_number})"
+        return qualified_label(label, source)
+
+    def with_sources(self, sources) -> MouseCapabilities:
+        if sources is None:
+            return replace(self, attached_sources=None, source_names=())
+        mouse = next((source for source in sources if source.kind == "mouse"), None)
+        return replace(self,
+            attached_sources=frozenset((s.vendor_id, s.product_id, s.interface_number) for s in sources),
+            attached_ids=frozenset((s.vendor_id, s.product_id) for s in sources),
+            mouse_id=None if mouse is None else (mouse.vendor_id, mouse.product_id),
+            source_names=tuple(((s.vendor_id, s.product_id, s.interface_number), s.product_name) for s in sources if s.product_name),
+        )
 
     @classmethod
     def from_device_info(cls, info: object | None) -> MouseCapabilities:
@@ -363,7 +391,10 @@ class MouseCapabilities:
         absent, which is what leaves an unqualified binding exactly as
         available as it has always been.
         """
-        if trigger.source is not None and self.attached_ids is not None:
+        if trigger.source is not None and self.attached_sources is not None:
+            if (trigger.source.vendor_id, trigger.source.product_id, trigger.source.interface_number) not in self.attached_sources:
+                return False
+        elif trigger.source is not None and self.attached_ids is not None:
             identity = (int(trigger.source.vendor_id), int(trigger.source.product_id))
             if identity not in self.attached_ids:
                 return False
@@ -395,7 +426,7 @@ class BindingTableModel(QAbstractTableModel):
             self.dataChanged.emit(
                 self.index(0, 0),
                 self.index(rows - 1, self.columnCount() - 1),
-                [Qt.ItemDataRole.ForegroundRole],
+                [Qt.ItemDataRole.ForegroundRole, Qt.ItemDataRole.DisplayRole],
             )
 
     @property
@@ -444,7 +475,7 @@ class BindingTableModel(QAbstractTableModel):
         if role != Qt.ItemDataRole.DisplayRole:
             return None
         if index.column() == self.TRIGGER:
-            return trigger_label(binding.trigger)
+            return self._capabilities.label(binding.trigger)
         if index.column() == self.MODE:
             return binding.mode.name
         return action_label(binding.action, self._profile)

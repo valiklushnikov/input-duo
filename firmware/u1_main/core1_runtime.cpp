@@ -291,7 +291,8 @@ void Core1Runtime::tick(std::uint32_t now_ms) {
     // while this was running is not silently dropped on the floor.
     const std::uint8_t capture_request =
         capture_request_mailbox_.load(std::memory_order_acquire);
-    if (capture_request == kCaptureRequestBegin) {
+    const bool deferred_begin = capture_request == kCaptureRequestBegin && !capture_events_.empty();
+    if (capture_request == kCaptureRequestBegin && !deferred_begin) {
         capture_.begin(now_ms);
     } else if (capture_request == kCaptureRequestCancel) {
         capture_.cancel();
@@ -300,7 +301,7 @@ void Core1Runtime::tick(std::uint32_t now_ms) {
     capture_.tick(now_ms);
     publish_capture_state();
 
-    if (capture_request != 0) {
+    if (capture_request != 0 && !deferred_begin) {
         std::uint8_t consumed = capture_request;
         capture_request_mailbox_.compare_exchange_strong(consumed, 0,
                                                          std::memory_order_acq_rel,
@@ -326,6 +327,7 @@ void Core1Runtime::tick(std::uint32_t now_ms) {
 }
 
 void Core1Runtime::begin_capture(std::uint32_t now_ms) {
+    if (!capture_events_.empty()) return;
     capture_.begin(now_ms);
     publish_capture_state();
 }
@@ -345,20 +347,15 @@ void Core1Runtime::request_capture_cancel() {
 
 void Core1Runtime::publish_capture_state() {
     mapping::CapturedTrigger trigger;
-    if (capture_.take(trigger)) {
-        capture_event_payload_ = trigger;
-        capture_event_occupied_.store(true, std::memory_order_release);
+    if (capture_events_.empty() && capture_.take(trigger)) {
+        capture_events_.push(trigger);
     }
     // Event first, state second. Main reads in the same order.
     capture_active_published_.store(capture_.active(), std::memory_order_release);
 }
 
 bool Core1Runtime::take_capture_event(mapping::CapturedTrigger& out) {
-    if (!capture_event_occupied_.exchange(false, std::memory_order_acq_rel)) {
-        return false;
-    }
-    out = capture_event_payload_;
-    return true;
+    return capture_events_.pop(out);
 }
 
 void Core1Runtime::request_profile(std::uint8_t profile) {

@@ -55,6 +55,7 @@ ReferenceSourceAdapter::Interface* ReferenceSourceAdapter::claim_slot(
     }
     // The table is full. An interface that cannot be assigned a source slot
     // cannot be announced safely.
+    ++rejected_interfaces_;
     return nullptr;
 }
 
@@ -129,6 +130,7 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
     identity.vendor_id = record.vid;
     identity.product_id = record.pid;
     identity.interface_number = record.interface_number;
+    identity.device_address = record.dev_addr;
 
     Interface* const existing = find(record.dev_addr, record.instance);
     Interface* entry = claim_slot(record.dev_addr, record.instance);

@@ -283,6 +283,21 @@ TEST_CASE(config_validator_accepts_ru_and_ua_layouts_from_python_vector) {
     CHECK_EQ(ua.text_layout(), duo_input::config::TextLayout::UA);
 }
 
+TEST_CASE(config_validator_reads_consumer_usage_from_two_existing_binding_bytes) {
+    for (std::uint16_t usage : {0x00E9, 0x0100, 0x01B1, 0xFFFF}) {
+        auto bytes = read_vector("valid_full.bin");
+        const auto offset = read_u32(bytes, 80);
+        bytes[offset] = 3; write_u16(bytes, offset + 1, usage); repair_crc(bytes);
+        const auto result = validate_config({bytes.data(), bytes.size()});
+        CHECK(result);
+        if (result) {
+            duo_input::config::ProfileView profile; duo_input::config::BindingView binding;
+            CHECK(result.view().profile_at(0, profile)); CHECK(profile.binding_at(0, binding));
+            CHECK(binding.trigger_code() == usage); CHECK(binding.trigger_modifiers() == 0);
+        }
+    }
+}
+
 TEST_CASE(config_validator_accepts_target_inherit_and_mouse_step_toggle_from_python_vector) {
     const std::vector<std::uint8_t> full = read_vector("valid_full.bin");
     const auto result = validate_config({full.data(), full.size()});

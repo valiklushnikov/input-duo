@@ -505,6 +505,7 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
         interface->identity.vendor_id = record.vendor_id;
         interface->identity.product_id = record.product_id;
         interface->identity.interface_number = record.interface_number;
+        interface->identity.device_address = record.dev_addr;
 
         const LogicalRole wanted =
             classified ? role_for_kind(interface->identity.kind)
@@ -603,19 +604,10 @@ bool DeviceRegistry::take_event(input::SourceEvent& event,
     // the "wrong" one of the two costs nothing.
     if (host_fault_pending_) {
         host_fault_pending_ = false;
-        host_fault_stage_ = 2;
         event = {};
         event.kind = input::SourceEventKind::Fault;
+        event.source_id = input::kWholeHostSource;
         identity = {};
-        identity.kind = input::DeviceKind::Keyboard;
-        return true;
-    }
-    if (host_fault_stage_ == 2) {
-        host_fault_stage_ = 0;
-        event = {};
-        event.kind = input::SourceEventKind::Fault;
-        identity = {};
-        identity.kind = input::DeviceKind::Mouse;
         return true;
     }
     PendingEvent pending;

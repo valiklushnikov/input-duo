@@ -81,6 +81,7 @@ class DiagnosticsPage(QWidget):
                 ("endpoint_drops", QT_TRANSLATE_NOOP("DiagnosticsPage", "Link drops seen by U2")),
                 ("endpoint_release_ms", QT_TRANSLATE_NOOP("DiagnosticsPage", "U2 released after (ms)")),
                 ("dropped_commands", QT_TRANSLATE_NOOP("DiagnosticsPage", "Input commands never delivered")),
+                ("rejected_interfaces", QT_TRANSLATE_NOOP("DiagnosticsPage", "Interfaces refused: source capacity")),
             ),
         ),
         (

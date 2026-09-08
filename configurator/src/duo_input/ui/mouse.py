@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QPushButton,
+    QSpinBox,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -138,19 +139,27 @@ class MouseSwitchPage(QWidget):
         self.trigger_kind.addItem(self.tr("Choose..."), None)
         self.trigger_kind.addItem(self.tr("Keyboard key"), TriggerKind.KEYBOARD_USAGE)
         self.trigger_kind.addItem(self.tr("Mouse button"), TriggerKind.MOUSE_BUTTON)
-        self.trigger_kind.currentIndexChanged.connect(self._on_changed)
+        self.trigger_kind.addItem(self.tr("Consumer control"), TriggerKind.CONSUMER_USAGE)
+        self.trigger_kind.currentIndexChanged.connect(self._on_trigger_edited)
         form.addRow(field_label(self.tr("1. What do you press?"), box), self.trigger_kind)
 
         self.key_combo = QComboBox(box)
         self.key_combo.setAccessibleName(self.tr("Keyboard key"))
         for usage in SELECTABLE_USAGES:
             self.key_combo.addItem(key_name(usage), usage)
-        self.key_combo.currentIndexChanged.connect(self._on_changed)
+        self.key_combo.currentIndexChanged.connect(self._on_trigger_edited)
         form.addRow(field_label(self.tr("Key:"), box), self.key_combo)
+        self.consumer_usage = QSpinBox(box)
+        self.consumer_usage.setRange(1, 0xFFFF)
+        self.consumer_usage.setDisplayIntegerBase(16)
+        self.consumer_usage.setPrefix("0x")
+        self.consumer_usage.setAccessibleName(self.tr("Consumer usage"))
+        self.consumer_usage.valueChanged.connect(self._on_trigger_edited)
+        form.addRow(field_label(self.tr("Consumer usage:"), box), self.consumer_usage)
 
         self.mouse_combo = QComboBox(box)
         self.mouse_combo.setAccessibleName(self.tr("Mouse button"))
-        self.mouse_combo.currentIndexChanged.connect(self._on_changed)
+        self.mouse_combo.currentIndexChanged.connect(self._on_trigger_edited)
         button_row = QHBoxLayout()
         button_row.setContentsMargins(0, 0, 0, 0)
         button_row.setSpacing(SPACE_SM)
@@ -170,7 +179,7 @@ class MouseSwitchPage(QWidget):
         for key, label, _bit in MODIFIER_BITS:
             check = QCheckBox(label, box)
             check.setAccessibleName(self.tr("{0} modifier").format(label))
-            check.toggled.connect(self._on_changed)
+            check.toggled.connect(self._on_trigger_edited)
             self.modifier_boxes[key] = check
             modifiers.addWidget(check)
         modifiers.addStretch(1)
@@ -242,6 +251,7 @@ class MouseSwitchPage(QWidget):
         return None
 
     def set_session(self, session: ProjectSession) -> None:
+        self._captured = None
         self._session = session
         self._refresh()
 
@@ -263,7 +273,11 @@ class MouseSwitchPage(QWidget):
         raise ValueError(f"{kind.name} {argument} is not a mouse switch action")
 
     def current_trigger(self) -> Trigger | None:
+        if self._captured is not None:
+            return self._captured
         kind = self.trigger_kind.currentData()
+        if kind is TriggerKind.CONSUMER_USAGE:
+            return Trigger(kind, self.consumer_usage.value())
         if kind is TriggerKind.MOUSE_BUTTON:
             button = self.mouse_combo.currentData()
             if button is None:
@@ -312,23 +326,22 @@ class MouseSwitchPage(QWidget):
         """
         if trigger.kind is TriggerKind.MOUSE_BUTTON:
             self._capabilities = self._capabilities.observing(trigger.code)
-        elif trigger.kind is not TriggerKind.KEYBOARD_USAGE:
-            return
-        elif self.key_combo.findData(trigger.code) < 0:
-            # A usage this chooser does not offer - F13 upwards and the three
-            # keys almost nothing has. Selecting it would empty the combo and
-            # leave the page describing no trigger at all.
+        elif trigger.kind not in (TriggerKind.KEYBOARD_USAGE, TriggerKind.CONSUMER_USAGE):
             return
         self._captured = trigger
         self._updating = True
         try:
             self.select_trigger_kind(TriggerKind(trigger.kind))
+            if trigger.kind is TriggerKind.CONSUMER_USAGE:
+                self.consumer_usage.setValue(trigger.code)
             if trigger.kind is TriggerKind.MOUSE_BUTTON:
                 self._rebuild_mouse_buttons()
                 self.mouse_combo.setCurrentIndex(
                     self.mouse_combo.findData(trigger.code)
                 )
             else:
+                if self.key_combo.findData(trigger.code) < 0:
+                    self.key_combo.addItem(key_name(trigger.code), trigger.code)
                 self.key_combo.setCurrentIndex(self.key_combo.findData(trigger.code))
                 for key, _label, bit in MODIFIER_BITS:
                     self.modifier_boxes[key].setChecked(bool(trigger.modifiers & bit))
@@ -416,10 +429,10 @@ class MouseSwitchPage(QWidget):
 
     def _trigger_label(self, trigger: Trigger) -> str:
         if trigger.kind is TriggerKind.MOUSE_BUTTON:
-            return qualified_label(
-                self._mouse_button_label(trigger.code), trigger.source
+            return self._capabilities.label(
+                trigger, self._mouse_button_label(trigger.code)
             )
-        return trigger_label(trigger)
+        return self._capabilities.label(trigger)
 
     def _unavailable_buttons(self) -> tuple[int, ...]:
         """Buttons a switch binding needs that the attached mouse cannot press."""
@@ -442,6 +455,7 @@ class MouseSwitchPage(QWidget):
         self._updating = True
         try:
             kind = self.trigger_kind.currentData()
+            self.consumer_usage.setEnabled(kind is TriggerKind.CONSUMER_USAGE)
             self.key_combo.setEnabled(kind is TriggerKind.KEYBOARD_USAGE)
             self.mouse_combo.setEnabled(kind is TriggerKind.MOUSE_BUTTON)
             for box in self.modifier_boxes.values():
@@ -507,6 +521,11 @@ class MouseSwitchPage(QWidget):
     # ----------------------------------------------------------------- slots
 
     def _on_changed(self, *_args: object) -> None:
+        self._refresh()
+
+    def _on_trigger_edited(self, *_args: object) -> None:
+        if not self._updating:
+            self._captured = None
         self._refresh()
 
     def _on_apply_clicked(self) -> None:

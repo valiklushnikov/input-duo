@@ -204,7 +204,9 @@ def _validate_trigger(trigger: object, path: str, triggers: set[tuple[int, int, 
     if not isinstance(trigger, Trigger):
         issues.append(ValidationIssue(f"{path}/trigger", "trigger must be a Trigger"))
         return
-    if not _is_enum(trigger.kind, TriggerKind) or not _is_u8(trigger.code, minimum=1) or not _is_u8(trigger.modifiers):
+    consumer = trigger.kind == TriggerKind.CONSUMER_USAGE
+    valid_code = type(trigger.code) is int and 1 <= trigger.code <= (0xFFFF if consumer else 0xFF)
+    if not _is_enum(trigger.kind, TriggerKind) or not valid_code or not _is_u8(trigger.modifiers) or (consumer and trigger.modifiers != 0):
         issues.append(ValidationIssue(f"{path}/trigger", "trigger is invalid"))
         return
     if trigger.kind == TriggerKind.MOUSE_BUTTON and (trigger.code > 5 or trigger.modifiers != 0):
@@ -217,6 +219,16 @@ def _validate_trigger(trigger: object, path: str, triggers: set[tuple[int, int, 
     # two layers cannot disagree about what a duplicate is - and "no source"
     # is spelled as the all-zero triple there, so it is spelled that way here.
     source = trigger.source
+    if source is not None and (
+        not all(type(value) is int for value in (source.vendor_id, source.product_id, source.interface_number))
+        or not 0 <= source.vendor_id <= 0xFFFF
+        or not 0 <= source.product_id <= 0xFFFF
+        or not 0 <= source.interface_number <= 0xFF
+        or ((source.vendor_id, source.product_id, source.interface_number) != (0, 0, 0)
+            and (source.vendor_id == 0 or source.product_id == 0))
+    ):
+        issues.append(ValidationIssue(f"{path}/trigger/source", "trigger source is invalid"))
+        return
     key = (
         int(trigger.kind),
         trigger.code,

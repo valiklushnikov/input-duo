@@ -283,13 +283,6 @@ private:
     std::size_t callback_head_ = 0;
     std::size_t callback_count_ = 0;
     bool host_fault_pending_ = false;
-    /// Set once a whole-host Fault is owed a second, still-undelivered
-    /// SourceEvent: take_event() emits the host fault as two events - one
-    /// per role slot (Keyboard, then Mouse) - since neither pipeline
-    /// instance is reachable through a single Unknown-kind event, and
-    /// releasing an idle pipeline is harmless. 0 = nothing owed, 2 = the
-    /// Mouse-kind Fault is still owed.
-    std::uint8_t host_fault_stage_ = 0;
     /// Registry-wide monotonic counter. Each fresh HidMount claim (never a
     /// duplicate mount of an already-mounted interface) is assigned the next
     /// value, so no two interfaces - even ones reusing the same array slot

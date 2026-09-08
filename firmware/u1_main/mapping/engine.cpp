@@ -39,6 +39,8 @@ bool modifier_bit(std::uint16_t usage, std::uint8_t& mask) {
 }
 
 config::TriggerKind trigger_of(InputEventKind kind) {
+    if (kind == InputEventKind::ConsumerDown || kind == InputEventKind::ConsumerUp)
+        return config::TriggerKind::CONSUMER_USAGE;
     return (kind == InputEventKind::MouseButtonDown || kind == InputEventKind::MouseButtonUp)
                ? config::TriggerKind::MOUSE_BUTTON
                : config::TriggerKind::KEYBOARD_USAGE;
@@ -105,9 +107,11 @@ bool BindingEngine::matches(const Binding& binding, const InputEvent& event,
             required.interface_number == source->interface_number);
 }
 
-BindingEngine::Held* BindingEngine::find_held(InputEventKind kind, std::uint16_t code) {
+BindingEngine::Held* BindingEngine::find_held(InputEventKind kind, std::uint16_t code,
+                                             std::uint8_t source_index) {
     for (std::size_t index = 0; index < held_count_; ++index) {
-        if (held_[index].kind == kind && held_[index].code == code) {
+        if (held_[index].kind == kind && held_[index].code == code &&
+            held_[index].source_index == source_index) {
             return &held_[index];
         }
     }
@@ -115,7 +119,7 @@ BindingEngine::Held* BindingEngine::find_held(InputEventKind kind, std::uint16_t
 }
 
 bool BindingEngine::remember(const InputEvent& event, bool suppressed) {
-    if (find_held(event.kind, event.code) != nullptr) {
+    if (find_held(event.kind, event.code, event.source_index) != nullptr) {
         return false;
     }
     if (held_count_ >= kMaxHeld) {
@@ -123,6 +127,7 @@ bool BindingEngine::remember(const InputEvent& event, bool suppressed) {
     }
     held_[held_count_].kind = event.kind;
     held_[held_count_].code = event.code;
+    held_[held_count_].source_index = event.source_index;
     held_[held_count_].orphaned = false;
     held_[held_count_].suppressed = suppressed;
     ++held_count_;
@@ -132,7 +137,8 @@ bool BindingEngine::remember(const InputEvent& event, bool suppressed) {
 bool BindingEngine::forget(const InputEvent& event) {
     const InputEventKind down = matching_down(event.kind);
     for (std::size_t index = 0; index < held_count_; ++index) {
-        if (held_[index].kind != down || held_[index].code != event.code) {
+        if (held_[index].kind != down || held_[index].code != event.code ||
+            held_[index].source_index != event.source_index) {
             continue;
         }
         // Swallowed on the way down, or left behind by a route change: either
@@ -142,7 +148,7 @@ bool BindingEngine::forget(const InputEvent& event) {
         const bool hidden = held_[index].orphaned || held_[index].suppressed;
         held_[index] = held_[held_count_ - 1];
         --held_count_;
-        return !hidden;
+        return !hidden && !forwarded(down, event.code);
     }
     // Never seen going down at all.
     return false;
@@ -160,6 +166,25 @@ void BindingEngine::orphan(bool keys, bool buttons) {
     }
 }
 
+bool BindingEngine::forwarded(InputEventKind kind, std::uint16_t code) const {
+    for (std::size_t i = 0; i < held_count_; ++i) {
+        const auto& held = held_[i];
+        if (held.kind == kind && held.code == code && !held.suppressed && !held.orphaned)
+            return true;
+    }
+    return false;
+}
+
+std::uint8_t BindingEngine::held_modifiers() const {
+    std::uint8_t modifiers = 0;
+    for (std::size_t i = 0; i < held_count_; ++i) {
+        std::uint8_t mask = 0;
+        if (held_[i].kind == InputEventKind::KeyDown && modifier_bit(held_[i].code, mask))
+            modifiers = static_cast<std::uint8_t>(modifiers | mask);
+    }
+    return modifiers;
+}
+
 Outcome BindingEngine::handle(const InputEvent& event) {
     Outcome outcome;
     input::SourceIdentity identity;
@@ -171,12 +196,12 @@ Outcome BindingEngine::handle(const InputEvent& event) {
     std::uint8_t mask = 0;
     if (event.kind == InputEventKind::KeyDown && modifier_bit(event.code, mask)) {
         modifiers_ = static_cast<std::uint8_t>(modifiers_ | mask);
-    } else if (event.kind == InputEventKind::KeyUp && modifier_bit(event.code, mask)) {
-        modifiers_ = static_cast<std::uint8_t>(modifiers_ & ~mask);
     }
 
     if (is_up(event.kind)) {
-        if (forget(event)) {
+        const bool released = forget(event);
+        modifiers_ = held_modifiers();
+        if (released) {
             ActionRequest request;
             request.kind = ActionRequestKind::SendInput;
             request.event = event;
@@ -194,7 +219,7 @@ Outcome BindingEngine::handle(const InputEvent& event) {
         return outcome;
     }
 
-    if (find_held(event.kind, event.code) != nullptr) {
+    if (find_held(event.kind, event.code, event.source_index) != nullptr) {
         // Already down. A keyboard resends its state constantly: a finger
         // resting on a key is one intention, not forty macros a second - and
         // if the route moved underneath it, this input belongs to the computer
@@ -204,16 +229,23 @@ Outcome BindingEngine::handle(const InputEvent& event) {
 
     bool matched[kMaxBindings] = {};
     bool swallowed = false;
+    bool matched_any = false;
+    bool matched_qualified = false;
     for (std::size_t index = 0; index < binding_count_; ++index) {
-        matched[index] = matches(bindings_[index], event, source);
+        const auto& required = bindings_[index].source;
+        const bool qualified = required.vendor_id != 0 || required.product_id != 0 || required.interface_number != 0;
+        bool& group_matched = qualified ? matched_qualified : matched_any;
+        matched[index] = !group_matched && matches(bindings_[index], event, source);
+        group_matched = group_matched || matched[index];
         swallowed = swallowed ||
                     (matched[index] && bindings_[index].mode == config::BindingMode::REPLACE);
     }
-    remember(event, swallowed);
+    const bool already_forwarded = forwarded(event.kind, event.code);
+    if (!remember(event, swallowed)) return outcome;
 
     // All Add matches share one physical press; any Replace suppresses it and
     // its eventual release, even if that binding is beyond the output budget.
-    if (!swallowed) {
+    if (!swallowed && !already_forwarded) {
         ActionRequest request;
         request.kind = ActionRequestKind::SendInput;
         request.event = event;

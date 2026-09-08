@@ -125,6 +125,7 @@ class DiagnosticSnapshot:
     endpoint_drops: int | str = UNKNOWN
     endpoint_release_ms: int | str = UNKNOWN
     dropped_commands: int | str = UNKNOWN
+    rejected_interfaces: int | str = UNKNOWN
     cdc_bad_crc: int | str = UNKNOWN
     cdc_bad_sequence: int | str = UNKNOWN
     cdc_timeout: int | str = UNKNOWN
@@ -174,6 +175,7 @@ class DiagnosticSnapshot:
             endpoint_drops=_counter(counters, "endpoint_drops"),
             endpoint_release_ms=_counter(counters, "endpoint_release_ms"),
             dropped_commands=_counter(counters, "dropped_commands"),
+            rejected_interfaces=_counter(counters, "rejected_interfaces"),
             input_backend=_backend_name(counters),
             input_backend_counters=_backend_counters(counters),
             host_stack=_host_stack(counters),

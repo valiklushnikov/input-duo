@@ -490,11 +490,8 @@ TEST_CASE(failed_host_initialization_is_observable_as_a_fault_event) {
         SourceIdentity identity;
         CHECK(registry.take_event(event, identity));
         CHECK_EQ(event.kind, SourceEventKind::Fault);
-        CHECK_EQ(identity.kind, DeviceKind::Keyboard);
-
-        CHECK(registry.take_event(event, identity));
-        CHECK_EQ(event.kind, SourceEventKind::Fault);
-        CHECK_EQ(identity.kind, DeviceKind::Mouse);
+        CHECK_EQ(event.source_id, 0xFF);
+        CHECK_EQ(identity.kind, DeviceKind::Unknown);
 
         CHECK_FALSE(registry.take_event(event, identity));
     }
@@ -513,10 +510,8 @@ TEST_CASE(backend_reports_failed_host_initialization_without_servicing_a_dead_ho
         SourceIdentity identity;
         CHECK(backend.take_event(event, identity));
         CHECK_EQ(event.kind, SourceEventKind::Fault);
-        CHECK_EQ(identity.kind, DeviceKind::Keyboard);
-        CHECK(backend.take_event(event, identity));
-        CHECK_EQ(event.kind, SourceEventKind::Fault);
-        CHECK_EQ(identity.kind, DeviceKind::Mouse);
+        CHECK_EQ(event.source_id, 0xFF);
+        CHECK_EQ(identity.kind, DeviceKind::Unknown);
         CHECK_FALSE(backend.take_event(event, identity));
         CHECK(backend.clock_settled());
         CHECK_EQ(duo::test::tinyusb_host::system_clock_khz(), 0u);

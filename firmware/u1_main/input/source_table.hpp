@@ -15,7 +15,7 @@ namespace duo_input::u1::input {
 /// that interface alone.
 class SourceTable {
 public:
-    static constexpr std::size_t kMaxSources = 8;
+    static constexpr std::size_t kMaxSources = kSourceCapacity;
 
     explicit SourceTable(IInputHandler& handler);
     SourceTable(const SourceTable&) = delete;
@@ -27,6 +27,9 @@ public:
                   std::uint32_t now_ms);
     bool resolve(std::uint8_t index, SourceIdentity& out) const;
     std::uint32_t unclaimed_interfaces() const;
+    std::uint32_t revision() const { return revision_; }
+    void inventory(SourceInventory& out, std::uint32_t backend_rejections = 0) const;
+    void set_product_name(std::uint8_t device_address, const char* name);
 
 private:
     class SlotHandler final : public IInputHandler {
@@ -55,6 +58,7 @@ private:
     IInputHandler& handler_;
     std::array<Slot, kMaxSources> slots_{};
     std::uint32_t unclaimed_interfaces_ = 0;
+    std::uint32_t revision_ = 0;
 };
 
 }  // namespace duo_input::u1::input

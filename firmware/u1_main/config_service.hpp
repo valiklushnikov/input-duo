@@ -384,7 +384,7 @@ inline constexpr std::size_t kReferenceCounterBlockBytes = 1 + kReferenceCounter
 /// kReferenceCounterFieldBytes fewer, so this is a ceiling and not a length.
 inline constexpr std::size_t kDiagnosticsPayloadSize =
     kBackendBlockOffset + kBackendBlockBytes + kHostBlockBytes +
-    kReferenceCounterBlockBytes;
+    kReferenceCounterBlockBytes + 8 + input::kSourceCapacity * (7 + input::kProductNameBytes);
 
 static_assert(kDiagnosticsPayloadSize <= protocol::ProtocolLimits::CDC_MAX_PAYLOAD,
               "the diagnostics reply has to fit in one frame");
@@ -480,6 +480,7 @@ public:
         keyboard_port_ = keyboard;
         mouse_port_ = mouse;
     }
+    void set_input_sources(const input::SourceInventory& inventory) { input_sources_ = inventory; input_sources_published_ = true; }
 
     /// Publish which backend read those ports, and its own counters.
     ///
@@ -652,6 +653,7 @@ private:
     /// its length, which is one byte when this image never published
     /// reference counters.
     std::size_t write_reference_counters(std::uint8_t* out) const;
+    std::size_t write_input_sources(std::uint8_t* out) const;
 
     storage::AbStore& store_;
     CdcSink& sink_;
@@ -721,6 +723,8 @@ private:
     diagnostics::LatencyHistogram keyboard_latency_{};
     diagnostics::LatencyHistogram mouse_latency_{};
     PeripheralPort keyboard_port_{};
+    input::SourceInventory input_sources_{};
+    bool input_sources_published_ = false;
     PeripheralPort mouse_port_{};
     /// Unknown until the main loop says otherwise. Defaulting this to CH375
     /// would have a PIO USB build report the wrong backend for as long as it
