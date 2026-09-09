@@ -31,6 +31,7 @@ constexpr std::uint32_t device_capabilities() {
            static_cast<std::uint32_t>(protocol::Capability::CONFIG_READ) |
            static_cast<std::uint32_t>(protocol::Capability::CONFIG_WRITE) |
            static_cast<std::uint32_t>(protocol::Capability::DIAGNOSTICS) |
+           static_cast<std::uint32_t>(protocol::Capability::HID_DESCRIPTOR_DIAGNOSTICS) |
            static_cast<std::uint32_t>(protocol::Capability::ROUTE_CONTROL) |
            static_cast<std::uint32_t>(protocol::Capability::SPI_ENDPOINT) |
            static_cast<std::uint32_t>(protocol::Capability::FACTORY_RESET);
@@ -113,6 +114,7 @@ int expected_request_size(CdcMessageType type) {
         case CdcMessageType::CAPTURE_END:
         case CdcMessageType::STOP_AND_RELEASE_ALL:
         case CdcMessageType::GET_DIAGNOSTICS:
+        case CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE:
         case CdcMessageType::FACTORY_RESET_ARM:
         case CdcMessageType::FACTORY_RESET_COMMIT:
             return 0;
@@ -152,6 +154,9 @@ std::uint32_t required_capability(CdcMessageType type) {
             return static_cast<std::uint32_t>(protocol::Capability::TEST_MACRO);
         case CdcMessageType::GET_DIAGNOSTICS:
             return static_cast<std::uint32_t>(protocol::Capability::DIAGNOSTICS);
+        case CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE:
+            return static_cast<std::uint32_t>(
+                protocol::Capability::HID_DESCRIPTOR_DIAGNOSTICS);
         case CdcMessageType::FACTORY_RESET_ARM:
         case CdcMessageType::FACTORY_RESET_COMMIT:
             return static_cast<std::uint32_t>(protocol::Capability::FACTORY_RESET);
@@ -509,6 +514,35 @@ std::size_t ConfigService::write_input_sources(std::uint8_t* out) const {
     return at;
 }
 
+std::size_t ConfigService::hid_descriptor_capture_payload(
+    CdcError error, std::uint8_t* out) const {
+    constexpr std::size_t kHeaderBytes = 12;
+    out[0] = static_cast<std::uint8_t>(error);
+    out[1] = 1;
+    std::memset(out + 2, 0, kHeaderBytes - 2);
+
+    const auto& capture = input_sources_.hid_descriptor_capture;
+    if (!capture.present) {
+        return kHeaderBytes;
+    }
+
+    const std::uint16_t captured_size =
+        std::min<std::uint16_t>(capture.captured_size,
+                                static_cast<std::uint16_t>(
+                                    input::kHidDescriptorCaptureBytes));
+    const std::uint16_t bounded_size =
+        std::min<std::uint16_t>(captured_size, capture.original_size);
+    const bool truncated = capture.original_size > bounded_size;
+    out[2] = static_cast<std::uint8_t>(0x01u | (truncated ? 0x02u : 0u));
+    put_u16(out + 3, capture.vendor_id);
+    put_u16(out + 5, capture.product_id);
+    out[7] = capture.interface_number;
+    put_u16(out + 8, capture.original_size);
+    put_u16(out + 10, bounded_size);
+    std::memcpy(out + kHeaderBytes, capture.bytes, bounded_size);
+    return kHeaderBytes + bounded_size;
+}
+
 std::size_t ConfigService::write_reference_counters(std::uint8_t* out) const {
     // The leading length, for the same reason the host block leads with one:
     // it is what lets CH375 and PIO_USB - which link this exact class and
@@ -623,6 +657,9 @@ void ConfigService::reply_error(const CdcFrame& frame, CdcError error) {
         case CdcMessageType::GET_DIAGNOSTICS:
             size = diagnostics_payload(error, payload);
             break;
+        case CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE:
+            size = hid_descriptor_capture_payload(error, payload);
+            break;
         case CdcMessageType::WRITE_CHUNK:
             put_u32(payload + 1, expected_offset_);
             size = 5;
@@ -717,6 +754,12 @@ void ConfigService::dispatch(const CdcFrame& frame) {
         }
         case CdcMessageType::GET_DIAGNOSTICS: {
             const std::size_t size = diagnostics_payload(CdcError::Ok, payload);
+            reply(frame.type, frame.sequence, payload, size);
+            return;
+        }
+        case CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE: {
+            const std::size_t size =
+                hid_descriptor_capture_payload(CdcError::Ok, payload);
             reply(frame.type, frame.sequence, payload, size);
             return;
         }

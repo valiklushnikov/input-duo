@@ -96,6 +96,7 @@ bool is_known(CdcMessageType type) {
         case CdcMessageType::FACTORY_RESET_COMMIT:
         case CdcMessageType::GET_ACTIVE_CONFIG_INFO:
         case CdcMessageType::GET_DIAGNOSTICS:
+        case CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE:
         case CdcMessageType::GET_STATUS:
         case CdcMessageType::HELLO:
         case CdcMessageType::PING:

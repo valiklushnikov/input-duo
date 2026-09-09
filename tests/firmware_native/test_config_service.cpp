@@ -2209,3 +2209,93 @@ TEST_CASE(a_new_session_forgets_a_confirmation_nobody_used) {
     CHECK_EQ(error_of(link.send(CdcMessageType::FACTORY_RESET_ARM)),
              CdcError::PhysicalConfirmationRequired);
 }
+
+TEST_CASE(hid_descriptor_diagnostics_is_advertised_and_capability_gated) {
+    Link all;
+    std::uint8_t everything[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+    const CdcFrame info = all.send(CdcMessageType::HELLO, everything,
+                                   sizeof(everything));
+    CHECK((u32_at(info, 3) & static_cast<std::uint32_t>(
+                                duo_input::protocol::Capability::HID_DESCRIPTOR_DIAGNOSTICS)) != 0);
+
+    Link legacy;
+    std::uint8_t diagnostics_only[4] = {
+        static_cast<std::uint8_t>(duo_input::protocol::Capability::DIAGNOSTICS), 0, 0, 0};
+    legacy.send(CdcMessageType::HELLO, diagnostics_only, sizeof(diagnostics_only));
+    CHECK_EQ(error_of(legacy.send(CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE)),
+             CdcError::UnsupportedCapability);
+}
+
+TEST_CASE(an_absent_hid_descriptor_has_the_exact_versioned_twelve_byte_reply) {
+    Link link;
+    link.hello();
+    const CdcFrame reply = link.send(CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE);
+    constexpr std::uint8_t expected[12] = {0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+    CHECK_EQ(reply.payload.size, sizeof(expected));
+    CHECK(std::memcmp(reply.payload.data, expected, sizeof(expected)) == 0);
+}
+
+TEST_CASE(a_complete_hid_descriptor_reply_preserves_identity_length_and_bytes) {
+    Link link;
+    link.hello();
+    duo_input::u1::input::SourceInventory inventory{};
+    auto& capture = inventory.hid_descriptor_capture;
+    capture.present = true;
+    capture.vendor_id = 0x3434;
+    capture.product_id = 0xD030;
+    capture.interface_number = 2;
+    capture.original_size = 3;
+    capture.captured_size = 3;
+    capture.bytes[0] = 0x05;
+    capture.bytes[1] = 0x01;
+    capture.bytes[2] = 0x09;
+    link.service.set_input_sources(inventory);
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE);
+    constexpr std::uint8_t expected[15] = {
+        0x00, 0x01, 0x01, 0x34, 0x34, 0x30, 0xD0, 0x02,
+        0x03, 0x00, 0x03, 0x00, 0x05, 0x01, 0x09};
+
+    CHECK_EQ(reply.payload.size, sizeof(expected));
+    CHECK(std::memcmp(reply.payload.data, expected, sizeof(expected)) == 0);
+}
+
+TEST_CASE(a_truncated_maximum_hid_descriptor_reply_stays_below_the_frame_limit) {
+    Link link;
+    link.hello();
+    duo_input::u1::input::SourceInventory inventory{};
+    auto& capture = inventory.hid_descriptor_capture;
+    capture.present = true;
+    capture.truncated = true;
+    capture.vendor_id = 0x1234;
+    capture.product_id = 0x5678;
+    capture.interface_number = 9;
+    capture.original_size = 300;
+    capture.captured_size = 256;
+    for (std::size_t index = 0; index < capture.captured_size; ++index) {
+        capture.bytes[index] = static_cast<std::uint8_t>(index);
+    }
+    link.service.set_input_sources(inventory);
+
+    const CdcFrame reply = link.send(CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE);
+
+    CHECK_EQ(reply.payload.size, 268u);
+    CHECK_EQ(reply.payload.data[2], 0x03u);
+    CHECK_EQ(reply.payload.data[8], 0x2Cu);
+    CHECK_EQ(reply.payload.data[9], 0x01u);
+    CHECK_EQ(reply.payload.data[10], 0x00u);
+    CHECK_EQ(reply.payload.data[11], 0x01u);
+    CHECK(std::memcmp(reply.payload.data + 12, capture.bytes, 256) == 0);
+    CHECK(reply.payload.size <= ProtocolLimits::CDC_MAX_PAYLOAD);
+}
+
+TEST_CASE(hid_descriptor_diagnostics_rejects_a_nonempty_request) {
+    Link link;
+    link.hello();
+    const std::uint8_t unexpected = 1;
+
+    CHECK_EQ(error_of(link.send(CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE,
+                                &unexpected, 1)),
+             CdcError::InvalidRequest);
+}

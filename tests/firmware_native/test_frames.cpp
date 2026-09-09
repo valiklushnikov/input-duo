@@ -375,3 +375,26 @@ TEST_CASE(a_message_type_that_does_not_exist_is_not_an_answer) {
     CHECK(!duo_input::link::is_endpoint_reply(
         static_cast<duo_input::protocol::SpiMessageType>(0xFF)));
 }
+
+TEST_CASE(hid_descriptor_capture_is_a_known_cdc_message_and_round_trips) {
+    const duo_input::protocol::CdcFrame frame{
+        duo_input::protocol::PROTOCOL_VERSION_MINOR,
+        duo_input::protocol::CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE,
+        0,
+        23,
+        {nullptr, 0},
+    };
+    std::array<std::uint8_t, 1038> scratch{};
+    std::array<std::uint8_t, 1045> encoded{};
+    std::size_t encoded_size = 0;
+
+    CHECK(duo_input::protocol::encode_cdc_frame(frame, {encoded.data(), encoded.size()},
+                                                {scratch.data(), scratch.size()}, encoded_size));
+    duo_input::protocol::DecodeResult decoded{};
+    CHECK(duo_input::protocol::decode_cdc_frame({encoded.data(), encoded_size},
+                                                {scratch.data(), scratch.size()}, decoded));
+    CHECK_EQ(decoded.cdc.type,
+             duo_input::protocol::CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE);
+    CHECK_EQ(decoded.cdc.sequence, 23u);
+    CHECK_EQ(decoded.cdc.payload.size, 0u);
+}

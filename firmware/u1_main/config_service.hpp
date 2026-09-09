@@ -647,6 +647,8 @@ private:
     std::size_t status_payload(CdcError error, std::uint8_t* out) const;
     std::size_t config_info_payload(CdcError error, std::uint8_t* out);
     std::size_t diagnostics_payload(CdcError error, std::uint8_t* out) const;
+    std::size_t hid_descriptor_capture_payload(CdcError error,
+                                               std::uint8_t* out) const;
     /// The appended host block, written at ``out``. Returns its length, which
     /// is one byte when this image publishes no observation.
     std::size_t write_host_observation(std::uint8_t* out) const;
