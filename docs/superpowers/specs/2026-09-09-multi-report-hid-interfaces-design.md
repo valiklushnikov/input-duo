@@ -1,6 +1,7 @@
 # Multiple HID reports in one input interface
 
-**Status:** approved in chat on 2026-09-09; written review pending.
+**Status:** approved in chat on 2026-09-09, including the separate descriptor
+diagnostics command amendment.
 
 ## Problem
 
@@ -28,21 +29,26 @@ repeat that mistake.
   other independently decodable reports in the same descriptor.
 - Disconnect releases held state from every decoder owned by the interface.
 - The 12-byte binding record and the 8-byte capture payload do not change.
+- The existing `GET_DIAGNOSTICS` payload remains byte-for-byte compatible. Its
+  maximum is already 1020 of the protocol's 1024 payload bytes, so descriptor
+  bytes travel through a separate optional command and capability.
 
 ## Stage 1: capture the missing evidence
 
-Add a bounded, backend-neutral descriptor observation to diagnostics. At HID
-mount, retain one complete report descriptor up to the existing supported
-descriptor limit together with its `(VID, PID, interface)` identity and actual
-length. Expose it through a separately versioned optional diagnostics tail so
-older configurators keep reading the preceding blocks unchanged.
+Add a bounded, backend-neutral descriptor observation. At HID mount, retain
+one complete report descriptor up to the existing 256-byte supported descriptor
+limit together with its `(VID, PID, interface)` identity and actual length.
+Expose it through a new `GET_HID_DESCRIPTOR_CAPTURE` request/reply guarded by a
+new `HID_DESCRIPTOR_DIAGNOSTICS` capability. An older configurator never sends
+the request; an older firmware never advertises the capability. The existing
+`GET_DIAGNOSTICS` payload does not change.
 
-The configurator includes the bytes as hexadecimal in `diagnostics.json`.
-There is no device-specific selection: the observation records the most recent
-descriptor that the diagnostics buffer can represent, and states explicitly
-when a descriptor was longer than the capture capacity. Unit tests cover exact
-round-trip bytes, absence, truncation signalling, payload bounds, and old/new
-compatibility.
+The configurator requests this observation after ordinary diagnostics and
+includes the bytes as hexadecimal in `diagnostics.json`. There is no
+device-specific selection: the observation records the most recently mounted
+descriptor, and states explicitly when a descriptor was longer than the
+capture capacity. Unit tests cover exact round-trip bytes, absence, truncation
+signalling, payload bounds, and old/new compatibility.
 
 After this diagnostic firmware is flashed, one exported report supplies the
 real 164-byte fixture. That fixture is committed under `tests/vectors/` with
