@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -34,6 +35,7 @@ using duo_input::u1::ch375::InterruptStatus;
 using duo_input::u1::ch375::kSetupTimeoutUs;
 using duo_input::u1::ch375::SetupProgress;
 using duo_input::u1::ch375::testing::FakeCh375Chip;
+using duo_input::u1::input::hid::ReportRole;
 
 namespace {
 
@@ -129,6 +131,22 @@ bool read_aula_keyboard_descriptor(std::vector<std::uint8_t>& descriptor) {
     return decode_hex(encoded, descriptor);
 }
 
+bool read_keychron_keyboard_descriptor(std::vector<std::uint8_t>& descriptor) {
+    const std::filesystem::path fixture =
+        std::filesystem::path(__FILE__).parent_path().parent_path() / "vectors" /
+        "usb_descriptors" / "keychron_3434_d030_interface_2_report.hex";
+    std::ifstream input(fixture);
+    std::string encoded;
+    if (!std::getline(input, encoded)) {
+        return false;
+    }
+    std::string unexpected_line;
+    if (std::getline(input, unexpected_line)) {
+        return false;
+    }
+    return decode_hex(encoded, descriptor);
+}
+
 }  // namespace
 
 // ------------------------------------------------------------- a mouse
@@ -141,6 +159,11 @@ TEST_CASE(a_mouse_is_brought_up) {
     rig.begin(rig.chip.now_us());
 
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK_EQ(rig.setup.report_set().count, 1u);
+    CHECK_EQ(rig.setup.report_set().entries[0].role, ReportRole::Mouse);
+    CHECK_EQ(std::memcmp(&rig.setup.report_set().entries[0].mouse,
+                         &rig.setup.mouse_layout(), sizeof(rig.setup.mouse_layout())),
+             0);
 }
 
 TEST_CASE(a_mouse_beyond_the_ch375_single_descriptor_buffer_is_brought_up) {
@@ -436,6 +459,7 @@ TEST_CASE(a_device_that_refuses_the_protocol_request_is_still_brought_up) {
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
     CHECK_EQ(rig.setup.interrupt_endpoint(), 2u);
     CHECK_FALSE(rig.setup.boot_protocol_selected());
+    CHECK_EQ(rig.setup.report_set().count, 0u);
 }
 
 TEST_CASE(a_device_that_never_answers_the_protocol_request_is_still_brought_up) {
@@ -627,6 +651,19 @@ std::vector<std::uint8_t> bench_mouse_descriptor() {
     };
 }
 
+TEST_CASE(a_rejected_descriptor_does_not_survive_a_refused_boot_switch) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_report_keyboard(plain_wheel_mouse_descriptor());
+    rig.chip.refuse_setup_requests(true);
+
+    rig.begin(rig.chip.now_us());
+
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK_FALSE(rig.setup.boot_protocol_selected());
+    CHECK_EQ(rig.setup.report_set().count, 0u);
+}
+
 /// Run one report through a normalizer set up the way the runtime sets it up.
 struct Routed {
     duo_input::u1::input::InputEvent events[duo_input::u1::input::kMaxEventsPerReport];
@@ -669,6 +706,11 @@ TEST_CASE(a_mouse_that_declares_a_report_descriptor_is_asked_for_it) {
     CHECK_EQ(rig.chip.report_descriptor_asked_for(),
              static_cast<std::uint16_t>(plain_wheel_mouse_descriptor().size()));
     CHECK(rig.setup.has_mouse_layout());
+    CHECK_EQ(rig.setup.report_set().count, 1u);
+    CHECK_EQ(rig.setup.report_set().entries[0].role, ReportRole::Mouse);
+    CHECK_EQ(std::memcmp(&rig.setup.report_set().entries[0].mouse,
+                         &rig.setup.mouse_layout(), sizeof(rig.setup.mouse_layout())),
+             0);
 }
 
 TEST_CASE(the_request_is_a_get_descriptor_for_a_report_descriptor) {
@@ -1123,6 +1165,11 @@ TEST_CASE(a_keyboard_that_describes_itself_is_read_in_its_own_protocol) {
     CHECK(rig.setup.has_keyboard_layout());
     CHECK_EQ(rig.setup.keyboard_layout().key_element_count, std::uint8_t{6});
     CHECK_EQ(rig.setup.keyboard_layout().key_bit_offset, std::uint16_t{8});
+    CHECK_EQ(rig.setup.report_set().count, 1u);
+    CHECK_EQ(rig.setup.report_set().entries[0].role, ReportRole::Keyboard);
+    CHECK_EQ(std::memcmp(&rig.setup.report_set().entries[0].keyboard,
+                         &rig.setup.keyboard_layout(), sizeof(rig.setup.keyboard_layout())),
+             0);
 
     // And no SET_PROTOCOL. Asking for boot now throws away the very thing
     // this step went and fetched, and the one setup packet on the wire is the
@@ -1133,6 +1180,33 @@ TEST_CASE(a_keyboard_that_describes_itself_is_read_in_its_own_protocol) {
     SetupPacket packet;
     CHECK(read_setup(only_setup(rig.chip), packet));
     CHECK_EQ(packet.request, std::uint8_t{0x06});
+}
+
+TEST_CASE(the_keychron_descriptor_keeps_all_supported_reports_in_descriptor_order) {
+    std::vector<std::uint8_t> descriptor;
+    if (!read_keychron_keyboard_descriptor(descriptor)) {
+        CHECK(false);
+        return;
+    }
+
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_report_keyboard(descriptor, false);
+    rig.begin(rig.chip.now_us());
+
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK_EQ(descriptor.size(), std::size_t{164});
+    CHECK_EQ(rig.setup.report_set().count, 3u);
+    CHECK_EQ(rig.setup.report_set().entries[0].role, ReportRole::Keyboard);
+    CHECK_EQ(rig.setup.report_set().entries[0].report_id, 1u);
+    CHECK_EQ(rig.setup.report_set().entries[1].role, ReportRole::Consumer);
+    CHECK_EQ(rig.setup.report_set().entries[1].report_id, 2u);
+    CHECK_EQ(rig.setup.report_set().entries[2].role, ReportRole::Keyboard);
+    CHECK_EQ(rig.setup.report_set().entries[2].report_id, 12u);
+    CHECK_EQ(std::memcmp(&rig.setup.report_set().entries[0].keyboard,
+                         &rig.setup.keyboard_layout(), sizeof(rig.setup.keyboard_layout())),
+             0);
+    CHECK_FALSE(rig.setup.boot_protocol_selected());
 }
 
 TEST_CASE(the_captured_aula_keyboard_descriptor_is_used_as_the_aula_declared_it) {
@@ -1178,6 +1252,11 @@ TEST_CASE(a_keyboard_is_not_asked_for_its_report_descriptor) {
     CHECK_FALSE(rig.setup.has_keyboard_layout());
     CHECK_EQ(rig.setup.keyboard_layout().key_element_count, std::uint8_t{6});
     CHECK_FALSE(rig.setup.has_mouse_layout());
+    CHECK_EQ(rig.setup.report_set().count, 1u);
+    CHECK_EQ(rig.setup.report_set().entries[0].role, ReportRole::Keyboard);
+    CHECK_EQ(std::memcmp(&rig.setup.report_set().entries[0].keyboard,
+                         &rig.setup.keyboard_layout(), sizeof(rig.setup.keyboard_layout())),
+             0);
 }
 
 TEST_CASE(a_keyboard_layout_does_not_survive_into_the_next_device) {

@@ -143,7 +143,10 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
     // fell back to the boot layout must stay where it is: moving it would make
     // the device send a format nothing here knows how to read.
     //
-    const bool wants_report_protocol =
+    // Protocol belongs to the interface, not an entry or Report ID within it:
+    // one non-empty descriptor set selects report protocol once for all of
+    // the reports that descriptor published.
+    const bool wants_report_protocol = identity.report_set.count != 0 &&
         layout_source == pio_usb::HidLayoutSource::ReportDescriptor;
 
     // A successful late read describes the interface already announced with

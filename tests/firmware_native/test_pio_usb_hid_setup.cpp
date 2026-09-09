@@ -14,6 +14,7 @@
 using duo_input::u1::input::DeviceKind;
 using duo_input::u1::input::SourceIdentity;
 using duo_input::u1::input::hid::KeyboardFieldKind;
+using duo_input::u1::input::hid::ReportRole;
 using duo_input::u1::pio_usb::classify_hid_layout;
 using duo_input::u1::pio_usb::HidLayoutSource;
 
@@ -128,9 +129,28 @@ std::vector<std::uint8_t> consumer_control() {
 TEST_CASE(empty_callback_descriptor_is_absent_and_uses_only_matching_boot_protocol) {
     for (const auto protocol : {kProtocolKeyboard, kProtocolMouse}) {
         SourceIdentity identity;
-        CHECK(classify_hid(protocol, nullptr, 0, identity));
+        CHECK_EQ(classify_hid_layout(protocol, nullptr, 0, identity),
+                 HidLayoutSource::BootProtocol);
         CHECK_EQ(identity.kind, protocol == kProtocolKeyboard ? DeviceKind::Keyboard
                                                               : DeviceKind::Mouse);
+        CHECK_EQ(identity.report_set.count, 1u);
+        CHECK_EQ(identity.report_set.entries[0].role,
+                 protocol == kProtocolKeyboard ? ReportRole::Keyboard
+                                               : ReportRole::Mouse);
+        CHECK_EQ(identity.report_set.entries[0].report_id, 0u);
+        if (protocol == kProtocolKeyboard) {
+            CHECK_EQ(std::memcmp(&identity.report_set.entries[0].keyboard,
+                                 &identity.keyboard_layout,
+                                 sizeof(identity.keyboard_layout)),
+                     0);
+            CHECK_EQ(identity.mouse_layout.minimum_body_bytes, 0u);
+        } else {
+            CHECK_EQ(std::memcmp(&identity.report_set.entries[0].mouse,
+                                 &identity.mouse_layout,
+                                 sizeof(identity.mouse_layout)),
+                     0);
+            CHECK_EQ(identity.keyboard_layout.key_kind, KeyboardFieldKind::None);
+        }
         CHECK(all_zero(identity.descriptor_hash, sizeof(identity.descriptor_hash)));
     }
 
@@ -153,6 +173,12 @@ TEST_CASE(report_id_keyboard_uses_its_descriptor_layout_even_under_mouse_protoco
     CHECK_EQ(identity.keyboard_layout.key_element_count, std::uint8_t{6});
     CHECK_EQ(identity.keyboard_layout.minimum_body_bytes, std::uint8_t{7});
     CHECK_EQ(identity.mouse_layout.minimum_body_bytes, std::uint8_t{0});
+    CHECK_EQ(identity.report_set.count, 1u);
+    CHECK_EQ(identity.report_set.entries[0].role, ReportRole::Keyboard);
+    CHECK_EQ(std::memcmp(&identity.report_set.entries[0].keyboard,
+                         &identity.keyboard_layout,
+                         sizeof(identity.keyboard_layout)),
+             0);
 }
 
 TEST_CASE(five_button_wheel_mouse_keeps_the_neutral_descriptor_layout) {
@@ -168,6 +194,12 @@ TEST_CASE(five_button_wheel_mouse_keeps_the_neutral_descriptor_layout) {
     CHECK_EQ(identity.mouse_layout.wheel.offset, std::uint8_t{3});
     CHECK_EQ(identity.mouse_layout.minimum_body_bytes, std::uint8_t{3});
     CHECK_EQ(identity.keyboard_layout.key_kind, KeyboardFieldKind::None);
+    CHECK_EQ(identity.report_set.count, 1u);
+    CHECK_EQ(identity.report_set.entries[0].role, ReportRole::Mouse);
+    CHECK_EQ(std::memcmp(&identity.report_set.entries[0].mouse,
+                         &identity.mouse_layout,
+                         sizeof(identity.mouse_layout)),
+             0);
 }
 
 TEST_CASE(captured_aula_descriptor_is_classified_as_its_five_slot_keyboard_shape) {
@@ -180,6 +212,51 @@ TEST_CASE(captured_aula_descriptor_is_classified_as_its_five_slot_keyboard_shape
     CHECK_EQ(identity.kind, DeviceKind::Keyboard);
     CHECK_EQ(identity.keyboard_layout.key_element_count, std::uint8_t{5});
     CHECK_EQ(identity.keyboard_layout.minimum_body_bytes, std::uint8_t{7});
+    CHECK_EQ(identity.report_set.count, 1u);
+    CHECK_EQ(identity.report_set.entries[0].role, ReportRole::Keyboard);
+    CHECK_EQ(std::memcmp(&identity.report_set.entries[0].keyboard,
+                         &identity.keyboard_layout,
+                         sizeof(identity.keyboard_layout)),
+             0);
+}
+
+TEST_CASE(captured_keychron_descriptor_publishes_every_report_in_descriptor_order) {
+    const auto descriptor = read_hex(std::string{DUO_TEST_VECTOR_DIR} +
+                                     "/usb_descriptors/keychron_3434_d030_interface_2_report.hex");
+    CHECK_EQ(descriptor.size(), std::size_t{164});
+    SourceIdentity identity;
+
+    CHECK_EQ(classify_hid_layout(kProtocolKeyboard, descriptor.data(),
+                                 descriptor.size(), identity),
+             HidLayoutSource::ReportDescriptor);
+    CHECK_EQ(identity.report_set.count, 3u);
+    CHECK_EQ(identity.report_set.entries[0].role, ReportRole::Keyboard);
+    CHECK_EQ(identity.report_set.entries[0].report_id, 1u);
+    CHECK_EQ(identity.report_set.entries[1].role, ReportRole::Consumer);
+    CHECK_EQ(identity.report_set.entries[1].report_id, 2u);
+    CHECK_EQ(identity.report_set.entries[2].role, ReportRole::Keyboard);
+    CHECK_EQ(identity.report_set.entries[2].report_id, 12u);
+    CHECK_EQ(identity.kind, DeviceKind::Keyboard);
+    CHECK_EQ(std::memcmp(&identity.report_set.entries[0].keyboard,
+                         &identity.keyboard_layout,
+                         sizeof(identity.keyboard_layout)),
+             0);
+}
+
+TEST_CASE(a_descriptor_consumer_publishes_one_entry_with_its_legacy_layout) {
+    const auto descriptor = consumer_control();
+    SourceIdentity identity;
+
+    CHECK_EQ(classify_hid_layout(kProtocolNone, descriptor.data(), descriptor.size(),
+                                 identity),
+             HidLayoutSource::ReportDescriptor);
+    CHECK_EQ(identity.kind, DeviceKind::Consumer);
+    CHECK_EQ(identity.report_set.count, 1u);
+    CHECK_EQ(identity.report_set.entries[0].role, ReportRole::Consumer);
+    CHECK_EQ(std::memcmp(&identity.report_set.entries[0].keyboard,
+                         &identity.keyboard_layout,
+                         sizeof(identity.keyboard_layout)),
+             0);
 }
 
 TEST_CASE(valid_unsupported_descriptors_fall_back_only_for_a_matching_boot_protocol) {
@@ -211,16 +288,25 @@ TEST_CASE(malformed_descriptor_can_fall_back_but_cannot_leave_partial_layout_sta
     CHECK_FALSE(all_zero(identity.descriptor_hash, sizeof(identity.descriptor_hash)));
 }
 
-TEST_CASE(a_descriptor_with_both_supported_roles_is_rejected_as_ambiguous) {
+TEST_CASE(a_descriptor_with_both_supported_roles_keeps_both_in_descriptor_order) {
     auto descriptor = report_id_keyboard();
     const auto mouse = five_button_wheel_mouse();
     descriptor.insert(descriptor.end(), mouse.begin(), mouse.end());
     SourceIdentity identity;
 
-    CHECK_FALSE(classify_hid(kProtocolKeyboard, descriptor.data(), descriptor.size(), identity));
-    CHECK_EQ(identity.kind, DeviceKind::Unknown);
-    CHECK_EQ(identity.keyboard_layout.key_kind, KeyboardFieldKind::None);
-    CHECK_EQ(identity.mouse_layout.minimum_body_bytes, std::uint8_t{0});
+    CHECK_EQ(classify_hid_layout(kProtocolKeyboard, descriptor.data(), descriptor.size(),
+                                 identity),
+             HidLayoutSource::ReportDescriptor);
+    CHECK_EQ(identity.report_set.count, 2u);
+    CHECK_EQ(identity.report_set.entries[0].role, ReportRole::Keyboard);
+    CHECK_EQ(identity.report_set.entries[0].report_id, 2u);
+    CHECK_EQ(identity.report_set.entries[1].role, ReportRole::Mouse);
+    CHECK_EQ(identity.report_set.entries[1].report_id, 2u);
+    CHECK_EQ(identity.kind, DeviceKind::Keyboard);
+    CHECK_EQ(std::memcmp(&identity.report_set.entries[0].keyboard,
+                         &identity.keyboard_layout,
+                         sizeof(identity.keyboard_layout)),
+             0);
     CHECK_FALSE(all_zero(identity.descriptor_hash, sizeof(identity.descriptor_hash)));
 }
 

@@ -39,6 +39,7 @@ using duo_input::u1::input::DeviceKind;
 using duo_input::u1::input::SourceEvent;
 using duo_input::u1::input::SourceEventKind;
 using duo_input::u1::input::SourceIdentity;
+using duo_input::u1::input::hid::ReportRole;
 using duo_input::u1::reference::ReferenceSourceAdapter;
 
 namespace {
@@ -191,6 +192,32 @@ TEST_CASE(reference_capacity_refusal_counts_the_rejecting_boundary) {
     CHECK_EQ(adapter.rejected_interfaces(), 1u);
 }
 
+std::vector<std::uint8_t> keychron_keyboard_descriptor_vector() {
+    std::ifstream stream(std::string{DUO_TEST_VECTOR_DIR} +
+                         "/usb_descriptors/keychron_3434_d030_interface_2_report.hex");
+    std::string hex{std::istreambuf_iterator<char>{stream},
+                    std::istreambuf_iterator<char>{}};
+    hex.erase(std::remove_if(hex.begin(), hex.end(), [](char value) {
+                  return !std::isxdigit(static_cast<unsigned char>(value));
+              }),
+              hex.end());
+    std::vector<std::uint8_t> bytes;
+    for (std::size_t index = 0; index < hex.size(); index += 2) {
+        bytes.push_back(static_cast<std::uint8_t>(
+            std::stoul(hex.substr(index, 2), nullptr, 16)));
+    }
+    return bytes;
+}
+
+std::vector<std::uint8_t> consumer_report() {
+    return {
+        0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01,
+        0x15, 0x00, 0x26, 0xFF, 0x03,
+        0x19, 0x00, 0x2A, 0xFF, 0x03,
+        0x75, 0x10, 0x95, 0x01, 0x81, 0x00, 0xC0,
+    };
+}
+
 Taken take(ReferenceSourceAdapter& adapter) {
     Taken taken;
     taken.ok = adapter.take_event(taken.event, taken.identity);
@@ -233,6 +260,12 @@ TEST_CASE(a_boot_mouse_mount_is_announced_as_a_ready_mouse) {
     CHECK_EQ(taken.event.source_id, 0u);
     CHECK_EQ(taken.identity.interface_number, 0u);
     CHECK_EQ(taken.event.report_size, static_cast<std::size_t>(0));
+    CHECK_EQ(taken.identity.report_set.count, 1u);
+    CHECK_EQ(taken.identity.report_set.entries[0].role, ReportRole::Mouse);
+    CHECK_EQ(std::memcmp(&taken.identity.report_set.entries[0].mouse,
+                         &taken.identity.mouse_layout,
+                         sizeof(taken.identity.mouse_layout)),
+             0);
 
     CHECK_FALSE(take(adapter).ok);
 }
@@ -249,6 +282,12 @@ TEST_CASE(a_boot_keyboard_mount_is_announced_as_a_ready_keyboard) {
     CHECK(taken.identity.kind == DeviceKind::Keyboard);
     CHECK_EQ(taken.event.source_id, 0u);
     CHECK_EQ(taken.identity.interface_number, 0u);
+    CHECK_EQ(taken.identity.report_set.count, 1u);
+    CHECK_EQ(taken.identity.report_set.entries[0].role, ReportRole::Keyboard);
+    CHECK_EQ(std::memcmp(&taken.identity.report_set.entries[0].keyboard,
+                         &taken.identity.keyboard_layout,
+                         sizeof(taken.identity.keyboard_layout)),
+             0);
 }
 
 TEST_CASE(every_reference_interface_is_announced_and_reports_as_its_own_source) {
@@ -302,6 +341,60 @@ TEST_CASE(a_mouse_keeps_the_layout_its_report_descriptor_declared) {
     CHECK_EQ(taken.identity.mouse_layout.report_id_value, 1u);
     CHECK_EQ(taken.identity.mouse_layout.x.bytes, 2u);
     CHECK(taken.identity.mouse_layout.wheel.present);
+    CHECK_EQ(taken.identity.report_set.count, 1u);
+    CHECK_EQ(taken.identity.report_set.entries[0].role, ReportRole::Mouse);
+    CHECK_EQ(std::memcmp(&taken.identity.report_set.entries[0].mouse,
+                         &taken.identity.mouse_layout,
+                         sizeof(taken.identity.mouse_layout)),
+             0);
+}
+
+TEST_CASE(a_consumer_mount_publishes_one_entry_with_its_legacy_layout) {
+    ReferenceSourceAdapter adapter;
+    adapter.consume(mount(1, 0, kProtocolNone, 0x1234, 0x5678,
+                          consumer_report()),
+                    0);
+
+    const Taken taken = take(adapter);
+    CHECK(taken.ok);
+    CHECK_EQ(taken.identity.kind, DeviceKind::Consumer);
+    CHECK_EQ(taken.identity.report_set.count, 1u);
+    CHECK_EQ(taken.identity.report_set.entries[0].role, ReportRole::Consumer);
+    CHECK_EQ(std::memcmp(&taken.identity.report_set.entries[0].keyboard,
+                         &taken.identity.keyboard_layout,
+                         sizeof(taken.identity.keyboard_layout)),
+             0);
+}
+
+TEST_CASE(keychron_mount_publishes_every_report_and_requests_report_protocol_once) {
+    ReferenceSourceAdapter adapter;
+    const auto descriptor_bytes = keychron_keyboard_descriptor_vector();
+    CHECK_EQ(descriptor_bytes.size(), std::size_t{164});
+    adapter.consume(mount(1, 2, kProtocolKeyboard, 0x3434, 0xD030,
+                          descriptor_bytes),
+                    0);
+
+    const Taken taken = take(adapter);
+    CHECK(taken.ok);
+    CHECK_EQ(taken.identity.report_set.count, 3u);
+    CHECK_EQ(taken.identity.report_set.entries[0].role, ReportRole::Keyboard);
+    CHECK_EQ(taken.identity.report_set.entries[0].report_id, 1u);
+    CHECK_EQ(taken.identity.report_set.entries[1].role, ReportRole::Consumer);
+    CHECK_EQ(taken.identity.report_set.entries[1].report_id, 2u);
+    CHECK_EQ(taken.identity.report_set.entries[2].role, ReportRole::Keyboard);
+    CHECK_EQ(taken.identity.report_set.entries[2].report_id, 12u);
+    CHECK_EQ(taken.identity.kind, DeviceKind::Keyboard);
+    CHECK_EQ(std::memcmp(&taken.identity.report_set.entries[0].keyboard,
+                         &taken.identity.keyboard_layout,
+                         sizeof(taken.identity.keyboard_layout)),
+             0);
+
+    ReferenceSourceAdapter::ProtocolRequest request{};
+    CHECK(adapter.take_protocol_request(request));
+    CHECK_EQ(request.dev_addr, 1u);
+    CHECK_EQ(request.instance, 2u);
+    CHECK_EQ(request.protocol, ReferenceSourceAdapter::kHidProtocolReport);
+    CHECK_FALSE(adapter.take_protocol_request(request));
 }
 
 TEST_CASE(the_first_source_owns_diagnostics_and_a_second_is_also_accepted) {
@@ -633,6 +726,12 @@ TEST_CASE(a_late_aula_descriptor_releases_boot_state_before_changing_layout) {
     CHECK(upgraded.event.kind == SourceEventKind::Ready);
     CHECK(upgraded.identity.kind == DeviceKind::Keyboard);
     CHECK_EQ(upgraded.identity.keyboard_layout.key_element_count, 5u);
+    CHECK_EQ(upgraded.identity.report_set.count, 1u);
+    CHECK_EQ(upgraded.identity.report_set.entries[0].role, ReportRole::Keyboard);
+    CHECK_EQ(std::memcmp(&upgraded.identity.report_set.entries[0].keyboard,
+                         &upgraded.identity.keyboard_layout,
+                         sizeof(upgraded.identity.keyboard_layout)),
+             0);
 
     ReferenceSourceAdapter::ProtocolRequest protocol{};
     CHECK(adapter.take_protocol_request(protocol));

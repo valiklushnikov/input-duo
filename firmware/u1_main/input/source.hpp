@@ -101,6 +101,7 @@ struct SourceIdentity {
     std::uint8_t interface_number = 0;
     hid::KeyboardReportLayout keyboard_layout{};
     hid::MouseReportLayout mouse_layout{};
+    hid::HidReportSet report_set{};
     /// SHA-256 of the report descriptor the source gave up, or all zeros if
     /// none was read - a keyboard, or a mouse that declined.
     std::uint8_t descriptor_hash[32] = {};

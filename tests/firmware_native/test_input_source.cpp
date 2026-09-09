@@ -374,6 +374,11 @@ TEST_CASE(identity_reads_kind_layout_and_hash_from_a_settled_mouse_setup) {
     CHECK(identity.mouse_layout.wheel.present);
     CHECK(std::memcmp(&identity.mouse_layout, &rig.setup.mouse_layout(),
                       sizeof(identity.mouse_layout)) == 0);
+    CHECK_EQ(identity.report_set.count, 1u);
+    CHECK_EQ(identity.report_set.entries[0].role,
+             duo_input::u1::input::hid::ReportRole::Mouse);
+    CHECK(std::memcmp(&identity.report_set, &rig.setup.report_set(),
+                      sizeof(identity.report_set)) == 0);
 
     // A real SHA-256 of a non-empty descriptor is not all zero. If it were
     // copied wrong - or not copied at all - this and the memcmp below could

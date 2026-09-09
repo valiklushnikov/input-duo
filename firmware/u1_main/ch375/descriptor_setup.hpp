@@ -153,6 +153,9 @@ public:
     /// read, and boot protocol's when it was not.
     const KeyboardReportLayout& keyboard_layout() const { return keyboard_layout_; }
 
+    /// Every independently decodable report published by this interface.
+    const input::hid::HidReportSet& report_set() const { return report_set_; }
+
     /// Why the report descriptor was not used, for a bring-up build to report.
     std::uint8_t last_report_descriptor_status() const { return report_status_; }
     ReportDescriptorError last_report_descriptor_error() const { return report_error_; }
@@ -264,6 +267,7 @@ private:
     bool have_mouse_layout_ = false;
     KeyboardReportLayout keyboard_layout_ = boot_keyboard_layout();
     bool have_keyboard_layout_ = false;
+    input::hid::HidReportSet report_set_{};
     ReportDescriptorError report_error_ = ReportDescriptorError::None;
     std::uint8_t report_status_ = 0;
     /// How many times running the device has said nothing to the request.

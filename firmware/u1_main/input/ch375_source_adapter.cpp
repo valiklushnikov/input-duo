@@ -18,6 +18,18 @@ DeviceKind neutral_kind(ch375::DeviceKind kind) {
     }
 }
 
+DeviceKind neutral_kind(hid::ReportRole role) {
+    switch (role) {
+        case hid::ReportRole::Keyboard:
+            return DeviceKind::Keyboard;
+        case hid::ReportRole::Consumer:
+            return DeviceKind::Consumer;
+        case hid::ReportRole::Mouse:
+            return DeviceKind::Mouse;
+    }
+    return DeviceKind::Unknown;
+}
+
 }  // namespace
 
 bool Ch375SourceAdapter::convert(const ch375::Ch375Event& event, SourceEvent& out) const {
@@ -59,7 +71,10 @@ bool Ch375SourceAdapter::convert(const ch375::Ch375Event& event, SourceEvent& ou
 
 SourceIdentity Ch375SourceAdapter::identity(const ch375::DescriptorSetup& setup) const {
     SourceIdentity out;
-    out.kind = neutral_kind(setup.kind());
+    out.report_set = setup.report_set();
+    out.kind = out.report_set.count != 0
+                   ? neutral_kind(out.report_set.entries[0].role)
+                   : neutral_kind(setup.kind());
     out.vendor_id = setup.vendor_id();
     out.product_id = setup.product_id();
     out.keyboard_layout = setup.keyboard_layout();

@@ -68,6 +68,40 @@ constexpr std::size_t kMaxPacketSizeOffset = 7;
 /// does not add up rather than guessing at the rest.
 constexpr std::size_t kDescriptorBuffer = kMaxBlockSize;
 
+input::hid::HidReportSet boot_report_set(DeviceKind kind) {
+    input::hid::HidReportSet set;
+    set.count = 1;
+    set.entries[0].role = kind == DeviceKind::Mouse
+                              ? input::hid::ReportRole::Mouse
+                              : input::hid::ReportRole::Keyboard;
+    set.entries[0].keyboard = input::hid::boot_keyboard_layout();
+    set.entries[0].mouse = input::hid::boot_mouse_layout();
+    return set;
+}
+
+ReportDescriptorError rejected_error(const input::hid::HidReportSet& set,
+                                     input::hid::ReportRole role,
+                                     ReportDescriptorError missing) {
+    for (std::size_t index = 0; index < set.rejected_count; ++index) {
+        if (set.rejected[index].role == role) {
+            return set.rejected[index].reason;
+        }
+    }
+    return missing;
+}
+
+bool has_primary_role(const input::hid::HidReportSet& set, DeviceKind kind) {
+    const input::hid::ReportRole expected =
+        kind == DeviceKind::Mouse ? input::hid::ReportRole::Mouse
+                                  : input::hid::ReportRole::Keyboard;
+    for (std::size_t index = 0; index < set.count; ++index) {
+        if (set.entries[index].role == expected) {
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 void DescriptorSetup::begin(std::uint32_t now_us) {
@@ -90,6 +124,7 @@ void DescriptorSetup::begin(std::uint32_t now_us) {
     have_mouse_layout_ = false;
     keyboard_layout_ = boot_keyboard_layout();
     have_keyboard_layout_ = false;
+    report_set_ = input::hid::HidReportSet{};
     report_error_ = ReportDescriptorError::None;
     report_status_ = 0;
     control_packet_ = 8;
@@ -337,49 +372,41 @@ SetupProgress DescriptorSetup::apply_report_descriptor(std::uint32_t now_us) {
         return abandon_report_descriptor(now_us, kReportDescriptorUnreadable);
     }
 
-    if (capabilities_.kind == DeviceKind::Keyboard) {
-        KeyboardReportLayout layout = boot_keyboard_layout();
-        report_error_ = parse_keyboard_report_descriptor(
-            protocol::ByteView{report_buffer_, report_received_}, layout);
-        if (report_error_ != ReportDescriptorError::None) {
-            // Bytes that do not add up, two keyboard reports with no way to
-            // say which is which, a descriptor that is not a keyboard at all.
-            // Each is a device that may still type on boot protocol's fixed
-            // report - if it has one.
-            report_status_ = kReportDescriptorUnusable;
-            return fallback_keyboard_to_boot(now_us);
-        }
-
-        keyboard_layout_ = layout;
-        have_keyboard_layout_ = true;
-        // And no SET_PROTOCOL. Boot protocol's report is eight fixed bytes
-        // with six key slots in it, and a keyboard that declares five slots
-        // and a vendor byte is not sending that - so asking for boot now
-        // throws away the very thing this step went and fetched.
-        return finish(kReportDescriptorUsed);
-    }
-
-    MouseReportLayout layout = boot_mouse_layout();
-    report_error_ = parse_mouse_report_descriptor(
-        protocol::ByteView{report_buffer_, report_received_}, layout);
+    report_error_ = input::hid::parse_hid_report_set(
+        protocol::ByteView{report_buffer_, report_received_}, report_set_);
     if (report_error_ != ReportDescriptorError::None) {
-        // A descriptor that does not add up, a field wider than the bounded
-        // reader, a device that is not a pointer at all. Each of them is a
-        // device this firmware can still route on boot protocol's fixed report.
+        return abandon_report_descriptor(now_us, kReportDescriptorUnusable);
+    }
+    if (report_set_.count == 0 ||
+        !has_primary_role(report_set_, capabilities_.kind)) {
+        report_error_ = capabilities_.kind == DeviceKind::Mouse
+                            ? rejected_error(report_set_, input::hid::ReportRole::Mouse,
+                                             ReportDescriptorError::NoMouseReport)
+                            : rejected_error(report_set_, input::hid::ReportRole::Keyboard,
+                                             ReportDescriptorError::NoKeyboardReport);
         return abandon_report_descriptor(now_us, kReportDescriptorUnusable);
     }
 
-    mouse_layout_ = layout;
-    have_mouse_layout_ = true;
-    // And no SET_PROTOCOL. Boot protocol's report is three bytes and has no
-    // wheel in it, so asking for it now would throw away the very thing this
-    // step went and fetched.
+    const input::hid::HidReportEntry& first = report_set_.entries[0];
+    if (first.role == input::hid::ReportRole::Mouse) {
+        mouse_layout_ = first.mouse;
+        have_mouse_layout_ = true;
+    } else {
+        keyboard_layout_ = first.keyboard;
+        have_keyboard_layout_ = true;
+    }
+    // The accepted report set describes report protocol interface-wide. No
+    // individual Report ID gets to select a different protocol.
     return finish(kReportDescriptorUsed);
 }
 
 SetupProgress DescriptorSetup::abandon_report_descriptor(std::uint32_t now_us,
                                                         std::uint8_t status) {
     report_status_ = status;
+    // Parsed candidates describe report protocol. Once that descriptor is
+    // rejected they cannot be published as the active wire format, including
+    // when the subsequent boot-protocol request is refused or silent.
+    report_set_ = input::hid::HidReportSet{};
     // Do not erase bytes already collected.  A zero byte count means nothing
     // arrived; a non-zero count plus kReportDescriptorUnusable means the
     // parser rejected actual evidence.  begin() resets the count before the
@@ -633,6 +660,9 @@ SetupProgress DescriptorSetup::poll(std::uint32_t now_us, bool interrupted,
             // Now it is in boot protocol, which is the report format every
             // normalizer here was written against.
             boot_protocol_selected_ = true;
+            report_set_ = boot_report_set(capabilities_.kind);
+            keyboard_layout_ = report_set_.entries[0].keyboard;
+            mouse_layout_ = report_set_.entries[0].mouse;
             return finish(static_cast<std::uint8_t>(InterruptStatus::Success));
 
         case Step::Idle:
