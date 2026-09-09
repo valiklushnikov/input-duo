@@ -20,6 +20,7 @@ from duo_input.domain.models import Macro, MacroStep, TargetMode
 from duo_input.generated.protocol import (
     BINARY_CONFIG_MAX_BYTES,
     PROTOCOL_VERSION_MAJOR,
+    Capability,
     CdcMessageType,
     MacroStepType,
 )
@@ -101,6 +102,7 @@ class _MutatingTransport(AbstractByteTransport):
         super().__init__()
         self._emulator = emulator
         self._mutate = mutate
+        self.requests: list[CdcMessageType] = []
 
     @property
     def is_open(self) -> bool:
@@ -113,6 +115,8 @@ class _MutatingTransport(AbstractByteTransport):
         self._emulator.close()
 
     def write(self, data: bytes) -> bytes:
+        for part in data[:-1].split(b"\0"):
+            self.requests.append(decode_cdc_frame(part + b"\0").type)
         raw = self._emulator.write(data)
         if not raw:
             return raw
@@ -551,6 +555,67 @@ def test_get_diagnostics_reports_device_counters(qtbot, service, emulator, confi
     assert diagnostics.aborted_staging == 0
 
 
+def test_get_diagnostics_fetches_optional_hid_descriptor_evidence(
+    qtbot, service, emulator, config_a
+):
+    emulator.install_active(config_a)
+    transport = _MutatingTransport(emulator, lambda frame: frame)
+    _connect(qtbot, service, transport)
+
+    result = _succeed(qtbot, service, service.get_diagnostics)
+
+    assert result.value is service.diagnostics
+    assert service.hid_descriptor_capture.present is False
+    assert transport.requests[-2:] == [
+        CdcMessageType.GET_DIAGNOSTICS,
+        CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE,
+    ]
+
+
+def test_get_diagnostics_remains_compatible_when_descriptor_capability_is_absent(
+    qtbot, service, emulator, config_a
+):
+    emulator.install_active(config_a)
+
+    def remove_descriptor_capability(frame: CdcFrame):
+        if frame.type is not CdcMessageType.DEVICE_INFO:
+            return frame
+        payload = bytearray(frame.payload)
+        capabilities = int.from_bytes(payload[3:7], "little")
+        payload[3:7] = (capabilities & ~int(Capability.HID_DESCRIPTOR_DIAGNOSTICS)).to_bytes(
+            4, "little"
+        )
+        return replace(frame, payload=bytes(payload))
+
+    transport = _MutatingTransport(emulator, remove_descriptor_capability)
+    _connect(qtbot, service, transport)
+
+    result = _succeed(qtbot, service, service.get_diagnostics)
+
+    assert result.value is service.diagnostics
+    assert service.hid_descriptor_capture is None
+    assert CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE not in transport.requests
+
+
+def test_malformed_hid_descriptor_evidence_fails_diagnostics_by_name(
+    qtbot, service, emulator, config_a
+):
+    emulator.install_active(config_a)
+
+    def truncate_descriptor_reply(frame: CdcFrame):
+        if frame.type is CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE:
+            return replace(frame, payload=b"\0\1")
+        return frame
+
+    transport = _MutatingTransport(emulator, truncate_descriptor_reply)
+    _connect(qtbot, service, transport)
+
+    failure = _fail(qtbot, service, service.get_diagnostics)
+
+    assert failure.operation == "get_diagnostics"
+    assert failure.reason is FailureReason.BAD_PAYLOAD
+
+
 def test_a_diagnostics_reply_the_host_cannot_read_is_named_not_waited_out(
     qtbot, service, emulator, config_a
 ):
@@ -749,9 +814,12 @@ def test_a_reply_never_rewinds_the_sequence_behind_a_capture_event(
     request = transport.requests[already_sent]
     assert request.type is CdcMessageType.STOP_AND_RELEASE_ALL
     assert transport.capture_sequence is not None
-    # The capture event consumed capture_sequence, so the next host request must
-    # be the one after it and must never rewind to a sequence already spent.
-    assert request.sequence == (transport.capture_sequence + 1) & 0xFFFF
+    # The capture event consumed capture_sequence. The optional descriptor
+    # request consumes the next sequence, and this later request must continue
+    # after both rather than rewind to a sequence already spent.
+    assert transport.requests[already_sent - 1].type is CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE
+    assert transport.requests[already_sent - 1].sequence == (transport.capture_sequence + 1) & 0xFFFF
+    assert request.sequence == (transport.capture_sequence + 2) & 0xFFFF
     # Let the in-flight request settle; the emulator never saw the fabricated
     # capture event, so it answers BAD_SEQUENCE and the operation ends there.
     qtbot.waitUntil(lambda: service.state is not DeviceState.BUSY, timeout=5000)
@@ -808,6 +876,7 @@ def test_disconnecting_forgets_the_counters(qtbot, service, emulator, config_a):
     service.disconnect_device()
 
     assert service.diagnostics is None
+    assert service.hid_descriptor_capture is None
 
 
 # ------------------------------------------------------ link state over CDC

@@ -42,6 +42,7 @@ _FIXED_REQUEST_SIZES = {
     CdcMessageType.TEST_MACRO: 2,
     CdcMessageType.STOP_AND_RELEASE_ALL: 0,
     CdcMessageType.GET_DIAGNOSTICS: 0,
+    CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE: 0,
     CdcMessageType.FACTORY_RESET_ARM: 0,
     CdcMessageType.FACTORY_RESET_COMMIT: 0,
 }
@@ -59,6 +60,7 @@ _REQUIRED_CAPABILITY = {
     CdcMessageType.CAPTURE_END: Capability.CAPTURE,
     CdcMessageType.TEST_MACRO: Capability.TEST_MACRO,
     CdcMessageType.GET_DIAGNOSTICS: Capability.DIAGNOSTICS,
+    CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE: Capability.HID_DESCRIPTOR_DIAGNOSTICS,
     CdcMessageType.FACTORY_RESET_ARM: Capability.FACTORY_RESET,
     CdcMessageType.FACTORY_RESET_COMMIT: Capability.FACTORY_RESET,
 }
@@ -185,6 +187,7 @@ class U1Emulator(AbstractByteTransport):
         #: for byte the way firmware without the block answers, same as
         #: ``input_backend`` being ``None`` above.
         self.reference_counters: tuple[int, int, int, int] | None = None
+        self._hid_descriptor_capture: tuple[int, int, int, int, bytes] | None = None
         self._timeout_once = False
         self._disconnect_once = False
         self._bad_crc_response_once = False
@@ -193,6 +196,30 @@ class U1Emulator(AbstractByteTransport):
     @property
     def last_sequence(self) -> int | None:
         return self._last_sequence
+
+    def set_hid_descriptor_capture(
+        self,
+        vendor_id: int,
+        product_id: int,
+        interface_number: int,
+        descriptor: bytes,
+        *,
+        original_size: int | None = None,
+    ) -> None:
+        """Install deterministic descriptor evidence for host integration tests."""
+        captured = bytes(descriptor)
+        if not captured or len(captured) > 256:
+            raise ValueError("captured HID descriptor must contain 1..256 bytes")
+        original = len(captured) if original_size is None else original_size
+        if original < len(captured) or original > 0xFFFF:
+            raise ValueError("original HID descriptor size is inconsistent")
+        self._hid_descriptor_capture = (
+            vendor_id,
+            product_id,
+            interface_number,
+            original,
+            captured,
+        )
 
     @property
     def active_generation(self) -> int:
@@ -447,6 +474,8 @@ class U1Emulator(AbstractByteTransport):
             return bytes((error,)) + (frame.payload[:4] if len(frame.payload) >= 4 else b"\0" * 4)
         if frame.type is CdcMessageType.GET_DIAGNOSTICS:
             return bytes((error,)) + self._handle_get_diagnostics(b"")[1:]
+        if frame.type is CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE:
+            return bytes((error,)) + self._handle_get_hid_descriptor_capture(b"")[1:]
         if frame.type is CdcMessageType.PING:
             return bytes((error,)) + (frame.payload if len(frame.payload) < CDC_MAX_PAYLOAD else b"")
         return bytes((error,))
@@ -653,6 +682,28 @@ class U1Emulator(AbstractByteTransport):
             + struct.pack("<I", self.dropped_commands)
             + struct.pack("<B", self.runtime_fault)
             + self._appended_diagnostics()
+        )
+
+    def _handle_get_hid_descriptor_capture(self, payload: bytes) -> bytes:
+        if self._hid_descriptor_capture is None:
+            return struct.pack("<BBBHHBHH", ErrorCode.OK, 1, 0, 0, 0, 0, 0, 0)
+        vendor_id, product_id, interface_number, original_size, descriptor = (
+            self._hid_descriptor_capture
+        )
+        flags = 1 | (2 if original_size > len(descriptor) else 0)
+        return (
+            struct.pack(
+                "<BBBHHBHH",
+                ErrorCode.OK,
+                1,
+                flags,
+                vendor_id,
+                product_id,
+                interface_number,
+                original_size,
+                len(descriptor),
+            )
+            + descriptor
         )
 
     def _appended_diagnostics(self) -> bytes:

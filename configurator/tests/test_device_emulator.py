@@ -509,6 +509,41 @@ def test_diagnostics_count_crc_disconnect_timeout_bad_sequence_and_aborts(config
     )
 
 
+def test_hid_descriptor_capture_defaults_to_an_explicit_absent_record():
+    emulator = U1Emulator()
+    emulator.open()
+    _hello(emulator)
+
+    reply = _request(emulator, CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE)
+
+    assert reply.payload == struct.pack(
+        "<BBBHHBHH",
+        ErrorCode.OK,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+
+
+def test_hid_descriptor_capture_fixture_round_trips_exact_bytes():
+    emulator = U1Emulator()
+    descriptor = bytes((0x05, 0x01, 0x09, 0x02))
+    emulator.set_hid_descriptor_capture(0x3434, 0xD030, 2, descriptor)
+    emulator.open()
+    _hello(emulator)
+
+    reply = _request(emulator, CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE)
+
+    assert reply.payload == (
+        struct.pack("<BBBHHBHH", ErrorCode.OK, 1, 1, 0x3434, 0xD030, 2, 4, 4)
+        + descriptor
+    )
+
+
 def test_malformed_payloads_and_output_only_types_do_not_mutate_state(config_b: bytes):
     emulator = U1Emulator()
     _hello(emulator)

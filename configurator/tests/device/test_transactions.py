@@ -26,6 +26,59 @@ from duo_input.protocol.cobs import cobs_encode
 from duo_input.protocol.frame import CdcFrame, encode_cdc_frame
 
 
+def _hid_descriptor_parser():
+    from duo_input.device import transactions
+
+    parser = getattr(transactions, "parse_hid_descriptor_capture", None)
+    assert parser is not None, "descriptor capture parser is missing"
+    return parser
+
+
+def test_hid_descriptor_capture_parses_absent_complete_and_truncated_payloads():
+    parse = _hid_descriptor_parser()
+
+    absent = parse(bytes((0, 1)) + bytes(10))
+    complete = parse(
+        struct.pack("<BBBHHBHH", 0, 1, 1, 0x3434, 0xD030, 2, 3, 3)
+        + bytes.fromhex("05 01 09")
+    )
+    truncated = parse(
+        struct.pack("<BBBHHBHH", 0, 1, 3, 0x1234, 0x5678, 9, 300, 2)
+        + bytes.fromhex("AA BB")
+    )
+
+    assert absent.present is False
+    assert absent.descriptor == b""
+    assert (complete.vendor_id, complete.product_id, complete.interface_number) == (
+        0x3434,
+        0xD030,
+        2,
+    )
+    assert complete.descriptor == bytes.fromhex("05 01 09")
+    assert complete.truncated is False
+    assert truncated.original_size == 300
+    assert truncated.descriptor == bytes.fromhex("AA BB")
+    assert truncated.truncated is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"\0" * 11,
+        struct.pack("<BBBHHBHH", 0, 2, 0, 0, 0, 0, 0, 0),
+        struct.pack("<BBBHHBHH", 0, 1, 4, 0, 0, 0, 0, 0),
+        struct.pack("<BBBHHBHH", 0, 1, 1, 1, 2, 3, 257, 257) + bytes(257),
+        struct.pack("<BBBHHBHH", 0, 1, 1, 1, 2, 3, 2, 2) + b"x",
+        struct.pack("<BBBHHBHH", 0, 1, 0, 1, 0, 0, 0, 0),
+        struct.pack("<BBBHHBHH", 0, 1, 1, 1, 2, 3, 3, 2) + b"xx",
+        struct.pack("<BBBHHBHH", 0, 1, 3, 1, 2, 3, 2, 2) + b"xx",
+    ],
+)
+def test_hid_descriptor_capture_rejects_inconsistent_payloads(payload):
+    with pytest.raises(PayloadError):
+        _hid_descriptor_parser()(payload)
+
+
 def test_inventory_tail_keeps_interfaces_names_and_rejections_and_old_reply():
     from duo_input.device.transactions import parse_diagnostics
     from duo_input.domain.models import Trigger

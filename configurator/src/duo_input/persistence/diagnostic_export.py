@@ -13,6 +13,7 @@ nothing, the field says ``unknown`` rather than a plausible-looking value.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import zipfile
 from dataclasses import asdict, dataclass, field
@@ -133,6 +134,7 @@ class DiagnosticSnapshot:
     cdc_timeout: int | str = UNKNOWN
     cdc_disconnect: int | str = UNKNOWN
     cdc_aborted_staging: int | str = UNKNOWN
+    hid_descriptor_capture: dict[str, object] | str = UNKNOWN
 
     @classmethod
     def unknown(cls) -> DiagnosticSnapshot:
@@ -188,10 +190,31 @@ class DiagnosticSnapshot:
             reference_keyboard_ready=_reference_ready(counters, "keyboard_ready"),
             reference_mouse_ready=_reference_ready(counters, "mouse_ready"),
             peripherals=_peripherals(counters),
+            hid_descriptor_capture=_hid_descriptor_capture(service),
         )
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _hid_descriptor_capture(service: object) -> dict[str, object] | str:
+    capture = getattr(service, "hid_descriptor_capture", None)
+    if capture is None:
+        return UNKNOWN
+    if not capture.present:
+        return {"present": False}
+    descriptor = bytes(capture.descriptor)
+    return {
+        "present": True,
+        "truncated": capture.truncated,
+        "vendor_id": f"0x{capture.vendor_id:04X}",
+        "product_id": f"0x{capture.product_id:04X}",
+        "interface_number": capture.interface_number,
+        "original_size": capture.original_size,
+        "captured_size": capture.captured_size,
+        "sha256": hashlib.sha256(descriptor).hexdigest(),
+        "hex": descriptor.hex(" ").upper(),
+    }
 
 
 def _input_sources(counters: object) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import zipfile
 
@@ -127,6 +128,7 @@ def test_the_archive_records_every_field_the_report_needs(tmp_path):
         "cdc_timeout",
         "cdc_disconnect",
         "cdc_aborted_staging",
+        "hid_descriptor_capture",
     ):
         assert field in report
 
@@ -143,6 +145,7 @@ def test_a_field_protocol_v1_does_not_carry_says_so(tmp_path):
     assert report["reference_keyboard_ready"] == UNKNOWN
     assert report["reference_mouse_ready"] == UNKNOWN
     assert report["peripherals"] == []
+    assert report["hid_descriptor_capture"] == UNKNOWN
 
 
 def test_the_application_log_travels_with_the_report(tmp_path):
@@ -192,6 +195,36 @@ def test_a_connected_device_fills_in_what_protocol_v1_reports(qtbot, emulator):
     # The emulator answers the way firmware predating the suffix answers, and
     # nothing may invent a backend for it.
     assert snapshot.input_backend == UNKNOWN
+    assert snapshot.hid_descriptor_capture == {"present": False}
+
+
+def test_a_captured_hid_descriptor_round_trips_exactly_through_the_archive(
+    qtbot, emulator, tmp_path
+):
+    descriptor = bytes((0x05, 0x01, 0x09, 0x02))
+    emulator.set_hid_descriptor_capture(0x3434, 0xD030, 2, descriptor)
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    archive = build_diagnostic_zip(
+        tmp_path / "diag.zip", DiagnosticSnapshot.from_service(service)
+    )
+    capture = json.loads(_members(archive)[DIAGNOSTICS_MEMBER])["hid_descriptor_capture"]
+
+    assert capture == {
+        "present": True,
+        "truncated": False,
+        "vendor_id": "0x3434",
+        "product_id": "0xD030",
+        "interface_number": 2,
+        "original_size": 4,
+        "captured_size": 4,
+        "sha256": hashlib.sha256(descriptor).hexdigest(),
+        "hex": "05 01 09 02",
+    }
 
 
 def test_a_disconnected_service_yields_an_all_unknown_snapshot(qtbot):

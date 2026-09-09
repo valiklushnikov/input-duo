@@ -48,7 +48,9 @@ _PERIPHERAL = struct.Struct("<BBBHHBH32s")
 _CHUNK_ACK = struct.Struct("<BI")
 _CAPTURE_EVENT_LEGACY = struct.Struct("<BBB")
 _CAPTURE_EVENT_FULL = struct.Struct("<BBBHHB")
+_HID_DESCRIPTOR_CAPTURE = struct.Struct("<BBBHHBHH")
 assert _CAPTURE_EVENT_FULL.size == CAPTURE_EVENT_PAYLOAD_BYTES
+assert _HID_DESCRIPTOR_CAPTURE.size == 12
 
 
 class PayloadError(ValueError):
@@ -112,6 +114,21 @@ class DeviceStatus:
     capture_active: bool
     staging_active: bool
     release_all_count: int
+
+
+@dataclass(frozen=True)
+class HidDescriptorCapture:
+    present: bool
+    truncated: bool
+    vendor_id: int
+    product_id: int
+    interface_number: int
+    original_size: int
+    descriptor: bytes
+
+    @property
+    def captured_size(self) -> int:
+        return len(self.descriptor)
 
 
 @dataclass(frozen=True)
@@ -788,6 +805,49 @@ def parse_config_info(payload: bytes) -> ActiveConfigInfo:
     return ActiveConfigInfo(generation, size, digest)
 
 
+def parse_hid_descriptor_capture(payload: bytes) -> HidDescriptorCapture:
+    if len(payload) < _HID_DESCRIPTOR_CAPTURE.size:
+        raise PayloadError("GET_HID_DESCRIPTOR_CAPTURE payload is too short")
+    (
+        _error,
+        version,
+        flags,
+        vendor_id,
+        product_id,
+        interface_number,
+        original_size,
+        captured_size,
+    ) = _HID_DESCRIPTOR_CAPTURE.unpack_from(payload)
+    descriptor = bytes(payload[_HID_DESCRIPTOR_CAPTURE.size :])
+
+    if version != 1:
+        raise PayloadError("GET_HID_DESCRIPTOR_CAPTURE version is unsupported")
+    if flags & ~0x03:
+        raise PayloadError("GET_HID_DESCRIPTOR_CAPTURE flags are invalid")
+    if captured_size > 256 or len(descriptor) != captured_size:
+        raise PayloadError("GET_HID_DESCRIPTOR_CAPTURE size is inconsistent")
+
+    present = bool(flags & 0x01)
+    truncated = bool(flags & 0x02)
+    if not present:
+        if truncated or vendor_id or product_id or interface_number or original_size or captured_size:
+            raise PayloadError("absent HID descriptor capture carries data")
+    elif original_size == 0 or captured_size == 0:
+        raise PayloadError("present HID descriptor capture is empty")
+    elif truncated != (original_size > captured_size):
+        raise PayloadError("HID descriptor truncation flag disagrees with its sizes")
+
+    return HidDescriptorCapture(
+        present,
+        truncated,
+        vendor_id,
+        product_id,
+        interface_number,
+        original_size,
+        descriptor,
+    )
+
+
 def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
     """Read the counters, and the link state when the firmware reports it.
 
@@ -1388,6 +1448,7 @@ __all__ = [
     "InputBackendReport",
     "LatencyHistogram",
     "HostObservation",
+    "HidDescriptorCapture",
     "PeripheralPort",
     "ReferenceCounters",
     "OperationFailure",
@@ -1400,6 +1461,7 @@ __all__ = [
     "parse_config_info",
     "parse_device_info",
     "parse_diagnostics",
+    "parse_hid_descriptor_capture",
     "parse_read_chunk",
     "parse_status",
     "percentage",

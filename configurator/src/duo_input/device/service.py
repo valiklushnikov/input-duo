@@ -42,6 +42,7 @@ from .transactions import (
     parse_config_info,
     parse_device_info,
     parse_diagnostics,
+    parse_hid_descriptor_capture,
     parse_read_chunk,
     parse_status,
     percentage,
@@ -102,6 +103,7 @@ class DeviceService(QObject):
         self._device_info = None
         self._status = None
         self._diagnostics = None
+        self._hid_descriptor_capture = None
         self._captures_received = 0
         self._capture_decision = "none"
         self._capture_payload = b""
@@ -149,6 +151,11 @@ class DeviceService(QObject):
         return self._diagnostics
 
     @property
+    def hid_descriptor_capture(self):
+        """Optional report-descriptor evidence fetched with diagnostics."""
+        return self._hid_descriptor_capture
+
+    @property
     def device_hash(self) -> bytes:
         """Last hash the device reported for its active configuration."""
         return self._device_hash
@@ -177,6 +184,7 @@ class DeviceService(QObject):
         self._device_info = None
         self._status = None
         self._diagnostics = None
+        self._hid_descriptor_capture = None
         self._captures_received = 0
         self._capture_decision = "none"
         self._capture_payload = b""
@@ -415,6 +423,7 @@ class DeviceService(QObject):
         self._staging_open = False
         # Counters belong to the device that reported them, not to the host.
         self._diagnostics = None
+        self._hid_descriptor_capture = None
         self._timer.stop()
         self._assembler.clear()
         if link is not None:
@@ -531,6 +540,20 @@ class DeviceService(QObject):
 
     def _on_diagnostics(self, payload: bytes) -> None:
         self._diagnostics = parse_diagnostics(payload)
+        if self._device_info is not None and (
+            self._device_info.capabilities & int(Capability.HID_DESCRIPTOR_DIAGNOSTICS)
+        ):
+            self._request(
+                CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE,
+                CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE,
+                b"",
+                self._on_hid_descriptor_capture,
+            )
+            return
+        self._finish_success(self._diagnostics)
+
+    def _on_hid_descriptor_capture(self, payload: bytes) -> None:
+        self._hid_descriptor_capture = parse_hid_descriptor_capture(payload)
         self._finish_success(self._diagnostics)
 
     # read -------------------------------------------------------------------
