@@ -591,6 +591,25 @@ std::vector<std::uint8_t> plain_wheel_mouse_descriptor() {
     };
 }
 
+std::vector<std::uint8_t> consumer_report_descriptor() {
+    return {
+        0x05, 0x0C, 0x85, 0x02,
+        0x19, 0x01, 0x29, 0x02, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x02, 0x81, 0x02,
+    };
+}
+
+std::vector<std::uint8_t> unsupported_keyboard_then_consumer_descriptor() {
+    return {
+        0x05, 0x07, 0x85, 0x01,
+        0x19, 0x00, 0x29, 0x65, 0x15, 0x00, 0x25, 0x65,
+        0x75, 0x11, 0x95, 0x01, 0x81, 0x00,
+        0x05, 0x0C, 0x85, 0x02,
+        0x19, 0x01, 0x29, 0x02, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x02, 0x81, 0x02,
+    };
+}
+
 /// The report descriptor of a mouse whose reports lead with an identifier.
 ///
 /// Identifier, one button byte, sixteen-bit X and Y, one wheel byte: the
@@ -651,7 +670,7 @@ std::vector<std::uint8_t> bench_mouse_descriptor() {
     };
 }
 
-TEST_CASE(a_rejected_descriptor_does_not_survive_a_refused_boot_switch) {
+TEST_CASE(a_valid_wrong_role_descriptor_never_attempts_a_boot_switch) {
     Rig rig;
     rig.chip.attach_device();
     rig.chip.serve_report_keyboard(plain_wheel_mouse_descriptor());
@@ -661,7 +680,10 @@ TEST_CASE(a_rejected_descriptor_does_not_survive_a_refused_boot_switch) {
 
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
     CHECK_FALSE(rig.setup.boot_protocol_selected());
-    CHECK_EQ(rig.setup.report_set().count, 0u);
+    CHECK_EQ(rig.setup.report_set().count, 1u);
+    CHECK_EQ(rig.setup.report_set().entries[0].role, ReportRole::Mouse);
+    CHECK(rig.setup.has_mouse_layout());
+    CHECK_EQ(rig.chip.setup_packets().size(), std::size_t{1});
 }
 
 /// Run one report through a normalizer set up the way the runtime sets it up.
@@ -1209,6 +1231,42 @@ TEST_CASE(the_keychron_descriptor_keeps_all_supported_reports_in_descriptor_orde
     CHECK_FALSE(rig.setup.boot_protocol_selected());
 }
 
+TEST_CASE(a_consumer_only_descriptor_is_a_usable_descriptor_report_set) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_report_keyboard(consumer_report_descriptor());
+    rig.begin(rig.chip.now_us());
+
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK_EQ(rig.setup.report_set().count, 1u);
+    CHECK_EQ(rig.setup.report_set().entries[0].role, ReportRole::Consumer);
+    CHECK_EQ(rig.setup.report_set().entries[0].report_id, 2u);
+    CHECK_EQ(rig.setup.report_set().rejected_count, 0u);
+    CHECK(rig.setup.has_keyboard_layout());
+    CHECK(rig.setup.keyboard_layout().consumer);
+    CHECK_FALSE(rig.setup.boot_protocol_selected());
+}
+
+TEST_CASE(an_unsupported_keyboard_report_does_not_hide_a_later_consumer_report) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_report_keyboard(unsupported_keyboard_then_consumer_descriptor());
+    rig.begin(rig.chip.now_us());
+
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+    CHECK_EQ(rig.setup.report_set().count, 1u);
+    CHECK_EQ(rig.setup.report_set().entries[0].role, ReportRole::Consumer);
+    CHECK_EQ(rig.setup.report_set().entries[0].report_id, 2u);
+    CHECK_EQ(rig.setup.report_set().rejected_count, 1u);
+    CHECK_EQ(rig.setup.report_set().rejected[0].role, ReportRole::Keyboard);
+    CHECK_EQ(rig.setup.report_set().rejected[0].report_id, 1u);
+    CHECK_EQ(rig.setup.report_set().rejected[0].reason,
+             duo_input::u1::ch375::ReportDescriptorError::UnsupportedLayout);
+    CHECK(rig.setup.has_keyboard_layout());
+    CHECK(rig.setup.keyboard_layout().consumer);
+    CHECK_FALSE(rig.setup.boot_protocol_selected());
+}
+
 TEST_CASE(the_captured_aula_keyboard_descriptor_is_used_as_the_aula_declared_it) {
     std::vector<std::uint8_t> descriptor;
     if (!read_aula_keyboard_descriptor(descriptor)) {
@@ -1346,22 +1404,24 @@ TEST_CASE(a_keyboard_whose_data_stage_carries_nothing_falls_back_to_boot) {
     CHECK(rig.chip.boot_protocol_selected());
 }
 
-TEST_CASE(a_keyboard_descriptor_that_will_not_parse_falls_back_to_boot) {
+TEST_CASE(a_keyboard_interface_keeps_a_usable_mouse_only_descriptor_set) {
     Rig rig;
     rig.chip.attach_device();
-    // A perfectly well-formed mouse descriptor, which is not a keyboard.
+    // The configuration's protocol is only a hint. The report descriptor is
+    // authoritative once it publishes any independently usable entry.
     rig.chip.serve_report_keyboard(plain_wheel_mouse_descriptor());
 
     rig.begin(rig.chip.now_us());
 
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
-    // It was fetched - the failure is in the bytes, not in the fetching.
     CHECK_EQ(rig.chip.report_descriptor_requests(), 1);
     CHECK_EQ(rig.setup.report_descriptor_bytes(), plain_wheel_mouse_descriptor().size());
     CHECK_FALSE(rig.setup.has_keyboard_layout());
-    CHECK_EQ(rig.setup.keyboard_layout().key_element_count, std::uint8_t{6});
-    CHECK(rig.setup.boot_protocol_selected());
-    CHECK(rig.chip.boot_protocol_selected());
+    CHECK(rig.setup.has_mouse_layout());
+    CHECK_EQ(rig.setup.report_set().count, 1u);
+    CHECK_EQ(rig.setup.report_set().entries[0].role, ReportRole::Mouse);
+    CHECK_FALSE(rig.setup.boot_protocol_selected());
+    CHECK_FALSE(rig.chip.boot_protocol_selected());
 }
 
 TEST_CASE(a_keyboard_descriptor_longer_than_there_is_room_for_falls_back_to_boot) {
@@ -1381,18 +1441,18 @@ TEST_CASE(a_keyboard_descriptor_longer_than_there_is_room_for_falls_back_to_boot
     CHECK(rig.chip.boot_protocol_selected());
 }
 
-TEST_CASE(a_non_boot_keyboard_whose_descriptor_will_not_parse_is_unsupported) {
+TEST_CASE(a_non_boot_keyboard_interface_keeps_a_usable_mouse_only_descriptor_set) {
     Rig rig;
     rig.chip.attach_device();
-    // The same bytes as the test three above, on an interface that does not
-    // declare the boot subclass. There is no fixed report behind it to fall
-    // back to, so there is nothing this firmware can read it as.
     rig.chip.serve_report_keyboard(plain_wheel_mouse_descriptor(), false);
 
     rig.begin(rig.chip.now_us());
 
-    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Failed));
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
     CHECK_FALSE(rig.setup.has_keyboard_layout());
+    CHECK(rig.setup.has_mouse_layout());
+    CHECK_EQ(rig.setup.report_set().count, 1u);
+    CHECK_EQ(rig.setup.report_set().entries[0].role, ReportRole::Mouse);
     CHECK_FALSE(rig.setup.boot_protocol_selected());
 }
 

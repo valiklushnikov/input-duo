@@ -178,6 +178,14 @@ std::vector<std::uint8_t> wheel_mouse_descriptor() {
     };
 }
 
+std::vector<std::uint8_t> consumer_descriptor() {
+    return {
+        0x05, 0x0C, 0x85, 0x02,
+        0x19, 0x01, 0x29, 0x02, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x02, 0x81, 0x02,
+    };
+}
+
 /// Drives a DescriptorSetup exactly the way Ch375Device does, against a
 /// FakeCh375Chip standing in for the controller. Copied from the same rig
 /// test_ch375_descriptor_setup.cpp uses - this file is not about the setup
@@ -386,6 +394,24 @@ TEST_CASE(identity_reads_kind_layout_and_hash_from_a_settled_mouse_setup) {
     CHECK(!all_zero(identity.descriptor_hash, sizeof(identity.descriptor_hash)));
     CHECK(std::memcmp(identity.descriptor_hash, rig.setup.report_descriptor_hash(),
                       sizeof(identity.descriptor_hash)) == 0);
+}
+
+TEST_CASE(identity_uses_the_first_accepted_report_instead_of_the_configuration_hint) {
+    Rig rig;
+    rig.chip.attach_device();
+    rig.chip.serve_report_keyboard(consumer_descriptor());
+    rig.begin(rig.chip.now_us());
+    CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
+
+    Ch375SourceAdapter adapter(0);
+    const SourceIdentity identity = adapter.identity(rig.setup);
+
+    CHECK(identity.kind == DeviceKind::Consumer);
+    CHECK(identity.keyboard_layout.consumer);
+    CHECK_EQ(identity.report_set.count, 1u);
+    CHECK_EQ(identity.report_set.entries[0].role,
+             duo_input::u1::input::hid::ReportRole::Consumer);
+    CHECK_EQ(identity.report_set.entries[0].report_id, 2u);
 }
 
 TEST_CASE(identity_preserves_vendor_and_product_ids_from_setup) {

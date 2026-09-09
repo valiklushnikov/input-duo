@@ -90,18 +90,6 @@ ReportDescriptorError rejected_error(const input::hid::HidReportSet& set,
     return missing;
 }
 
-bool has_primary_role(const input::hid::HidReportSet& set, DeviceKind kind) {
-    const input::hid::ReportRole expected =
-        kind == DeviceKind::Mouse ? input::hid::ReportRole::Mouse
-                                  : input::hid::ReportRole::Keyboard;
-    for (std::size_t index = 0; index < set.count; ++index) {
-        if (set.entries[index].role == expected) {
-            return true;
-        }
-    }
-    return false;
-}
-
 }  // namespace
 
 void DescriptorSetup::begin(std::uint32_t now_us) {
@@ -377,8 +365,7 @@ SetupProgress DescriptorSetup::apply_report_descriptor(std::uint32_t now_us) {
     if (report_error_ != ReportDescriptorError::None) {
         return abandon_report_descriptor(now_us, kReportDescriptorUnusable);
     }
-    if (report_set_.count == 0 ||
-        !has_primary_role(report_set_, capabilities_.kind)) {
+    if (report_set_.count == 0) {
         report_error_ = capabilities_.kind == DeviceKind::Mouse
                             ? rejected_error(report_set_, input::hid::ReportRole::Mouse,
                                              ReportDescriptorError::NoMouseReport)
