@@ -15,9 +15,11 @@
 // the normalizer reads. A layout that cannot be expressed that way is refused
 // by name, and a refused layout is one the caller keeps out of report protocol.
 
+#include "crypto/sha256.hpp"
 #include "input/hid/report_descriptor.hpp"
 #include "test_support.hpp"
 
+#include <cstring>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
@@ -32,6 +34,7 @@ using duo_input::u1::input::hid::HidReportSet;
 using duo_input::u1::input::hid::KeyboardFieldKind;
 using duo_input::u1::input::hid::KeyboardReportLayout;
 using duo_input::u1::input::hid::MouseReportLayout;
+using duo_input::u1::input::hid::parse_hid_report_set;
 using duo_input::u1::input::hid::parse_keyboard_report_descriptor;
 using duo_input::u1::input::hid::parse_mouse_report_descriptor;
 using duo_input::u1::input::hid::RejectedReportEntry;
@@ -98,6 +101,19 @@ namespace {
 
 duo_input::protocol::ByteView view(const std::vector<std::uint8_t>& bytes) {
     return duo_input::protocol::ByteView{bytes.data(), bytes.size()};
+}
+
+void check_entry(const HidReportEntry& entry,
+                 ReportRole role,
+                 std::uint8_t report_id,
+                 std::uint8_t minimum_body_bytes) {
+    CHECK_EQ(entry.role, role);
+    CHECK_EQ(entry.report_id, report_id);
+    if (role == ReportRole::Mouse) {
+        CHECK_EQ(entry.mouse.minimum_body_bytes, minimum_body_bytes);
+    } else {
+        CHECK_EQ(entry.keyboard.minimum_body_bytes, minimum_body_bytes);
+    }
 }
 
 std::vector<std::uint8_t> read_strict_uppercase_hex(const std::string& path) {
@@ -1208,4 +1224,168 @@ TEST_CASE(a_bitmap_whose_bit_count_disagrees_with_its_usage_range_is_refused) {
         CHECK_EQ(layout.key_element_bits, std::uint8_t{8});
         CHECK_EQ(layout.key_element_count, std::uint8_t{6});
     }
+}
+
+// ------------------------------------------------------- bounded report sets
+
+TEST_CASE(the_captured_keychron_descriptor_keeps_all_supported_reports_in_order) {
+    const std::vector<std::uint8_t> bytes = read_strict_uppercase_hex(
+        std::string{DUO_USB_DESCRIPTORS_PATH} +
+        "/keychron_3434_d030_interface_2_report.hex");
+    CHECK_EQ(bytes.size(), std::size_t{164});
+
+    const std::uint8_t expected_digest[duo_input::crypto::kSha256DigestSize] = {
+        0x3E, 0x7A, 0x52, 0x26, 0x17, 0x3A, 0x4F, 0xBE,
+        0x03, 0xC9, 0x89, 0x34, 0xC6, 0x68, 0x6D, 0x8C,
+        0xCD, 0x0D, 0x3A, 0xE3, 0x21, 0xB5, 0xB1, 0xA2,
+        0x66, 0xB2, 0x4C, 0x4B, 0x18, 0xCD, 0xDB, 0x28,
+    };
+    std::uint8_t digest[duo_input::crypto::kSha256DigestSize] = {};
+    duo_input::crypto::sha256(bytes.data(), bytes.size(), digest);
+    for (std::size_t index = 0; index < duo_input::crypto::kSha256DigestSize;
+         ++index) {
+        CHECK_EQ(digest[index], expected_digest[index]);
+    }
+
+    HidReportSet set;
+    CHECK_EQ(parse_hid_report_set(view(bytes), set), ReportDescriptorError::None);
+    CHECK(set.uses_report_ids);
+    CHECK_EQ(set.count, std::uint8_t{3});
+    check_entry(set.entries[0], ReportRole::Keyboard, 1, 8);
+    check_entry(set.entries[1], ReportRole::Consumer, 2, 2);
+    check_entry(set.entries[2], ReportRole::Keyboard, 12, 20);
+
+    const KeyboardReportLayout& id_1 = set.entries[0].keyboard;
+    for (std::uint16_t modifier = 0; modifier < 8; ++modifier) {
+        CHECK_EQ(id_1.modifier_bits[modifier], modifier);
+    }
+    CHECK_EQ(id_1.key_kind, KeyboardFieldKind::Array);
+    CHECK_EQ(id_1.key_bit_offset, std::uint16_t{16});
+    CHECK_EQ(id_1.key_element_bits, std::uint8_t{8});
+    CHECK_EQ(id_1.key_element_count, std::uint8_t{6});
+    CHECK_EQ(id_1.key_usage_minimum, std::uint16_t{0});
+    CHECK_EQ(id_1.key_usage_maximum, std::uint16_t{0xF1});
+
+    const KeyboardReportLayout& id_12 = set.entries[2].keyboard;
+    CHECK_EQ(id_12.key_kind, KeyboardFieldKind::Bitmap);
+    CHECK_EQ(id_12.key_bit_offset, std::uint16_t{8});
+    CHECK_EQ(id_12.key_element_count, std::uint8_t{0x98});
+    CHECK_EQ(id_12.key_usage_minimum, std::uint16_t{0});
+    CHECK_EQ(id_12.key_usage_maximum, std::uint16_t{0x98});
+}
+
+TEST_CASE(an_unsupported_keyboard_candidate_does_not_hide_a_later_consumer) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x07, 0x85, 0x01,
+        0x19, 0x00, 0x29, 0x65, 0x15, 0x00, 0x25, 0x65,
+        0x75, 0x11, 0x95, 0x01, 0x81, 0x00,
+        0x05, 0x0C, 0x85, 0x02,
+        0x19, 0x01, 0x29, 0x02, 0x15, 0x00, 0x25, 0x01,
+        0x75, 0x01, 0x95, 0x02, 0x81, 0x02,
+    };
+    HidReportSet set;
+
+    CHECK_EQ(parse_hid_report_set(view(bytes), set), ReportDescriptorError::None);
+    CHECK_EQ(set.count, std::uint8_t{1});
+    check_entry(set.entries[0], ReportRole::Consumer, 2, 1);
+    CHECK_EQ(set.rejected_count, std::uint8_t{1});
+    CHECK_EQ(set.rejected[0].role, ReportRole::Keyboard);
+    CHECK_EQ(set.rejected[0].report_id, std::uint8_t{1});
+    CHECK_EQ(set.rejected[0].reason, ReportDescriptorError::UnsupportedLayout);
+}
+
+TEST_CASE(valid_report_entries_follow_descriptor_order_across_roles) {
+    const std::vector<std::uint8_t> bytes = {
+        // Consumer ID 9.
+        0x05, 0x0C, 0x85, 0x09, 0x19, 0x01, 0x29, 0x02,
+        0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x02, 0x81, 0x02,
+        // Mouse ID 3.
+        0x05, 0x09, 0x85, 0x03, 0x19, 0x01, 0x29, 0x03,
+        0x75, 0x01, 0x95, 0x03, 0x81, 0x02,
+        0x75, 0x05, 0x95, 0x01, 0x81, 0x01,
+        0x05, 0x01, 0x09, 0x30, 0x09, 0x31,
+        0x75, 0x08, 0x95, 0x02, 0x81, 0x06,
+        // Keyboard ID 7.
+        0x05, 0x07, 0x85, 0x07, 0x19, 0x00, 0x29, 0x65,
+        0x15, 0x00, 0x25, 0x65, 0x75, 0x08, 0x95, 0x06, 0x81, 0x00,
+    };
+    HidReportSet set;
+
+    CHECK_EQ(parse_hid_report_set(view(bytes), set), ReportDescriptorError::None);
+    CHECK_EQ(set.count, std::uint8_t{3});
+    check_entry(set.entries[0], ReportRole::Consumer, 9, 1);
+    check_entry(set.entries[1], ReportRole::Mouse, 3, 3);
+    check_entry(set.entries[2], ReportRole::Keyboard, 7, 6);
+}
+
+TEST_CASE(the_ninth_valid_candidate_never_displaces_the_first_eight) {
+    std::vector<std::uint8_t> bytes;
+    for (std::uint8_t report_id = 1; report_id <= 8; ++report_id) {
+        const std::uint8_t report[] = {
+            0x05, 0x0C, 0x85, report_id, 0x19, 0x01, 0x29, 0x01,
+            0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02,
+        };
+        bytes.insert(bytes.end(), std::begin(report), std::end(report));
+    }
+    const std::uint8_t ninth_mouse[] = {
+        0x05, 0x09, 0x85, 0x09, 0x19, 0x01, 0x29, 0x03,
+        0x75, 0x01, 0x95, 0x03, 0x81, 0x02,
+        0x75, 0x05, 0x95, 0x01, 0x81, 0x01,
+        0x05, 0x01, 0x09, 0x30, 0x09, 0x31,
+        0x75, 0x08, 0x95, 0x02, 0x81, 0x06,
+    };
+    bytes.insert(bytes.end(), std::begin(ninth_mouse), std::end(ninth_mouse));
+    HidReportSet set;
+
+    CHECK_EQ(parse_hid_report_set(view(bytes), set), ReportDescriptorError::None);
+    CHECK_EQ(set.count, std::uint8_t{8});
+    for (std::uint8_t index = 0; index < 8; ++index) {
+        check_entry(set.entries[index], ReportRole::Consumer,
+                    static_cast<std::uint8_t>(index + 1), 1);
+    }
+    CHECK_EQ(set.rejected_count, std::uint8_t{0});
+    CHECK_EQ(set.rejected_overflow, std::uint8_t{1});
+}
+
+TEST_CASE(two_supported_unnumbered_roles_are_explicitly_ambiguous) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x0C, 0x19, 0x01, 0x29, 0x02,
+        0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x02, 0x81, 0x02,
+        0x05, 0x07, 0x19, 0x00, 0x29, 0x65,
+        0x15, 0x00, 0x25, 0x65, 0x75, 0x08, 0x95, 0x06, 0x81, 0x00,
+    };
+    HidReportSet set;
+
+    CHECK_EQ(parse_hid_report_set(view(bytes), set), ReportDescriptorError::None);
+    CHECK_FALSE(set.uses_report_ids);
+    CHECK_EQ(set.count, std::uint8_t{0});
+    CHECK_EQ(set.rejected_count, std::uint8_t{2});
+    CHECK_EQ(set.rejected[0].role, ReportRole::Consumer);
+    CHECK_EQ(set.rejected[0].report_id, std::uint8_t{0});
+    CHECK_EQ(set.rejected[0].reason, ReportDescriptorError::AmbiguousReportSet);
+    CHECK_EQ(set.rejected[1].role, ReportRole::Keyboard);
+    CHECK_EQ(set.rejected[1].report_id, std::uint8_t{0});
+    CHECK_EQ(set.rejected[1].reason, ReportDescriptorError::AmbiguousReportSet);
+}
+
+TEST_CASE(a_fatal_truncated_item_leaves_the_report_set_unchanged) {
+    const std::vector<std::uint8_t> bytes = {
+        0x05, 0x0C, 0x85, 0x02, 0x19, 0x01, 0x29, 0x02,
+        0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x02, 0x81, 0x02,
+        0x82, 0x00,
+    };
+    HidReportSet set{};
+    set.uses_report_ids = true;
+    set.count = 1;
+    set.entries[0].role = ReportRole::Mouse;
+    set.entries[0].report_id = 77;
+    set.entries[0].mouse = boot_mouse_layout();
+    set.rejected_count = 1;
+    set.rejected[0] = RejectedReportEntry{
+        ReportRole::Keyboard, 55, ReportDescriptorError::AmbiguousReportSet};
+    set.rejected_overflow = 9;
+    const HidReportSet sentinel = set;
+
+    CHECK_EQ(parse_hid_report_set(view(bytes), set), ReportDescriptorError::Truncated);
+    CHECK_EQ(std::memcmp(&set, &sentinel, sizeof(set)), 0);
 }

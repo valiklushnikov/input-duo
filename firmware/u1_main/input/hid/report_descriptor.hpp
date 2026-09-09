@@ -141,6 +141,12 @@ struct HidReportSet {
 static_assert(std::is_trivially_copyable<HidReportSet>::value,
               "a HID report set crosses cores only by value");
 
+/// Walk one HID report descriptor and retain every independently decodable
+/// input layout in descriptor order. Candidate failures are recorded without
+/// discarding other Report IDs. Structural failures leave ``out`` unchanged.
+ReportDescriptorError parse_hid_report_set(protocol::ByteView descriptor,
+                                           HidReportSet& out);
+
 /// The one supported report role exposed by a descriptor, if there is one.
 enum class ReportDescriptorRole : std::uint8_t {
     None,
