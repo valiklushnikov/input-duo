@@ -15,6 +15,7 @@ operator.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -93,3 +94,15 @@ def test_check_reports_every_stale_file_and_exits_nonzero(
 def test_repository_generated_files_match_the_schema() -> None:
     """The gate itself, run against the real tree, whatever its line endings."""
     assert generate_protocol.main(["--check"]) == 0
+
+
+def test_hid_descriptor_diagnostics_identifiers_are_generated_on_both_sides() -> None:
+    schema = json.loads(generate_protocol.SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    cpp = generate_protocol.render_cpp(schema)
+    python = generate_protocol.render_python(schema)
+
+    assert "GET_HID_DESCRIPTOR_CAPTURE = 0x16" in cpp
+    assert "HID_DESCRIPTOR_DIAGNOSTICS = 0x800" in cpp
+    assert "GET_HID_DESCRIPTOR_CAPTURE = 0x16" in python
+    assert "HID_DESCRIPTOR_DIAGNOSTICS = 0x800" in python
