@@ -144,6 +144,10 @@ static_assert(std::is_trivially_copyable<HidReportSet>::value,
 /// Walk one HID report descriptor and retain every independently decodable
 /// input layout in descriptor order. Candidate failures are recorded without
 /// discarding other Report IDs. Structural failures leave ``out`` unchanged.
+///
+/// Parsing uses one fixed scratch arena owned by the serialized active USB
+/// setup backend (Core 1 for PIO USB). Calls must not overlap or re-enter; an
+/// accidental same-owner re-entry fails atomically as malformed global state.
 ReportDescriptorError parse_hid_report_set(protocol::ByteView descriptor,
                                            HidReportSet& out);
 

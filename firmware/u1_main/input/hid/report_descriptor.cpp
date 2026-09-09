@@ -1,5 +1,7 @@
 #include "input/hid/report_descriptor.hpp"
 
+#include <new>
+
 namespace duo_input::u1::input::hid {
 namespace {
 
@@ -220,6 +222,7 @@ struct KeyboardLocalState {
 struct KeyboardReportState {
     ReportRole role = ReportRole::Keyboard;
     std::uint8_t report_id = 0;
+    bool report_id_valid = true;
     bool has_keys = false;
     bool invalid = false;
     std::size_t first_input_offset = kNoDescriptorOffset;
@@ -229,12 +232,14 @@ struct KeyboardReportState {
 
 struct MouseReportState {
     WorkingReport report;
+    bool report_id_valid = true;
     bool invalid = false;
     std::size_t first_input_offset = kNoDescriptorOffset;
 };
 
 struct InputCursor {
     std::uint8_t report_id = 0;
+    bool report_id_valid = true;
     std::uint32_t input_bits = 0;
 };
 
@@ -244,6 +249,53 @@ struct CompletedCandidate {
     std::uint8_t source_index = 0;
     ReportDescriptorError error = ReportDescriptorError::None;
 };
+
+struct DroppedCandidateKeys {
+    std::uint8_t valid_report_ids[32] = {};
+    bool invalid_report_id = false;
+};
+
+struct ParserScratch {
+    KeyboardGlobalState globals;
+    KeyboardGlobalState global_stack[kMaximumKeyboardGlobals] = {};
+    KeyboardLocalState locals;
+    KeyboardReportState usage_reports[kMaximumUsageReports] = {};
+    MouseReportState mouse_reports[kMaximumMouseReports] = {};
+    InputCursor cursors[kMaximumInputCursors] = {};
+    CompletedCandidate
+        completed[kMaximumUsageReports + kMaximumMouseReports] = {};
+    DroppedCandidateKeys usage_dropped[2] = {};
+    DroppedCandidateKeys mouse_dropped;
+    HidReportEntry entry;
+    HidReportSet parsed;
+};
+
+static_assert(std::is_trivially_destructible<ParserScratch>::value,
+              "Reusing parser storage must not skip a required destructor");
+static_assert(std::is_trivially_destructible<HidReportSet>::value,
+              "Reusing wrapper storage must not skip a required destructor");
+
+// Descriptor discovery is serialized by the active backend (Core 1 for PIO
+// USB; the alternative CH375 backend also calls synchronously). The
+// legacy wrappers also finish one parse before starting another. Keeping the
+// bounded candidate arena in BSS is what makes that ownership fit Core 1's
+// 2 KiB stack; the flag turns accidental same-owner recursion into an atomic
+// failure instead of corrupting an active parse.
+alignas(ParserScratch)
+std::uint8_t g_core1_parser_scratch_storage[sizeof(ParserScratch)] = {};
+alignas(HidReportSet)
+std::uint8_t g_core1_parser_result_storage[sizeof(HidReportSet)] = {};
+bool g_core1_parser_scratch_active = false;
+
+ParserScratch& construct_parser_scratch() {
+    return *::new (static_cast<void*>(g_core1_parser_scratch_storage))
+        ParserScratch{};
+}
+
+HidReportSet& construct_parser_result() {
+    return *::new (static_cast<void*>(g_core1_parser_result_storage))
+        HidReportSet{};
+}
 
 std::int32_t signed_item(std::uint32_t data, std::size_t length) {
     if (length == 1) {
@@ -309,22 +361,51 @@ bool record_modifier(KeyboardReportState& report,
     return true;
 }
 
+void saturating_increment(std::uint8_t& value);
+
+void note_dropped_candidate(DroppedCandidateKeys& dropped,
+                            std::uint8_t report_id,
+                            bool report_id_valid,
+                            std::uint8_t& rejected_overflow) {
+    const std::uint8_t mask =
+        static_cast<std::uint8_t>(1U << (report_id % 8));
+    const bool known = report_id_valid
+                           ? (dropped.valid_report_ids[report_id / 8] & mask) != 0
+                           : dropped.invalid_report_id;
+    if (known) {
+        return;
+    }
+    if (report_id_valid) {
+        dropped.valid_report_ids[report_id / 8] |= mask;
+    } else {
+        dropped.invalid_report_id = true;
+    }
+    saturating_increment(rejected_overflow);
+}
+
 KeyboardReportState* usage_report(KeyboardReportState* reports,
                                   std::size_t& report_count,
                                   ReportRole role,
                                   std::uint8_t report_id,
+                                  bool report_id_valid,
+                                  DroppedCandidateKeys& dropped,
+                                  std::uint8_t& rejected_overflow,
                                   std::size_t first_input_offset) {
     for (std::size_t index = 0; index < report_count; ++index) {
-        if (reports[index].role == role && reports[index].report_id == report_id) {
+        if (reports[index].role == role && reports[index].report_id == report_id &&
+            reports[index].report_id_valid == report_id_valid) {
             return &reports[index];
         }
     }
     if (report_count == kMaximumUsageReports) {
+        note_dropped_candidate(dropped, report_id, report_id_valid,
+                               rejected_overflow);
         return nullptr;
     }
     KeyboardReportState& report = reports[report_count++];
     report.role = role;
     report.report_id = report_id;
+    report.report_id_valid = report_id_valid;
     report.first_input_offset = first_input_offset;
     report.layout.consumer = role == ReportRole::Consumer;
     report.layout.report_id_value = report_id;
@@ -334,26 +415,35 @@ KeyboardReportState* usage_report(KeyboardReportState* reports,
 MouseReportState* mouse_report(MouseReportState* reports,
                                std::size_t& report_count,
                                std::uint8_t report_id,
+                               bool report_id_valid,
+                               DroppedCandidateKeys& dropped,
+                               std::uint8_t& rejected_overflow,
                                std::size_t first_input_offset) {
     for (std::size_t index = 0; index < report_count; ++index) {
-        if (reports[index].report.report_id == report_id) {
+        if (reports[index].report.report_id == report_id &&
+            reports[index].report_id_valid == report_id_valid) {
             return &reports[index];
         }
     }
     if (report_count == kMaximumMouseReports) {
+        note_dropped_candidate(dropped, report_id, report_id_valid,
+                               rejected_overflow);
         return nullptr;
     }
     MouseReportState& report = reports[report_count++];
     report.report.report_id = report_id;
+    report.report_id_valid = report_id_valid;
     report.first_input_offset = first_input_offset;
     return &report;
 }
 
 InputCursor* input_cursor(InputCursor* cursors,
                           std::size_t& cursor_count,
-                          std::uint8_t report_id) {
+                          std::uint8_t report_id,
+                          bool report_id_valid) {
     for (std::size_t index = 0; index < cursor_count; ++index) {
-        if (cursors[index].report_id == report_id) {
+        if (cursors[index].report_id == report_id &&
+            cursors[index].report_id_valid == report_id_valid) {
             return &cursors[index];
         }
     }
@@ -362,6 +452,7 @@ InputCursor* input_cursor(InputCursor* cursors,
     }
     InputCursor& cursor = cursors[cursor_count++];
     cursor.report_id = report_id;
+    cursor.report_id_valid = report_id_valid;
     return &cursor;
 }
 
@@ -383,9 +474,11 @@ bool input_mentions_page(const KeyboardLocalState& locals,
 
 void invalidate_usage_reports(KeyboardReportState* reports,
                               std::size_t report_count,
-                              std::uint8_t report_id) {
+                              std::uint8_t report_id,
+                              bool report_id_valid) {
     for (std::size_t index = 0; index < report_count; ++index) {
-        if (reports[index].report_id == report_id) {
+        if (reports[index].report_id == report_id &&
+            reports[index].report_id_valid == report_id_valid) {
             reports[index].invalid = true;
         }
     }
@@ -520,6 +613,8 @@ std::uint32_t bounded_field_bits(std::uint32_t report_size,
 
 void record_mouse_inputs(MouseReportState* mouse_reports,
                          std::size_t& mouse_report_count,
+                         DroppedCandidateKeys& dropped,
+                         std::uint8_t& rejected_overflow,
                          const KeyboardGlobalState& globals,
                          const KeyboardLocalState& locals,
                          std::size_t item_offset,
@@ -533,7 +628,8 @@ void record_mouse_inputs(MouseReportState* mouse_reports,
                                                   globals.report_count);
     if (globals.usage_page == kPageButton) {
         MouseReportState* candidate = mouse_report(
-            mouse_reports, mouse_report_count, globals.report_id, item_offset);
+            mouse_reports, mouse_report_count, globals.report_id,
+            globals.report_id_valid, dropped, rejected_overflow, item_offset);
         if (candidate != nullptr) {
             candidate->invalid = candidate->invalid || !globals.report_id_valid;
             extend_buttons(candidate->report.buttons, first_bit, bits);
@@ -564,7 +660,8 @@ void record_mouse_inputs(MouseReportState* mouse_reports,
         }
         if (candidate == nullptr) {
             candidate = mouse_report(mouse_reports, mouse_report_count,
-                                     globals.report_id, item_offset);
+                                     globals.report_id, globals.report_id_valid,
+                                     dropped, rejected_overflow, item_offset);
             if (candidate == nullptr) {
                 return;
             }
@@ -593,6 +690,8 @@ void record_mouse_inputs(MouseReportState* mouse_reports,
 void record_usage_input(KeyboardReportState* reports,
                         std::size_t& report_count,
                         ReportRole role,
+                        DroppedCandidateKeys& dropped,
+                        std::uint8_t& rejected_overflow,
                         const KeyboardGlobalState& globals,
                         const KeyboardLocalState& locals,
                         std::size_t item_offset,
@@ -608,7 +707,8 @@ void record_usage_input(KeyboardReportState* reports,
     }
 
     KeyboardReportState* report = usage_report(
-        reports, report_count, role, globals.report_id, item_offset);
+        reports, report_count, role, globals.report_id,
+        globals.report_id_valid, dropped, rejected_overflow, item_offset);
     if (report == nullptr) {
         return;
     }
@@ -775,16 +875,25 @@ ReportDescriptorError parse_hid_report_set(protocol::ByteView descriptor,
     if (descriptor.data == nullptr || descriptor.size == 0) {
         return ReportDescriptorError::Truncated;
     }
+    if (g_core1_parser_scratch_active) {
+        return ReportDescriptorError::MalformedGlobalState;
+    }
+    g_core1_parser_scratch_active = true;
+    struct ScratchRelease {
+        ~ScratchRelease() { g_core1_parser_scratch_active = false; }
+    } scratch_release;
 
-    KeyboardGlobalState globals;
-    KeyboardGlobalState global_stack[kMaximumKeyboardGlobals] = {};
+    ParserScratch& scratch = construct_parser_scratch();
+
+    KeyboardGlobalState& globals = scratch.globals;
+    KeyboardGlobalState* const global_stack = scratch.global_stack;
     std::size_t global_depth = 0;
-    KeyboardLocalState locals;
-    KeyboardReportState usage_reports[kMaximumUsageReports] = {};
+    KeyboardLocalState& locals = scratch.locals;
+    KeyboardReportState* const usage_reports = scratch.usage_reports;
     std::size_t usage_report_count = 0;
-    MouseReportState mouse_reports[kMaximumMouseReports] = {};
+    MouseReportState* const mouse_reports = scratch.mouse_reports;
     std::size_t mouse_report_count = 0;
-    InputCursor cursors[kMaximumInputCursors] = {};
+    InputCursor* const cursors = scratch.cursors;
     std::size_t cursor_count = 0;
     bool any_report_id = false;
 
@@ -836,8 +945,10 @@ ReportDescriptorError parse_hid_report_set(protocol::ByteView descriptor,
                     break;
                 case kTagReportId:
                     any_report_id = true;
-                    globals.report_id = static_cast<std::uint8_t>(data & 0xFF);
                     globals.report_id_valid = data != 0 && data <= 0xFF;
+                    globals.report_id = globals.report_id_valid
+                                            ? static_cast<std::uint8_t>(data)
+                                            : std::uint8_t{0};
                     break;
                 case kTagReportCount:
                     globals.report_count = data;
@@ -881,7 +992,9 @@ ReportDescriptorError parse_hid_report_set(protocol::ByteView descriptor,
         if (tag == kTagInput) {
             const std::uint64_t field_bits =
                 static_cast<std::uint64_t>(globals.report_size) * globals.report_count;
-            InputCursor* cursor = input_cursor(cursors, cursor_count, globals.report_id);
+            InputCursor* cursor = input_cursor(cursors, cursor_count,
+                                               globals.report_id,
+                                               globals.report_id_valid);
             const std::uint32_t first_bit =
                 cursor == nullptr ? kBitCeiling : cursor->input_bits;
             const std::uint64_t bit_after_field =
@@ -891,16 +1004,21 @@ ReportDescriptorError parse_hid_report_set(protocol::ByteView descriptor,
                 bit_after_field <= kMaximumKeyboardReportBits;
             if (!cursor_is_bounded) {
                 invalidate_usage_reports(usage_reports, usage_report_count,
-                                         globals.report_id);
+                                         globals.report_id,
+                                         globals.report_id_valid);
             }
 
             record_usage_input(usage_reports, usage_report_count,
-                               ReportRole::Keyboard, globals, locals, item_offset,
-                               first_bit, cursor_is_bounded, data);
+                               ReportRole::Keyboard, scratch.usage_dropped[0],
+                               scratch.parsed.rejected_overflow, globals, locals,
+                               item_offset, first_bit, cursor_is_bounded, data);
             record_usage_input(usage_reports, usage_report_count,
-                               ReportRole::Consumer, globals, locals, item_offset,
-                               first_bit, cursor_is_bounded, data);
-            record_mouse_inputs(mouse_reports, mouse_report_count, globals, locals,
+                               ReportRole::Consumer, scratch.usage_dropped[1],
+                               scratch.parsed.rejected_overflow, globals, locals,
+                               item_offset, first_bit, cursor_is_bounded, data);
+            record_mouse_inputs(mouse_reports, mouse_report_count,
+                                scratch.mouse_dropped,
+                                scratch.parsed.rejected_overflow, globals, locals,
                                 item_offset, first_bit, data);
 
             if (cursor != nullptr) {
@@ -914,10 +1032,10 @@ ReportDescriptorError parse_hid_report_set(protocol::ByteView descriptor,
 
         // HID local items apply to one Main item, including Output, Feature,
         // Collection, and End Collection. Only Input advances an Input cursor.
-        locals = KeyboardLocalState{};
+        ::new (static_cast<void*>(&locals)) KeyboardLocalState{};
     }
 
-    CompletedCandidate completed[kMaximumUsageReports + kMaximumMouseReports] = {};
+    CompletedCandidate* const completed = scratch.completed;
     std::size_t completed_count = 0;
     for (std::size_t index = 0; index < usage_report_count; ++index) {
         KeyboardReportState& report = usage_reports[index];
@@ -928,14 +1046,15 @@ ReportDescriptorError parse_hid_report_set(protocol::ByteView descriptor,
         candidate.first_input_offset = report.first_input_offset;
         candidate.role = report.role;
         candidate.source_index = static_cast<std::uint8_t>(index);
-        if (report.invalid || (any_report_id && report.report_id == 0)) {
+        if (report.invalid || !report.report_id_valid ||
+            (any_report_id && report.report_id == 0)) {
             candidate.error = ReportDescriptorError::UnsupportedLayout;
         }
     }
     for (std::size_t index = 0; index < mouse_report_count; ++index) {
-        MouseReportLayout layout;
         ReportDescriptorError error = ReportDescriptorError::None;
-        if (complete_mouse_candidate(mouse_reports[index], any_report_id, layout, error)) {
+        if (complete_mouse_candidate(mouse_reports[index], any_report_id,
+                                     scratch.entry.mouse, error)) {
             CompletedCandidate& candidate = completed[completed_count++];
             candidate.first_input_offset = mouse_reports[index].first_input_offset;
             candidate.role = ReportRole::Mouse;
@@ -945,7 +1064,7 @@ ReportDescriptorError parse_hid_report_set(protocol::ByteView descriptor,
     }
     sort_completed_candidates(completed, completed_count);
 
-    HidReportSet parsed;
+    HidReportSet& parsed = scratch.parsed;
     parsed.uses_report_ids = any_report_id;
     std::size_t accepted_count = 0;
     for (std::size_t index = 0; index < completed_count; ++index) {
@@ -966,7 +1085,8 @@ ReportDescriptorError parse_hid_report_set(protocol::ByteView descriptor,
             append_rejected(parsed, candidate.role, report_id,
                             ReportDescriptorError::AmbiguousReportSet);
         } else {
-            HidReportEntry entry;
+            HidReportEntry& entry =
+                *::new (static_cast<void*>(&scratch.entry)) HidReportEntry{};
             entry.role = candidate.role;
             entry.report_id = report_id;
             if (candidate.role == ReportRole::Mouse) {
@@ -991,7 +1111,7 @@ ReportDescriptorError parse_hid_report_set(protocol::ByteView descriptor,
 
 ReportDescriptorError parse_keyboard_report_descriptor(protocol::ByteView descriptor,
                                                        KeyboardReportLayout& out) {
-    HidReportSet set;
+    HidReportSet& set = construct_parser_result();
     const ReportDescriptorError error = parse_hid_report_set(descriptor, set);
     if (error != ReportDescriptorError::None) {
         return error;
@@ -1024,7 +1144,7 @@ ReportDescriptorError parse_keyboard_report_descriptor(protocol::ByteView descri
 
 ReportDescriptorError parse_consumer_report_descriptor(protocol::ByteView descriptor,
                                                        KeyboardReportLayout& out) {
-    HidReportSet set;
+    HidReportSet& set = construct_parser_result();
     const ReportDescriptorError error = parse_hid_report_set(descriptor, set);
     if (error != ReportDescriptorError::None) {
         return error;
@@ -1057,7 +1177,7 @@ ReportDescriptorError parse_consumer_report_descriptor(protocol::ByteView descri
 
 ReportDescriptorError parse_mouse_report_descriptor(protocol::ByteView descriptor,
                                                     MouseReportLayout& out) {
-    HidReportSet set;
+    HidReportSet& set = construct_parser_result();
     const ReportDescriptorError error = parse_hid_report_set(descriptor, set);
     if (error != ReportDescriptorError::None) {
         return error;
@@ -1087,31 +1207,45 @@ ReportDescriptorError parse_mouse_report_descriptor(protocol::ByteView descripto
 ReportDescriptorRole classify_report_descriptor(protocol::ByteView descriptor,
                                                  KeyboardReportLayout& keyboard,
                                                  MouseReportLayout& mouse) {
-    HidReportSet set;
-    if (parse_hid_report_set(descriptor, set) == ReportDescriptorError::None) {
-        for (std::size_t index = 0; index < set.rejected_count; ++index) {
-            if (set.rejected[index].reason == ReportDescriptorError::AmbiguousReportSet) {
-                return ReportDescriptorRole::Ambiguous;
-            }
+    HidReportSet& set = construct_parser_result();
+    if (parse_hid_report_set(descriptor, set) != ReportDescriptorError::None) {
+        return ReportDescriptorRole::None;
+    }
+    for (std::size_t index = 0; index < set.rejected_count; ++index) {
+        if (set.rejected[index].reason == ReportDescriptorError::AmbiguousReportSet) {
+            return ReportDescriptorRole::Ambiguous;
         }
     }
-    KeyboardReportLayout parsed_keyboard;
-    MouseReportLayout parsed_mouse;
-    const bool has_keyboard =
-        parse_keyboard_report_descriptor(descriptor, parsed_keyboard) ==
-        ReportDescriptorError::None;
-    const bool has_mouse = parse_mouse_report_descriptor(descriptor, parsed_mouse) ==
-                           ReportDescriptorError::None;
+
+    // Match the legacy wrappers' exactly-one-per-role rule directly against
+    // the completed set. Re-parsing through those wrappers kept extra layout
+    // copies and nested parser frames on the small USB discovery stack.
+    const HidReportEntry* keyboard_entry = nullptr;
+    const HidReportEntry* mouse_entry = nullptr;
+    std::size_t keyboard_count = 0;
+    std::size_t mouse_count = 0;
+    for (std::size_t index = 0; index < set.count; ++index) {
+        const HidReportEntry& entry = set.entries[index];
+        if (entry.role == ReportRole::Keyboard) {
+            keyboard_entry = &entry;
+            ++keyboard_count;
+        } else if (entry.role == ReportRole::Mouse) {
+            mouse_entry = &entry;
+            ++mouse_count;
+        }
+    }
+    const bool has_keyboard = keyboard_count == 1;
+    const bool has_mouse = mouse_count == 1;
 
     if (has_keyboard && has_mouse) {
         return ReportDescriptorRole::Ambiguous;
     }
     if (has_keyboard) {
-        keyboard = parsed_keyboard;
+        keyboard = keyboard_entry->keyboard;
         return ReportDescriptorRole::Keyboard;
     }
     if (has_mouse) {
-        mouse = parsed_mouse;
+        mouse = mouse_entry->mouse;
         return ReportDescriptorRole::Mouse;
     }
     return ReportDescriptorRole::None;

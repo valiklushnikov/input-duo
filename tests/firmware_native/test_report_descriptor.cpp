@@ -1347,6 +1347,88 @@ TEST_CASE(the_ninth_valid_candidate_never_displaces_the_first_eight) {
     CHECK_EQ(set.rejected_overflow, std::uint8_t{1});
 }
 
+TEST_CASE(the_ninth_mouse_candidate_is_counted_without_displacing_earlier_mice) {
+    std::vector<std::uint8_t> bytes;
+    for (std::uint8_t report_id = 1; report_id <= 9; ++report_id) {
+        const std::uint8_t report[] = {
+            0x85, report_id,
+            0x05, 0x09, 0x19, 0x01, 0x29, 0x03,
+            0x75, 0x01, 0x95, 0x03, 0x81, 0x02,
+            0x75, 0x05, 0x95, 0x01, 0x81, 0x01,
+            0x05, 0x01, 0x09, 0x30, 0x09, 0x31,
+            0x75, 0x08, 0x95, 0x02, 0x81, 0x06,
+        };
+        bytes.insert(bytes.end(), std::begin(report), std::end(report));
+    }
+    HidReportSet set;
+
+    CHECK_EQ(parse_hid_report_set(view(bytes), set), ReportDescriptorError::None);
+    CHECK_EQ(set.count, std::uint8_t{8});
+    for (std::uint8_t index = 0; index < 8; ++index) {
+        check_entry(set.entries[index], ReportRole::Mouse,
+                    static_cast<std::uint8_t>(index + 1), 3);
+    }
+    CHECK_EQ(set.rejected_count, std::uint8_t{0});
+    CHECK_EQ(set.rejected_overflow, std::uint8_t{1});
+}
+
+TEST_CASE(the_seventeenth_usage_candidate_is_counted_after_the_staging_limit) {
+    std::vector<std::uint8_t> bytes;
+    for (std::uint8_t report_id = 1; report_id <= 17; ++report_id) {
+        const std::uint8_t report[] = {
+            0x85, report_id, 0x05, 0x0C, 0x09, 0x01,
+            0x75, 0x01, 0x95, 0x01, 0x81, 0x02,
+        };
+        bytes.insert(bytes.end(), std::begin(report), std::end(report));
+    }
+    HidReportSet set;
+
+    CHECK_EQ(parse_hid_report_set(view(bytes), set), ReportDescriptorError::None);
+    CHECK_EQ(set.count, std::uint8_t{8});
+    for (std::uint8_t index = 0; index < 8; ++index) {
+        check_entry(set.entries[index], ReportRole::Consumer,
+                    static_cast<std::uint8_t>(index + 1), 1);
+    }
+    CHECK_EQ(set.rejected_count, std::uint8_t{0});
+    CHECK_EQ(set.rejected_overflow, std::uint8_t{9});
+}
+
+TEST_CASE(an_invalid_wide_report_id_before_id_one_cannot_poison_the_valid_report) {
+    const std::vector<std::uint8_t> bytes = {
+        0x86, 0x01, 0x01,  // invalid Report ID (0x0101)
+        0x05, 0x0C, 0x09, 0x01, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02,
+        0x85, 0x01,        // valid Report ID (1)
+        0x05, 0x0C, 0x09, 0x01, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02,
+    };
+    HidReportSet set;
+
+    CHECK_EQ(parse_hid_report_set(view(bytes), set), ReportDescriptorError::None);
+    CHECK_EQ(set.count, std::uint8_t{1});
+    check_entry(set.entries[0], ReportRole::Consumer, 1, 1);
+    CHECK_EQ(set.rejected_count, std::uint8_t{1});
+    CHECK_EQ(set.rejected[0].role, ReportRole::Consumer);
+    CHECK_EQ(set.rejected[0].report_id, std::uint8_t{0});
+    CHECK_EQ(set.rejected[0].reason, ReportDescriptorError::UnsupportedLayout);
+}
+
+TEST_CASE(an_invalid_wide_report_id_after_id_one_cannot_poison_the_valid_report) {
+    const std::vector<std::uint8_t> bytes = {
+        0x85, 0x01,        // valid Report ID (1)
+        0x05, 0x0C, 0x09, 0x01, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02,
+        0x86, 0x01, 0x01,  // invalid Report ID (0x0101)
+        0x05, 0x0C, 0x09, 0x01, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02,
+    };
+    HidReportSet set;
+
+    CHECK_EQ(parse_hid_report_set(view(bytes), set), ReportDescriptorError::None);
+    CHECK_EQ(set.count, std::uint8_t{1});
+    check_entry(set.entries[0], ReportRole::Consumer, 1, 1);
+    CHECK_EQ(set.rejected_count, std::uint8_t{1});
+    CHECK_EQ(set.rejected[0].role, ReportRole::Consumer);
+    CHECK_EQ(set.rejected[0].report_id, std::uint8_t{0});
+    CHECK_EQ(set.rejected[0].reason, ReportDescriptorError::UnsupportedLayout);
+}
+
 TEST_CASE(two_supported_unnumbered_roles_are_explicitly_ambiguous) {
     const std::vector<std::uint8_t> bytes = {
         0x05, 0x0C, 0x19, 0x01, 0x29, 0x02,
@@ -1366,6 +1448,96 @@ TEST_CASE(two_supported_unnumbered_roles_are_explicitly_ambiguous) {
     CHECK_EQ(set.rejected[1].role, ReportRole::Keyboard);
     CHECK_EQ(set.rejected[1].report_id, std::uint8_t{0});
     CHECK_EQ(set.rejected[1].reason, ReportDescriptorError::AmbiguousReportSet);
+}
+
+TEST_CASE(invalid_wide_mouse_ids_do_not_alias_valid_mouse_fields_or_cursors) {
+    for (const bool invalid_first : {false, true}) {
+        std::vector<std::uint8_t> bytes;
+        for (const bool invalid : {invalid_first, !invalid_first}) {
+            if (invalid) {
+                bytes.insert(bytes.end(), {0x86, 0x01, 0x01});
+            } else {
+                bytes.insert(bytes.end(), {0x85, 0x01});
+            }
+            bytes.insert(bytes.end(), {
+                0x05, 0x09, 0x19, 0x01, 0x29, 0x03,
+                0x75, 0x01, 0x95, 0x03, 0x81, 0x02,
+                0x75, 0x05, 0x95, 0x01, 0x81, 0x01,
+                0x05, 0x01, 0x09, 0x30, 0x09, 0x31,
+                0x75, 0x08, 0x95, 0x02, 0x81, 0x06,
+            });
+        }
+        HidReportSet set;
+        CHECK_EQ(parse_hid_report_set(view(bytes), set), ReportDescriptorError::None);
+        CHECK_EQ(set.count, std::uint8_t{1});
+        check_entry(set.entries[0], ReportRole::Mouse, 1, 3);
+        CHECK_EQ(set.entries[0].mouse.x.offset, std::uint8_t{1});
+        CHECK_EQ(set.entries[0].mouse.y.offset, std::uint8_t{2});
+        CHECK_EQ(set.rejected_count, std::uint8_t{1});
+        CHECK_EQ(set.rejected[0].role, ReportRole::Mouse);
+        CHECK_EQ(set.rejected[0].report_id, std::uint8_t{0});
+        CHECK_EQ(set.rejected[0].reason, ReportDescriptorError::UnsupportedLayout);
+    }
+}
+
+TEST_CASE(repeated_dropped_usage_inputs_are_counted_once_and_overflow_saturates) {
+    std::vector<std::uint8_t> bytes;
+    for (unsigned report_id = 1; report_id <= 255; ++report_id) {
+        for (const std::uint8_t page : {std::uint8_t{0x07}, std::uint8_t{0x0C}}) {
+            bytes.insert(bytes.end(), {
+                0x85, static_cast<std::uint8_t>(report_id), 0x05, page,
+                0x19, 0x01, 0x29, 0x02,
+                0x75, 0x01, 0x95, 0x02, 0x81, 0x02,
+            });
+        }
+        if (report_id == 9) {
+            // Repeating a dropped candidate's Input cannot count a new candidate.
+            bytes.insert(bytes.end(), {0x19, 0x03, 0x29, 0x04, 0x81, 0x02});
+            HidReportSet set;
+            CHECK_EQ(parse_hid_report_set(view(bytes), set), ReportDescriptorError::None);
+            CHECK_EQ(set.count, std::uint8_t{8});
+            CHECK_EQ(set.rejected_overflow, std::uint8_t{10});
+        }
+    }
+    HidReportSet set;
+    CHECK_EQ(parse_hid_report_set(view(bytes), set), ReportDescriptorError::None);
+    CHECK_EQ(set.count, std::uint8_t{8});
+    CHECK_EQ(set.rejected_overflow, std::uint8_t{255});
+    check_entry(set.entries[0], ReportRole::Keyboard, 1, 1);
+    check_entry(set.entries[7], ReportRole::Consumer, 4, 1);
+}
+
+TEST_CASE(shared_parser_scratch_is_reset_after_success_and_each_fatal_exit) {
+    const std::vector<std::uint8_t> valid = {
+        0x85, 0x01, 0x05, 0x0C, 0x09, 0x01,
+        0x75, 0x01, 0x95, 0x01, 0x81, 0x02,
+    };
+    HidReportSet set;
+    CHECK_EQ(parse_hid_report_set(view(valid), set), ReportDescriptorError::None);
+    const HidReportSet sentinel = set;
+    const std::vector<std::vector<std::uint8_t>> fatal_suffixes = {
+        {0x82, 0x00}, {0xFE}, {0xFE, 0x02, 0x00, 0x01},
+        {0xB4}, {0xA4, 0xA4, 0xA4, 0xA4, 0xA4},
+    };
+    for (std::size_t index = 0; index < fatal_suffixes.size(); ++index) {
+        auto bytes = valid;
+        bytes.insert(bytes.end(), fatal_suffixes[index].begin(), fatal_suffixes[index].end());
+        const auto error = index < 3 ? ReportDescriptorError::Truncated
+                                    : ReportDescriptorError::MalformedGlobalState;
+        CHECK_EQ(parse_hid_report_set(view(bytes), set), error);
+        CHECK_EQ(std::memcmp(&set, &sentinel, sizeof(set)), 0);
+        CHECK_EQ(parse_hid_report_set(view(valid), set), ReportDescriptorError::None);
+        CHECK_EQ(set.count, std::uint8_t{1});
+        CHECK_EQ(set.entries[0].keyboard.key_bit_offset, std::uint16_t{0});
+        CHECK_EQ(set.rejected_count, std::uint8_t{0});
+        CHECK_EQ(set.rejected_overflow, std::uint8_t{0});
+    }
+    const std::vector<std::uint8_t> empty = {0x05, 0x01};
+    CHECK_EQ(parse_hid_report_set(view(empty), set), ReportDescriptorError::None);
+    CHECK_FALSE(set.uses_report_ids);
+    CHECK_EQ(set.count, std::uint8_t{0});
+    CHECK_EQ(set.rejected_count, std::uint8_t{0});
+    CHECK_EQ(set.rejected_overflow, std::uint8_t{0});
 }
 
 TEST_CASE(a_fatal_truncated_item_leaves_the_report_set_unchanged) {
