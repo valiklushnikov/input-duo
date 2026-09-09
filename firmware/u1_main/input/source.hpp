@@ -104,6 +104,10 @@ struct SourceIdentity {
     /// SHA-256 of the report descriptor the source gave up, or all zeros if
     /// none was read - a keyboard, or a mouse that declined.
     std::uint8_t descriptor_hash[32] = {};
+    // Diagnostics: 0 unknown, 1 descriptor, 2 boot; 0xFF means not parsed.
+    std::uint8_t layout_source = 0;
+    std::uint8_t keyboard_error = 0xFF;
+    std::uint8_t consumer_error = 0xFF;
 };
 
 static_assert(sizeof(SourceEvent::report) == kMaxSourceReportBytes,

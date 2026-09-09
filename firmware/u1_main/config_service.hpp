@@ -384,7 +384,8 @@ inline constexpr std::size_t kReferenceCounterBlockBytes = 1 + kReferenceCounter
 /// kReferenceCounterFieldBytes fewer, so this is a ceiling and not a length.
 inline constexpr std::size_t kDiagnosticsPayloadSize =
     kBackendBlockOffset + kBackendBlockBytes + kHostBlockBytes +
-    kReferenceCounterBlockBytes + 8 + input::kSourceCapacity * (7 + input::kProductNameBytes);
+    kReferenceCounterBlockBytes + 8 + input::kSourceCapacity * (7 + input::kProductNameBytes) +
+    4 + input::kSourceCapacity * 23;
 
 static_assert(kDiagnosticsPayloadSize <= protocol::ProtocolLimits::CDC_MAX_PAYLOAD,
               "the diagnostics reply has to fit in one frame");

@@ -157,8 +157,10 @@ TEST_CASE(consumer_descriptors_decode_array_and_bitmap_sources_and_release_on_de
         0x09,0xE9,0x09,0xEA,0x09,0xCD,0x75,0x01,0x95,0x03,0x81,0x02,0xC0};
     RecordingHandler handler; SourceTable table(handler);
     SourceIdentity a, b;
-    CHECK(duo_input::u1::pio_usb::classify_hid(0, array, sizeof(array), a));
-    CHECK(duo_input::u1::pio_usb::classify_hid(0, bitmap, sizeof(bitmap), b));
+    CHECK(duo_input::u1::pio_usb::classify_hid_layout(0, array, sizeof(array), a) !=
+          duo_input::u1::pio_usb::HidLayoutSource::None);
+    CHECK(duo_input::u1::pio_usb::classify_hid_layout(0, bitmap, sizeof(bitmap), b) !=
+          duo_input::u1::pio_usb::HidLayoutSource::None);
     table.on_event(ready_event(1), a, 0); table.on_event(ready_event(2), b, 0);
     const std::uint8_t down_a[] = {2, 0xB1, 1}; const std::uint8_t down_b[] = {5};
     table.on_event(report_event(1, down_a, sizeof(down_a)), a, 1);

@@ -14,9 +14,22 @@
 using duo_input::u1::input::DeviceKind;
 using duo_input::u1::input::SourceIdentity;
 using duo_input::u1::input::hid::KeyboardFieldKind;
-using duo_input::u1::pio_usb::classify_hid;
+using duo_input::u1::pio_usb::classify_hid_layout;
+using duo_input::u1::pio_usb::HidLayoutSource;
 
 namespace {
+
+/// Was this interface classified at all - which is all the cases below ask.
+/// Deliberately local to this file: a production caller has to know WHERE the
+/// layout came from, because that decides the protocol the interface is left
+/// in, and a shared wrapper that answered only "yes" is what let the PIO USB
+/// backend leave a descriptor-classified mouse in boot protocol.
+bool classify_hid(std::uint8_t protocol, const std::uint8_t* descriptor,
+                  std::size_t length,
+                  duo_input::u1::input::SourceIdentity& out) {
+    return classify_hid_layout(protocol, descriptor, length, out) !=
+           HidLayoutSource::None;
+}
 
 constexpr std::uint8_t kProtocolNone = 0;
 constexpr std::uint8_t kProtocolKeyboard = 1;

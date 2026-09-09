@@ -102,6 +102,9 @@ class DeviceService(QObject):
         self._device_info = None
         self._status = None
         self._diagnostics = None
+        self._captures_received = 0
+        self._capture_decision = "none"
+        self._capture_payload = b""
         self._device_hash = b""
         self._last_progress: int | None = None
 
@@ -115,6 +118,14 @@ class DeviceService(QObject):
         self._abort_requested = False
 
     # ------------------------------------------------------------------ state
+
+    @property
+    def capture_observation(self) -> str:
+        return f"received={self._captures_received} decision={self._capture_decision} payload={self._capture_payload.hex(' ')}"
+
+    def note_capture_decision(self, decision: str) -> None:
+        """The listening dialog reports whether its filter accepted the reply."""
+        self._capture_decision = decision
 
     @property
     def state(self) -> DeviceState:
@@ -166,6 +177,9 @@ class DeviceService(QObject):
         self._device_info = None
         self._status = None
         self._diagnostics = None
+        self._captures_received = 0
+        self._capture_decision = "none"
+        self._capture_payload = b""
         if not link.open():
             self._teardown_link()
             self.operation_failed.emit(
@@ -338,6 +352,9 @@ class DeviceService(QObject):
         if frame.type is CdcMessageType.CAPTURE_EVENT:
             # Device-initiated: it owns the sequence counter for this frame.
             self._sequence.align_after(frame.sequence)
+            self._captures_received += 1
+            self._capture_payload = bytes(frame.payload[:8])
+            self._capture_decision = "no listening dialog"
             self.capture_received.emit(bytes(frame.payload))
             return
         pending = self._pending

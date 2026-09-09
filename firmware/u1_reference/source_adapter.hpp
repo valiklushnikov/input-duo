@@ -3,7 +3,7 @@
 // What a captured callback record means, decided in ordinary task context.
 //
 // This is the only place in the reference target that decides what an
-// interface is. It reuses classify_hid and the shared report-descriptor
+// interface is. It reuses classify_hid_layout and the shared report-descriptor
 // parsers underneath it; every mounted interface is then announced as a
 // distinct source, including one whose layout remains unknown.
 //

@@ -168,16 +168,19 @@ class CaptureDialog(QDialog):
         try:
             self._trigger = parse_capture_event(bytes(payload))
         except PayloadError:
+            self._service.note_capture_decision("unreadable")
             # A payload this host cannot read is not a trigger; keep waiting
             # rather than binding something the operator never pressed.
             return
         if self._accepts is not None and not self._accepts(self._trigger):
+            self._service.note_capture_decision("filtered")
             self._trigger = None
             # Capture mode ends after the first physical press.  Start another
             # window without resetting the visible ten-second countdown.
             if self._service.is_connected:
                 self._service.begin_capture()
             return
+        self._service.note_capture_decision("accepted")
         self.accept()
 
     def done(self, result: int) -> None:  # noqa: N802 - Qt override

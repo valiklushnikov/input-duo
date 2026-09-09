@@ -490,7 +490,23 @@ std::size_t ConfigService::write_input_sources(std::uint8_t* out) const {
         out[at + 7 + input::kProductNameBytes - 1] = 0;
         at += 7 + input::kProductNameBytes;
     }
-    return size;
+    // A separate tail preserves version 1's exact inventory record size.
+    out[at++] = 1;
+    put_u16(out + at, static_cast<std::uint16_t>(4 + count * 23)); at += 2;
+    out[at++] = static_cast<std::uint8_t>(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& source = input_sources_.sources[i];
+        put_u32(out + at, source.reports); at += 4;
+        put_u32(out + at, source.decoded_events); at += 4;
+        out[at++] = source.last_report_size;
+        std::memcpy(out + at, source.last_report, 9); at += 9;
+        out[at++] = source.layout_source;
+        out[at++] = source.report_id;
+        out[at++] = source.minimum_body_bytes;
+        out[at++] = source.keyboard_error;
+        out[at++] = source.consumer_error;
+    }
+    return at;
 }
 
 std::size_t ConfigService::write_reference_counters(std::uint8_t* out) const {

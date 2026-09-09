@@ -109,6 +109,36 @@ bytes**: its former reserved bytes carry the source qualifier, and its final
 reserved byte remains zero. An all-zero binding source (vendor ID, product ID,
 and interface number all zero) means **any source**.
 
+### Optional per-interface decoding diagnostics
+
+The version-1 inventory header (`<BHBI>`) and its 55-byte `<HHBBB48s>`
+records are unchanged. A separate optional tail follows the inventory's declared
+length: version, tail byte length, and matching source count (`<BHB>`), then
+one 23-byte `<IIB9sBBBBB>` record per inventory source. All integers are
+little-endian. Records contain received-report count, decoded-event count,
+last report length, its first nine bytes, layout origin, expected report ID,
+minimum body length, keyboard parser result, and consumer parser result.
+Layout origins are 0 unknown, 1 descriptor, and 2 boot fallback; parser result
+255 means not parsed. Report ID zero means no ID prefix is expected. Old hosts
+ignore the tail; new hosts accept inventories without it. The largest complete
+diagnostics reply is 1020 bytes, below the 1024-byte frame limit.
+
+Diagnostics shows these as **Input source decoding**. Counts reset when an
+interface is mounted again and saturate at `0xFFFFFFFF`. Decoded events are
+edges, including modifiers and disconnect releases, not physical presses.
+The last raw report may include keyboard usages; it is included in diagnostics
+exports, but this is a single overwritten nine-byte sample, not a key history.
+**Capture reception and filter** separately records host-received captures and
+the listening dialog's accepted/filtered/unreadable decision since connection.
+
+For a missing auxiliary capture, refresh Diagnostics before and after one
+Mouse-page Detect attempt and export the report. Supply the two new rows and
+the rejected-interface count. A missing interface, unchanged report count,
+increasing reports with no decoded edges, and a received-but-filtered capture
+identify different boundaries; none should be inferred from a silent dialog.
+To sample a press rather than its subsequent release, hold the side button
+while refreshing Diagnostics after dismissing the Detect dialog.
+
 ## Per-interface input sources: required bench acceptance
 
 These are acceptance checks, not recorded measurements. Write the stated

@@ -40,6 +40,7 @@ void SourceTable::on_event(const SourceEvent& event, const SourceIdentity& ident
         slot->occupied = true;
         slot->source_id = event.source_id;
         slot->identity = identity;
+        slot->observation = {};
         ++revision_;
         slot->pipeline.set_kind(identity.kind, identity.keyboard_layout, identity.mouse_layout);
         return;
@@ -52,6 +53,11 @@ void SourceTable::on_event(const SourceEvent& event, const SourceIdentity& ident
     switch (event.kind) {
         case SourceEventKind::Report:
         case SourceEventKind::AuxiliaryReport:
+            if (slot->observation.reports != 0xFFFFFFFFu) ++slot->observation.reports;
+            slot->observation.last_report_size = event.report_size;
+            std::memset(slot->observation.last_report, 0, sizeof(slot->observation.last_report));
+            std::memcpy(slot->observation.last_report, event.report,
+                        event.report_size < 9 ? event.report_size : 9);
             slot->pipeline.on_report(protocol::ByteView{event.report, event.report_size}, now_ms);
             return;
 
@@ -83,6 +89,16 @@ void SourceTable::inventory(SourceInventory& out, std::uint32_t backend_rejectio
     for (const auto& slot : slots_) {
         if (!slot.occupied) continue;
         auto& info = out.sources[out.count++];
+        info = slot.observation;
+        info.layout_source = slot.identity.layout_source;
+        info.keyboard_error = slot.identity.keyboard_error;
+        info.consumer_error = slot.identity.consumer_error;
+        const bool mouse = slot.identity.kind == DeviceKind::Mouse;
+        const auto& keyboard_layout = slot.identity.keyboard_layout;
+        const auto& mouse_layout = slot.identity.mouse_layout;
+        info.report_id = mouse ? (mouse_layout.report_id ? mouse_layout.report_id_value : 0)
+                               : (keyboard_layout.report_id ? keyboard_layout.report_id_value : 0);
+        info.minimum_body_bytes = mouse ? mouse_layout.minimum_body_bytes : keyboard_layout.minimum_body_bytes;
         info.vendor_id = slot.identity.vendor_id; info.product_id = slot.identity.product_id;
         info.interface_number = slot.identity.interface_number;
         info.device_address = slot.identity.device_address;
@@ -114,6 +130,8 @@ void SourceTable::on_input(std::uint8_t source_index, const InputEvent& event,
                            std::uint32_t now_ms) {
     InputEvent stamped = event;
     stamped.source_index = source_index;
+    if (slots_[source_index].observation.decoded_events != 0xFFFFFFFFu)
+        ++slots_[source_index].observation.decoded_events;
     handler_.on_input(stamped, now_ms);
 }
 

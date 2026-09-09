@@ -22,6 +22,10 @@ void add_device(std::uint8_t dev_addr, std::uint16_t vendor_id,
 void set_protocol(std::uint8_t dev_addr, std::uint8_t instance,
                   std::uint8_t protocol);
 void set_receive_result(bool result);
+/// What tuh_hid_set_protocol() returns from here on. Real TinyUSB refuses while
+/// its single control transfer is already in flight - which is the whole reason
+/// a refused request has to be held and offered again rather than dropped.
+void set_hid_protocol_result(bool result);
 void set_interface_number(std::uint8_t dev_addr, std::uint8_t instance,
                           std::uint8_t interface_number);
 void set_host_initialization_result(bool configure_result, bool initialize_result);
@@ -115,6 +119,15 @@ void set_root_port(bool initialized, bool connected, bool suspended,
 /// arrive on its own SourceEvent.
 void set_now_us(std::uint32_t value);
 
+/// One tuh_hid_set_protocol() call, in the order the firmware made them.
+struct HidProtocolRequest {
+    std::uint8_t dev_addr = 0;
+    std::uint8_t instance = 0;
+    std::uint8_t protocol = 0;
+};
+
+std::size_t hid_protocol_request_count();
+HidProtocolRequest hid_protocol_request(std::size_t index);
 std::size_t receive_count();
 std::size_t receive_count(std::uint8_t dev_addr, std::uint8_t instance);
 std::size_t host_task_count();

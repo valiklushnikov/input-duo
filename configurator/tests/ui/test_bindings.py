@@ -655,6 +655,7 @@ def test_a_captured_event_becomes_the_trigger(qtbot, service, emulator):
         link.poll()
 
     assert dialog.trigger == Trigger(TriggerKind.MOUSE_BUTTON, 4, 0)
+    assert service.capture_observation == "received=1 decision=accepted payload=02 04 00"
 
 
 def test_the_table_says_what_each_binding_does(page):

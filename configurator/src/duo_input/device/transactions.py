@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import struct
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from duo_input.domain.models import Trigger, TriggerSource
@@ -593,6 +593,15 @@ class InputSource:
     kind: str
     device_address: int
     product_name: str = ""
+    reports: int | None = None
+    decoded_events: int | None = None
+    last_report_size: int | None = None
+    last_report: bytes = b""
+    layout_source: int | None = None
+    report_id: int | None = None
+    minimum_body_bytes: int | None = None
+    keyboard_error: int | None = None
+    consumer_error: int | None = None
 
 
 def _parse_input_sources(block: bytes) -> tuple[tuple[InputSource, ...] | None, int | None]:
@@ -610,6 +619,20 @@ def _parse_input_sources(block: bytes) -> tuple[tuple[InputSource, ...] | None, 
     for offset in range(8, size, record.size):
         vid, pid, interface, kind, address, name = record.unpack_from(block, offset)
         sources.append(InputSource(vid, pid, interface, {1: "keyboard", 2: "mouse", 3: "consumer"}.get(kind, "unknown"), address, name.split(b"\0", 1)[0].decode("utf-8", errors="replace")))
+    tail = block[size:]
+    if tail:
+        if len(tail) < 4:
+            raise PayloadError("source decoding diagnostics are truncated")
+        version, trace_size, trace_count = struct.unpack_from("<BHB", tail)
+        if version == 1:
+            record = struct.Struct("<IIB9sBBBBB")
+            if trace_count != count or trace_size != 4 + count * record.size or len(tail) < trace_size:
+                raise PayloadError("source decoding diagnostics have the wrong size")
+            for index in range(count):
+                reports, decoded, length, raw, origin, report_id, minimum, keyboard_error, consumer_error = record.unpack_from(tail, 4 + index * record.size)
+                sources[index] = replace(sources[index], reports=reports, decoded_events=decoded,
+                    last_report_size=length, last_report=raw[:min(length, 9)], layout_source=origin,
+                    report_id=report_id, minimum_body_bytes=minimum, keyboard_error=keyboard_error, consumer_error=consumer_error)
     return tuple(sources), rejected
 
 

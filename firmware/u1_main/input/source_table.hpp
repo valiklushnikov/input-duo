@@ -48,6 +48,7 @@ private:
         bool occupied = false;
         std::uint8_t source_id = 0;
         SourceIdentity identity{};
+        SourceInfo observation{};
         SlotHandler handler;
         InputPipeline pipeline;
     };

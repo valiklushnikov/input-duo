@@ -126,6 +126,8 @@ class DiagnosticSnapshot:
     endpoint_release_ms: int | str = UNKNOWN
     dropped_commands: int | str = UNKNOWN
     rejected_interfaces: int | str = UNKNOWN
+    input_sources: str = UNKNOWN
+    capture_observation: str = UNKNOWN
     cdc_bad_crc: int | str = UNKNOWN
     cdc_bad_sequence: int | str = UNKNOWN
     cdc_timeout: int | str = UNKNOWN
@@ -176,6 +178,8 @@ class DiagnosticSnapshot:
             endpoint_release_ms=_counter(counters, "endpoint_release_ms"),
             dropped_commands=_counter(counters, "dropped_commands"),
             rejected_interfaces=_counter(counters, "rejected_interfaces"),
+            input_sources=_input_sources(counters),
+            capture_observation=getattr(service, "capture_observation", UNKNOWN),
             input_backend=_backend_name(counters),
             input_backend_counters=_backend_counters(counters),
             host_stack=_host_stack(counters),
@@ -188,6 +192,22 @@ class DiagnosticSnapshot:
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _input_sources(counters: object) -> str:
+    sources = getattr(counters, "input_sources", None)
+    if sources is None:
+        return UNKNOWN
+    rows = []
+    for source in sources:
+        label = f"{source.vendor_id:04X}:{source.product_id:04X} interface {source.interface_number} address={source.device_address} {source.kind}"
+        if source.product_name:
+            label += f" ({source.product_name})"
+        if source.reports is not None:
+            origin = {0: "unknown", 1: "descriptor", 2: "boot"}.get(source.layout_source, "unknown")
+            label += f"; reports={source.reports} decoded={source.decoded_events}; layout={origin} id={source.report_id} min={source.minimum_body_bytes}; parse keyboard={source.keyboard_error} consumer={source.consumer_error}; last[{source.last_report_size}]={source.last_report.hex(' ')}"
+        rows.append(label)
+    return "\n".join(rows) if rows else "none"
 
 
 def _yes_no(counters: object, field: str) -> str:

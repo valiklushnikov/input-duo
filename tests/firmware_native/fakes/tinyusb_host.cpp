@@ -51,6 +51,9 @@ std::array<Interface, 32> interfaces{};
 std::array<ReceiveCall, 64> receive_calls{};
 std::size_t receive_calls_used = 0;
 bool receive_result = true;
+std::array<duo::test::tinyusb_host::HidProtocolRequest, 32> hid_protocol_requests{};
+std::size_t hid_protocol_requests_used = 0;
+bool hid_protocol_result = true;
 bool configure_result = true;
 bool initialize_result = true;
 std::size_t host_tasks = 0;
@@ -86,6 +89,9 @@ void reset() {
     receive_calls = {};
     receive_calls_used = 0;
     receive_result = true;
+    hid_protocol_requests = {};
+    hid_protocol_requests_used = 0;
+    hid_protocol_result = true;
     configure_result = true;
     initialize_result = true;
     host_tasks = 0;
@@ -141,6 +147,8 @@ void set_protocol(std::uint8_t dev_addr, std::uint8_t instance,
 }
 
 void set_receive_result(bool result) { receive_result = result; }
+
+void set_hid_protocol_result(bool result) { hid_protocol_result = result; }
 
 void set_interface_number(std::uint8_t dev_addr, std::uint8_t instance,
                           std::uint8_t interface_number) {
@@ -228,6 +236,15 @@ void set_root_port(bool initialized, bool connected, bool suspended,
     pio_usb_root_port[0].is_fullspeed = is_fullspeed;
 }
 
+std::size_t hid_protocol_request_count() { return hid_protocol_requests_used; }
+
+HidProtocolRequest hid_protocol_request(std::size_t index) {
+    if (index >= hid_protocol_requests_used) {
+        return {};
+    }
+    return hid_protocol_requests[index];
+}
+
 std::size_t receive_count() { return receive_calls_used; }
 
 std::size_t receive_count(std::uint8_t dev_addr, std::uint8_t instance) {
@@ -278,6 +295,15 @@ extern "C" bool tuh_hid_receive_report(std::uint8_t dev_addr,
         receive_calls[receive_calls_used++] = ReceiveCall{dev_addr, instance};
     }
     return receive_result;
+}
+
+extern "C" bool tuh_hid_set_protocol(std::uint8_t dev_addr, std::uint8_t instance,
+                                     std::uint8_t protocol) {
+    if (hid_protocol_requests_used < hid_protocol_requests.size()) {
+        hid_protocol_requests[hid_protocol_requests_used++] =
+            duo::test::tinyusb_host::HidProtocolRequest{dev_addr, instance, protocol};
+    }
+    return hid_protocol_result;
 }
 
 extern "C" bool tuh_hid_itf_get_info(std::uint8_t dev_addr,

@@ -47,6 +47,18 @@ def test_inventory_tail_keeps_interfaces_names_and_rejections_and_old_reply():
     assert capabilities.label(Trigger(TriggerKind.KEYBOARD_USAGE, 4, source=TriggerSource(0x1234, 0x5678, 3))) == "A - Receiver (interface 3)"
 
 
+def test_source_decoding_diagnostics_are_optional_and_keep_the_raw_report():
+    from duo_input.device.transactions import parse_diagnostics
+    legacy = bytearray(252); legacy[43] = 9
+    inventory = struct.pack("<BHBIHHBBB48s", 1, 63, 1, 0, 0x1234, 0x5678, 2, 1, 1, b"Receiver")
+    assert parse_diagnostics(bytes(legacy) + inventory).input_sources[0].reports is None
+    trace = struct.pack("<BHBIIB9sBBBBB", 1, 27, 1, 6, 3, 9, bytes.fromhex("0101004f0000000003"), 1, 1, 8, 0, 4)
+    source = parse_diagnostics(bytes(legacy) + inventory + trace).input_sources[0]
+    assert (source.reports, source.decoded_events, source.last_report_size) == (6, 3, 9)
+    assert source.last_report.hex() == "0101004f0000000003"
+    assert (source.layout_source, source.report_id, source.minimum_body_bytes, source.keyboard_error, source.consumer_error) == (1, 1, 8, 0, 4)
+
+
 def _wire(sequence: int, payload: bytes) -> bytes:
     return encode_cdc_frame(CdcFrame(CdcMessageType.PING, sequence, payload))
 

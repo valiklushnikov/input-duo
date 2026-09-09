@@ -392,6 +392,8 @@ def test_a_key_from_another_device_is_refused_and_the_window_stays_open(qtbot):
 
     assert dialog.trigger is None
     assert page.trigger_kind.currentData() is TriggerKind.MOUSE_BUTTON
+    assert "received=1 decision=filtered" in service.capture_observation
+    assert "34 12 78 56 00" in service.capture_observation
 
 
 def test_a_key_the_operator_then_changes_loses_the_device_it_named(qtbot):

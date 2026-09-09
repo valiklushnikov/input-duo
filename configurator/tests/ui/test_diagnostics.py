@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import zipfile
+import struct
 
 import pytest
 
@@ -49,6 +50,22 @@ def page(qtbot, service) -> DiagnosticsPage:
 
 
 # ---------------------------------------------------------------- the page
+
+
+def test_refresh_shows_interface_boundary_evidence(page, emulator, qtbot, monkeypatch):
+    legacy = bytearray(252); legacy[43] = 9
+    inventory = struct.pack("<BHBIHHBBB48s", 1, 63, 1, 0, 0x1234, 0x5678, 2, 1, 1, b"Receiver")
+    trace = struct.pack("<BHBIIB9sBBBBB", 1, 27, 1, 6, 3, 9, bytes.fromhex("0101004f0000000003"), 1, 1, 8, 0, 4)
+    monkeypatch.setattr(emulator, "_handle_get_diagnostics", lambda payload: bytes(legacy) + inventory + trace)
+    with qtbot.waitSignal(page.service.operation_succeeded):
+        page.service.connect_device(emulator)
+    with qtbot.waitSignal(page.service.operation_succeeded):
+        page.refresh_button.click()
+    value = page.value("input_sources")
+    assert "1234:5678 interface 2" in value
+    assert "reports=6 decoded=3" in value
+    assert "id=1 min=8" in value
+    assert "01 01 00 4f 00 00 00 00 03" in value
 
 
 def test_diagnostics_does_not_offer_a_firmware_version(page):

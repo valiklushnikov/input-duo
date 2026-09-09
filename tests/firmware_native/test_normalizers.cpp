@@ -530,7 +530,7 @@ TEST_CASE(a_reordered_native_array_says_nobody_did_anything) {
     CHECK_EQ(out.count, 0u);
 }
 
-TEST_CASE(a_native_report_releases_before_it_presses_and_modifiers_come_last) {
+TEST_CASE(a_native_report_releases_then_applies_modifiers_before_new_keys) {
     KeyboardNormalizer normalizer;
     Collected out;
     normalizer.set_layout(aula_keyboard_layout());
@@ -545,9 +545,9 @@ TEST_CASE(a_native_report_releases_before_it_presses_and_modifiers_come_last) {
     CHECK_EQ(static_cast<int>(out.events[0].kind), static_cast<int>(InputEventKind::KeyUp));
     CHECK_EQ(out.events[0].code, std::uint16_t{0x04});
     CHECK_EQ(static_cast<int>(out.events[1].kind), static_cast<int>(InputEventKind::KeyDown));
-    CHECK_EQ(out.events[1].code, std::uint16_t{0x05});
+    CHECK_EQ(out.events[1].code, std::uint16_t{0xE0});
     CHECK_EQ(static_cast<int>(out.events[2].kind), static_cast<int>(InputEventKind::KeyDown));
-    CHECK_EQ(out.events[2].code, std::uint16_t{0xE0});
+    CHECK_EQ(out.events[2].code, std::uint16_t{0x05});
 }
 
 TEST_CASE(native_modifiers_are_delivered_lowest_bit_first) {

@@ -1682,3 +1682,92 @@ TEST_CASE(reconnect_clears_old_layout_vid_pid_hash_and_presence_before_reclassif
                           sizeof(keyboard->identity.descriptor_hash)) == 0);
     }
 }
+
+// A layout read from a report descriptor describes what the device sends in
+// REPORT protocol. TinyUSB configures every boot-capable interface in BOOT
+// protocol (hid_host.c's _hidh_default_protocol), whose mouse report is three
+// bytes with no Report ID, so a descriptor layout applied to those reports
+// matches nothing and drops every one of them - silently, since a Report ID
+// mismatch is not an error. Measured on hardware 2026-09-09: a Keychron Link
+// mounted, ready, five buttons, an 81-byte descriptor, and mouse_latency.count
+// still zero because nothing the mouse sent ever decoded.
+TEST_CASE(a_descriptor_classified_interface_is_moved_to_report_protocol_before_it_is_armed) {
+    RegistryRig rig;
+    const auto descriptor = neutral_mouse_descriptor();
+    rig.device(duo::test::tinyusb_host::kFirstDownstreamAddress, 0x3434, 0xD030);
+    rig.hid(duo::test::tinyusb_host::kFirstDownstreamAddress, 0, kProtocolMouse,
+            descriptor.data(), static_cast<std::uint16_t>(descriptor.size()));
+    rig.registry.process_pending(0);
+
+    CHECK_EQ(duo::test::tinyusb_host::hid_protocol_request_count(), 1u);
+    const auto request = duo::test::tinyusb_host::hid_protocol_request(0);
+    CHECK_EQ(request.dev_addr, duo::test::tinyusb_host::kFirstDownstreamAddress);
+    CHECK_EQ(request.instance, 0u);
+    CHECK_EQ(request.protocol, DeviceRegistry::kHidProtocolReport);
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(
+                 duo::test::tinyusb_host::kFirstDownstreamAddress, 0),
+             1u);
+}
+
+// The other half of the same rule, and the reason this is per interface rather
+// than one default for the whole host: an interface that gave up no descriptor
+// is read with boot protocol's own layout, and moving THAT one to report
+// protocol would make the device send a format nothing here can read.
+TEST_CASE(a_boot_fallback_interface_is_left_in_boot_protocol) {
+    RegistryRig rig;
+    rig.device(duo::test::tinyusb_host::kFirstDownstreamAddress, 0x3434, 0xD030);
+    rig.hid(duo::test::tinyusb_host::kFirstDownstreamAddress, 0, kProtocolMouse,
+            nullptr, 0);
+    rig.registry.process_pending(0);
+
+    CHECK_EQ(rig.registry.find(duo::test::tinyusb_host::kFirstDownstreamAddress, 0)
+                 ->identity.kind,
+             DeviceKind::Mouse);
+    CHECK_EQ(duo::test::tinyusb_host::hid_protocol_request_count(), 0u);
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(
+                 duo::test::tinyusb_host::kFirstDownstreamAddress, 0),
+             1u);
+}
+
+// TinyUSB has one control transfer in flight at a time, so this call is refused
+// while the other interfaces of the same device are still being set up.
+// Refusing is not failing: dropping the request leaves the interface in boot
+// protocol while its layout describes report protocol, which is silently no
+// input at all - so it is held and offered again every pass, and the interface
+// is not armed until the format it will answer in matches the layout that reads
+// it. A refusal is also not a receive-arm failure and must not spend that
+// bounded budget.
+TEST_CASE(a_refused_protocol_switch_is_held_and_offered_again_rather_than_dropped) {
+    RegistryRig rig;
+    const auto descriptor = neutral_mouse_descriptor();
+    duo::test::tinyusb_host::set_hid_protocol_result(false);
+    rig.device(duo::test::tinyusb_host::kFirstDownstreamAddress, 0x3434, 0xD030);
+    rig.hid(duo::test::tinyusb_host::kFirstDownstreamAddress, 0, kProtocolMouse,
+            descriptor.data(), static_cast<std::uint16_t>(descriptor.size()));
+    rig.registry.process_pending(0);
+
+    CHECK_EQ(duo::test::tinyusb_host::hid_protocol_request_count(), 1u);
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(
+                 duo::test::tinyusb_host::kFirstDownstreamAddress, 0),
+             0u);
+    CHECK_EQ(rig.registry.arm_failure_count(), 0u);
+
+    rig.registry.retry_pending_arms(1000);
+    CHECK_EQ(duo::test::tinyusb_host::hid_protocol_request_count(), 2u);
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(
+                 duo::test::tinyusb_host::kFirstDownstreamAddress, 0),
+             0u);
+
+    duo::test::tinyusb_host::set_hid_protocol_result(true);
+    rig.registry.retry_pending_arms(2000);
+    CHECK_EQ(duo::test::tinyusb_host::hid_protocol_request_count(), 3u);
+    CHECK_EQ(duo::test::tinyusb_host::receive_count(
+                 duo::test::tinyusb_host::kFirstDownstreamAddress, 0),
+             1u);
+
+    // And once it has been accepted it is not asked for again on every
+    // subsequent pass - a control transfer per pass would crowd out the very
+    // reports this exists to make readable.
+    rig.registry.retry_pending_arms(3000);
+    CHECK_EQ(duo::test::tinyusb_host::hid_protocol_request_count(), 3u);
+}

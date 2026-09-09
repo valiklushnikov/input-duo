@@ -56,6 +56,11 @@ public:
     /// also drop this role's independently-arming sibling.
     static constexpr std::uint8_t kMaxArmRetries = 3;
 
+    /// HID_PROTOCOL_REPORT, TinyUSB's own value. An interface whose layout was
+    /// read from its report descriptor has to be moved here before that layout
+    /// describes anything the device actually sends.
+    static constexpr std::uint8_t kHidProtocolReport = 1;
+
     struct Interface {
         bool mounted = false;
         std::uint8_t dev_addr = 0;
@@ -102,6 +107,14 @@ public:
         std::uint8_t arm_retry_count = 0;
         bool arm_retry_pending = false;
         std::uint32_t arm_retry_deadline_us = 0;
+        /// This interface's layout came from its report descriptor, and the
+        /// SET_PROTOCOL that moves it into report protocol has not been
+        /// accepted yet. Until it is, the interface is deliberately not armed:
+        /// TinyUSB configures boot-capable interfaces in boot protocol, whose
+        /// mouse report is three bytes with no Report ID, and a descriptor
+        /// layout reading those matches nothing and drops every one of them
+        /// without an error to show for it.
+        bool report_protocol_pending = false;
     };
 
     void record_host_initialization(bool configure_succeeded, bool init_succeeded);

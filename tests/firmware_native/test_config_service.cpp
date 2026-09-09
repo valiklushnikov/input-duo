@@ -39,6 +39,9 @@ using duo_input::u1::mapping::CaptureController;
 using duo_input::u1::mapping::CapturedTrigger;
 
 extern "C" bool tuh_hid_receive_report(std::uint8_t, std::uint8_t) { return true; }
+extern "C" bool tuh_hid_set_protocol(std::uint8_t, std::uint8_t, std::uint8_t) {
+    return true;
+}
 
 namespace {
 
@@ -805,13 +808,65 @@ TEST_CASE(diagnostics_append_interface_inventory_and_capacity_refusals) {
     link.service.set_input_sources(inventory);
     const auto reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
     const std::size_t at = 252;
-    CHECK_EQ(reply.payload.size, at + 8 + 55);
+    CHECK_EQ(reply.payload.size, at + 8 + 55 + 27);
     CHECK_EQ(reply.payload.data[at], 1);
     CHECK_EQ(reply.payload.data[at + 3], 1);
     CHECK_EQ(read_u32(reply.payload.data + at + 4), 7u);
     CHECK_EQ(reply.payload.data[at + 8], 0x34);
     CHECK_EQ(reply.payload.data[at + 12], 3);
     CHECK_EQ(std::strcmp(reinterpret_cast<const char*>(reply.payload.data + at + 15), "Receiver"), 0);
+}
+
+TEST_CASE(auxiliary_keyboard_report_crosses_registry_sources_capture_and_cdc) {
+    // Product-neutral report-ID keyboard, with the historical nine-byte shape.
+    // No receiver descriptor is available, so this proves the generic downstream
+    // path, not that the bench descriptor actually selects this layout.
+    const std::uint8_t descriptor[] = {
+        0x05,1,0x09,6,0xA1,1,0x85,1,0x05,7,0x19,0xE0,0x29,0xE7,
+        0x15,0,0x25,1,0x75,1,0x95,8,0x81,2,0x75,8,0x95,1,0x81,1,
+        0x19,0,0x29,0x65,0x15,0,0x25,0x65,0x75,8,0x95,6,0x81,0,0xC0};
+    struct Handler : duo_input::u1::input::IInputHandler {
+        CaptureController capture;
+        void on_input(const InputEvent& event, std::uint32_t) override { capture.handle(event); }
+    } handler;
+    duo_input::u1::input::SourceTable sources(handler);
+    handler.capture.set_sources(sources);
+    duo_input::u1::pio_usb::DeviceRegistry registry;
+    registry.capture_hid_mount(1, 0, 0x1234, 0x5678, 2, nullptr, 0, 0);
+    registry.capture_hid_mount(1, 2, 0x1234, 0x5678, 1, descriptor, sizeof(descriptor), 2);
+    const auto drain = [&] {
+        registry.process_pending(0);
+        duo_input::u1::input::SourceEvent event{}; duo_input::u1::input::SourceIdentity identity{};
+        while (registry.take_event(event, identity)) sources.on_event(event, identity, 0);
+    };
+    drain();
+    handler.capture.begin(0);
+    const std::uint8_t press[] = {1,1,0,0x4F,0,0,0,0,3};
+    registry.capture_report(1, 2, press, sizeof(press), 0); drain();
+    CapturedTrigger trigger{};
+    CHECK(handler.capture.take(trigger));
+    CHECK_EQ(trigger.code, 0x4F); CHECK_EQ(trigger.modifiers, 1);
+    CHECK_EQ(trigger.interface_number, 2);
+    Link link; link.hello(); link.send(CdcMessageType::CAPTURE_BEGIN);
+    link.service.emit_capture_event(trigger);
+    const auto reply = link.decode_last();
+    const std::uint8_t expected[] = {1,0x4F,1,0x34,0x12,0x78,0x56,2};
+    CHECK_EQ(reply.payload.size, sizeof(expected));
+    CHECK(std::memcmp(reply.payload.data, expected, sizeof(expected)) == 0);
+    std::uint8_t other_report[] = {7,0,0,0,0,0,0,0,0};
+    registry.capture_report(1, 2, other_report, sizeof(other_report), 1); drain();
+    duo_input::u1::input::SourceInventory inventory{}; sources.inventory(inventory);
+    CHECK_EQ(inventory.sources[1].reports, 2u);
+    CHECK_EQ(inventory.sources[1].decoded_events, 3u);
+    CHECK_EQ(inventory.sources[1].last_report[0], 7);
+    CHECK_EQ(inventory.sources[1].report_id, 1);
+    CHECK_EQ(inventory.sources[1].layout_source, 1);
+    CHECK_EQ(inventory.sources[1].minimum_body_bytes, 8);
+    CHECK_EQ(inventory.sources[1].keyboard_error, 0);
+    link.service.set_input_sources(inventory);
+    const auto diagnostics = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    CHECK_EQ(diagnostics.payload.size, 252u + 118u + 50u);
+    CHECK_EQ(read_u32(diagnostics.payload.data + 252 + 118 + 4 + 23), 2u);
 }
 
 TEST_CASE(both_target_rejection_boundaries_reach_the_operator_diagnostics) {
@@ -1211,7 +1266,7 @@ TEST_CASE(the_diagnostics_carry_what_the_host_stack_and_root_port_are_doing) {
     // own single not-published marker byte instead of the full ten.
     CHECK_EQ(reply.payload.size,
              duo_input::u1::kDiagnosticsPayloadSize -
-                 duo_input::u1::kReferenceCounterFieldBytes - 448);
+                 duo_input::u1::kReferenceCounterFieldBytes - 448 - 188);
 }
 
 // The two clocks are the whole point of carrying both. A host brought up at
@@ -1315,7 +1370,7 @@ TEST_CASE(the_host_block_leaves_the_prefix_byte_for_byte_unchanged) {
     // test above.
     CHECK_EQ(published.payload.size,
              duo_input::u1::kDiagnosticsPayloadSize -
-                 duo_input::u1::kReferenceCounterFieldBytes - 448);
+                 duo_input::u1::kReferenceCounterFieldBytes - 448 - 188);
     for (std::size_t index = 0; index < sizeof(kFrozenLegacyDiagnosticsPrefix); ++index) {
         CHECK_EQ(published.payload.data[index], kFrozenLegacyDiagnosticsPrefix[index]);
     }
@@ -1711,7 +1766,7 @@ TEST_CASE(input_source_inventory_is_an_explicit_empty_current_snapshot) {
     Link link; link.hello();
     link.service.set_input_sources({});
     const auto response = link.send(CdcMessageType::GET_DIAGNOSTICS);
-    CHECK_EQ(response.payload.size, 260u);
+    CHECK_EQ(response.payload.size, 264u);
     CHECK_EQ(response.payload.data[252], 1);
     CHECK_EQ(response.payload.data[255], 0);
 }

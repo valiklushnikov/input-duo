@@ -39,11 +39,4 @@ HidLayoutSource classify_hid_layout(std::uint8_t protocol,
                                     std::size_t length,
                                     input::SourceIdentity& out);
 
-/// Whether the interface is one this firmware can read at all.
-///
-/// Kept for callers that only need the verdict. A caller that has to choose a
-/// protocol needs classify_hid_layout above instead.
-bool classify_hid(std::uint8_t protocol, const std::uint8_t* descriptor,
-                  std::size_t length, input::SourceIdentity& out);
-
 }  // namespace duo_input::u1::pio_usb

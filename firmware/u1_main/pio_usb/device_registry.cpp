@@ -5,6 +5,8 @@
 #include "pio_usb/hid_setup.hpp"
 
 extern "C" bool tuh_hid_receive_report(std::uint8_t dev_addr, std::uint8_t instance);
+extern "C" bool tuh_hid_set_protocol(std::uint8_t dev_addr, std::uint8_t instance,
+                                     std::uint8_t protocol);
 
 namespace duo_input::u1::pio_usb {
 namespace {
@@ -225,6 +227,26 @@ void DeviceRegistry::arm_if_needed(Interface& interface, std::uint32_t now_us) {
         interface.report_in_flight) {
         return;
     }
+    if (interface.report_protocol_pending) {
+        if (!tuh_hid_set_protocol(interface.dev_addr, interface.instance,
+                                  kHidProtocolReport)) {
+            // TinyUSB keeps one control transfer in flight at a time, so this
+            // is refused while the rest of the device is still being set up.
+            // A refusal is not a failure: the request is held and offered again
+            // on the next pass rather than dropped, because dropping it leaves
+            // the interface answering in boot protocol while its layout reads
+            // report protocol - which is not a broken device or an error
+            // anybody sees, it is silently no input at all.
+            //
+            // Deliberately not counted as an arm failure and deliberately not
+            // charged to the bounded arm-retry budget: no receive was
+            // attempted, and spending that budget here would escalate a
+            // perfectly healthy interface to a fault for the crime of asking
+            // for the control endpoint at a busy moment.
+            return;
+        }
+        interface.report_protocol_pending = false;
+    }
     if (tuh_hid_receive_report(interface.dev_addr, interface.instance)) {
         interface.report_in_flight = true;
         interface.arm_retry_pending = false;
@@ -281,8 +303,15 @@ void DeviceRegistry::retry_pending_arms(std::uint32_t now_us) {
         // keys never released. The signed difference is right either side of
         // the wrap as long as the real interval is under ~35 minutes, which
         // kArmRetryBackoffUs (16 ms at most) is by five orders of magnitude.
-        if (interface.arm_retry_pending &&
-            static_cast<std::int32_t>(now_us - interface.arm_retry_deadline_us) >= 0) {
+        // A held SET_PROTOCOL is offered every pass, with no backoff: it is
+        // waiting on TinyUSB's single control slot, which the same pass loop
+        // frees, and until it is accepted this interface has no receive armed
+        // at all. The arm backoff below is a different thing entirely - there
+        // the endpoint refused, and hammering it is what the backoff exists to
+        // stop.
+        if (interface.report_protocol_pending ||
+            (interface.arm_retry_pending &&
+             static_cast<std::int32_t>(now_us - interface.arm_retry_deadline_us) >= 0)) {
             arm_if_needed(interface, now_us);
         }
     }
@@ -497,11 +526,21 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
         // apart from whatever an older, already-detached occupant of the
         // same slot left queued.
         interface->generation = ++next_generation_;
-        const bool classified = classify_hid(
+        const HidLayoutSource layout_source = classify_hid_layout(
             record.interface_protocol,
             record.payload_present ? record.payload : nullptr,
             record.payload_present ? record.size : 0,
             interface->identity);
+        const bool classified = layout_source != HidLayoutSource::None;
+        // A layout read from a report descriptor describes what the device
+        // sends in REPORT protocol, so the interface has to be moved there
+        // before that layout describes anything at all. One that fell back to
+        // boot protocol's own layout must stay exactly where it is: moving that
+        // one would make the device answer in a format nothing here can read.
+        // Which is why this is per interface and not one host-wide default -
+        // a default would break the second case to fix the first.
+        interface->report_protocol_pending =
+            layout_source == HidLayoutSource::ReportDescriptor;
         interface->identity.vendor_id = record.vendor_id;
         interface->identity.product_id = record.product_id;
         interface->identity.interface_number = record.interface_number;

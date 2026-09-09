@@ -247,6 +247,25 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
 #endif
             }
         }
+    }
+
+    // The same report can introduce a shortcut and its modifier together.
+    // Capture and binding matching must see the new modifier state before
+    // the ordinary key down; releases above still belong to the old state.
+    const std::uint8_t changed = static_cast<std::uint8_t>(modifiers ^ modifiers_);
+    for (std::uint8_t bit = 0; bit < 8; ++bit) {
+        const std::uint8_t mask = static_cast<std::uint8_t>(1u << bit);
+        if ((changed & mask) == 0) continue;
+        const std::uint16_t usage = static_cast<std::uint16_t>(kFirstModifierUsage + bit);
+        emit(out, capacity, used,
+             (modifiers & mask) != 0 ? InputEventKind::KeyDown : InputEventKind::KeyUp, usage);
+#if DUO_CH375_PROBE
+        if ((modifiers & mask) != 0) ++probe_modifier_downs_;
+#endif
+    }
+    modifiers_ = modifiers;
+
+    if (!rollover) {
         for (std::size_t index = 0; index < now_count; ++index) {
             if (!contains(held_, held_count_, now[index])) {
                 emit(out, capacity, used, layout_.consumer ? InputEventKind::ConsumerDown : InputEventKind::KeyDown, now[index]);
@@ -260,23 +279,6 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
         }
         held_count_ = static_cast<std::uint8_t>(now_count);
     }
-
-    const std::uint8_t changed = static_cast<std::uint8_t>(modifiers ^ modifiers_);
-    for (std::uint8_t bit = 0; bit < 8; ++bit) {
-        const std::uint8_t mask = static_cast<std::uint8_t>(1u << bit);
-        if ((changed & mask) == 0) {
-            continue;
-        }
-        const std::uint16_t usage = static_cast<std::uint16_t>(kFirstModifierUsage + bit);
-        emit(out, capacity, used,
-             (modifiers & mask) != 0 ? InputEventKind::KeyDown : InputEventKind::KeyUp, usage);
-#if DUO_CH375_PROBE
-        if ((modifiers & mask) != 0) {
-            ++probe_modifier_downs_;
-        }
-#endif
-    }
-    modifiers_ = modifiers;
 
     return used;
 }

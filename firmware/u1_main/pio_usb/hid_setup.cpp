@@ -20,7 +20,12 @@ HidLayoutSource classify_hid_layout(std::uint8_t protocol,
         crypto::sha256(descriptor, length, out.descriptor_hash);
 
         input::hid::KeyboardReportLayout keyboard;
+        input::hid::KeyboardReportLayout consumer;
         input::hid::MouseReportLayout mouse;
+        out.keyboard_error = static_cast<std::uint8_t>(
+            input::hid::parse_keyboard_report_descriptor({descriptor, length}, keyboard));
+        out.consumer_error = static_cast<std::uint8_t>(
+            input::hid::parse_consumer_report_descriptor({descriptor, length}, consumer));
         const input::hid::ReportDescriptorRole role =
             input::hid::classify_report_descriptor(
                 protocol::ByteView{descriptor, length}, keyboard, mouse);
@@ -30,17 +35,19 @@ HidLayoutSource classify_hid_layout(std::uint8_t protocol,
         if (role == input::hid::ReportDescriptorRole::Keyboard) {
             out.kind = input::DeviceKind::Keyboard;
             out.keyboard_layout = keyboard;
+            out.layout_source = 1;
             return HidLayoutSource::ReportDescriptor;
         }
         if (role == input::hid::ReportDescriptorRole::Mouse) {
             out.kind = input::DeviceKind::Mouse;
             out.mouse_layout = mouse;
+            out.layout_source = 1;
             return HidLayoutSource::ReportDescriptor;
         }
-        if (input::hid::parse_consumer_report_descriptor({descriptor, length}, keyboard) ==
-            input::hid::ReportDescriptorError::None) {
+        if (out.consumer_error == static_cast<std::uint8_t>(input::hid::ReportDescriptorError::None)) {
             out.kind = input::DeviceKind::Consumer;
-            out.keyboard_layout = keyboard;
+            out.keyboard_layout = consumer;
+            out.layout_source = 1;
             return HidLayoutSource::ReportDescriptor;
         }
     }
@@ -48,20 +55,16 @@ HidLayoutSource classify_hid_layout(std::uint8_t protocol,
     if (protocol == kProtocolKeyboard) {
         out.kind = input::DeviceKind::Keyboard;
         out.keyboard_layout = input::hid::boot_keyboard_layout();
+        out.layout_source = 2;
         return HidLayoutSource::BootProtocol;
     }
     if (protocol == kProtocolMouse) {
         out.kind = input::DeviceKind::Mouse;
         out.mouse_layout = input::hid::boot_mouse_layout();
+        out.layout_source = 2;
         return HidLayoutSource::BootProtocol;
     }
     return HidLayoutSource::None;
-}
-
-bool classify_hid(std::uint8_t protocol, const std::uint8_t* descriptor,
-                  std::size_t length, input::SourceIdentity& out) {
-    return classify_hid_layout(protocol, descriptor, length, out) !=
-          HidLayoutSource::None;
 }
 
 }  // namespace duo_input::u1::pio_usb
