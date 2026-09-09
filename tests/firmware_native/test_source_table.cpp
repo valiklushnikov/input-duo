@@ -1,6 +1,7 @@
 // Every HID interface owns a source slot and its normalizer state.
 
 #include "input/source_table.hpp"
+#include "fakes/multi_report_hid.hpp"
 #include "input/product_names.hpp"
 #include "pio_usb/hid_setup.hpp"
 #include "test_support.hpp"
@@ -92,6 +93,7 @@ SourceIdentity mouse_identity(std::uint8_t interface_number) {
     identity.product_id = 0x5678;
     identity.interface_number = interface_number;
     identity.mouse_layout = boot_mouse_layout();
+    duo::test::multi_report_hid::set_single_report(identity);
     return identity;
 }
 
@@ -109,6 +111,7 @@ TEST_CASE(a_composite_device_gets_one_slot_per_interface) {
     keyboard.product_id = 0x5678;
     keyboard.interface_number = 1;
     keyboard.keyboard_layout = boot_keyboard_layout();
+    duo::test::multi_report_hid::set_single_report(keyboard);
 
     const SourceIdentity second_mouse = mouse_identity(2);
 
@@ -212,6 +215,7 @@ TEST_CASE(a_source_fault_releases_held_input_and_frees_its_slot) {
     keyboard.kind = DeviceKind::Keyboard;
     keyboard.interface_number = 1;
     keyboard.keyboard_layout = boot_keyboard_layout();
+    duo::test::multi_report_hid::set_single_report(keyboard);
     table.on_event(ready_event(1), keyboard, 0);
 
     const std::uint8_t held[8] = {0x00, 0x00, 0x4F, 0, 0, 0, 0, 0};
@@ -330,4 +334,58 @@ TEST_CASE(optional_usb_product_name_is_carried_to_every_sibling_and_stale_comple
     names.complete(true, 4);
     table.inventory(inventory);
     CHECK_EQ(inventory.sources[0].product_name[0], 0);
+}
+
+TEST_CASE(every_keychron_report_keeps_one_source_index_and_unknown_ids_are_counted) {
+    using namespace duo::test::multi_report_hid;
+    RecordingHandler handler;
+    SourceTable table(handler);
+    table.on_event(ready_event(7), mouse_identity(0), 0);
+    const auto source = identity();
+    table.on_event(ready_event(42), source, 0);
+    table.on_event(report_event(42, kSidePress, sizeof(kSidePress)), source, 1);
+    table.on_event(auxiliary_report_event(42, kConsumerPress, sizeof(kConsumerPress)), source, 2);
+    table.on_event(report_event(42, kBitmapPress, sizeof(kBitmapPress)), source, 3);
+    CHECK_EQ(handler.events.size(), 5u);
+    const std::uint8_t unknown[21] = {0x7F, 1, 0, 0x4F};
+    table.on_event(auxiliary_report_event(42, unknown, sizeof(unknown)), source, 4);
+    CHECK_EQ(handler.events.size(), 5u);
+    duo_input::u1::input::SourceInventory inventory;
+    table.inventory(inventory);
+    CHECK_EQ(inventory.count, 2);
+    CHECK_EQ(inventory.sources[1].reports, 4u);
+    CHECK_EQ(inventory.sources[1].last_report[0], 0x7F);
+    table.on_event(report_event(42, kSideRelease, sizeof(kSideRelease)), source, 5);
+    CHECK_EQ(handler.events.size(), 7u);
+    if (handler.events.size() == 7) {
+        CHECK_EQ(handler.events[0].code, 0xE0);
+        CHECK_EQ(handler.events[1].code, 0x4F);
+        CHECK_EQ(handler.events[5].kind, InputEventKind::KeyUp);
+        CHECK_EQ(handler.events[5].code, 0x4F);
+        CHECK_EQ(handler.events[6].kind, InputEventKind::KeyUp);
+        CHECK_EQ(handler.events[6].code, 0xE0);
+    }
+    table.on_event(detached_event(42), source, 6);
+    CHECK_EQ(handler.events.size(), 10u);
+    for (const auto& event : handler.events) {
+        CHECK_EQ(event.source_index, 1);
+        CHECK(event.code != 0x03);
+    }
+    table.on_event(ready_event(42), source, 7);
+    SourceIdentity resolved;
+    CHECK(table.resolve(1, resolved));
+    CHECK_EQ(resolved.vendor_id, 0x3434);
+    CHECK_EQ(resolved.product_id, 0xD030);
+    CHECK_EQ(resolved.interface_number, 2);
+}
+
+TEST_CASE(ready_with_no_accepted_reports_does_not_guess_from_legacy_kind_or_layout) {
+    RecordingHandler handler;
+    SourceTable table(handler);
+    auto source = mouse_identity(0);
+    source.report_set = {};
+    table.on_event(ready_event(0), source, 0);
+    const std::uint8_t move[] = {1, 5, 6};
+    table.on_event(report_event(0, move, sizeof(move)), source, 1);
+    CHECK(handler.events.empty());
 }

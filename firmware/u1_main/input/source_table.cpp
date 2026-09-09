@@ -42,7 +42,7 @@ void SourceTable::on_event(const SourceEvent& event, const SourceIdentity& ident
         slot->identity = identity;
         slot->observation = {};
         ++revision_;
-        slot->pipeline.set_kind(identity.kind, identity.keyboard_layout, identity.mouse_layout);
+        slot->pipeline.set_report_set(identity.report_set);
         return;
     }
 

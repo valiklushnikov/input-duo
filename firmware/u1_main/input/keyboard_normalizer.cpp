@@ -146,7 +146,10 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
     // report can be delivered at all is not known until the last one is read.
     std::uint16_t now[kGatherSlots] = {};
     std::size_t now_count = 0;
+    std::size_t rollover_slots = 0;
+#if DUO_CH375_PROBE
     std::size_t error_slots = 0;
+#endif
     bool overflowed = false;
 
     const std::uint32_t first_bit = layout_.key_bit_offset;
@@ -159,12 +162,12 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
             usage = static_cast<std::uint16_t>(
                 read_bits(body, first_bit + index * element_bits,
                           layout_.key_element_bits));
-            if (!layout_.consumer && usage == kRollover) {
-                // Not a usage anybody can press, so it never joins the set.
-                // How many there are is what decides the report: HID 1.11 8.3
-                // has a keyboard that has lost count put this in *every* array
-                // field, and only that is the keyboard saying so.
-                ++error_slots;
+            const bool error_usage = !layout_.consumer && usage >= 0x01 && usage <= 0x03;
+            if (error_usage) {
+                if (usage == kRollover) ++rollover_slots;
+#if DUO_CH375_PROBE
+                if (error_slots < 7) ++error_slots;
+#endif
                 continue;
             }
         } else {
@@ -174,6 +177,9 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
             usage = layout_.explicit_usage_count != 0
                         ? (index < layout_.explicit_usage_count ? layout_.explicit_usages[index] : 0)
                         : static_cast<std::uint16_t>(layout_.key_usage_minimum + index);
+            // Bitmap keyboards can declare the error usages too. Those bits
+            // are never keys, and only an array can signal rollover.
+            if (!layout_.consumer && usage >= 0x01 && usage <= 0x03) continue;
         }
         if (usage == 0 || contains(now, now_count, usage)) {
             continue;
@@ -196,14 +202,12 @@ std::size_t KeyboardNormalizer::apply(protocol::ByteView report, InputEvent* out
     // threw away nine per cent of this keyboard's reports. A thrown-away
     // release leaves the key held, and the computer repeats it until the next
     // keystroke; a thrown-away press is a letter that never arrives at all.
-    const bool rollover = error_slots == kKeySlots;
+    const bool rollover = element_count != 0 && rollover_slots == element_count;
 
 #if DUO_CH375_PROBE
-    // Counted before anything acts on it. The whole question is whether the
-    // number of ErrorRollOver values this device sends ever equals the number
-    // of slots it declared - because the rule above asks for six of them, and
-    // this keyboard has five.
-    ++probe_error_slots_[error_slots < 8 ? error_slots : 7];
+    // All three keyboard array error usages share the bounded probe count;
+    // only the separate ErrorRollOver count controls production decisions.
+    ++probe_error_slots_[error_slots];
     if (rollover) {
         ++probe_rollovers_;
     }

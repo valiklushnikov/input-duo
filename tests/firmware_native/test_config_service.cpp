@@ -857,7 +857,7 @@ TEST_CASE(auxiliary_keyboard_report_crosses_registry_sources_capture_and_cdc) {
     registry.capture_report(1, 2, other_report, sizeof(other_report), 1); drain();
     duo_input::u1::input::SourceInventory inventory{}; sources.inventory(inventory);
     CHECK_EQ(inventory.sources[1].reports, 2u);
-    CHECK_EQ(inventory.sources[1].decoded_events, 3u);
+    CHECK_EQ(inventory.sources[1].decoded_events, 2u); // Ctrl + Right; 0x03 is an error usage.
     CHECK_EQ(inventory.sources[1].last_report[0], 7);
     CHECK_EQ(inventory.sources[1].report_id, 1);
     CHECK_EQ(inventory.sources[1].layout_source, 1);

@@ -7,6 +7,7 @@
 // other computer types until it is rebooted.
 
 #include "input/pipeline.hpp"
+#include "fakes/multi_report_hid.hpp"
 #include "test_support.hpp"
 
 #include <vector>
@@ -65,6 +66,7 @@ SourceIdentity identity(DeviceKind kind, const KeyboardReportLayout& keyboard_la
     out.mouse_layout = mouse_layout;
     out.vendor_id = vendor_id;
     out.product_id = product_id;
+    duo::test::multi_report_hid::set_single_report(out);
     return out;
 }
 
@@ -323,7 +325,7 @@ TEST_CASE(a_mouse_is_read_through_the_layout_it_was_declared_with) {
     // no wheel at all - which is the pointer this firmware shipped.
     CHECK_EQ(recorder.count(InputEventKind::Wheel), 1);
     CHECK_EQ(recorder.count(InputEventKind::MouseButtonDown), 0);
-    CHECK_EQ(recorder.events.front().wheel, 1);
+    if (!recorder.events.empty()) CHECK_EQ(recorder.events.front().wheel, 1);
 }
 
 TEST_CASE(movement_in_a_declared_layout_reaches_the_handler_intact) {
@@ -339,8 +341,10 @@ TEST_CASE(movement_in_a_declared_layout_reaches_the_handler_intact) {
 
     CHECK_EQ(recorder.count(InputEventKind::MouseMove), 1);
     CHECK_EQ(recorder.count(InputEventKind::MouseButtonDown), 0);
-    CHECK_EQ(recorder.events.front().x, static_cast<std::int16_t>(-10));
-    CHECK_EQ(recorder.events.front().y, static_cast<std::int16_t>(79));
+    if (!recorder.events.empty()) {
+        CHECK_EQ(recorder.events.front().x, static_cast<std::int16_t>(-10));
+        CHECK_EQ(recorder.events.front().y, static_cast<std::int16_t>(79));
+    }
 }
 
 TEST_CASE(a_layout_that_never_arrived_leaves_the_boot_reader_in_place) {
@@ -441,4 +445,175 @@ TEST_CASE(a_keyboard_layout_does_not_outlive_the_keyboard_that_declared_it) {
                       1210);
 
     CHECK_EQ(recorder.of(InputEventKind::KeyDown, 0x04), 1);
+}
+
+TEST_CASE(keychron_side_button_uses_declared_id_and_preserves_exact_shortcut_order) {
+    using namespace duo::test::multi_report_hid;
+    Recorder recorder;
+    InputPipeline pipeline(recorder);
+    const auto source = identity();
+    pipeline.on_event(ready_event(), source, 0);
+    pipeline.on_report({kSidePress, sizeof(kSidePress)}, 1);
+    CHECK_EQ(recorder.events.size(), 2u);
+    pipeline.on_report({kSideRelease, sizeof(kSideRelease)}, 2);
+    CHECK_EQ(recorder.events.size(), 4u);
+    if (recorder.events.size() == 4) {
+        CHECK_EQ(recorder.events[0].kind, InputEventKind::KeyDown);
+        CHECK_EQ(recorder.events[0].code, 0xE0);
+        CHECK_EQ(recorder.events[1].kind, InputEventKind::KeyDown);
+        CHECK_EQ(recorder.events[1].code, 0x4F);
+        CHECK_EQ(recorder.events[2].kind, InputEventKind::KeyUp);
+        CHECK_EQ(recorder.events[2].code, 0x4F);
+        CHECK_EQ(recorder.events[3].kind, InputEventKind::KeyUp);
+        CHECK_EQ(recorder.events[3].code, 0xE0);
+    }
+    CHECK_EQ(recorder.of(InputEventKind::KeyDown, 0x03), 0);
+    CHECK_EQ(recorder.of(InputEventKind::KeyUp, 0x03), 0);
+}
+
+TEST_CASE(consumer_id_2_never_releases_ctrl_right_held_by_keyboard_id_1) {
+    using namespace duo::test::multi_report_hid;
+    Recorder recorder;
+    InputPipeline pipeline(recorder);
+    pipeline.on_event(ready_event(), identity(), 0);
+    pipeline.on_report({kSidePress, sizeof(kSidePress)}, 1);
+    CHECK_EQ(recorder.count(InputEventKind::KeyDown), 2);
+    recorder.events.clear();
+    // Padding is legal; a broken broadcast can read a complete keyboard body.
+    const std::uint8_t consumer_press[21] = {2, 0xE9};
+    const std::uint8_t consumer_release[21] = {2};
+    pipeline.on_report({consumer_press, sizeof(consumer_press)}, 2);
+    pipeline.on_report({consumer_release, sizeof(consumer_release)}, 3);
+    CHECK_EQ(recorder.events.size(), 2u);
+    CHECK_EQ(recorder.of(InputEventKind::ConsumerDown, 0xE9), 1);
+    CHECK_EQ(recorder.of(InputEventKind::ConsumerUp, 0xE9), 1);
+    CHECK_EQ(recorder.count(InputEventKind::KeyUp), 0);
+    CHECK_EQ(recorder.count(InputEventKind::KeyDown), 0);
+    pipeline.on_report({kSideRelease, sizeof(kSideRelease)}, 4);
+    CHECK_EQ(recorder.of(InputEventKind::KeyUp, 0x4F), 1);
+    CHECK_EQ(recorder.of(InputEventKind::KeyUp, 0xE0), 1);
+}
+
+TEST_CASE(keyboard_id_12_keeps_its_keys_and_modifiers_independent_of_id_1) {
+    using namespace duo::test::multi_report_hid;
+    Recorder recorder;
+    InputPipeline pipeline(recorder);
+    pipeline.on_event(ready_event(), identity(), 0);
+    pipeline.on_report({kSidePress, sizeof(kSidePress)}, 1);
+    pipeline.on_report({kBitmapPress, sizeof(kBitmapPress)}, 2);
+    CHECK_EQ(recorder.count(InputEventKind::KeyDown), 4);
+    CHECK_EQ(recorder.count(InputEventKind::KeyUp), 0);
+    recorder.events.clear();
+    pipeline.on_report({kSideRelease, sizeof(kSideRelease)}, 3);
+    CHECK_EQ(recorder.events.size(), 2u);
+    CHECK_EQ(recorder.of(InputEventKind::KeyUp, 0x04), 0);
+    CHECK_EQ(recorder.of(InputEventKind::KeyUp, 0xE1), 0);
+    pipeline.on_report({kBitmapRelease, sizeof(kBitmapRelease)}, 4);
+    CHECK_EQ(recorder.events.size(), 4u);
+    CHECK_EQ(recorder.of(InputEventKind::KeyUp, 0x04), 1);
+    CHECK_EQ(recorder.of(InputEventKind::KeyUp, 0xE1), 1);
+}
+
+TEST_CASE(detach_and_fault_release_every_report_slot_and_reconnect_starts_empty) {
+    using namespace duo::test::multi_report_hid;
+    for (const auto terminal : {SourceEventKind::Detached, SourceEventKind::Fault}) {
+        Recorder recorder;
+        InputPipeline pipeline(recorder);
+        const auto source = identity();
+        pipeline.on_event(ready_event(), source, 0);
+        pipeline.on_report({kSidePress, sizeof(kSidePress)}, 1);
+        pipeline.on_report({kConsumerPress, sizeof(kConsumerPress)}, 2);
+        pipeline.on_report({kBitmapPress, sizeof(kBitmapPress)}, 3);
+        recorder.events.clear();
+        auto event = detached_event();
+        event.kind = terminal;
+        pipeline.on_event(event, source, 4);
+        CHECK_EQ(recorder.events.size(), 5u);
+        CHECK_EQ(recorder.of(InputEventKind::KeyUp, 0x4F), 1);
+        CHECK_EQ(recorder.of(InputEventKind::KeyUp, 0xE0), 1);
+        CHECK_EQ(recorder.of(InputEventKind::ConsumerUp, 0xE9), 1);
+        CHECK_EQ(recorder.of(InputEventKind::KeyUp, 0x04), 1);
+        CHECK_EQ(recorder.of(InputEventKind::KeyUp, 0xE1), 1);
+        recorder.events.clear();
+        pipeline.on_event(ready_event(), source, 5);
+        pipeline.on_report({kSideRelease, sizeof(kSideRelease)}, 6);
+        pipeline.on_report({kConsumerRelease, sizeof(kConsumerRelease)}, 7);
+        pipeline.on_report({kBitmapRelease, sizeof(kBitmapRelease)}, 8);
+        CHECK(recorder.events.empty());
+        pipeline.on_report({kSidePress, sizeof(kSidePress)}, 9);
+        pipeline.on_report({kConsumerPress, sizeof(kConsumerPress)}, 10);
+        pipeline.on_report({kBitmapPress, sizeof(kBitmapPress)}, 11);
+        CHECK_EQ(recorder.events.size(), 5u);
+    }
+}
+
+TEST_CASE(ready_resets_all_decoder_states_without_inventing_releases) {
+    using namespace duo::test::multi_report_hid;
+    Recorder recorder;
+    InputPipeline pipeline(recorder);
+    const auto source = identity();
+    pipeline.on_event(ready_event(), source, 0);
+    pipeline.on_report({kSidePress, sizeof(kSidePress)}, 1);
+    pipeline.on_report({kConsumerPress, sizeof(kConsumerPress)}, 2);
+    pipeline.on_report({kBitmapPress, sizeof(kBitmapPress)}, 3);
+    recorder.events.clear();
+    pipeline.on_event(ready_event(), source, 4);
+    CHECK(recorder.events.empty());
+    pipeline.on_report({kSidePress, sizeof(kSidePress)}, 5);
+    pipeline.on_report({kConsumerPress, sizeof(kConsumerPress)}, 6);
+    pipeline.on_report({kBitmapPress, sizeof(kBitmapPress)}, 7);
+    CHECK_EQ(recorder.events.size(), 5u);
+    CHECK_EQ(recorder.count(InputEventKind::KeyUp), 0);
+}
+
+TEST_CASE(auxiliary_and_primary_reports_use_the_same_report_id_dispatch) {
+    using namespace duo::test::multi_report_hid;
+    Recorder recorder;
+    InputPipeline pipeline(recorder);
+    const auto source = identity();
+    pipeline.on_event(ready_event(), source, 0);
+    auto press = report_event(kSidePress, sizeof(kSidePress));
+    press.kind = SourceEventKind::AuxiliaryReport;
+    pipeline.on_event(press, source, 1);
+    pipeline.on_event(report_event(kSideRelease, sizeof(kSideRelease)), source, 2);
+    CHECK_EQ(recorder.events.size(), 4u);
+    CHECK_EQ(recorder.of(InputEventKind::KeyDown, 0x4F), 1);
+    CHECK_EQ(recorder.of(InputEventKind::KeyUp, 0x4F), 1);
+}
+
+TEST_CASE(unnumbered_boot_and_descriptor_mouse_reports_dispatch_motion_exactly_once) {
+    const std::uint8_t descriptor[] = {0x05,0x01,0x09,0x02,0xA1,0x01,
+        0x05,0x09,0x19,0x01,0x29,0x08,0x15,0x00,0x25,0x01,
+        0x75,0x01,0x95,0x08,0x81,0x02,0x05,0x01,
+        0x09,0x30,0x09,0x31,0x15,0x81,0x25,0x7F,0x75,0x08,0x95,0x02,0x81,0x06,0xC0};
+    SourceIdentity declared;
+    CHECK_EQ(duo_input::u1::input::hid::parse_hid_report_set(
+                 {descriptor, sizeof(descriptor)}, declared.report_set),
+             duo_input::u1::input::hid::ReportDescriptorError::None);
+    CHECK_EQ(declared.report_set.count, 1);
+    declared.kind = DeviceKind::Mouse;
+    declared.mouse_layout = declared.report_set.entries[0].mouse;
+    Recorder recorder;
+    InputPipeline pipeline(recorder);
+    pipeline.on_event(ready_event(), declared, 0);
+    const std::uint8_t move[] = {0, 5, 6};
+    pipeline.on_report({move, sizeof(move)}, 1);
+    CHECK_EQ(recorder.count(InputEventKind::MouseMove), 1);
+    pipeline.on_event(detached_event(), declared, 2);
+    pipeline.set_kind(DeviceKind::Mouse, boot_keyboard_layout(), boot_mouse_layout());
+    const std::uint8_t boot_move[] = {0, 5, 6};
+    pipeline.on_report({boot_move, sizeof(boot_move)}, 3);
+    CHECK_EQ(recorder.count(InputEventKind::MouseMove), 2);
+}
+
+TEST_CASE(empty_and_unknown_numbered_packets_never_fall_back_to_boot_offsets) {
+    using namespace duo::test::multi_report_hid;
+    Recorder recorder;
+    InputPipeline pipeline(recorder);
+    pipeline.on_event(ready_event(), identity(), 0);
+    const std::uint8_t unknown[] = {0x7F, 0x01, 0x00, 0x4F, 0, 0, 0, 0, 0};
+    pipeline.on_report({nullptr, 0}, 1);
+    pipeline.on_report({unknown, 0}, 2);
+    pipeline.on_report({unknown, sizeof(unknown)}, 3);
+    CHECK(recorder.events.empty());
 }

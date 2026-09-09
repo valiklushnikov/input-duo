@@ -35,16 +35,12 @@ class InputPipeline {
 public:
     explicit InputPipeline(IInputHandler& handler) : handler_(handler) {}
 
-    /// What this device turned out to be, and where it keeps its fields.
-    ///
-    /// Told once, when the source has been configured. Each layout is the one
-    /// that source's report descriptor declared, or boot protocol's for a
-    /// device that would not give one up.
-    ///
-    /// Both go in on every Ready, whichever kind it is. A pipeline is reused
-    /// across devices, and a layout left behind from the last one is read into
-    /// the next: a keyboard whose reports are all dropped because they do not
-    /// carry an identifier the keyboard before it used.
+    /// Install the accepted descriptor layouts, with independent held state
+    /// for every Report ID. Ready clears old state without emitting input;
+    /// the preceding Detached/Fault is responsible for releases.
+    void set_report_set(const hid::HidReportSet& reports);
+
+    /// One-entry compatibility wrapper for callers that already own a layout.
     void set_kind(DeviceKind kind, const hid::KeyboardReportLayout& keyboard_layout,
                   const hid::MouseReportLayout& mouse_layout);
 
@@ -66,16 +62,25 @@ public:
     std::uint32_t unclaimed_reports() const { return unclaimed_; }
 #if DUO_CH375_PROBE
     /// What the keyboard normalizer made of the reports it was handed.
-    const KeyboardNormalizer& keyboard_normalizer() const { return keyboard_; }
+    const KeyboardNormalizer& keyboard_normalizer() const { return decoders_[0].keyboard; }
 #endif
 
 private:
     void emit(const InputEvent* events, std::size_t count, std::uint32_t now_ms);
 
+    struct DecoderSlot {
+        bool active = false;
+        hid::ReportRole role = hid::ReportRole::Keyboard;
+        std::uint8_t report_id = 0;
+        KeyboardNormalizer keyboard;
+        MouseNormalizer mouse;
+    };
+
     IInputHandler& handler_;
     DeviceKind kind_ = DeviceKind::Unknown;
-    KeyboardNormalizer keyboard_;
-    MouseNormalizer mouse_;
+    DecoderSlot decoders_[hid::kMaxHidReportEntries] = {};
+    std::uint8_t decoder_count_ = 0;
+    bool uses_report_ids_ = false;
     std::uint32_t unclaimed_ = 0;
 };
 

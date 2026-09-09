@@ -610,6 +610,71 @@ TEST_CASE(six_error_slots_are_still_the_only_rollover) {
     CHECK(out.has(InputEventKind::KeyUp, 0x04));
 }
 
+TEST_CASE(all_three_keyboard_error_usages_are_ignored_without_losing_real_keys) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    out.count = normalizer.apply(view(keys(1, {1, 2, 3, 0x4F})), out.events,
+                                 kMaxEventsPerReport);
+    CHECK_EQ(out.count, 2u);
+    CHECK(out.has(InputEventKind::KeyDown, 0xE0));
+    CHECK(out.has(InputEventKind::KeyDown, 0x4F));
+    for (std::uint16_t usage = 1; usage <= 3; ++usage) {
+        CHECK_FALSE(out.has(InputEventKind::KeyDown, usage));
+    }
+    out.count = normalizer.apply(view(keys(0, {1, 2, 3})), out.events, kMaxEventsPerReport);
+    CHECK_EQ(out.count, 2u);
+    CHECK(out.has(InputEventKind::KeyUp, 0x4F));
+    CHECK(out.has(InputEventKind::KeyUp, 0xE0));
+}
+
+TEST_CASE(rollover_freezes_only_when_every_declared_array_slot_is_0x01) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.set_layout(aula_keyboard_layout());
+    normalizer.apply(view(aula_keys(0, {0x04})), out.events, kMaxEventsPerReport);
+    out.count = normalizer.apply(view(aula_keys(0, {1, 1, 1, 1, 1})), out.events,
+                                 kMaxEventsPerReport);
+    CHECK_EQ(out.count, 0u);
+    out.count = normalizer.apply(view(aula_keys(0, {})), out.events, kMaxEventsPerReport);
+    CHECK_EQ(out.count, 1u);
+    CHECK(out.has(InputEventKind::KeyUp, 0x04));
+}
+
+TEST_CASE(mixed_keyboard_errors_do_not_freeze_a_release) {
+    KeyboardNormalizer normalizer;
+    Collected out;
+    normalizer.apply(view(keys(0, {0x04})), out.events, kMaxEventsPerReport);
+    out.count = normalizer.apply(view(keys(0, {1, 1, 1, 1, 2, 3})), out.events,
+                                 kMaxEventsPerReport);
+    CHECK_EQ(out.count, 1u);
+    CHECK(out.has(InputEventKind::KeyUp, 0x04));
+}
+
+TEST_CASE(keyboard_error_bits_never_become_keys_or_rollover_in_a_bitmap) {
+    KeyboardNormalizer normalizer;
+    auto layout = nkro_keyboard_layout();
+    layout.key_usage_minimum = 0;
+    normalizer.set_layout(layout);
+    Collected out;
+    const std::uint8_t report[15] = {0, 0x1E}; // errors 1..3 plus real usage 4
+    out.count = normalizer.apply({report, sizeof(report)}, out.events, kMaxEventsPerReport);
+    CHECK_EQ(out.count, 1u);
+    CHECK(out.has(InputEventKind::KeyDown, 0x04));
+}
+
+TEST_CASE(consumer_usages_0x01_through_0x03_are_not_keyboard_errors) {
+    KeyboardNormalizer normalizer;
+    auto layout = boot_keyboard_layout();
+    layout.consumer = true;
+    normalizer.set_layout(layout);
+    Collected out;
+    out.count = normalizer.apply(view(keys(0, {1, 2, 3})), out.events, kMaxEventsPerReport);
+    CHECK_EQ(out.count, 3u);
+    CHECK(out.has(InputEventKind::ConsumerDown, 1));
+    CHECK(out.has(InputEventKind::ConsumerDown, 2));
+    CHECK(out.has(InputEventKind::ConsumerDown, 3));
+}
+
 TEST_CASE(release_all_lets_go_of_keys_found_through_a_native_layout) {
     KeyboardNormalizer normalizer;
     Collected out;

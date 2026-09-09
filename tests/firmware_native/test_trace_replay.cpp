@@ -35,6 +35,7 @@
 // neighbours is one the device really made at some point.
 
 #include "input/keyboard_normalizer.hpp"
+#include "fakes/multi_report_hid.hpp"
 #include "input/mouse_normalizer.hpp"
 #include "test_support.hpp"
 
@@ -493,4 +494,24 @@ TEST_CASE(captured_mouse_reports_carry_no_wheel) {
     // capture that established it.
     const Replayed stream = replay_mouse(mouse_corpus());
     CHECK_EQ(count_of(stream, InputEventKind::Wheel), 0);
+}
+
+TEST_CASE(captured_keychron_packets_replay_with_no_error_usage_and_exact_modifier_order) {
+    using namespace duo::test::multi_report_hid;
+    const auto source = identity();
+    KeyboardNormalizer normalizer;
+    normalizer.set_layout(source.report_set.entries[0].keyboard);
+    Replayed stream;
+    InputEvent events[kMaxEventsPerReport];
+    auto count = normalizer.apply({kSidePress, sizeof(kSidePress)}, events, kMaxEventsPerReport);
+    collect(stream, 0, events, count);
+    count = normalizer.apply({kSideRelease, sizeof(kSideRelease)}, events, kMaxEventsPerReport);
+    collect(stream, 1, events, count);
+    const ExpectedEvent expected[] = {
+        {0, InputEventKind::KeyDown, 0xE0, 0, 0},
+        {0, InputEventKind::KeyDown, 0x4F, 0, 0},
+        {1, InputEventKind::KeyUp, 0x4F, 0, 0},
+        {1, InputEventKind::KeyUp, 0xE0, 0, 0},
+    };
+    check_stream(stream, expected, 4);
 }

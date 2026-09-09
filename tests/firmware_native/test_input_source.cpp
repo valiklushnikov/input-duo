@@ -11,6 +11,7 @@
 #include "ch375/descriptor_setup.hpp"
 #include "ch375/device.hpp"
 #include "fakes/scripted_ch375.hpp"
+#include "fakes/multi_report_hid.hpp"
 #include "input/ch375_source_adapter.hpp"
 #include "input/pipeline.hpp"
 #include "input/source.hpp"
@@ -76,6 +77,7 @@ SourceIdentity keyboard_identity() {
     identity.kind = DeviceKind::Keyboard;
     identity.keyboard_layout = boot_keyboard_layout();
     identity.mouse_layout = boot_mouse_layout();
+    duo::test::multi_report_hid::set_single_report(identity);
     return identity;
 }
 
@@ -86,6 +88,7 @@ SourceIdentity mouse_identity(std::uint16_t vendor_id = 0, std::uint16_t product
     identity.mouse_layout = boot_mouse_layout();
     identity.vendor_id = vendor_id;
     identity.product_id = product_id;
+    duo::test::multi_report_hid::set_single_report(identity);
     return identity;
 }
 

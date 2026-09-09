@@ -11,6 +11,7 @@
 
 #include "core1_runtime.hpp"
 #include "fakes/tinyusb_host.hpp"
+#include "fakes/multi_report_hid.hpp"
 #include "input/pipeline.hpp"
 #include "pio_usb/backend.hpp"
 #include "pio_usb/device_registry.hpp"
@@ -286,6 +287,67 @@ TEST_CASE(boot_6kro_press_and_release_become_keydown_and_keyup) {
 
     rig.report(kNoKeys, sizeof(kNoKeys));
     CHECK_EQ(rig.recorder.of(InputEventKind::KeyUp, 0x04), 1);
+}
+
+TEST_CASE(pio_keychron_real_descriptor_delivers_exact_side_button_order_and_capture_identity) {
+    using namespace duo::test::multi_report_hid;
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+    duo_input::u1::mapping::CaptureController capture;
+    struct CapturingHandler final : IInputHandler {
+        duo_input::u1::mapping::CaptureController& capture;
+        std::vector<InputEvent> events;
+        explicit CapturingHandler(duo_input::u1::mapping::CaptureController& value) : capture(value) {}
+        void on_input(const InputEvent& event, std::uint32_t) override {
+            events.push_back(event);
+            capture.handle(event);
+        }
+    } handler(capture);
+    duo_input::u1::input::SourceTable sources(handler);
+    capture.set_sources(sources);
+    const auto bytes = descriptor();
+    duo::test::tinyusb_host::add_device(4, 0x3434, 0xD030);
+    tuh_mount_cb(4);
+    duo::test::tinyusb_host::set_protocol(4, 2, kProtocolKeyboard);
+    tuh_hid_mount_cb(4, 2, bytes.data(), static_cast<std::uint16_t>(bytes.size()));
+    auto pump = [&](std::uint32_t now) {
+        backend.task(now * 1000);
+        SourceEvent event;
+        SourceIdentity source;
+        while (backend.take_event(event, source)) sources.on_event(event, source, now);
+    };
+    pump(1);
+    capture.begin(1);
+    tuh_hid_report_received_cb(4, 2, kSidePress, sizeof(kSidePress));
+    pump(2);
+    CHECK_EQ(handler.events.size(), 2u);
+    duo_input::u1::mapping::CapturedTrigger trigger;
+    CHECK(capture.take(trigger));
+    CHECK_EQ(trigger.kind, duo_input::config::TriggerKind::KEYBOARD_USAGE);
+    CHECK_EQ(trigger.code, 0x4F);
+    CHECK_EQ(trigger.modifiers, 0x01);
+    CHECK_EQ(trigger.vendor_id, 0x3434);
+    CHECK_EQ(trigger.product_id, 0xD030);
+    CHECK_EQ(trigger.interface_number, 2);
+    tuh_hid_report_received_cb(4, 2, kSideRelease, sizeof(kSideRelease));
+    pump(3);
+    CHECK_EQ(handler.events.size(), 4u);
+    if (handler.events.size() == 4) {
+        CHECK_EQ(handler.events[0].kind, InputEventKind::KeyDown);
+        CHECK_EQ(handler.events[0].code, 0xE0);
+        CHECK_EQ(handler.events[1].kind, InputEventKind::KeyDown);
+        CHECK_EQ(handler.events[1].code, 0x4F);
+        CHECK_EQ(handler.events[2].kind, InputEventKind::KeyUp);
+        CHECK_EQ(handler.events[2].code, 0x4F);
+        CHECK_EQ(handler.events[3].kind, InputEventKind::KeyUp);
+        CHECK_EQ(handler.events[3].code, 0xE0);
+    }
+    for (const auto& event : handler.events) {
+        CHECK_EQ(event.source_index, 0);
+        CHECK(event.code != 0x03);
+    }
+    duo_input::u1::pio_usb::set_callback_registry(nullptr);
 }
 
 TEST_CASE(a_report_id_keyboard_is_read_through_its_own_descriptor_layout) {
