@@ -25,6 +25,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 #include "protocol/bytes.hpp"
 
@@ -107,7 +108,38 @@ enum class ReportDescriptorError : std::uint8_t {
     NoKeyboardReport,
     AmbiguousKeyboardReport,
     MalformedGlobalState,
+    AmbiguousReportSet,
 };
+
+enum class ReportRole : std::uint8_t { Keyboard = 1, Consumer = 2, Mouse = 3 };
+
+struct HidReportEntry {
+    ReportRole role = ReportRole::Keyboard;
+    std::uint8_t report_id = 0;
+    KeyboardReportLayout keyboard{};
+    MouseReportLayout mouse{};
+};
+
+struct RejectedReportEntry {
+    ReportRole role = ReportRole::Keyboard;
+    std::uint8_t report_id = 0;
+    ReportDescriptorError reason = ReportDescriptorError::UnsupportedLayout;
+};
+
+inline constexpr std::size_t kMaxHidReportEntries = 8;
+inline constexpr std::size_t kMaxRejectedReportEntries = 8;
+
+struct HidReportSet {
+    bool uses_report_ids = false;
+    std::uint8_t count = 0;
+    HidReportEntry entries[kMaxHidReportEntries] = {};
+    std::uint8_t rejected_count = 0;
+    RejectedReportEntry rejected[kMaxRejectedReportEntries] = {};
+    std::uint8_t rejected_overflow = 0;
+};
+
+static_assert(std::is_trivially_copyable<HidReportSet>::value,
+              "a HID report set crosses cores only by value");
 
 /// The one supported report role exposed by a descriptor, if there is one.
 enum class ReportDescriptorRole : std::uint8_t {

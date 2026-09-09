@@ -22,16 +22,77 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 using duo_input::u1::input::hid::boot_keyboard_layout;
 using duo_input::u1::input::hid::boot_mouse_layout;
+using duo_input::u1::input::hid::HidReportEntry;
+using duo_input::u1::input::hid::HidReportSet;
 using duo_input::u1::input::hid::KeyboardFieldKind;
 using duo_input::u1::input::hid::KeyboardReportLayout;
 using duo_input::u1::input::hid::MouseReportLayout;
 using duo_input::u1::input::hid::parse_keyboard_report_descriptor;
 using duo_input::u1::input::hid::parse_mouse_report_descriptor;
+using duo_input::u1::input::hid::RejectedReportEntry;
 using duo_input::u1::input::hid::ReportDescriptorError;
+using duo_input::u1::input::hid::ReportRole;
+using duo_input::u1::input::hid::kMaxHidReportEntries;
+using duo_input::u1::input::hid::kMaxRejectedReportEntries;
+
+constexpr HidReportSet kEmptyReportSet{};
+static_assert(!kEmptyReportSet.uses_report_ids);
+static_assert(kEmptyReportSet.count == 0);
+static_assert(kEmptyReportSet.rejected_count == 0);
+static_assert(kEmptyReportSet.rejected_overflow == 0);
+static_assert(std::extent<decltype(HidReportSet::entries)>::value ==
+              kMaxHidReportEntries);
+static_assert(std::extent<decltype(HidReportSet::rejected)>::value ==
+              kMaxRejectedReportEntries);
+static_assert(std::is_trivially_copyable<HidReportSet>::value,
+              "a HID report set crosses cores only by value");
+
+constexpr bool report_set_values_copy_without_aliasing() {
+    HidReportSet original{};
+    original.entries[0].report_id = 3;
+    original.entries[0].mouse.x.offset = 1;
+    original.rejected[0].report_id = 4;
+
+    HidReportSet copy = original;
+    copy.entries[0].report_id = 5;
+    copy.entries[0].mouse.x.offset = 9;
+    copy.rejected[0].report_id = 6;
+
+    return original.entries[0].report_id == 3 &&
+           original.entries[0].mouse.x.offset == 1 &&
+           original.rejected[0].report_id == 4;
+}
+static_assert(report_set_values_copy_without_aliasing());
+
+TEST_CASE(the_bounded_report_set_copies_values_without_aliasing) {
+    HidReportSet original{};
+    original.uses_report_ids = true;
+    original.count = 1;
+    original.entries[0].role = ReportRole::Mouse;
+    original.entries[0].report_id = 3;
+    original.entries[0].mouse.x.present = true;
+    original.rejected_count = 1;
+    original.rejected[0].role = ReportRole::Consumer;
+    original.rejected[0].report_id = 4;
+    original.rejected[0].reason = ReportDescriptorError::AmbiguousReportSet;
+
+    HidReportSet copy = original;
+    copy.entries[0].report_id = 5;
+    copy.entries[0].mouse.x.offset = 9;
+    copy.rejected[0].report_id = 6;
+    copy.rejected[0].reason = ReportDescriptorError::UnsupportedLayout;
+
+    CHECK_EQ(original.entries[0].report_id, std::uint8_t{3});
+    CHECK_EQ(original.entries[0].mouse.x.offset, std::uint8_t{0});
+    CHECK_EQ(original.rejected[0].report_id, std::uint8_t{4});
+    CHECK_EQ(original.rejected[0].reason,
+             ReportDescriptorError::AmbiguousReportSet);
+}
 
 namespace {
 
