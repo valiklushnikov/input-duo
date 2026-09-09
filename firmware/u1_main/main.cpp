@@ -575,6 +575,8 @@ void core1_entry() {
             g_sources.inventory(snapshot);
 #else
             g_sources.inventory(snapshot, g_pio_usb_backend.registry().interface_overflow_count());
+            snapshot.hid_descriptor_capture =
+                g_pio_usb_backend.registry().hid_descriptor_capture();
 #endif
             g_source_inventory.push(snapshot);
         }

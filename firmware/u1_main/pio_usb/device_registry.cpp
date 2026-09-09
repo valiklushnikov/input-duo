@@ -95,11 +95,13 @@ bool DeviceRegistry::capture_hid_mount(std::uint8_t dev_addr, std::uint8_t insta
     record.vendor_id = vendor_id;
     record.product_id = product_id;
     record.interface_protocol = interface_protocol;
-    if (descriptor != nullptr && descriptor_size != 0 &&
-        descriptor_size <= kMaxDescriptorBytes) {
+    if (descriptor != nullptr && descriptor_size != 0) {
         record.payload_present = true;
         record.size = descriptor_size;
-        std::memcpy(record.payload, descriptor, descriptor_size);
+        const std::size_t captured_size = descriptor_size < kMaxDescriptorBytes
+                                              ? descriptor_size
+                                              : kMaxDescriptorBytes;
+        std::memcpy(record.payload, descriptor, captured_size);
     }
     if (push(record)) {
         return true;
@@ -494,6 +496,21 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
         if (ensure_device(record.dev_addr, record.vendor_id, record.product_id) == nullptr) {
             return;
         }
+        if (record.payload_present) {
+            const std::uint16_t captured_size =
+                record.size < kMaxDescriptorBytes
+                    ? record.size
+                    : static_cast<std::uint16_t>(kMaxDescriptorBytes);
+            hid_descriptor_capture_ = {};
+            hid_descriptor_capture_.present = true;
+            hid_descriptor_capture_.truncated = record.size > captured_size;
+            hid_descriptor_capture_.vendor_id = record.vendor_id;
+            hid_descriptor_capture_.product_id = record.product_id;
+            hid_descriptor_capture_.interface_number = record.interface_number;
+            hid_descriptor_capture_.original_size = record.size;
+            hid_descriptor_capture_.captured_size = captured_size;
+            std::memcpy(hid_descriptor_capture_.bytes, record.payload, captured_size);
+        }
         Interface* interface = find_mutable(record.dev_addr, record.instance);
         if (interface != nullptr) {
             ++duplicate_mounts_;
@@ -517,8 +534,10 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
         interface->instance = record.instance;
         interface->source_id = static_cast<std::uint8_t>(interface - interfaces_);
         interface->interface_protocol = record.interface_protocol;
-        interface->descriptor_present = record.payload_present;
-        interface->descriptor_bytes = record.payload_present ? record.size : 0;
+        const bool complete_descriptor =
+            record.payload_present && record.size <= kMaxDescriptorBytes;
+        interface->descriptor_present = complete_descriptor;
+        interface->descriptor_bytes = complete_descriptor ? record.size : 0;
         // Assigned once, here, from the registry-wide monotonic counter -
         // never on the duplicate-mount branch above, which re-arms the same
         // still-mounted interface rather than claiming a fresh one. This is
@@ -528,8 +547,8 @@ void DeviceRegistry::process(const CallbackRecord& record, std::uint32_t now_us)
         interface->generation = ++next_generation_;
         const HidLayoutSource layout_source = classify_hid_layout(
             record.interface_protocol,
-            record.payload_present ? record.payload : nullptr,
-            record.payload_present ? record.size : 0,
+            complete_descriptor ? record.payload : nullptr,
+            complete_descriptor ? record.size : 0,
             interface->identity);
         const bool classified = layout_source != HidLayoutSource::None;
         // A layout read from a report descriptor describes what the device

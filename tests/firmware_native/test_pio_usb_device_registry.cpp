@@ -1771,3 +1771,71 @@ TEST_CASE(a_refused_protocol_switch_is_held_and_offered_again_rather_than_droppe
     rig.registry.retry_pending_arms(3000);
     CHECK_EQ(duo::test::tinyusb_host::hid_protocol_request_count(), 3u);
 }
+
+TEST_CASE(the_latest_complete_hid_descriptor_is_retained_by_value_with_its_identity) {
+    RegistryRig rig;
+    std::array<std::uint8_t, 164> descriptor{};
+    for (std::size_t index = 0; index < descriptor.size(); ++index) {
+        descriptor[index] = static_cast<std::uint8_t>(index ^ 0x5Au);
+    }
+    const auto expected = descriptor;
+    rig.device(3, 0x3434, 0xD030);
+    duo::test::tinyusb_host::set_protocol(3, 2, kProtocolNone);
+    duo::test::tinyusb_host::set_interface_number(3, 2, 7);
+    tuh_hid_mount_cb(3, 2, descriptor.data(), descriptor.size());
+    descriptor.fill(0);
+    rig.registry.process_pending(0);
+
+    const auto& capture = rig.registry.hid_descriptor_capture();
+    CHECK(capture.present);
+    CHECK_FALSE(capture.truncated);
+    CHECK_EQ(capture.vendor_id, 0x3434u);
+    CHECK_EQ(capture.product_id, 0xD030u);
+    CHECK_EQ(capture.interface_number, 7u);
+    CHECK_EQ(capture.original_size, 164u);
+    CHECK_EQ(capture.captured_size, 164u);
+    CHECK(std::memcmp(capture.bytes, expected.data(), expected.size()) == 0);
+}
+
+TEST_CASE(an_oversized_descriptor_is_retained_as_a_marked_prefix_but_never_parsed) {
+    RegistryRig rig;
+    std::array<std::uint8_t, 300> descriptor{};
+    descriptor.fill(0xA5);
+    rig.device(4, 0x1234, 0x5678);
+    duo::test::tinyusb_host::set_protocol(4, 1, kProtocolMouse);
+    duo::test::tinyusb_host::set_interface_number(4, 1, 9);
+    tuh_hid_mount_cb(4, 1, descriptor.data(), descriptor.size());
+    rig.registry.process_pending(0);
+
+    const auto& capture = rig.registry.hid_descriptor_capture();
+    CHECK(capture.present);
+    CHECK(capture.truncated);
+    CHECK_EQ(capture.interface_number, 9u);
+    CHECK_EQ(capture.original_size, 300u);
+    CHECK_EQ(capture.captured_size, DeviceRegistry::kMaxDescriptorBytes);
+    CHECK(std::memcmp(capture.bytes, descriptor.data(), capture.captured_size) == 0);
+
+    const auto* interface = rig.registry.find(4, 1);
+    CHECK(interface != nullptr);
+    CHECK_EQ(interface->identity.kind, DeviceKind::Mouse);
+    CHECK_FALSE(interface->descriptor_present);
+    CHECK_EQ(duo::test::tinyusb_host::hid_protocol_request_count(), 0u);
+}
+
+TEST_CASE(a_mount_without_a_descriptor_does_not_erase_the_latest_evidence) {
+    RegistryRig rig;
+    rig.device(5, 0x1111, 0x2222);
+    rig.hid(5, 0, kProtocolNone, kDescriptor, sizeof(kDescriptor));
+    rig.registry.process_pending(0);
+
+    rig.device(6, 0x3333, 0x4444);
+    rig.hid(6, 0, kProtocolKeyboard, nullptr, 0);
+    rig.registry.process_pending(0);
+
+    const auto& capture = rig.registry.hid_descriptor_capture();
+    CHECK(capture.present);
+    CHECK_EQ(capture.vendor_id, 0x1111u);
+    CHECK_EQ(capture.product_id, 0x2222u);
+    CHECK_EQ(capture.captured_size, sizeof(kDescriptor));
+    CHECK(std::memcmp(capture.bytes, kDescriptor, sizeof(kDescriptor)) == 0);
+}

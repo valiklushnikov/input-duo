@@ -162,6 +162,9 @@ public:
 
     const Interface* find(std::uint8_t dev_addr, std::uint8_t instance) const;
     const Interface* owner(input::DeviceKind kind) const;
+    const input::HidDescriptorCapture& hid_descriptor_capture() const {
+        return hid_descriptor_capture_;
+    }
 
     std::size_t device_count() const;
     std::size_t interface_count() const;
@@ -279,6 +282,7 @@ private:
 
     Device devices_[kDeviceCapacity] = {};
     Interface interfaces_[kInterfaceCapacity] = {};
+    input::HidDescriptorCapture hid_descriptor_capture_{};
     CallbackRecord callbacks_[kCallbackQueueCapacity] = {};
     PendingEvent detach_events_[kDetachQueueCapacity] = {};
     std::size_t detach_head_ = 0;
