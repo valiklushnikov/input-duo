@@ -38,6 +38,9 @@ set(_duo_u1_main_dir "${CMAKE_CURRENT_LIST_DIR}/../u1_main")
 
 add_executable(duo_u1_reference)
 
+include(${CMAKE_SOURCE_DIR}/cmake/pio_usb_core1_stack.cmake)
+duo_configure_pio_usb_core1_stack(duo_u1_reference)
+
 target_sources(duo_u1_reference PRIVATE
     main.cpp
     callback_queue.cpp

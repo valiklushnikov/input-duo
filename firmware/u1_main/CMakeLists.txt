@@ -67,6 +67,11 @@ list(APPEND _duo_u1_sources
 
 add_executable(duo_u1_main ${_duo_u1_sources})
 
+if(DUO_INPUT_BACKEND STREQUAL "PIO_USB")
+    include(${CMAKE_SOURCE_DIR}/cmake/pio_usb_core1_stack.cmake)
+    duo_configure_pio_usb_core1_stack(duo_u1_main)
+endif()
+
 # tusb_config.h lives beside the sources, so TinyUSB has to be told to look
 # here for it.
 target_include_directories(duo_u1_main PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

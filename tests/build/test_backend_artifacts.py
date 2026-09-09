@@ -116,6 +116,30 @@ def test_declared_backend_is_one_of_the_three_known_values():
     assert declared_backend(BUILD_DIR) in ("CH375", "PIO_USB", "PIO_USB_REFERENCE")
 
 
+def test_pio_usb_images_link_the_irq_budgeted_core1_stack():
+    if declared_backend(BUILD_DIR) not in ("PIO_USB", "PIO_USB_REFERENCE"):
+        pytest.skip("this build directory does not run the PIO USB host on Core 1")
+
+    stack = linked_symbols(U1_ELF).get("core1_stack")
+    assert stack is not None, f"{U1_ELF} has no linked Pico SDK Core 1 stack"
+    assert stack.size == 4096, (
+        f"{U1_ELF} reserves {stack.size} bytes for Core 1, not the 4096-byte "
+        "PIO USB application-plus-IRQ budget"
+    )
+
+
+def test_ch375_image_keeps_the_sdk_default_core1_stack():
+    if declared_backend(BUILD_DIR) != "CH375":
+        pytest.skip("this build directory is not configured for CH375")
+
+    stack = linked_symbols(U1_ELF).get("core1_stack")
+    assert stack is not None, f"{U1_ELF} has no linked Pico SDK Core 1 stack"
+    assert stack.size == 2048, (
+        f"{U1_ELF} reserves {stack.size} bytes for Core 1; the PIO USB stack "
+        "increase leaked into the CH375 image"
+    )
+
+
 def test_a_ch375_declared_build_actually_links_ch375_and_not_pio_usb():
     if declared_backend(BUILD_DIR) != "CH375":
         pytest.skip("this build directory is not configured for CH375")
