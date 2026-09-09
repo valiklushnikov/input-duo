@@ -123,6 +123,20 @@ Layout origins are 0 unknown, 1 descriptor, and 2 boot fallback; parser result
 ignore the tail; new hosts accept inventories without it. The largest complete
 diagnostics reply is 1020 bytes, below the 1024-byte frame limit.
 
+Descriptor bytes use a separate, capability-gated request rather than extending
+that reply. Capability `HID_DESCRIPTOR_DIAGNOSTICS` (`2048`) enables
+`GET_HID_DESCRIPTOR_CAPTURE` (`22`), whose successful response is at most 268
+bytes: a 12-byte versioned identity/length header and at most 256 descriptor
+bytes. The existing `GET_DIAGNOSTICS` maximum remains exactly 1020 bytes.
+
+Compatibility works in both directions. A new configurator connected to old
+firmware sees no capability 2048, sends no message 22, and exports the descriptor
+state as `unknown` while all ordinary diagnostics remain usable. An old
+configurator connected to new firmware offers only the capability bits it knows,
+so U1 does not negotiate capability 2048 and the host continues using every
+existing command and unchanged reply shape. No VID/PID selects this mechanism:
+the captured identity is evidence, not a device-specific dispatch key.
+
 Diagnostics shows these as **Input source decoding**. Counts reset when an
 interface is mounted again and saturate at `0xFFFFFFFF`. Decoded events are
 edges, including modifiers and disconnect releases, not physical presses.

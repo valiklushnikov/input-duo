@@ -64,11 +64,19 @@ Successful or shape-preserving direct payloads are:
 | `READ_CONFIG_CHUNK` | `offset:u32, bytes` |
 | `WRITE_CHUNK` | `accepted_next_offset:u32` |
 | `GET_DIAGNOSTICS` | five `u32`: bad CRC, disconnect, timeout, bad sequence, aborted staging; then the link state (`answering:u8, endpoint_usb:u8, frames_sent:u32, crc_errors:u32, echoed_frames:u32`), the endpoint report (`drops:u8, release_ms:u16`), `dropped_commands:u32`, and `runtime_fault:u8` |
+| `GET_HID_DESCRIPTOR_CAPTURE` | format version `u8`, flags `u8` (`present`, `truncated`), `vendor_id:u16`, `product_id:u16`, `interface_number:u8`, `original_size:u16`, `captured_size:u16`, then exactly `captured_size` descriptor bytes (maximum 256) |
 | `PING` | the request payload unchanged (at most 1023 bytes so the error prefix fits) |
 
 All other successful direct replies contain only `error=OK`. Malformed fixed-size requests
 return `INVALID_REQUEST` and perform no state mutation. Read and write chunks are at most 512
 bytes and write chunks are strictly sequential.
+
+`GET_HID_DESCRIPTOR_CAPTURE` requires negotiated capability
+`HID_DESCRIPTOR_DIAGNOSTICS` (`2048`) and has an empty request. Including its
+error byte, the reply is 12 bytes when no observation is present and at most
+268 bytes. It is intentionally separate from `GET_DIAGNOSTICS`, whose maximum
+remains 1020 bytes. Therefore new hosts omit the request against old firmware,
+and old hosts negotiate no new capability or command against new firmware.
 
 ## Transactional configuration guarantees
 
