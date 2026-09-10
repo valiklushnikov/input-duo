@@ -129,13 +129,25 @@ that reply. Capability `HID_DESCRIPTOR_DIAGNOSTICS` (`2048`) enables
 bytes: a 12-byte versioned identity/length header and at most 256 descriptor
 bytes. The existing `GET_DIAGNOSTICS` maximum remains exactly 1020 bytes.
 
+Parsed report-set decisions use another separate request. Capability
+`HID_REPORT_SET_DIAGNOSTICS` (`4096`) enables `GET_HID_REPORT_SETS` (`23`), an
+empty request whose successful little-endian reply is bounded to 459 bytes.
+It reports, per source, the accepted `(role, Report ID, minimum body bytes)`
+entries and rejected `(role, Report ID, reason)` entries. It does not extend
+`GET_DIAGNOSTICS`; that reply's maximum remains exactly 1020 bytes.
+
 Compatibility works in both directions. A new configurator connected to old
-firmware sees no capability 2048, sends no message 22, and exports the descriptor
-state as `unknown` while all ordinary diagnostics remain usable. An old
-configurator connected to new firmware offers only the capability bits it knows,
-so U1 does not negotiate capability 2048 and the host continues using every
-existing command and unchanged reply shape. No VID/PID selects this mechanism:
-the captured identity is evidence, not a device-specific dispatch key.
+firmware sees neither optional capability, sends neither message 22 nor 23, and
+exports the descriptor and report-set states as `unknown` while all ordinary
+diagnostics remain usable. An old configurator connected to new firmware offers
+only the capability bits it knows, so U1 negotiates neither optional command and
+the host continues using every existing command and unchanged reply shape. The
+8-byte `CAPTURE_EVENT` payload and saved configuration and binding formats are
+unchanged.
+
+Report dispatch is generic: U1 selects the parsed accepted role and Report ID
+entry for the interface. VID/PID is evidence and a source qualifier for capture
+and bindings; report dispatch contains no VID/PID allowlist.
 
 Diagnostics shows these as **Input source decoding**. Counts reset when an
 interface is mounted again and saturate at `0xFFFFFFFF`. Decoded events are

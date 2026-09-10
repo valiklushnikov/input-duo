@@ -65,6 +65,7 @@ Successful or shape-preserving direct payloads are:
 | `WRITE_CHUNK` | `accepted_next_offset:u32` |
 | `GET_DIAGNOSTICS` | five `u32`: bad CRC, disconnect, timeout, bad sequence, aborted staging; then the link state (`answering:u8, endpoint_usb:u8, frames_sent:u32, crc_errors:u32, echoed_frames:u32`), the endpoint report (`drops:u8, release_ms:u16`), `dropped_commands:u32`, and `runtime_fault:u8` |
 | `GET_HID_DESCRIPTOR_CAPTURE` | format version `u8`, flags `u8` (`present`, `truncated`), `vendor_id:u16`, `product_id:u16`, `interface_number:u8`, `original_size:u16`, `captured_size:u16`, then exactly `captured_size` descriptor bytes (maximum 256) |
+| `GET_HID_REPORT_SETS` | format version `u8`, source count `u8`, then each source's identity and bounded accepted/rejected parsed report entries |
 | `PING` | the request payload unchanged (at most 1023 bytes so the error prefix fits) |
 
 All other successful direct replies contain only `error=OK`. Malformed fixed-size requests
@@ -77,6 +78,29 @@ error byte, the reply is 12 bytes when no observation is present and at most
 268 bytes. It is intentionally separate from `GET_DIAGNOSTICS`, whose maximum
 remains 1020 bytes. Therefore new hosts omit the request against old firmware,
 and old hosts negotiate no new capability or command against new firmware.
+
+`GET_HID_REPORT_SETS` (command `23`) requires negotiated capability
+`HID_REPORT_SET_DIAGNOSTICS` (`4096`) and also has an empty request. Its
+successful little-endian reply starts with `error:u8, version:u8 (=1),
+source_count:u8`. Each source then carries `device_address:u8, vendor_id:u16,
+product_id:u16, interface_number:u8, accepted_count:u8, rejected_count:u8,
+rejected_overflow:u8`; each accepted entry is `role:u8, report_id:u8,
+minimum_body_bytes:u8`, and each rejected entry is `role:u8, report_id:u8,
+reason:u8`. With eight sources and eight accepted plus eight rejected entries
+per source, the reply is at most 459 bytes. This separate reply leaves the
+`GET_DIAGNOSTICS` maximum exactly 1020 bytes.
+
+Compatibility works in both directions. A new host connected to old firmware
+does not negotiate capability 4096, sends no command 23, and records the report
+set state as unknown while existing diagnostics remain usable. An old host
+connected to new firmware does not offer capability 4096, so U1 does not
+negotiate it and all existing commands and reply shapes remain unchanged. This
+addition changes neither the 8-byte `CAPTURE_EVENT` payload nor saved
+configuration and binding formats.
+
+Runtime HID dispatch uses the parsed accepted `role` and Report ID entries for
+each interface. VID/PID values identify and qualify a source for diagnostics,
+capture, and bindings; there is no VID/PID allowlist in report dispatch.
 
 ## Transactional configuration guarantees
 
