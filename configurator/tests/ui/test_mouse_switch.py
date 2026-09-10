@@ -7,7 +7,7 @@ import struct
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QCheckBox, QLabel, QPushButton
 
 from duo_input.device.emulator import U1Emulator
 from duo_input.device.qt_transport import SynchronousTransportLink
@@ -40,9 +40,9 @@ from duo_input.ui import theme
 MOUSE_VID = 0x3434
 MOUSE_PID = 0xD030
 
-#: A "Right" arrow with Ctrl, on interface 1 of that mouse - the shape a mouse
+#: A "Right" arrow with Ctrl, on interface 2 of that mouse - the shape a mouse
 #: whose side button is wired to a keyboard usage actually reports.
-CAPTURED_SOURCE = TriggerSource(MOUSE_VID, MOUSE_PID, 1)
+CAPTURED_SOURCE = TriggerSource(MOUSE_VID, MOUSE_PID, 2)
 CAPTURED_KEY = 0x4F
 
 
@@ -318,10 +318,75 @@ def test_a_key_the_attached_mouse_sends_is_captured_and_selected(qtbot):
         TriggerKind.KEYBOARD_USAGE, CAPTURED_KEY, LEFT_CTRL, CAPTURED_SOURCE
     )
     assert dialog.trigger == expected
-    assert page.trigger_kind.currentData() is TriggerKind.KEYBOARD_USAGE
-    assert page.key_combo.currentData() == CAPTURED_KEY
-    assert page.modifier_boxes["ctrl"].isChecked() is True
+    assert page.captured_trigger_summary.text() == "Additional mouse button"
+    assert page.captured_trigger_summary.isVisibleTo(page) is True
+    assert page.trigger_kind.isVisibleTo(page) is False
+    assert page.key_combo.isVisibleTo(page) is False
+    assert page.consumer_usage.isVisibleTo(page) is False
+    assert page.mouse_combo.isVisibleTo(page) is False
+    assert all(
+        box.isVisibleTo(page) is False for box in page.modifier_boxes.values()
+    )
+    text_widgets = (
+        page.findChildren(QLabel)
+        + page.findChildren(QCheckBox)
+        + page.findChildren(QPushButton)
+    )
+    visible_text = " ".join(
+        widget.text() for widget in text_widgets if widget.isVisibleTo(page)
+    )
+    assert "Ctrl" not in visible_text
+    assert "Right" not in visible_text
+    assert "0x1" not in visible_text
+    assert "3434:D030" not in visible_text
+    assert "interface 2" not in visible_text
     assert page.current_trigger() == expected
+    assert page.current_binding().trigger == expected
+    assert page.capture_button.isEnabled() is True
+    assert page.capture_button.isVisibleTo(page) is True
+    assert page.action_combo.isEnabled() is True
+    assert page.action_combo.isVisibleTo(page) is True
+    assert page.mode_combo.isEnabled() is True
+    assert page.mode_combo.isVisibleTo(page) is True
+    assert page.apply_button.isEnabled() is True
+    assert page.apply_button.isVisibleTo(page) is True
+    assert page.warning_label.isVisibleTo(page) is True
+    assert page.existing_list.isVisibleTo(page) is True
+
+
+def test_a_mouse_origin_consumer_control_uses_the_same_friendly_summary(page):
+    page.set_capabilities(
+        MouseCapabilities(advertised=True).with_peripherals((_attached_mouse(),))
+    )
+    captured = Trigger(
+        TriggerKind.CONSUMER_USAGE, 0xE9, 0, CAPTURED_SOURCE
+    )
+
+    page.apply_captured_trigger(captured)
+
+    assert page.captured_trigger_summary.text() == "Additional mouse button"
+    assert page.consumer_usage.isVisibleTo(page) is False
+    assert page.current_trigger() == captured
+
+
+def test_editing_a_friendly_capture_restores_the_manual_trigger_editor(qtbot, page):
+    page.set_capabilities(
+        MouseCapabilities(advertised=True).with_peripherals((_attached_mouse(),))
+    )
+    page.apply_captured_trigger(
+        Trigger(TriggerKind.KEYBOARD_USAGE, CAPTURED_KEY, LEFT_CTRL, CAPTURED_SOURCE)
+    )
+
+    qtbot.mouseClick(page.edit_trigger_button, Qt.MouseButton.LeftButton)
+
+    assert page.captured_trigger_summary.isVisibleTo(page) is False
+    assert page.trigger_kind.isVisibleTo(page) is True
+    assert page.key_combo.isVisibleTo(page) is True
+    assert page.modifier_boxes["ctrl"].isVisibleTo(page) is True
+    page.key_combo.setCurrentIndex(page.key_combo.findData(0x04))
+    assert page.current_trigger() == Trigger(
+        TriggerKind.KEYBOARD_USAGE, 0x04, LEFT_CTRL, None
+    )
 
 
 @pytest.mark.parametrize("kind, code, modifiers", [(1, 0x68, 0xF1), (3, 0x1B1, 0)])
@@ -547,7 +612,7 @@ def test_the_page_lists_the_switch_bindings_of_the_active_profile(page):
     assert "Middle button (wheel)" in page.existing_list.item(0).text()
 
 
-def test_a_listed_binding_names_the_device_it_is_qualified_to(page):
+def test_a_listed_mouse_origin_key_is_presented_as_an_additional_mouse_button(page):
     page.set_session(
         page.session.apply(
             AddBinding(
@@ -560,19 +625,65 @@ def test_a_listed_binding_names_the_device_it_is_qualified_to(page):
             )
         )
     )
+    page.set_capabilities(
+        MouseCapabilities(advertised=True).with_peripherals((_attached_mouse(),))
+    )
 
-    assert "Right - 3434:D030 (interface 1)" in page.existing_list.item(0).text()
+    label = page.existing_list.item(0).text()
+    assert label.startswith("Additional mouse button ->")
+    assert "Right" not in label
+    assert "Ctrl" not in label
+    assert "3434:D030" not in label
+    assert "interface 2" not in label
 
 
-def test_a_listed_mouse_button_names_its_device_too(page):
+@pytest.mark.parametrize(
+    "button, expected",
+    (
+        (1, "Left button"),
+        (2, "Right button"),
+        (3, "Middle button (wheel)"),
+        (4, "Side button 1"),
+        (5, "Side button 2"),
+        (6, "Button 6"),
+    ),
+)
+def test_listed_standard_mouse_buttons_keep_their_exact_names_without_source(
+    page, button, expected
+):
+    page.set_capabilities(MouseCapabilities(advertised=True).observing(4).observing(5))
     page.set_session(
-        page.session.apply(AddBinding(1, _switch(3, source=CAPTURED_SOURCE)))
+        page.session.apply(AddBinding(1, _switch(button, source=CAPTURED_SOURCE)))
     )
 
-    assert (
-        "Middle button (wheel) - 3434:D030 (interface 1)"
-        in page.existing_list.item(0).text()
+    label = page.existing_list.item(0).text()
+    assert label.startswith(f"{expected} ->")
+    assert "3434:D030" not in label
+    assert "interface 2" not in label
+
+
+def test_a_non_mouse_keyboard_trigger_is_not_relabelled_or_source_qualified(page):
+    keyboard_source = TriggerSource(0x1234, 0x5678, 0)
+    page.set_session(
+        page.session.apply(
+            AddBinding(
+                1,
+                _switch(
+                    CAPTURED_KEY,
+                    kind=TriggerKind.KEYBOARD_USAGE,
+                    source=keyboard_source,
+                ),
+            )
+        )
     )
+    page.set_capabilities(
+        MouseCapabilities(advertised=True).with_peripherals((_attached_mouse(),))
+    )
+
+    label = page.existing_list.item(0).text()
+    assert label.startswith("Right ->")
+    assert "Additional mouse button" not in label
+    assert "1234:5678" not in label
 
 
 def test_a_binding_that_is_not_about_the_mouse_route_is_not_listed(page):

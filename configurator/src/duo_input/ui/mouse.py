@@ -34,7 +34,6 @@ from duo_input.ui.models.binding_table import (
     SELECTABLE_USAGES,
     MouseCapabilities,
     key_name,
-    qualified_label,
     trigger_label,
 )
 from duo_input.ui.bindings import CaptureDialog
@@ -141,38 +140,56 @@ class MouseSwitchPage(QWidget):
         self.trigger_kind.addItem(self.tr("Mouse button"), TriggerKind.MOUSE_BUTTON)
         self.trigger_kind.addItem(self.tr("Consumer control"), TriggerKind.CONSUMER_USAGE)
         self.trigger_kind.currentIndexChanged.connect(self._on_trigger_edited)
-        form.addRow(field_label(self.tr("1. What do you press?"), box), self.trigger_kind)
+        self.trigger_kind_label = field_label(self.tr("1. What do you press?"), box)
+        form.addRow(self.trigger_kind_label, self.trigger_kind)
 
         self.key_combo = QComboBox(box)
         self.key_combo.setAccessibleName(self.tr("Keyboard key"))
         for usage in SELECTABLE_USAGES:
             self.key_combo.addItem(key_name(usage), usage)
         self.key_combo.currentIndexChanged.connect(self._on_trigger_edited)
-        form.addRow(field_label(self.tr("Key:"), box), self.key_combo)
+        self.key_label = field_label(self.tr("Key:"), box)
+        form.addRow(self.key_label, self.key_combo)
         self.consumer_usage = QSpinBox(box)
         self.consumer_usage.setRange(1, 0xFFFF)
         self.consumer_usage.setDisplayIntegerBase(16)
         self.consumer_usage.setPrefix("0x")
         self.consumer_usage.setAccessibleName(self.tr("Consumer usage"))
         self.consumer_usage.valueChanged.connect(self._on_trigger_edited)
-        form.addRow(field_label(self.tr("Consumer usage:"), box), self.consumer_usage)
+        self.consumer_label = field_label(self.tr("Consumer usage:"), box)
+        form.addRow(self.consumer_label, self.consumer_usage)
 
         self.mouse_combo = QComboBox(box)
         self.mouse_combo.setAccessibleName(self.tr("Mouse button"))
         self.mouse_combo.currentIndexChanged.connect(self._on_trigger_edited)
-        button_row = QHBoxLayout()
-        button_row.setContentsMargins(0, 0, 0, 0)
-        button_row.setSpacing(SPACE_SM)
-        button_row.addWidget(self.mouse_combo, 1)
+        self.mouse_label = field_label(self.tr("Button:"), box)
+        form.addRow(self.mouse_label, self.mouse_combo)
+
+        self.captured_trigger_summary = QLabel(box)
+        self.captured_trigger_summary.setAccessibleName(
+            self.tr("Selected mouse control")
+        )
+        self.captured_trigger_summary.setWordWrap(True)
+        self.edit_trigger_button = QPushButton(self.tr("Edit manually"), box)
+        self.edit_trigger_button.setAccessibleName(
+            self.tr("Edit the detected trigger manually")
+        )
+        self.edit_trigger_button.clicked.connect(self._edit_trigger_manually)
+        captured_row = QHBoxLayout()
+        captured_row.setContentsMargins(0, 0, 0, 0)
+        captured_row.setSpacing(SPACE_SM)
+        captured_row.addWidget(self.captured_trigger_summary, 1)
+        captured_row.addWidget(self.edit_trigger_button)
+        self.captured_trigger_holder = QWidget(box)
+        self.captured_trigger_holder.setLayout(captured_row)
+        form.addRow(self.captured_trigger_holder)
+
         self.capture_button = QPushButton(self.tr("Detect button or key"), box)
         self.capture_button.setAccessibleName(
             self.tr("Detect a button or key on the mouse")
         )
         self.capture_button.clicked.connect(self.capture_mouse_button)
-        button_row.addWidget(self.capture_button)
-        button_holder = QWidget(box)
-        button_holder.setLayout(button_row)
-        form.addRow(field_label(self.tr("Button:"), box), button_holder)
+        form.addRow(self.capture_button)
 
         modifiers = QHBoxLayout()
         self.modifier_boxes: dict[str, QCheckBox] = {}
@@ -183,9 +200,10 @@ class MouseSwitchPage(QWidget):
             self.modifier_boxes[key] = check
             modifiers.addWidget(check)
         modifiers.addStretch(1)
-        holder = QWidget(box)
-        holder.setLayout(modifiers)
-        form.addRow(field_label(self.tr("Modifiers:"), box), holder)
+        self.modifiers_holder = QWidget(box)
+        self.modifiers_holder.setLayout(modifiers)
+        self.modifiers_label = field_label(self.tr("Modifiers:"), box)
+        form.addRow(self.modifiers_label, self.modifiers_holder)
 
         self.action_combo = QComboBox(box)
         self.action_combo.setAccessibleName(self.tr("What the trigger does"))
@@ -429,10 +447,21 @@ class MouseSwitchPage(QWidget):
 
     def _trigger_label(self, trigger: Trigger) -> str:
         if trigger.kind is TriggerKind.MOUSE_BUTTON:
-            return self._capabilities.label(
-                trigger, self._mouse_button_label(trigger.code)
+            return self._mouse_button_label(trigger.code)
+        if self._capabilities.is_mouse(trigger.source):
+            return self.tr("Additional mouse button")
+        return trigger_label(replace(trigger, source=None))
+
+    def _shows_friendly_capture(self) -> bool:
+        trigger = self._captured
+        return (
+            trigger is not None
+            and trigger.kind in (
+                TriggerKind.KEYBOARD_USAGE,
+                TriggerKind.CONSUMER_USAGE,
             )
-        return self._capabilities.label(trigger)
+            and self._capabilities.is_mouse(trigger.source)
+        )
 
     def _unavailable_buttons(self) -> tuple[int, ...]:
         """Buttons a switch binding needs that the attached mouse cannot press."""
@@ -455,6 +484,24 @@ class MouseSwitchPage(QWidget):
         self._updating = True
         try:
             kind = self.trigger_kind.currentData()
+            friendly_capture = self._shows_friendly_capture()
+            for widget in (
+                self.trigger_kind_label,
+                self.trigger_kind,
+                self.key_label,
+                self.key_combo,
+                self.consumer_label,
+                self.consumer_usage,
+                self.mouse_label,
+                self.mouse_combo,
+                self.modifiers_label,
+                self.modifiers_holder,
+            ):
+                widget.setVisible(not friendly_capture)
+            self.captured_trigger_holder.setVisible(friendly_capture)
+            self.captured_trigger_summary.setText(
+                self._trigger_label(self._captured) if friendly_capture else ""
+            )
             self.consumer_usage.setEnabled(kind is TriggerKind.CONSUMER_USAGE)
             self.key_combo.setEnabled(kind is TriggerKind.KEYBOARD_USAGE)
             self.mouse_combo.setEnabled(kind is TriggerKind.MOUSE_BUTTON)
@@ -521,6 +568,10 @@ class MouseSwitchPage(QWidget):
     # ----------------------------------------------------------------- slots
 
     def _on_changed(self, *_args: object) -> None:
+        self._refresh()
+
+    def _edit_trigger_manually(self) -> None:
+        self._captured = None
         self._refresh()
 
     def _on_trigger_edited(self, *_args: object) -> None:
