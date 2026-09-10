@@ -97,6 +97,36 @@ def test_refresh_shows_each_hid_report_set_source_read_only(page, emulator, qtbo
     )
 
 
+def test_refresh_distinguishes_supported_empty_report_sets_from_unsupported(
+    page, emulator, qtbot
+):
+    assert page.value("hid_report_sets") == UNKNOWN
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.service.connect_device(emulator)
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.refresh_button.click()
+
+    assert page.value("hid_report_sets") == "none"
+
+
+def test_refresh_keeps_rejected_report_overflow_visible_when_no_entries_fit(
+    page, emulator, qtbot
+):
+    from duo_input.device.transactions import HidReportSets, HidReportSource
+
+    emulator.set_hid_report_sets(HidReportSets((
+        HidReportSource(5, 0x3434, 0xD030, 2, (), (), 4),
+    )))
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.service.connect_device(emulator)
+    with qtbot.waitSignal(page.service.operation_succeeded, timeout=5000):
+        page.refresh_button.click()
+
+    assert page.value("hid_report_sets") == (
+        "3434:D030 interface 2: rejected overflow=4"
+    )
+
+
 def test_diagnostics_does_not_offer_a_firmware_version(page):
     """Protocol v1 carries no firmware version, from either microcontroller.
 

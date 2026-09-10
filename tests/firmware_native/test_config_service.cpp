@@ -73,6 +73,29 @@ static constexpr std::uint8_t kFrozenLegacyDiagnosticsPrefix[] = {
 static_assert(sizeof(kFrozenLegacyDiagnosticsPrefix) == 248u,
               "the frozen prefix is the complete pre-backend payload");
 
+// Hand-derived from the base revision's complete one-source reply after the
+// 248-byte prefix above: empty backend/host/reference blocks, the version-1
+// inventory with one 3434:D030 interface, and its version-1 decoding tail.
+// Report-set fields deliberately do not occur anywhere in these bytes.
+static constexpr std::uint8_t kFrozenOneSourceDiagnosticsSuffix[] = {
+    0x00, 0x00, 0x00, 0x00,
+    0x01, 0x3F, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+    0x34, 0x34, 0x30, 0xD0, 0x02, 0x00, 0x05,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x1B, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF,
+};
+
+static_assert(sizeof(kFrozenOneSourceDiagnosticsSuffix) == 94u,
+              "the literal suffix completes the 342-byte base reply");
+
 std::uint32_t read_u32(const std::uint8_t* at) {
     return static_cast<std::uint32_t>(at[0]) | (static_cast<std::uint32_t>(at[1]) << 8) |
            (static_cast<std::uint32_t>(at[2]) << 16) | (static_cast<std::uint32_t>(at[3]) << 24);
@@ -841,10 +864,16 @@ TEST_CASE(hid_report_sets_are_a_separate_bounded_reply_and_leave_diagnostics_unc
                           static_cast<std::uint8_t>(ReportDescriptorError::UnsupportedLayout)};
     link.service.set_input_sources(inventory);
 
+    std::vector<std::uint8_t> frozen_diagnostics(
+        std::begin(kFrozenLegacyDiagnosticsPrefix),
+        std::end(kFrozenLegacyDiagnosticsPrefix));
+    frozen_diagnostics.insert(frozen_diagnostics.end(),
+                              std::begin(kFrozenOneSourceDiagnosticsSuffix),
+                              std::end(kFrozenOneSourceDiagnosticsSuffix));
     const auto diagnostics_before = link.send(CdcMessageType::GET_DIAGNOSTICS);
-    const std::vector<std::uint8_t> frozen_diagnostics(
-        diagnostics_before.payload.data,
-        diagnostics_before.payload.data + diagnostics_before.payload.size);
+    CHECK_EQ(diagnostics_before.payload.size, frozen_diagnostics.size());
+    CHECK(std::memcmp(diagnostics_before.payload.data, frozen_diagnostics.data(),
+                      frozen_diagnostics.size()) == 0);
     const auto reply = link.send(CdcMessageType::GET_HID_REPORT_SETS);
     const std::uint8_t expected[] = {
         0, 1, 1, 5, 0x34, 0x34, 0x30, 0xD0, 2, 3, 2, 4,

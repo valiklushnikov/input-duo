@@ -365,8 +365,10 @@ def _as_text(value: object) -> str:
 
 
 def _hid_report_sets_text(value: object) -> str:
-    if value == UNKNOWN or not isinstance(value, list) or not value:
+    if value == UNKNOWN or not isinstance(value, list):
         return UNKNOWN
+    if not value:
+        return "none"
     rows: list[str] = []
     for source in value:
         accepted = "; ".join(
@@ -377,7 +379,14 @@ def _hid_report_sets_text(value: object) -> str:
             f"rejected {report['role']} id={report['report_id']} reason={report['reason']}"
             for report in source["rejected"]
         )
-        decisions = "; ".join(part for part in (accepted, rejected) if part) or "none"
+        overflow = (
+            f"rejected overflow={source['rejected_overflow']}"
+            if source["rejected_overflow"]
+            else ""
+        )
+        decisions = "; ".join(
+            part for part in (accepted, rejected, overflow) if part
+        ) or "none"
         rows.append(
             f"{source['vendor_id'][2:]}:{source['product_id'][2:]} "
             f"interface {source['interface_number']}: {decisions}"
