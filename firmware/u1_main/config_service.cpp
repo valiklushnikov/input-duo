@@ -32,6 +32,7 @@ constexpr std::uint32_t device_capabilities() {
            static_cast<std::uint32_t>(protocol::Capability::CONFIG_WRITE) |
            static_cast<std::uint32_t>(protocol::Capability::DIAGNOSTICS) |
            static_cast<std::uint32_t>(protocol::Capability::HID_DESCRIPTOR_DIAGNOSTICS) |
+           static_cast<std::uint32_t>(protocol::Capability::HID_REPORT_SET_DIAGNOSTICS) |
            static_cast<std::uint32_t>(protocol::Capability::ROUTE_CONTROL) |
            static_cast<std::uint32_t>(protocol::Capability::SPI_ENDPOINT) |
            static_cast<std::uint32_t>(protocol::Capability::FACTORY_RESET);
@@ -115,6 +116,7 @@ int expected_request_size(CdcMessageType type) {
         case CdcMessageType::STOP_AND_RELEASE_ALL:
         case CdcMessageType::GET_DIAGNOSTICS:
         case CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE:
+        case CdcMessageType::GET_HID_REPORT_SETS:
         case CdcMessageType::FACTORY_RESET_ARM:
         case CdcMessageType::FACTORY_RESET_COMMIT:
             return 0;
@@ -157,6 +159,9 @@ std::uint32_t required_capability(CdcMessageType type) {
         case CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE:
             return static_cast<std::uint32_t>(
                 protocol::Capability::HID_DESCRIPTOR_DIAGNOSTICS);
+        case CdcMessageType::GET_HID_REPORT_SETS:
+            return static_cast<std::uint32_t>(
+                protocol::Capability::HID_REPORT_SET_DIAGNOSTICS);
         case CdcMessageType::FACTORY_RESET_ARM:
         case CdcMessageType::FACTORY_RESET_COMMIT:
             return static_cast<std::uint32_t>(protocol::Capability::FACTORY_RESET);
@@ -543,6 +548,48 @@ std::size_t ConfigService::hid_descriptor_capture_payload(
     return kHeaderBytes + bounded_size;
 }
 
+std::size_t ConfigService::hid_report_sets_payload(
+    CdcError error, std::uint8_t* out) const {
+    out[0] = static_cast<std::uint8_t>(error);
+    out[1] = 1;
+    out[2] = 0;
+    if (error != CdcError::Ok || !input_sources_published_) {
+        return 3;
+    }
+
+    const std::size_t source_count =
+        std::min<std::size_t>(input_sources_.count, input::kSourceCapacity);
+    out[2] = static_cast<std::uint8_t>(source_count);
+    std::size_t at = 3;
+    for (std::size_t source_index = 0; source_index < source_count; ++source_index) {
+        const auto& source = input_sources_.sources[source_index];
+        const std::size_t accepted_count = std::min<std::size_t>(
+            source.accepted_count, input::kHidReportDecisionCapacity);
+        const std::size_t rejected_count = std::min<std::size_t>(
+            source.rejected_count, input::kHidReportDecisionCapacity);
+        out[at++] = source.device_address;
+        put_u16(out + at, source.vendor_id); at += 2;
+        put_u16(out + at, source.product_id); at += 2;
+        out[at++] = source.interface_number;
+        out[at++] = static_cast<std::uint8_t>(accepted_count);
+        out[at++] = static_cast<std::uint8_t>(rejected_count);
+        out[at++] = source.rejected_overflow;
+        for (std::size_t index = 0; index < accepted_count; ++index) {
+            const auto& report = source.accepted[index];
+            out[at++] = report.role;
+            out[at++] = report.report_id;
+            out[at++] = report.minimum_body_bytes;
+        }
+        for (std::size_t index = 0; index < rejected_count; ++index) {
+            const auto& report = source.rejected[index];
+            out[at++] = report.role;
+            out[at++] = report.report_id;
+            out[at++] = report.reason;
+        }
+    }
+    return at;
+}
+
 std::size_t ConfigService::write_reference_counters(std::uint8_t* out) const {
     // The leading length, for the same reason the host block leads with one:
     // it is what lets CH375 and PIO_USB - which link this exact class and
@@ -660,6 +707,9 @@ void ConfigService::reply_error(const CdcFrame& frame, CdcError error) {
         case CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE:
             size = hid_descriptor_capture_payload(error, payload);
             break;
+        case CdcMessageType::GET_HID_REPORT_SETS:
+            size = hid_report_sets_payload(error, payload);
+            break;
         case CdcMessageType::WRITE_CHUNK:
             put_u32(payload + 1, expected_offset_);
             size = 5;
@@ -760,6 +810,11 @@ void ConfigService::dispatch(const CdcFrame& frame) {
         case CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE: {
             const std::size_t size =
                 hid_descriptor_capture_payload(CdcError::Ok, payload);
+            reply(frame.type, frame.sequence, payload, size);
+            return;
+        }
+        case CdcMessageType::GET_HID_REPORT_SETS: {
+            const std::size_t size = hid_report_sets_payload(CdcError::Ok, payload);
             reply(frame.type, frame.sequence, payload, size);
             return;
         }

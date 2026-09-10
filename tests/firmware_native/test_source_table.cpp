@@ -19,6 +19,8 @@ using duo_input::u1::input::SourceIdentity;
 using duo_input::u1::input::SourceTable;
 using duo_input::u1::input::hid::boot_keyboard_layout;
 using duo_input::u1::input::hid::boot_mouse_layout;
+using duo_input::u1::input::hid::ReportDescriptorError;
+using duo_input::u1::input::hid::ReportRole;
 
 static_assert(!std::is_copy_constructible<SourceTable>::value,
               "SourceTable handlers must not be copied away from their slots");
@@ -110,6 +112,42 @@ TEST_CASE(source_lookup_has_a_small_owned_value_and_table_does_not_duplicate_rep
     CHECK(sizeof(ResolvedSource) <= 8u);
     CHECK(std::is_trivially_copyable<ResolvedSource>::value);
     CHECK(sizeof(SourceTable) <= 9000u);
+}
+
+TEST_CASE(inventory_copies_bounded_report_set_decisions_without_persisting_them_in_source_keys) {
+    RecordingHandler handler;
+    SourceTable table(handler);
+    auto identity = duo::test::multi_report_hid::identity();
+    identity.report_set.rejected_count = 2;
+    identity.report_set.rejected[0] = {
+        ReportRole::Mouse, 7, ReportDescriptorError::UnsupportedLayout};
+    identity.report_set.rejected[1] = {
+        ReportRole::Keyboard, 9, ReportDescriptorError::AmbiguousKeyboardReport};
+    identity.report_set.rejected_overflow = 3;
+
+    table.on_event(ready_event(42), identity, 0);
+    duo_input::u1::input::SourceInventory inventory{};
+    table.inventory(inventory);
+
+    CHECK_EQ(inventory.count, 1u);
+    const auto& source = inventory.sources[0];
+    CHECK_EQ(source.accepted_count, 3u);
+    CHECK_EQ(source.accepted[0].role, static_cast<std::uint8_t>(ReportRole::Keyboard));
+    CHECK_EQ(source.accepted[0].report_id, 1u);
+    CHECK_EQ(source.accepted[0].minimum_body_bytes, 8u);
+    CHECK_EQ(source.accepted[1].role, static_cast<std::uint8_t>(ReportRole::Consumer));
+    CHECK_EQ(source.accepted[1].report_id, 2u);
+    CHECK_EQ(source.accepted[1].minimum_body_bytes, 2u);
+    CHECK_EQ(source.accepted[2].role, static_cast<std::uint8_t>(ReportRole::Keyboard));
+    CHECK_EQ(source.accepted[2].report_id, 12u);
+    CHECK_EQ(source.accepted[2].minimum_body_bytes, 20u);
+    CHECK_EQ(source.rejected_count, 2u);
+    CHECK_EQ(source.rejected[0].role, static_cast<std::uint8_t>(ReportRole::Mouse));
+    CHECK_EQ(source.rejected[0].report_id, 7u);
+    CHECK_EQ(source.rejected[0].reason,
+             static_cast<std::uint8_t>(ReportDescriptorError::UnsupportedLayout));
+    CHECK_EQ(source.rejected_overflow, 3u);
+    CHECK(sizeof(ResolvedSource) <= 8u);
 }
 
 TEST_CASE(resolved_source_survives_slot_reuse_and_configuration_buffer_reuse) {

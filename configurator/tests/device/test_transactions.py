@@ -34,6 +34,72 @@ def _hid_descriptor_parser():
     return parser
 
 
+def _hid_report_sets_parser():
+    from duo_input.device import transactions
+
+    parser = getattr(transactions, "parse_hid_report_sets", None)
+    assert parser is not None, "report-set parser is missing"
+    return parser
+
+
+def test_hid_report_sets_parses_absent_and_keychron_decisions_as_immutable_values():
+    from duo_input.device import transactions
+
+    parse = _hid_report_sets_parser()
+    absent = parse(bytes((0, 1, 0)))
+    payload = (
+        struct.pack("<BBBBHHBBBB", 0, 1, 1, 5, 0x3434, 0xD030, 2, 3, 2, 4)
+        + bytes((1, 1, 8, 2, 2, 2, 1, 12, 20, 3, 3, 2, 1, 9, 3))
+    )
+    parsed = parse(payload)
+
+    assert absent == transactions.HidReportSets(())
+    assert parsed.sources[0].device_address == 5
+    assert parsed.sources[0].accepted == (
+        transactions.HidReportEntry(transactions.HidReportRole.KEYBOARD, 1, 8),
+        transactions.HidReportEntry(transactions.HidReportRole.CONSUMER, 2, 2),
+        transactions.HidReportEntry(transactions.HidReportRole.KEYBOARD, 12, 20),
+    )
+    assert parsed.sources[0].rejected == (
+        transactions.RejectedHidReportEntry(
+            transactions.HidReportRole.MOUSE,
+            3,
+            transactions.HidReportRejectionReason.NO_MOUSE_REPORT,
+        ),
+        transactions.RejectedHidReportEntry(
+            transactions.HidReportRole.KEYBOARD,
+            9,
+            transactions.HidReportRejectionReason.UNSUPPORTED_LAYOUT,
+        ),
+    )
+    assert parsed.sources[0].rejected_overflow == 4
+    with pytest.raises(AttributeError):
+        parsed.sources = ()
+
+
+@pytest.mark.parametrize(
+    ("payload", "failure"),
+    [
+        (bytes((0, 2, 0)), "version"),
+        (bytes((0, 1, 1)), "source count"),
+        (bytes((0, 1, 0, 0)), "tail"),
+        (struct.pack("<BBBBHHBBBB", 0, 1, 1, 1, 2, 3, 4, 9, 0, 0), "accepted count"),
+        (struct.pack("<BBBBHHBBBB", 0, 1, 1, 1, 2, 3, 4, 0, 9, 0), "rejected count"),
+        (struct.pack("<BBBBHHBBBB", 0, 1, 1, 1, 2, 3, 4, 1, 0, 0) + bytes((0, 1, 8)), "role"),
+        (struct.pack("<BBBBHHBBBB", 0, 1, 1, 1, 2, 3, 4, 0, 1, 0) + bytes((1, 1, 8)), "reason"),
+        (
+            struct.pack("<BBB", 0, 1, 2)
+            + struct.pack("<BHHBBBB", 1, 2, 3, 4, 0, 0, 0)
+            + struct.pack("<BHHBBBB", 9, 2, 3, 4, 0, 0, 0),
+            "duplicate",
+        ),
+    ],
+)
+def test_hid_report_sets_rejects_unbounded_or_inconsistent_payloads(payload, failure):
+    with pytest.raises(PayloadError, match=failure):
+        _hid_report_sets_parser()(payload)
+
+
 def test_hid_descriptor_capture_parses_absent_complete_and_truncated_payloads():
     parse = _hid_descriptor_parser()
 

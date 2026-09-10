@@ -10,7 +10,7 @@ from __future__ import annotations
 import struct
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 
 from duo_input.domain.models import Trigger, TriggerSource
 
@@ -49,6 +49,9 @@ _CHUNK_ACK = struct.Struct("<BI")
 _CAPTURE_EVENT_LEGACY = struct.Struct("<BBB")
 _CAPTURE_EVENT_FULL = struct.Struct("<BBBHHB")
 _HID_DESCRIPTOR_CAPTURE = struct.Struct("<BBBHHBHH")
+_HID_REPORT_SETS = struct.Struct("<BBB")
+_HID_REPORT_SOURCE = struct.Struct("<BHHBBBB")
+_HID_REPORT_ENTRY = struct.Struct("<BBB")
 assert _CAPTURE_EVENT_FULL.size == CAPTURE_EVENT_PAYLOAD_BYTES
 assert _HID_DESCRIPTOR_CAPTURE.size == 12
 
@@ -129,6 +132,52 @@ class HidDescriptorCapture:
     @property
     def captured_size(self) -> int:
         return len(self.descriptor)
+
+
+class HidReportRole(IntEnum):
+    KEYBOARD = 1
+    CONSUMER = 2
+    MOUSE = 3
+
+
+class HidReportRejectionReason(IntEnum):
+    TRUNCATED = 1
+    NO_MOUSE_REPORT = 2
+    UNSUPPORTED_LAYOUT = 3
+    NO_KEYBOARD_REPORT = 4
+    AMBIGUOUS_KEYBOARD_REPORT = 5
+    MALFORMED_GLOBAL_STATE = 6
+    AMBIGUOUS_REPORT_SET = 7
+
+
+@dataclass(frozen=True)
+class HidReportEntry:
+    role: HidReportRole
+    report_id: int
+    minimum_body_bytes: int
+
+
+@dataclass(frozen=True)
+class RejectedHidReportEntry:
+    role: HidReportRole
+    report_id: int
+    reason: HidReportRejectionReason
+
+
+@dataclass(frozen=True)
+class HidReportSource:
+    device_address: int
+    vendor_id: int
+    product_id: int
+    interface_number: int
+    accepted: tuple[HidReportEntry, ...]
+    rejected: tuple[RejectedHidReportEntry, ...]
+    rejected_overflow: int
+
+
+@dataclass(frozen=True)
+class HidReportSets:
+    sources: tuple[HidReportSource, ...]
 
 
 @dataclass(frozen=True)
@@ -848,6 +897,71 @@ def parse_hid_descriptor_capture(payload: bytes) -> HidDescriptorCapture:
     )
 
 
+def parse_hid_report_sets(payload: bytes) -> HidReportSets:
+    if len(payload) < _HID_REPORT_SETS.size:
+        raise PayloadError("GET_HID_REPORT_SETS payload is too short")
+    _error, version, source_count = _HID_REPORT_SETS.unpack_from(payload)
+    if version != 1:
+        raise PayloadError("GET_HID_REPORT_SETS version is unsupported")
+    if source_count > 8:
+        raise PayloadError("GET_HID_REPORT_SETS source count exceeds eight")
+
+    sources: list[HidReportSource] = []
+    identities: set[tuple[int, int, int]] = set()
+    at = _HID_REPORT_SETS.size
+    for _ in range(source_count):
+        if len(payload) - at < _HID_REPORT_SOURCE.size:
+            raise PayloadError("GET_HID_REPORT_SETS source count exceeds payload")
+        values = _HID_REPORT_SOURCE.unpack_from(payload, at)
+        at += _HID_REPORT_SOURCE.size
+        (device_address, vendor_id, product_id, interface_number,
+         accepted_count, rejected_count, rejected_overflow) = values
+        if accepted_count > 8:
+            raise PayloadError("GET_HID_REPORT_SETS accepted count exceeds eight")
+        if rejected_count > 8:
+            raise PayloadError("GET_HID_REPORT_SETS rejected count exceeds eight")
+        required = (accepted_count + rejected_count) * _HID_REPORT_ENTRY.size
+        if len(payload) - at < required:
+            raise PayloadError("GET_HID_REPORT_SETS entry count exceeds payload")
+
+        accepted: list[HidReportEntry] = []
+        for _ in range(accepted_count):
+            raw_role, report_id, minimum_body_bytes = _HID_REPORT_ENTRY.unpack_from(payload, at)
+            at += _HID_REPORT_ENTRY.size
+            try:
+                role = HidReportRole(raw_role)
+            except ValueError as error:
+                raise PayloadError("GET_HID_REPORT_SETS accepted role is invalid") from error
+            accepted.append(HidReportEntry(role, report_id, minimum_body_bytes))
+
+        rejected: list[RejectedHidReportEntry] = []
+        for _ in range(rejected_count):
+            raw_role, report_id, raw_reason = _HID_REPORT_ENTRY.unpack_from(payload, at)
+            at += _HID_REPORT_ENTRY.size
+            try:
+                role = HidReportRole(raw_role)
+            except ValueError as error:
+                raise PayloadError("GET_HID_REPORT_SETS rejected role is invalid") from error
+            try:
+                reason = HidReportRejectionReason(raw_reason)
+            except ValueError as error:
+                raise PayloadError("GET_HID_REPORT_SETS rejected reason is invalid") from error
+            rejected.append(RejectedHidReportEntry(role, report_id, reason))
+
+        identity = (vendor_id, product_id, interface_number)
+        if identity in identities:
+            raise PayloadError("GET_HID_REPORT_SETS carries a duplicate source identity")
+        identities.add(identity)
+        sources.append(HidReportSource(
+            device_address, vendor_id, product_id, interface_number,
+            tuple(accepted), tuple(rejected), rejected_overflow,
+        ))
+
+    if at != len(payload):
+        raise PayloadError("GET_HID_REPORT_SETS has an unexpected tail")
+    return HidReportSets(tuple(sources))
+
+
 def parse_diagnostics(payload: bytes) -> DeviceDiagnostics:
     """Read the counters, and the link state when the firmware reports it.
 
@@ -1449,6 +1563,11 @@ __all__ = [
     "LatencyHistogram",
     "HostObservation",
     "HidDescriptorCapture",
+    "HidReportEntry",
+    "HidReportRejectionReason",
+    "HidReportRole",
+    "HidReportSets",
+    "HidReportSource",
     "PeripheralPort",
     "ReferenceCounters",
     "OperationFailure",
@@ -1462,6 +1581,7 @@ __all__ = [
     "parse_device_info",
     "parse_diagnostics",
     "parse_hid_descriptor_capture",
+    "parse_hid_report_sets",
     "parse_read_chunk",
     "parse_status",
     "percentage",

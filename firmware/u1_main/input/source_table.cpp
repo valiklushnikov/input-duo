@@ -1,4 +1,5 @@
 #include "input/source_table.hpp"
+#include <algorithm>
 #include <cstring>
 
 namespace duo_input::u1::input {
@@ -57,6 +58,27 @@ void SourceTable::on_event(const SourceEvent& event, const SourceIdentity& ident
         info.kind = static_cast<std::uint8_t>(identity.kind);
         std::memcpy(info.product_name, identity.product_name, sizeof(info.product_name));
         info.product_name[sizeof(info.product_name) - 1] = 0;
+        info.accepted_count = static_cast<std::uint8_t>(std::min<std::size_t>(
+            identity.report_set.count, hid::kMaxHidReportEntries));
+        for (std::size_t index = 0; index < info.accepted_count; ++index) {
+            const auto& report = identity.report_set.entries[index];
+            auto& accepted = info.accepted[index];
+            accepted.role = static_cast<std::uint8_t>(report.role);
+            accepted.report_id = report.report_id;
+            accepted.minimum_body_bytes = report.role == hid::ReportRole::Mouse
+                                              ? report.mouse.minimum_body_bytes
+                                              : report.keyboard.minimum_body_bytes;
+        }
+        info.rejected_count = static_cast<std::uint8_t>(std::min<std::size_t>(
+            identity.report_set.rejected_count, hid::kMaxRejectedReportEntries));
+        for (std::size_t index = 0; index < info.rejected_count; ++index) {
+            const auto& report = identity.report_set.rejected[index];
+            auto& rejected = info.rejected[index];
+            rejected.role = static_cast<std::uint8_t>(report.role);
+            rejected.report_id = report.report_id;
+            rejected.reason = static_cast<std::uint8_t>(report.reason);
+        }
+        info.rejected_overflow = identity.report_set.rejected_overflow;
         ++revision_;
         slot->pipeline.set_report_set(identity.report_set);
         return;

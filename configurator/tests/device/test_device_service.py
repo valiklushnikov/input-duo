@@ -567,9 +567,15 @@ def test_get_diagnostics_fetches_optional_hid_descriptor_evidence(
     assert result.value is service.diagnostics
     assert service.hid_descriptor_capture.present is False
     assert transport.requests[-2:] == [
+        CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE,
+        CdcMessageType.GET_HID_REPORT_SETS,
+    ]
+    assert transport.requests[-3:] == [
         CdcMessageType.GET_DIAGNOSTICS,
         CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE,
+        CdcMessageType.GET_HID_REPORT_SETS,
     ]
+    assert service.hid_report_sets.sources == ()
 
 
 def test_get_diagnostics_remains_compatible_when_descriptor_capability_is_absent(
@@ -595,6 +601,35 @@ def test_get_diagnostics_remains_compatible_when_descriptor_capability_is_absent
     assert result.value is service.diagnostics
     assert service.hid_descriptor_capture is None
     assert CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE not in transport.requests
+    assert transport.requests[-1] is CdcMessageType.GET_HID_REPORT_SETS
+
+
+def test_get_diagnostics_skips_only_report_sets_when_its_capability_is_absent(
+    qtbot, service, emulator, config_a
+):
+    emulator.install_active(config_a)
+
+    def remove_report_set_capability(frame: CdcFrame):
+        if frame.type is not CdcMessageType.DEVICE_INFO:
+            return frame
+        payload = bytearray(frame.payload)
+        capabilities = int.from_bytes(payload[3:7], "little")
+        payload[3:7] = (capabilities & ~int(Capability.HID_REPORT_SET_DIAGNOSTICS)).to_bytes(
+            4, "little"
+        )
+        return replace(frame, payload=bytes(payload))
+
+    transport = _MutatingTransport(emulator, remove_report_set_capability)
+    _connect(qtbot, service, transport)
+
+    _succeed(qtbot, service, service.get_diagnostics)
+
+    assert service.hid_descriptor_capture.present is False
+    assert service.hid_report_sets is None
+    assert transport.requests[-2:] == [
+        CdcMessageType.GET_DIAGNOSTICS,
+        CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE,
+    ]
 
 
 def test_malformed_hid_descriptor_evidence_fails_diagnostics_by_name(
@@ -614,6 +649,36 @@ def test_malformed_hid_descriptor_evidence_fails_diagnostics_by_name(
 
     assert failure.operation == "get_diagnostics"
     assert failure.reason is FailureReason.BAD_PAYLOAD
+
+
+def test_malformed_hid_report_sets_fail_the_same_diagnostics_operation(
+    qtbot, service, emulator, config_a
+):
+    emulator.install_active(config_a)
+
+    def truncate_report_sets(frame: CdcFrame):
+        if frame.type is CdcMessageType.GET_HID_REPORT_SETS:
+            return replace(frame, payload=b"\0\1\1")
+        return frame
+
+    transport = _MutatingTransport(emulator, truncate_report_sets)
+    _connect(qtbot, service, transport)
+
+    failure = _fail(qtbot, service, service.get_diagnostics)
+
+    assert failure.operation == "get_diagnostics"
+    assert failure.reason is FailureReason.BAD_PAYLOAD
+
+
+def test_connect_and_disconnect_reset_retained_hid_report_sets(qtbot, service, emulator, config_a):
+    emulator.install_active(config_a)
+    _connect(qtbot, service, emulator)
+    _succeed(qtbot, service, service.get_diagnostics)
+    assert service.hid_report_sets is not None
+
+    service.disconnect_device()
+
+    assert service.hid_report_sets is None
 
 
 def test_a_diagnostics_reply_the_host_cannot_read_is_named_not_waited_out(

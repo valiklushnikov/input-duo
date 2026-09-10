@@ -135,6 +135,7 @@ class DiagnosticSnapshot:
     cdc_disconnect: int | str = UNKNOWN
     cdc_aborted_staging: int | str = UNKNOWN
     hid_descriptor_capture: dict[str, object] | str = UNKNOWN
+    hid_report_sets: list[dict[str, object]] | str = UNKNOWN
 
     @classmethod
     def unknown(cls) -> DiagnosticSnapshot:
@@ -191,6 +192,7 @@ class DiagnosticSnapshot:
             reference_mouse_ready=_reference_ready(counters, "mouse_ready"),
             peripherals=_peripherals(counters),
             hid_descriptor_capture=_hid_descriptor_capture(service),
+            hid_report_sets=_hid_report_sets(service),
         )
 
     def to_json(self) -> str:
@@ -215,6 +217,38 @@ def _hid_descriptor_capture(service: object) -> dict[str, object] | str:
         "sha256": hashlib.sha256(descriptor).hexdigest(),
         "hex": descriptor.hex(" ").upper(),
     }
+
+
+def _hid_report_sets(service: object) -> list[dict[str, object]] | str:
+    report_sets = getattr(service, "hid_report_sets", None)
+    if report_sets is None:
+        return UNKNOWN
+    exported: list[dict[str, object]] = []
+    for source in report_sets.sources:
+        exported.append({
+            "device_address": source.device_address,
+            "vendor_id": f"0x{source.vendor_id:04X}",
+            "product_id": f"0x{source.product_id:04X}",
+            "interface_number": source.interface_number,
+            "accepted": [
+                {
+                    "role": report.role.name.lower(),
+                    "report_id": report.report_id,
+                    "minimum_body_bytes": report.minimum_body_bytes,
+                }
+                for report in source.accepted
+            ],
+            "rejected": [
+                {
+                    "role": report.role.name.lower(),
+                    "report_id": report.report_id,
+                    "reason": report.reason.name.lower(),
+                }
+                for report in source.rejected
+            ],
+            "rejected_overflow": source.rejected_overflow,
+        })
+    return exported
 
 
 def _input_sources(counters: object) -> str:

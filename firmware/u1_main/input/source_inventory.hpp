@@ -8,6 +8,19 @@ namespace duo_input::u1::input {
 inline constexpr std::size_t kSourceCapacity = 8;
 inline constexpr std::size_t kProductNameBytes = 48;
 inline constexpr std::size_t kHidDescriptorCaptureBytes = 256;
+inline constexpr std::size_t kHidReportDecisionCapacity = 8;
+
+struct AcceptedHidReportInfo {
+    std::uint8_t role = 0;
+    std::uint8_t report_id = 0;
+    std::uint8_t minimum_body_bytes = 0;
+};
+
+struct RejectedHidReportInfo {
+    std::uint8_t role = 0;
+    std::uint8_t report_id = 0;
+    std::uint8_t reason = 0;
+};
 
 struct HidDescriptorCapture {
     bool present = false;
@@ -36,6 +49,11 @@ struct SourceInfo {
     std::uint8_t minimum_body_bytes = 0;
     std::uint8_t keyboard_error = 0xFF;
     std::uint8_t consumer_error = 0xFF;
+    std::uint8_t accepted_count = 0;
+    AcceptedHidReportInfo accepted[kHidReportDecisionCapacity] = {};
+    std::uint8_t rejected_count = 0;
+    RejectedHidReportInfo rejected[kHidReportDecisionCapacity] = {};
+    std::uint8_t rejected_overflow = 0;
 };
 struct SourceInventory {
     std::uint8_t count = 0;

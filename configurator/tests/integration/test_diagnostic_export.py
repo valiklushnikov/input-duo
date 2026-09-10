@@ -129,6 +129,7 @@ def test_the_archive_records_every_field_the_report_needs(tmp_path):
         "cdc_disconnect",
         "cdc_aborted_staging",
         "hid_descriptor_capture",
+        "hid_report_sets",
     ):
         assert field in report
 
@@ -146,6 +147,7 @@ def test_a_field_protocol_v1_does_not_carry_says_so(tmp_path):
     assert report["reference_mouse_ready"] == UNKNOWN
     assert report["peripherals"] == []
     assert report["hid_descriptor_capture"] == UNKNOWN
+    assert report["hid_report_sets"] == UNKNOWN
 
 
 def test_the_application_log_travels_with_the_report(tmp_path):
@@ -196,6 +198,57 @@ def test_a_connected_device_fills_in_what_protocol_v1_reports(qtbot, emulator):
     # nothing may invent a backend for it.
     assert snapshot.input_backend == UNKNOWN
     assert snapshot.hid_descriptor_capture == {"present": False}
+    assert snapshot.hid_report_sets == []
+
+
+def test_keychron_report_set_decisions_export_with_symbolic_roles_and_reasons(
+    qtbot, emulator, tmp_path
+):
+    from duo_input.device.transactions import (
+        HidReportEntry,
+        HidReportRejectionReason,
+        HidReportRole,
+        HidReportSets,
+        HidReportSource,
+        RejectedHidReportEntry,
+    )
+
+    emulator.set_hid_report_sets(HidReportSets((HidReportSource(
+        5, 0x3434, 0xD030, 2,
+        (
+            HidReportEntry(HidReportRole.KEYBOARD, 1, 8),
+            HidReportEntry(HidReportRole.CONSUMER, 2, 2),
+            HidReportEntry(HidReportRole.KEYBOARD, 12, 20),
+        ),
+        (RejectedHidReportEntry(
+            HidReportRole.MOUSE, 3, HidReportRejectionReason.NO_MOUSE_REPORT
+        ),),
+        4,
+    ),)))
+    service = DeviceService(timeout_ms=5000)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.connect_device(emulator)
+    with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+        service.get_diagnostics()
+
+    archive = build_diagnostic_zip(
+        tmp_path / "diag.zip", DiagnosticSnapshot.from_service(service)
+    )
+    report_sets = json.loads(_members(archive)[DIAGNOSTICS_MEMBER])["hid_report_sets"]
+
+    assert report_sets == [{
+        "device_address": 5,
+        "vendor_id": "0x3434",
+        "product_id": "0xD030",
+        "interface_number": 2,
+        "accepted": [
+            {"role": "keyboard", "report_id": 1, "minimum_body_bytes": 8},
+            {"role": "consumer", "report_id": 2, "minimum_body_bytes": 2},
+            {"role": "keyboard", "report_id": 12, "minimum_body_bytes": 20},
+        ],
+        "rejected": [{"role": "mouse", "report_id": 3, "reason": "no_mouse_report"}],
+        "rejected_overflow": 4,
+    }]
 
 
 def test_a_captured_hid_descriptor_round_trips_exactly_through_the_archive(

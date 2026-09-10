@@ -106,3 +106,12 @@ def test_hid_descriptor_diagnostics_identifiers_are_generated_on_both_sides() ->
     assert "HID_DESCRIPTOR_DIAGNOSTICS = 0x800" in cpp
     assert "GET_HID_DESCRIPTOR_CAPTURE = 0x16" in python
     assert "HID_DESCRIPTOR_DIAGNOSTICS = 0x800" in python
+
+
+def test_hid_report_sets_identifiers_and_mask_are_generated():
+    schema = json.loads(generate_protocol.SCHEMA_PATH.read_text(encoding="utf-8"))
+    assert schema["capabilities"].get("HID_REPORT_SET_DIAGNOSTICS") == 4096
+    assert schema["cdc_messages"].get("GET_HID_REPORT_SETS") == 23
+    for rendered in (generate_protocol.render_cpp(schema), generate_protocol.render_python(schema)):
+        assert "HID_REPORT_SET_DIAGNOSTICS = 0x1000" in rendered
+        assert "GET_HID_REPORT_SETS = 0x17" in rendered

@@ -387,8 +387,21 @@ inline constexpr std::size_t kDiagnosticsPayloadSize =
     kReferenceCounterBlockBytes + 8 + input::kSourceCapacity * (7 + input::kProductNameBytes) +
     4 + input::kSourceCapacity * 23;
 
+/// Separate report-set evidence; GET_DIAGNOSTICS remains frozen at 1020 bytes.
+inline constexpr std::size_t kHidReportSetEntryBytes = 3;
+inline constexpr std::size_t kHidReportSetSourceBytes =
+    9 + input::kHidReportDecisionCapacity * kHidReportSetEntryBytes * 2;
+inline constexpr std::size_t kHidReportSetsPayloadSize =
+    3 + input::kSourceCapacity * kHidReportSetSourceBytes;
+
 static_assert(kDiagnosticsPayloadSize <= protocol::ProtocolLimits::CDC_MAX_PAYLOAD,
               "the diagnostics reply has to fit in one frame");
+static_assert(kDiagnosticsPayloadSize == 1020,
+              "GET_DIAGNOSTICS is a frozen 1020-byte maximum");
+static_assert(kHidReportSetsPayloadSize == 459,
+              "the bounded report-set reply has a hand-checked maximum");
+static_assert(kHidReportSetsPayloadSize <= protocol::ProtocolLimits::CDC_MAX_PAYLOAD,
+              "the report-set reply has to fit in one frame");
 
 /// What the link to U2 is doing, as the host needs to see it.
 ///
@@ -649,6 +662,7 @@ private:
     std::size_t diagnostics_payload(CdcError error, std::uint8_t* out) const;
     std::size_t hid_descriptor_capture_payload(CdcError error,
                                                std::uint8_t* out) const;
+    std::size_t hid_report_sets_payload(CdcError error, std::uint8_t* out) const;
     /// The appended host block, written at ``out``. Returns its length, which
     /// is one byte when this image publishes no observation.
     std::size_t write_host_observation(std::uint8_t* out) const;

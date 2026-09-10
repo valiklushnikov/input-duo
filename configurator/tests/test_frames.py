@@ -22,6 +22,16 @@ def load_vectors():
     return json.loads(Path("tests", "vectors", "frame_vectors.json").read_text("utf-8"))
 
 
+def test_hid_report_sets_round_trip_and_capability_negotiation():
+    assert int(CdcMessageType.GET_HID_REPORT_SETS) == 23
+    assert int(Capability.HID_REPORT_SET_DIAGNOSTICS) == 4096
+    for payload in (b"", b"\x00\x01\x00", bytes(459)):
+        frame = CdcFrame(type=CdcMessageType.GET_HID_REPORT_SETS, sequence=23, payload=payload)
+        assert decode_cdc_frame(encode_cdc_frame(frame)) == frame
+    assert is_minor_compatible(9, 4096, int(Capability.HID_REPORT_SET_DIAGNOSTICS))
+    assert not is_minor_compatible(9, 4096, 4095)
+
+
 def cdc_transport_with_crc(raw: bytes) -> bytes:
     assert len(raw) >= 10
     return cobs_encode(raw[:-4] + crc32_ieee(raw[:-4]).to_bytes(4, "little")) + b"\0"

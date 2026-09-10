@@ -544,6 +544,41 @@ def test_hid_descriptor_capture_fixture_round_trips_exact_bytes():
     )
 
 
+def test_hid_report_sets_default_absent_and_configurable_keychron_fixture_are_exact():
+    from duo_input.device.transactions import (
+        HidReportEntry,
+        HidReportRejectionReason,
+        HidReportRole,
+        HidReportSets,
+        HidReportSource,
+        RejectedHidReportEntry,
+    )
+
+    emulator = U1Emulator()
+    emulator.open()
+    _hello(emulator)
+    assert _request(emulator, CdcMessageType.GET_HID_REPORT_SETS).payload == b"\0\1\0"
+
+    reports = HidReportSets((HidReportSource(
+        5, 0x3434, 0xD030, 2,
+        (
+            HidReportEntry(HidReportRole.KEYBOARD, 1, 8),
+            HidReportEntry(HidReportRole.CONSUMER, 2, 2),
+            HidReportEntry(HidReportRole.KEYBOARD, 12, 20),
+        ),
+        (RejectedHidReportEntry(
+            HidReportRole.MOUSE, 3, HidReportRejectionReason.NO_MOUSE_REPORT
+        ),),
+        4,
+    ),))
+    emulator.set_hid_report_sets(reports)
+
+    assert _request(emulator, CdcMessageType.GET_HID_REPORT_SETS).payload == (
+        struct.pack("<BBBBHHBBBB", 0, 1, 1, 5, 0x3434, 0xD030, 2, 3, 1, 4)
+        + bytes((1, 1, 8, 2, 2, 2, 1, 12, 20, 3, 3, 2))
+    )
+
+
 def test_malformed_payloads_and_output_only_types_do_not_mutate_state(config_b: bytes):
     emulator = U1Emulator()
     _hello(emulator)

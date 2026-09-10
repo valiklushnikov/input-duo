@@ -22,6 +22,7 @@ from duo_input.protocol.crc import crc32_ieee
 from duo_input.protocol.frame import CdcFrame, FrameError, decode_cdc_frame, encode_cdc_frame
 
 from .transport import AbstractByteTransport
+from .transactions import HidReportSets
 
 
 DEVICE_CAPABILITIES = sum(int(capability) for capability in Capability)
@@ -43,6 +44,7 @@ _FIXED_REQUEST_SIZES = {
     CdcMessageType.STOP_AND_RELEASE_ALL: 0,
     CdcMessageType.GET_DIAGNOSTICS: 0,
     CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE: 0,
+    CdcMessageType.GET_HID_REPORT_SETS: 0,
     CdcMessageType.FACTORY_RESET_ARM: 0,
     CdcMessageType.FACTORY_RESET_COMMIT: 0,
 }
@@ -61,6 +63,7 @@ _REQUIRED_CAPABILITY = {
     CdcMessageType.TEST_MACRO: Capability.TEST_MACRO,
     CdcMessageType.GET_DIAGNOSTICS: Capability.DIAGNOSTICS,
     CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE: Capability.HID_DESCRIPTOR_DIAGNOSTICS,
+    CdcMessageType.GET_HID_REPORT_SETS: Capability.HID_REPORT_SET_DIAGNOSTICS,
     CdcMessageType.FACTORY_RESET_ARM: Capability.FACTORY_RESET,
     CdcMessageType.FACTORY_RESET_COMMIT: Capability.FACTORY_RESET,
 }
@@ -188,6 +191,7 @@ class U1Emulator(AbstractByteTransport):
         #: ``input_backend`` being ``None`` above.
         self.reference_counters: tuple[int, int, int, int] | None = None
         self._hid_descriptor_capture: tuple[int, int, int, int, bytes] | None = None
+        self._hid_report_sets = HidReportSets(())
         self._timeout_once = False
         self._disconnect_once = False
         self._bad_crc_response_once = False
@@ -220,6 +224,20 @@ class U1Emulator(AbstractByteTransport):
             original,
             captured,
         )
+
+    def set_hid_report_sets(self, report_sets: HidReportSets) -> None:
+        """Install bounded report-set decisions for host integration tests."""
+        if not isinstance(report_sets, HidReportSets) or len(report_sets.sources) > 8:
+            raise ValueError("HID report sets must contain at most eight sources")
+        identities: set[tuple[int, int, int]] = set()
+        for source in report_sets.sources:
+            if len(source.accepted) > 8 or len(source.rejected) > 8:
+                raise ValueError("HID report source must contain at most eight decisions")
+            identity = (source.vendor_id, source.product_id, source.interface_number)
+            if identity in identities:
+                raise ValueError("HID report source identities must be unique")
+            identities.add(identity)
+        self._hid_report_sets = report_sets
 
     @property
     def active_generation(self) -> int:
@@ -476,6 +494,8 @@ class U1Emulator(AbstractByteTransport):
             return bytes((error,)) + self._handle_get_diagnostics(b"")[1:]
         if frame.type is CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE:
             return bytes((error,)) + self._handle_get_hid_descriptor_capture(b"")[1:]
+        if frame.type is CdcMessageType.GET_HID_REPORT_SETS:
+            return bytes((error, 1, 0))
         if frame.type is CdcMessageType.PING:
             return bytes((error,)) + (frame.payload if len(frame.payload) < CDC_MAX_PAYLOAD else b"")
         return bytes((error,))
@@ -705,6 +725,29 @@ class U1Emulator(AbstractByteTransport):
             )
             + descriptor
         )
+
+    def _handle_get_hid_report_sets(self, payload: bytes) -> bytes:
+        out = bytearray(struct.pack("<BBB", ErrorCode.OK, 1, len(self._hid_report_sets.sources)))
+        for source in self._hid_report_sets.sources:
+            out.extend(struct.pack(
+                "<BHHBBBB",
+                source.device_address,
+                source.vendor_id,
+                source.product_id,
+                source.interface_number,
+                len(source.accepted),
+                len(source.rejected),
+                source.rejected_overflow,
+            ))
+            for report in source.accepted:
+                out.extend(struct.pack(
+                    "<BBB", int(report.role), report.report_id, report.minimum_body_bytes
+                ))
+            for report in source.rejected:
+                out.extend(struct.pack(
+                    "<BBB", int(report.role), report.report_id, int(report.reason)
+                ))
+        return bytes(out)
 
     def _appended_diagnostics(self) -> bytes:
         """The latency, peripheral, backend and host blocks a current U1 appends.

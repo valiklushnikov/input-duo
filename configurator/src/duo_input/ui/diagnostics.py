@@ -83,6 +83,7 @@ class DiagnosticsPage(QWidget):
                 ("dropped_commands", QT_TRANSLATE_NOOP("DiagnosticsPage", "Input commands never delivered")),
                 ("rejected_interfaces", QT_TRANSLATE_NOOP("DiagnosticsPage", "Interfaces refused: source capacity")),
                 ("input_sources", QT_TRANSLATE_NOOP("DiagnosticsPage", "Input source decoding")),
+                ("hid_report_sets", QT_TRANSLATE_NOOP("DiagnosticsPage", "HID report sets")),
                 ("capture_observation", QT_TRANSLATE_NOOP("DiagnosticsPage", "Capture reception and filter")),
             ),
         ),
@@ -294,7 +295,8 @@ class DiagnosticsPage(QWidget):
         """Repaint from whatever the service already knows."""
         snapshot = self.snapshot()
         for key, label in self._values.items():
-            text = _as_text(getattr(snapshot, key, UNKNOWN))
+            value = getattr(snapshot, key, UNKNOWN)
+            text = _hid_report_sets_text(value) if key == "hid_report_sets" else _as_text(value)
             label.setText(text)
             # Nothing here is invented: a counter the device never sent looks
             # like an empty slot rather than like a reading of zero.
@@ -360,6 +362,27 @@ def _as_text(value: object) -> str:
     if isinstance(value, (tuple, list)):
         return ", ".join(str(item) for item in value) if value else UNKNOWN
     return str(value)
+
+
+def _hid_report_sets_text(value: object) -> str:
+    if value == UNKNOWN or not isinstance(value, list) or not value:
+        return UNKNOWN
+    rows: list[str] = []
+    for source in value:
+        accepted = "; ".join(
+            f"{report['role']} id={report['report_id']} min={report['minimum_body_bytes']}"
+            for report in source["accepted"]
+        )
+        rejected = "; ".join(
+            f"rejected {report['role']} id={report['report_id']} reason={report['reason']}"
+            for report in source["rejected"]
+        )
+        decisions = "; ".join(part for part in (accepted, rejected) if part) or "none"
+        rows.append(
+            f"{source['vendor_id'][2:]}:{source['product_id'][2:]} "
+            f"interface {source['interface_number']}: {decisions}"
+        )
+    return "\n".join(rows)
 
 
 __all__ = ["ARCHIVE_FILTER", "DiagnosticsPage"]

@@ -43,6 +43,7 @@ from .transactions import (
     parse_device_info,
     parse_diagnostics,
     parse_hid_descriptor_capture,
+    parse_hid_report_sets,
     parse_read_chunk,
     parse_status,
     percentage,
@@ -104,6 +105,7 @@ class DeviceService(QObject):
         self._status = None
         self._diagnostics = None
         self._hid_descriptor_capture = None
+        self._hid_report_sets = None
         self._captures_received = 0
         self._capture_decision = "none"
         self._capture_payload = b""
@@ -156,6 +158,11 @@ class DeviceService(QObject):
         return self._hid_descriptor_capture
 
     @property
+    def hid_report_sets(self):
+        """Optional per-interface report-set decisions fetched with diagnostics."""
+        return self._hid_report_sets
+
+    @property
     def device_hash(self) -> bytes:
         """Last hash the device reported for its active configuration."""
         return self._device_hash
@@ -185,6 +192,7 @@ class DeviceService(QObject):
         self._status = None
         self._diagnostics = None
         self._hid_descriptor_capture = None
+        self._hid_report_sets = None
         self._captures_received = 0
         self._capture_decision = "none"
         self._capture_payload = b""
@@ -424,6 +432,7 @@ class DeviceService(QObject):
         # Counters belong to the device that reported them, not to the host.
         self._diagnostics = None
         self._hid_descriptor_capture = None
+        self._hid_report_sets = None
         self._timer.stop()
         self._assembler.clear()
         if link is not None:
@@ -550,10 +559,27 @@ class DeviceService(QObject):
                 self._on_hid_descriptor_capture,
             )
             return
-        self._finish_success(self._diagnostics)
+        self._request_hid_report_sets()
 
     def _on_hid_descriptor_capture(self, payload: bytes) -> None:
         self._hid_descriptor_capture = parse_hid_descriptor_capture(payload)
+        self._request_hid_report_sets()
+
+    def _request_hid_report_sets(self) -> None:
+        if self._device_info is not None and (
+            self._device_info.capabilities & int(Capability.HID_REPORT_SET_DIAGNOSTICS)
+        ):
+            self._request(
+                CdcMessageType.GET_HID_REPORT_SETS,
+                CdcMessageType.GET_HID_REPORT_SETS,
+                b"",
+                self._on_hid_report_sets,
+            )
+            return
+        self._finish_success(self._diagnostics)
+
+    def _on_hid_report_sets(self, payload: bytes) -> None:
+        self._hid_report_sets = parse_hid_report_sets(payload)
         self._finish_success(self._diagnostics)
 
     # read -------------------------------------------------------------------

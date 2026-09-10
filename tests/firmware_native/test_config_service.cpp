@@ -35,6 +35,8 @@ using duo_input::u1::ConfigService;
 using duo_input::u1::IRuntimeConfig;
 using duo_input::u1::input::InputEvent;
 using duo_input::u1::input::InputEventKind;
+using duo_input::u1::input::hid::ReportDescriptorError;
+using duo_input::u1::input::hid::ReportRole;
 using duo_input::u1::mapping::CaptureController;
 using duo_input::u1::mapping::CapturedTrigger;
 
@@ -815,6 +817,104 @@ TEST_CASE(diagnostics_append_interface_inventory_and_capacity_refusals) {
     CHECK_EQ(reply.payload.data[at + 8], 0x34);
     CHECK_EQ(reply.payload.data[at + 12], 3);
     CHECK_EQ(std::strcmp(reinterpret_cast<const char*>(reply.payload.data + at + 15), "Receiver"), 0);
+}
+
+TEST_CASE(hid_report_sets_are_a_separate_bounded_reply_and_leave_diagnostics_unchanged) {
+    Link link;
+    link.hello();
+    duo_input::u1::input::SourceInventory inventory{};
+    inventory.count = 1;
+    auto& source = inventory.sources[0];
+    source.device_address = 5;
+    source.vendor_id = 0x3434;
+    source.product_id = 0xD030;
+    source.interface_number = 2;
+    source.accepted_count = 3;
+    source.accepted[0] = {static_cast<std::uint8_t>(ReportRole::Keyboard), 1, 8};
+    source.accepted[1] = {static_cast<std::uint8_t>(ReportRole::Consumer), 2, 2};
+    source.accepted[2] = {static_cast<std::uint8_t>(ReportRole::Keyboard), 12, 20};
+    source.rejected_count = 2;
+    source.rejected_overflow = 4;
+    source.rejected[0] = {static_cast<std::uint8_t>(ReportRole::Mouse), 3,
+                          static_cast<std::uint8_t>(ReportDescriptorError::NoMouseReport)};
+    source.rejected[1] = {static_cast<std::uint8_t>(ReportRole::Keyboard), 9,
+                          static_cast<std::uint8_t>(ReportDescriptorError::UnsupportedLayout)};
+    link.service.set_input_sources(inventory);
+
+    const auto diagnostics_before = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    const std::vector<std::uint8_t> frozen_diagnostics(
+        diagnostics_before.payload.data,
+        diagnostics_before.payload.data + diagnostics_before.payload.size);
+    const auto reply = link.send(CdcMessageType::GET_HID_REPORT_SETS);
+    const std::uint8_t expected[] = {
+        0, 1, 1, 5, 0x34, 0x34, 0x30, 0xD0, 2, 3, 2, 4,
+        1, 1, 8, 2, 2, 2, 1, 12, 20,
+        3, 3, 2, 1, 9, 3,
+    };
+    CHECK_EQ(reply.payload.size, sizeof(expected));
+    CHECK(std::memcmp(reply.payload.data, expected, sizeof(expected)) == 0);
+    const auto diagnostics_after = link.send(CdcMessageType::GET_DIAGNOSTICS);
+    CHECK_EQ(diagnostics_after.payload.size, frozen_diagnostics.size());
+    CHECK(std::memcmp(diagnostics_after.payload.data, frozen_diagnostics.data(),
+                      frozen_diagnostics.size()) == 0);
+    CHECK_EQ(duo_input::u1::kDiagnosticsPayloadSize, 1020u);
+}
+
+TEST_CASE(hid_report_sets_absent_reply_capability_gate_and_request_shape_are_exact) {
+    Link link;
+    link.hello();
+    const auto absent = link.send(CdcMessageType::GET_HID_REPORT_SETS);
+    const std::uint8_t expected[] = {0, 1, 0};
+    CHECK_EQ(absent.payload.size, sizeof(expected));
+    CHECK(std::memcmp(absent.payload.data, expected, sizeof(expected)) == 0);
+
+    const std::uint8_t extra = 1;
+    const auto malformed = link.send(CdcMessageType::GET_HID_REPORT_SETS, &extra, 1);
+    CHECK_EQ(error_of(malformed), CdcError::InvalidRequest);
+    CHECK_EQ(malformed.payload.size, 3u);
+
+    Link gated;
+    const std::uint32_t requested =
+        static_cast<std::uint32_t>(duo_input::protocol::Capability::DIAGNOSTICS);
+    const std::uint8_t request[] = {
+        static_cast<std::uint8_t>(requested),
+        static_cast<std::uint8_t>(requested >> 8),
+        static_cast<std::uint8_t>(requested >> 16),
+        static_cast<std::uint8_t>(requested >> 24),
+    };
+    gated.send(CdcMessageType::HELLO, request, sizeof(request));
+    const auto refused = gated.send(CdcMessageType::GET_HID_REPORT_SETS);
+    CHECK_EQ(error_of(refused), CdcError::UnsupportedCapability);
+    CHECK_EQ(refused.payload.size, 3u);
+}
+
+TEST_CASE(hid_report_sets_clamp_corrupted_counts_to_fixed_arrays_and_fit_exact_maximum) {
+    Link link;
+    link.hello();
+    duo_input::u1::input::SourceInventory inventory{};
+    inventory.count = 0xFF;
+    for (std::size_t index = 0; index < duo_input::u1::input::kSourceCapacity; ++index) {
+        auto& source = inventory.sources[index];
+        source.device_address = static_cast<std::uint8_t>(index + 1);
+        source.accepted_count = 0xFF;
+        source.rejected_count = 0xFF;
+        for (std::size_t entry = 0; entry < 8; ++entry) {
+            source.accepted[entry] = {1, static_cast<std::uint8_t>(entry), 8};
+            source.rejected[entry] = {3, static_cast<std::uint8_t>(entry), 3};
+        }
+    }
+    link.service.set_input_sources(inventory);
+
+    const auto reply = link.send(CdcMessageType::GET_HID_REPORT_SETS);
+
+    CHECK_EQ(reply.payload.size, 459u);
+    CHECK_EQ(reply.payload.data[2], 8u);
+    for (std::size_t source = 0; source < 8; ++source) {
+        const std::size_t at = 3 + source * 57;
+        CHECK_EQ(reply.payload.data[at + 6], 8u);
+        CHECK_EQ(reply.payload.data[at + 7], 8u);
+    }
+    CHECK(reply.payload.size <= ProtocolLimits::CDC_MAX_PAYLOAD);
 }
 
 TEST_CASE(auxiliary_keyboard_report_crosses_registry_sources_capture_and_cdc) {
