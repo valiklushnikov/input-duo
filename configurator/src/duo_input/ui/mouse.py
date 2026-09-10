@@ -162,34 +162,20 @@ class MouseSwitchPage(QWidget):
         self.mouse_combo = QComboBox(box)
         self.mouse_combo.setAccessibleName(self.tr("Mouse button"))
         self.mouse_combo.currentIndexChanged.connect(self._on_trigger_edited)
-        self.mouse_label = field_label(self.tr("Button:"), box)
-        form.addRow(self.mouse_label, self.mouse_combo)
-
-        self.captured_trigger_summary = QLabel(box)
-        self.captured_trigger_summary.setAccessibleName(
-            self.tr("Selected mouse control")
-        )
-        self.captured_trigger_summary.setWordWrap(True)
-        self.edit_trigger_button = QPushButton(self.tr("Edit manually"), box)
-        self.edit_trigger_button.setAccessibleName(
-            self.tr("Edit the detected trigger manually")
-        )
-        self.edit_trigger_button.clicked.connect(self._edit_trigger_manually)
-        captured_row = QHBoxLayout()
-        captured_row.setContentsMargins(0, 0, 0, 0)
-        captured_row.setSpacing(SPACE_SM)
-        captured_row.addWidget(self.captured_trigger_summary, 1)
-        captured_row.addWidget(self.edit_trigger_button)
-        self.captured_trigger_holder = QWidget(box)
-        self.captured_trigger_holder.setLayout(captured_row)
-        form.addRow(self.captured_trigger_holder)
-
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(SPACE_SM)
+        button_row.addWidget(self.mouse_combo, 1)
         self.capture_button = QPushButton(self.tr("Detect button or key"), box)
         self.capture_button.setAccessibleName(
             self.tr("Detect a button or key on the mouse")
         )
         self.capture_button.clicked.connect(self.capture_mouse_button)
-        form.addRow(self.capture_button)
+        button_row.addWidget(self.capture_button)
+        button_holder = QWidget(box)
+        button_holder.setLayout(button_row)
+        self.mouse_label = field_label(self.tr("Button:"), box)
+        form.addRow(self.mouse_label, button_holder)
 
         modifiers = QHBoxLayout()
         self.modifier_boxes: dict[str, QCheckBox] = {}
@@ -349,10 +335,25 @@ class MouseSwitchPage(QWidget):
         self._captured = trigger
         self._updating = True
         try:
-            self.select_trigger_kind(TriggerKind(trigger.kind))
-            if trigger.kind is TriggerKind.CONSUMER_USAGE:
+            friendly_capture = self._shows_friendly_capture()
+            self.select_trigger_kind(
+                TriggerKind.MOUSE_BUTTON
+                if friendly_capture
+                else TriggerKind(trigger.kind)
+            )
+            if friendly_capture:
+                if (
+                    trigger.kind is TriggerKind.KEYBOARD_USAGE
+                    and self.key_combo.findData(trigger.code) < 0
+                ):
+                    self.key_combo.addItem(key_name(trigger.code), trigger.code)
+                self.key_combo.setCurrentIndex(-1)
+                self.consumer_usage.setValue(self.consumer_usage.minimum())
+                for box in self.modifier_boxes.values():
+                    box.setChecked(False)
+            elif trigger.kind is TriggerKind.CONSUMER_USAGE:
                 self.consumer_usage.setValue(trigger.code)
-            if trigger.kind is TriggerKind.MOUSE_BUTTON:
+            elif trigger.kind is TriggerKind.MOUSE_BUTTON:
                 self._rebuild_mouse_buttons()
                 self.mouse_combo.setCurrentIndex(
                     self.mouse_combo.findData(trigger.code)
@@ -416,7 +417,10 @@ class MouseSwitchPage(QWidget):
         self.mouse_combo.clear()
         for button in self._capabilities.buttons:
             self.mouse_combo.addItem(self._mouse_button_label(button), button)
-        if current is not None:
+        if self._shows_friendly_capture():
+            self.mouse_combo.addItem(self.tr("Side button"), None)
+            self.mouse_combo.setCurrentIndex(self.mouse_combo.count() - 1)
+        elif current is not None:
             index = self.mouse_combo.findData(current)
             if index >= 0:
                 self.mouse_combo.setCurrentIndex(index)
@@ -449,7 +453,7 @@ class MouseSwitchPage(QWidget):
         if trigger.kind is TriggerKind.MOUSE_BUTTON:
             return self._mouse_button_label(trigger.code)
         if self._capabilities.is_mouse(trigger.source):
-            return self.tr("Additional mouse button")
+            return self.tr("Side button")
         return trigger_label(replace(trigger, source=None))
 
     def _shows_friendly_capture(self) -> bool:
@@ -485,23 +489,9 @@ class MouseSwitchPage(QWidget):
         try:
             kind = self.trigger_kind.currentData()
             friendly_capture = self._shows_friendly_capture()
-            for widget in (
-                self.trigger_kind_label,
-                self.trigger_kind,
-                self.key_label,
-                self.key_combo,
-                self.consumer_label,
-                self.consumer_usage,
-                self.mouse_label,
-                self.mouse_combo,
-                self.modifiers_label,
-                self.modifiers_holder,
-            ):
-                widget.setVisible(not friendly_capture)
-            self.captured_trigger_holder.setVisible(friendly_capture)
-            self.captured_trigger_summary.setText(
-                self._trigger_label(self._captured) if friendly_capture else ""
-            )
+            self.consumer_usage.setSpecialValueText("—" if friendly_capture else "")
+            for key, label, _bit in MODIFIER_BITS:
+                self.modifier_boxes[key].setText("" if friendly_capture else label)
             self.consumer_usage.setEnabled(kind is TriggerKind.CONSUMER_USAGE)
             self.key_combo.setEnabled(kind is TriggerKind.KEYBOARD_USAGE)
             self.mouse_combo.setEnabled(kind is TriggerKind.MOUSE_BUTTON)
@@ -568,10 +558,6 @@ class MouseSwitchPage(QWidget):
     # ----------------------------------------------------------------- slots
 
     def _on_changed(self, *_args: object) -> None:
-        self._refresh()
-
-    def _edit_trigger_manually(self) -> None:
-        self._captured = None
         self._refresh()
 
     def _on_trigger_edited(self, *_args: object) -> None:

@@ -1218,17 +1218,17 @@
         <translation>Key:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="187" />
+        <location filename="../../ui/mouse.py" line="169" />
         <source>Detect button or key</source>
         <translation>Detect button or key</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="401" />
+        <location filename="../../ui/mouse.py" line="402" />
         <source>Press the button or key on the mouse you want to use.</source>
         <translation>Press the button or key on the mouse you want to use.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="189" />
+        <location filename="../../ui/mouse.py" line="171" />
         <source>Detect a button or key on the mouse</source>
         <translation>Detect a button or key on the mouse</translation>
     </message>
@@ -1248,163 +1248,165 @@
         <translation>Consumer usage:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="165" />
+        <location filename="../../ui/mouse.py" line="177" />
         <source>Button:</source>
         <translation>Button:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="170" />
         <source>Selected mouse control</source>
         <translation>Selected mouse control</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="173" />
         <source>Edit manually</source>
         <translation>Edit manually</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="175" />
         <source>Edit the detected trigger manually</source>
         <translation>Edit the detected trigger manually</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="198" />
+        <location filename="../../ui/mouse.py" line="184" />
         <source>{0} modifier</source>
         <translation>{0} modifier</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="205" />
+        <location filename="../../ui/mouse.py" line="191" />
         <source>Modifiers:</source>
         <translation>Modifiers:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="209" />
+        <location filename="../../ui/mouse.py" line="195" />
         <source>What the trigger does</source>
         <translation>What the trigger does</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="210" />
+        <location filename="../../ui/mouse.py" line="196" />
         <source>Toggle between PC1 and PC2</source>
         <translation>Toggle between PC1 and PC2</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="211" />
+        <location filename="../../ui/mouse.py" line="197" />
         <source>Always PC1</source>
         <translation>Always PC1</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="212" />
+        <location filename="../../ui/mouse.py" line="198" />
         <source>Always PC2</source>
         <translation>Always PC2</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="214" />
+        <location filename="../../ui/mouse.py" line="200" />
         <source>2. What should it do?</source>
         <translation>2. What should it do?</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="217" />
+        <location filename="../../ui/mouse.py" line="203" />
         <source>Binding mode</source>
         <translation>Binding mode</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="218" />
+        <location filename="../../ui/mouse.py" line="204" />
         <source>Replace the key</source>
         <translation>Replace the key</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="219" />
+        <location filename="../../ui/mouse.py" line="205" />
         <source>Add to the key</source>
         <translation>Add to the key</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="220" />
+        <location filename="../../ui/mouse.py" line="206" />
         <source>Mode:</source>
         <translation>Mode:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="224" />
+        <location filename="../../ui/mouse.py" line="210" />
         <source>Mouse switching warnings</source>
         <translation>Mouse switching warnings</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="231" />
+        <location filename="../../ui/mouse.py" line="217" />
         <source>Bind</source>
         <translation>Bind</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="232" />
+        <location filename="../../ui/mouse.py" line="218" />
         <source>Bind this trigger to the mouse route</source>
         <translation>Bind this trigger to the mouse route</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="241" />
+        <location filename="../../ui/mouse.py" line="227" />
         <source>Mouse switching in this profile</source>
         <translation>Mouse switching in this profile</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="244" />
+        <location filename="../../ui/mouse.py" line="230" />
         <source>Existing mouse switch bindings</source>
         <translation>Existing mouse switch bindings</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="440" />
+        <location filename="../../ui/mouse.py" line="421" />
+        <location filename="../../ui/mouse.py" line="456" />
+        <source>Side button</source>
+        <translation>Side button</translation>
+    </message>
+    <message>
+        <location filename="../../ui/mouse.py" line="444" />
         <source>Left button</source>
         <translation>Left button</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="441" />
+        <location filename="../../ui/mouse.py" line="445" />
         <source>Right button</source>
         <translation>Right button</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="442" />
+        <location filename="../../ui/mouse.py" line="446" />
         <source>Middle button (wheel)</source>
         <translation>Middle button (wheel)</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="443" />
+        <location filename="../../ui/mouse.py" line="447" />
         <source>Side button 1</source>
         <translation>Side button 1</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="444" />
+        <location filename="../../ui/mouse.py" line="448" />
         <source>Side button 2</source>
         <translation>Side button 2</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="446" />
+        <location filename="../../ui/mouse.py" line="450" />
         <source>Button {0}</source>
         <translation>Button {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="430" />
+        <location filename="../../ui/mouse.py" line="434" />
         <source>Toggle</source>
         <translation>Toggle</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="452" />
         <source>Additional mouse button</source>
         <translation>Additional mouse button</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="538" />
-        <location filename="../../ui/mouse.py" line="543" />
+        <location filename="../../ui/mouse.py" line="528" />
+        <location filename="../../ui/mouse.py" line="533" />
         <source>Choose what you press first.</source>
         <translation>Choose what you press first.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="540" />
+        <location filename="../../ui/mouse.py" line="530" />
         <source>No mouse is attached, so no mouse button can be bound.</source>
         <translation>No mouse is attached, so no mouse button can be bound.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="547" />
+        <location filename="../../ui/mouse.py" line="537" />
         <source>{0} is already bound in this profile.</source>
         <translation>{0} is already bound in this profile.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="564" />
+        <location filename="../../ui/mouse.py" line="554" />
         <source>{0} is bound here but the attached mouse has not reported it.</source>
         <translation>{0} is bound here but the attached mouse has not reported it.</translation>
     </message>

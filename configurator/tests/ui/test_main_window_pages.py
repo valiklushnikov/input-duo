@@ -258,7 +258,8 @@ def test_a_key_the_mouse_sends_can_be_detected_straight_after_a_connect(
     with qtbot.waitSignal(window.service.capture_received, timeout=5000):
         link.poll()
 
-    assert page.trigger_kind.currentData() is TriggerKind.KEYBOARD_USAGE
+    assert page.trigger_kind.currentData() is TriggerKind.MOUSE_BUTTON
+    assert page.mouse_combo.currentText() == "Side button"
     assert page.current_trigger() == Trigger(
         TriggerKind.KEYBOARD_USAGE, 0x4F, LEFT_CTRL, BUS_MOUSE
     )

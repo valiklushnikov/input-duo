@@ -5,9 +5,9 @@ from __future__ import annotations
 import struct
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QCheckBox, QLabel, QPushButton
+from PySide6.QtWidgets import QCheckBox, QGroupBox, QLabel, QPushButton
 
 from duo_input.device.emulator import U1Emulator
 from duo_input.device.qt_transport import SynchronousTransportLink
@@ -318,15 +318,13 @@ def test_a_key_the_attached_mouse_sends_is_captured_and_selected(qtbot):
         TriggerKind.KEYBOARD_USAGE, CAPTURED_KEY, LEFT_CTRL, CAPTURED_SOURCE
     )
     assert dialog.trigger == expected
-    assert page.captured_trigger_summary.text() == "Additional mouse button"
-    assert page.captured_trigger_summary.isVisibleTo(page) is True
-    assert page.trigger_kind.isVisibleTo(page) is False
-    assert page.key_combo.isVisibleTo(page) is False
-    assert page.consumer_usage.isVisibleTo(page) is False
-    assert page.mouse_combo.isVisibleTo(page) is False
-    assert all(
-        box.isVisibleTo(page) is False for box in page.modifier_boxes.values()
-    )
+    assert page.trigger_kind.currentData() is TriggerKind.MOUSE_BUTTON
+    assert page.mouse_combo.currentText() == "Side button"
+    assert page.trigger_kind.isVisibleTo(page) is True
+    assert page.key_combo.isVisibleTo(page) is True
+    assert page.consumer_usage.isVisibleTo(page) is True
+    assert page.mouse_combo.isVisibleTo(page) is True
+    assert all(box.isVisibleTo(page) for box in page.modifier_boxes.values())
     text_widgets = (
         page.findChildren(QLabel)
         + page.findChildren(QCheckBox)
@@ -335,6 +333,16 @@ def test_a_key_the_attached_mouse_sends_is_captured_and_selected(qtbot):
     visible_text = " ".join(
         widget.text() for widget in text_widgets if widget.isVisibleTo(page)
     )
+    visible_text += " " + " ".join(
+        (
+            page.trigger_kind.currentText(),
+            page.key_combo.currentText(),
+            page.mouse_combo.currentText(),
+            page.consumer_usage.text(),
+        )
+    )
+    assert "Side button" in visible_text
+    assert "Additional mouse button" not in visible_text
     assert "Ctrl" not in visible_text
     assert "Right" not in visible_text
     assert "0x1" not in visible_text
@@ -352,9 +360,67 @@ def test_a_key_the_attached_mouse_sends_is_captured_and_selected(qtbot):
     assert page.apply_button.isVisibleTo(page) is True
     assert page.warning_label.isVisibleTo(page) is True
     assert page.existing_list.isVisibleTo(page) is True
+    assert all(
+        button.text() != "Edit manually"
+        for button in page.findChildren(QPushButton)
+    )
 
 
-def test_a_mouse_origin_consumer_control_uses_the_same_friendly_summary(page):
+def test_a_friendly_capture_keeps_the_original_editor_geometry(qtbot, page):
+    """Moving Detect out of the Button row or hiding fields must fail this."""
+    page.set_capabilities(
+        MouseCapabilities(advertised=True)
+        .observing(5)
+        .with_peripherals((_attached_mouse(),))
+    )
+    page.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
+    page.resize(1024, 700)
+    page.show()
+    qtbot.waitUntil(page.isVisible)
+
+    editor = next(
+        box
+        for box in page.findChildren(QGroupBox)
+        if box.title() == "Switch the mouse"
+    )
+    original_controls = (
+        page.trigger_kind,
+        page.key_combo,
+        page.consumer_usage,
+        page.mouse_combo,
+        page.modifiers_holder,
+        page.action_combo,
+        page.mode_combo,
+        page.capture_button,
+        page.apply_button,
+        page.warning_label,
+        page.existing_list,
+    )
+    before_page_size = page.size()
+    before_editor_size = editor.size()
+    before_mouse_geometry = page.mouse_combo.geometry()
+    before_detect_geometry = page.capture_button.geometry()
+    mouse_position = page.mouse_combo.mapTo(page, QPoint())
+    detect_position = page.capture_button.mapTo(page, QPoint())
+
+    assert all(control.isVisibleTo(page) for control in original_controls)
+    assert page.capture_button.width() == page.capture_button.sizeHint().width()
+    assert detect_position.y() == mouse_position.y()
+    assert detect_position.x() > mouse_position.x() + page.mouse_combo.width()
+
+    page.apply_captured_trigger(
+        Trigger(TriggerKind.KEYBOARD_USAGE, CAPTURED_KEY, LEFT_CTRL, CAPTURED_SOURCE)
+    )
+    qtbot.wait(1)
+
+    assert all(control.isVisibleTo(page) for control in original_controls)
+    assert page.size() == before_page_size
+    assert editor.size() == before_editor_size
+    assert page.mouse_combo.geometry() == before_mouse_geometry
+    assert page.capture_button.geometry() == before_detect_geometry
+
+
+def test_a_mouse_origin_consumer_control_uses_the_same_friendly_selection(page):
     page.set_capabilities(
         MouseCapabilities(advertised=True).with_peripherals((_attached_mouse(),))
     )
@@ -364,29 +430,25 @@ def test_a_mouse_origin_consumer_control_uses_the_same_friendly_summary(page):
 
     page.apply_captured_trigger(captured)
 
-    assert page.captured_trigger_summary.text() == "Additional mouse button"
-    assert page.consumer_usage.isVisibleTo(page) is False
+    assert page.trigger_kind.currentData() is TriggerKind.MOUSE_BUTTON
+    assert page.mouse_combo.currentText() == "Side button"
     assert page.current_trigger() == captured
 
 
-def test_editing_a_friendly_capture_restores_the_manual_trigger_editor(qtbot, page):
+def test_selecting_a_standard_button_clears_a_friendly_capture(page):
     page.set_capabilities(
-        MouseCapabilities(advertised=True).with_peripherals((_attached_mouse(),))
+        MouseCapabilities(advertised=True)
+        .observing(5)
+        .with_peripherals((_attached_mouse(),))
     )
     page.apply_captured_trigger(
         Trigger(TriggerKind.KEYBOARD_USAGE, CAPTURED_KEY, LEFT_CTRL, CAPTURED_SOURCE)
     )
 
-    qtbot.mouseClick(page.edit_trigger_button, Qt.MouseButton.LeftButton)
+    page.mouse_combo.setCurrentIndex(page.mouse_combo.findData(5))
 
-    assert page.captured_trigger_summary.isVisibleTo(page) is False
-    assert page.trigger_kind.isVisibleTo(page) is True
-    assert page.key_combo.isVisibleTo(page) is True
-    assert page.modifier_boxes["ctrl"].isVisibleTo(page) is True
-    page.key_combo.setCurrentIndex(page.key_combo.findData(0x04))
-    assert page.current_trigger() == Trigger(
-        TriggerKind.KEYBOARD_USAGE, 0x04, LEFT_CTRL, None
-    )
+    assert page.mouse_combo.currentText() == "Side button 2"
+    assert page.current_trigger() == Trigger(TriggerKind.MOUSE_BUTTON, 5, 0, None)
 
 
 @pytest.mark.parametrize("kind, code, modifiers", [(1, 0x68, 0xF1), (3, 0x1B1, 0)])
@@ -405,14 +467,15 @@ def test_detect_apply_preserves_extended_key_and_all_modifiers_and_clears_proven
     assert emulator.queue_capture_event(_capture_payload(kind, code & 0xFF, code >> 8 if kind == 3 else modifiers, CAPTURED_SOURCE))
     with qtbot.waitSignal(service.capture_received):
         link.poll()
-    if kind == 3:
-        assert page.consumer_usage.value() == code
-    else:
-        assert page.key_combo.currentData() == code
+    captured = Trigger(TriggerKind(kind), code, modifiers, CAPTURED_SOURCE)
+    assert page.trigger_kind.currentData() is TriggerKind.MOUSE_BUTTON
+    assert page.mouse_combo.currentText() == "Side button"
+    assert page.current_trigger() == captured
     page.select_action(ActionKind.SET_MOUSE_ROUTE, MouseRoute.PC2)
     with qtbot.waitSignal(page.command_requested) as changed:
         qtbot.mouseClick(page.apply_button, Qt.MouseButton.LeftButton)
-    assert changed.args[0].binding.trigger == Trigger(TriggerKind(kind), code, modifiers, CAPTURED_SOURCE)
+    assert changed.args[0].binding.trigger == captured
+    page.select_trigger_kind(TriggerKind(kind))
     if kind == 3:
         page.consumer_usage.setValue(0xE9)
         page.consumer_usage.setValue(code)
@@ -484,10 +547,11 @@ def test_a_key_the_operator_then_changes_loses_the_device_it_named(qtbot):
     with qtbot.waitSignal(service.capture_received, timeout=5000):
         link.poll()
 
+    page.select_trigger_kind(TriggerKind.KEYBOARD_USAGE)
     page.key_combo.setCurrentIndex(page.key_combo.findData(0x04))
 
     assert page.current_trigger() == Trigger(
-        TriggerKind.KEYBOARD_USAGE, 0x04, LEFT_CTRL, None
+        TriggerKind.KEYBOARD_USAGE, 0x04, 0, None
     )
 
 
@@ -518,7 +582,8 @@ def test_detect_can_be_pressed_again_after_a_key_was_detected(qtbot):
     )
     with qtbot.waitSignal(service.capture_received, timeout=5000):
         link.poll()
-    assert page.trigger_kind.currentData() is TriggerKind.KEYBOARD_USAGE
+    assert page.trigger_kind.currentData() is TriggerKind.MOUSE_BUTTON
+    assert page.mouse_combo.currentText() == "Side button"
 
     assert page.capture_button.isEnabled() is True
     with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
@@ -612,7 +677,7 @@ def test_the_page_lists_the_switch_bindings_of_the_active_profile(page):
     assert "Middle button (wheel)" in page.existing_list.item(0).text()
 
 
-def test_a_listed_mouse_origin_key_is_presented_as_an_additional_mouse_button(page):
+def test_a_listed_mouse_origin_key_is_presented_as_a_side_button(page):
     page.set_session(
         page.session.apply(
             AddBinding(
@@ -630,7 +695,8 @@ def test_a_listed_mouse_origin_key_is_presented_as_an_additional_mouse_button(pa
     )
 
     label = page.existing_list.item(0).text()
-    assert label.startswith("Additional mouse button ->")
+    assert label.startswith("Side button ->")
+    assert "Additional mouse button" not in label
     assert "Right" not in label
     assert "Ctrl" not in label
     assert "3434:D030" not in label
