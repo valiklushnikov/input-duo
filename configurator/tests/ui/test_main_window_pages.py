@@ -15,7 +15,13 @@ from duo_input.device.qt_transport import SynchronousTransportLink
 from duo_input.device.service import DeviceService
 from duo_input.domain.models import Action, Binding, Trigger, TriggerSource
 from duo_input.domain.text_compiler import compile_project_to_binary
-from duo_input.generated.protocol import ActionKind, BindingMode, TriggerKind
+from duo_input.generated.protocol import (
+    ActionKind,
+    BindingMode,
+    CdcMessageType,
+    TriggerKind,
+)
+from duo_input.protocol.frame import decode_cdc_frame
 from duo_input.ui.models.binding_table import LEFT_CTRL
 from duo_input.ui.main_window import MainWindow
 from duo_input.ui.models.binding_table import MouseCapabilities
@@ -178,6 +184,32 @@ def _mouse_bus_ports() -> tuple[tuple, ...]:
     )
 
 
+class _PausedDiagnosticsTailLink(SynchronousTransportLink):
+    """Hold the request after diagnostics so its intermediate state is stable."""
+
+    def __init__(self, emulator: U1Emulator) -> None:
+        super().__init__(emulator)
+        self._paused_request: bytes | None = None
+
+    def send(self, data: bytes) -> None:
+        if (
+            decode_cdc_frame(data).type is CdcMessageType.GET_HID_DESCRIPTOR_CAPTURE
+            and self._paused_request is None
+        ):
+            self._paused_request = bytes(data)
+            return
+        super().send(data)
+
+    @property
+    def diagnostics_tail_is_paused(self) -> bool:
+        return self._paused_request is not None
+
+    def release_diagnostics_tail(self) -> None:
+        request, self._paused_request = self._paused_request, None
+        assert request is not None
+        super().send(request)
+
+
 def test_a_key_the_mouse_sends_can_be_detected_straight_after_a_connect(
     window, qtbot, emulator
 ):
@@ -190,15 +222,24 @@ def test_a_key_the_mouse_sends_can_be_detected_straight_after_a_connect(
     """
     emulator.input_backend = 2
     emulator.peripheral_ports = _mouse_bus_ports()
-    link = SynchronousTransportLink(emulator)
+    link = _PausedDiagnosticsTailLink(emulator)
     with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
         window.connect_device(link)
     qtbot.waitUntil(lambda: window.service.diagnostics is not None, timeout=5000)
+    assert link.diagnostics_tail_is_paused is True
+
+    with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000) as completed:
+        link.release_diagnostics_tail()
+    assert completed.args[0].operation == "get_diagnostics"
 
     window.show()
     window.show_page(window.PAGE_MOUSE)
     page = window.mouse
-    assert page.capabilities.mouse_id == (BUS_MOUSE.vendor_id, BUS_MOUSE.product_id)
+    qtbot.waitUntil(
+        lambda: page.capabilities.mouse_id
+        == (BUS_MOUSE.vendor_id, BUS_MOUSE.product_id),
+        timeout=5000,
+    )
     page.select_trigger_kind(TriggerKind.MOUSE_BUTTON)
     with qtbot.waitSignal(window.service.operation_succeeded, timeout=5000):
         QTest.mouseClick(page.capture_button, Qt.MouseButton.LeftButton)
