@@ -1,6 +1,7 @@
 #include "ch375/descriptor_setup.hpp"
 
 #include "crypto/sha256.hpp"
+#include <new>
 
 namespace duo_input::u1::ch375 {
 namespace {
@@ -68,15 +69,16 @@ constexpr std::size_t kMaxPacketSizeOffset = 7;
 /// does not add up rather than guessing at the rest.
 constexpr std::size_t kDescriptorBuffer = kMaxBlockSize;
 
-input::hid::HidReportSet boot_report_set(DeviceKind kind) {
-    input::hid::HidReportSet set;
+void boot_report_set(DeviceKind kind, input::hid::HidReportSet& set) {
+    // Fill the setup object's report storage in place. Returning a whole set
+    // would reserve it in poll's frame throughout descriptor parsing/hashing.
+    new (&set) input::hid::HidReportSet{};
     set.count = 1;
     set.entries[0].role = kind == DeviceKind::Mouse
                               ? input::hid::ReportRole::Mouse
                               : input::hid::ReportRole::Keyboard;
     set.entries[0].keyboard = input::hid::boot_keyboard_layout();
     set.entries[0].mouse = input::hid::boot_mouse_layout();
-    return set;
 }
 
 ReportDescriptorError rejected_error(const input::hid::HidReportSet& set,
@@ -647,7 +649,7 @@ SetupProgress DescriptorSetup::poll(std::uint32_t now_us, bool interrupted,
             // Now it is in boot protocol, which is the report format every
             // normalizer here was written against.
             boot_protocol_selected_ = true;
-            report_set_ = boot_report_set(capabilities_.kind);
+            boot_report_set(capabilities_.kind, report_set_);
             keyboard_layout_ = report_set_.entries[0].keyboard;
             mouse_layout_ = report_set_.entries[0].mouse;
             return finish(static_cast<std::uint8_t>(InterruptStatus::Success));

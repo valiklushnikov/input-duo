@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <new>
 
 namespace duo_input::u1::input {
 namespace {
@@ -69,8 +70,10 @@ bool Ch375SourceAdapter::convert(const ch375::Ch375Event& event, SourceEvent& ou
     return true;
 }
 
-SourceIdentity Ch375SourceAdapter::identity(const ch375::DescriptorSetup& setup) const {
-    SourceIdentity out;
+void Ch375SourceAdapter::identity(const ch375::DescriptorSetup& setup, SourceIdentity& out) const {
+    // Reinitialize caller-owned scratch in place, including default diagnostic
+    // fields, without constructing a second full configuration on the stack.
+    new (&out) SourceIdentity{};
     out.report_set = setup.report_set();
     out.kind = out.report_set.count != 0
                    ? neutral_kind(out.report_set.entries[0].role)
@@ -80,7 +83,6 @@ SourceIdentity Ch375SourceAdapter::identity(const ch375::DescriptorSetup& setup)
     out.keyboard_layout = setup.keyboard_layout();
     out.mouse_layout = setup.mouse_layout();
     std::memcpy(out.descriptor_hash, setup.report_descriptor_hash(), sizeof(out.descriptor_hash));
-    return out;
 }
 
 }  // namespace duo_input::u1::input

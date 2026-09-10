@@ -32,16 +32,43 @@ therefore 280 bytes, below the 320-byte transaction path.
 The SDK installs the alarm-pool handler as an exclusive handler and neither
 firmware target changes the default IRQ priority, so the timer IRQ does not
 normally pre-empt itself. The sign-off budget nevertheless assumes one
-additional, equally deep 320-byte IRQ can nest at the deepest point. Against
-the reviewed 1808-byte reference application path, the remaining analytical
-headroom is:
+additional, equally deep 320-byte IRQ can nest at the deepest point. Fresh
+Task 4 clean links include the full synchronous input and discovery callers.
+The reference maximum is now 2112 bytes: Core 1 wrapper (8), entry (64),
+service_input (416), consume (8), on_mount (1032), classification (40),
+SHA-256 (128), finish (56), padding update (32), and block transform (328).
+The hash-padding branch is deeper than the descriptor parser branch.
+
+An additional 64 bytes covers ROM memory routines, veneers and alignment.
+The remaining reference analytical headroom is:
 
 ```text
-4096 - 1808 - (2 * 320) = 1648 bytes
+4096 - 2112 - 64 - (2 * 320) = 1280 bytes
 ```
 
 That conservative allowance is not evidence of measured hardware use. A bench
 high-water run may refine it, but is not required to prove the linked capacity.
+
+The production PIO maximum audited source-processing path is 1616 bytes:
+wrapper (8), entry (48), backend task (56), process_pending (296), process
+(48), remove_device (1080), latch_fault (32), and push_event (48). With the
+same allowances it leaves 1776 bytes. Its report-to-route-binding path is
+1128 bytes; capture, detach releases and ordinary discovery are smaller.
+
+CH375's deepest input path is report-to-route-binding at 1144 bytes, including
+the wrapper, entry, SourceTable, pipeline, both handlers, runtime, binding
+engine, route change and release helpers. Core 1 installs only the FIFO
+lockout IRQ: its 16-byte handler plus the 32-byte exception frame fits a
+64-byte allowance including alignment. Budgeting two such IRQs, plus the
+same extra 64 bytes, leaves `2048 - 1144 - 128 - 64 = 712` bytes. CH375 does
+not run the PIO SOF IRQ. Its descriptor setup poll frame is 208 bytes after
+building boot report sets directly into its owned storage.
+
+`tests/build/test_input_stack_budget.py` recompiles the current callers with
+each configured preset's ARM flags into fresh temporary objects and checks
+frame ceilings; stale ELF or stack-usage files cannot satisfy those tests.
+The complete Task 4 report records the call-path sums, mutations, clean-link
+commands and SRAM regions.
 
 ## Verification
 

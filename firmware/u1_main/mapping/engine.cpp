@@ -93,7 +93,7 @@ void BindingEngine::release_reached(Outcome& outcome, bool keyboard, bool mouse)
 }
 
 bool BindingEngine::matches(const Binding& binding, const InputEvent& event,
-                            const input::SourceIdentity* source) const {
+                            const input::SourceKey* source) const {
     if (binding.trigger != trigger_of(event.kind) || binding.code != event.code ||
         (modifiers_ & binding.required_modifiers) != binding.required_modifiers) {
         return false;
@@ -187,8 +187,8 @@ std::uint8_t BindingEngine::held_modifiers() const {
 
 Outcome BindingEngine::handle(const InputEvent& event) {
     Outcome outcome;
-    input::SourceIdentity identity;
-    const input::SourceIdentity* source =
+    input::SourceKey identity;
+    const input::SourceKey* source =
         sources_ != nullptr && sources_->resolve(event.source_index, identity) ? &identity : nullptr;
 
     // Modifiers are tracked before anything is matched, so a binding that asks

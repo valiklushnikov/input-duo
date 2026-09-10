@@ -155,11 +155,12 @@ void ReferenceSourceAdapter::on_mount(const ReferenceCallbackRecord& record,
     // report protocol is requested.
     if (entry->role == Role::Keyboard && keyboard_owned_ &&
         identity.kind == DeviceKind::Keyboard && wants_report_protocol) {
-        const SourceIdentity boot_identity = keyboard_identity_;
+        // push owns a value copy before the old identity is replaced. Keeping
+        // another report set on the discovery stack would overlap parsing.
+        push(SourceEventKind::Detached, entry->source_id, keyboard_identity_);
         keyboard_identity_ = identity;
         entry->identity = identity;
         request_protocol(record.dev_addr, record.instance, kHidProtocolReport);
-        push(SourceEventKind::Detached, entry->source_id, boot_identity);
         push(SourceEventKind::Ready, entry->source_id, identity);
         return;
     }

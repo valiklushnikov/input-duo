@@ -82,6 +82,14 @@ struct SourceEvent {
     std::size_t report_size = 0;
 };
 
+/// Stable saved-source match, copied by value so it remains valid after a
+/// SourceTable slot is detached or reused. Report IDs are never saved here.
+struct SourceKey {
+    std::uint16_t vendor_id = 0;
+    std::uint16_t product_id = 0;
+    std::uint8_t interface_number = 0;
+};
+
 /// What Ready says the source is, told once when it has been configured.
 ///
 /// Carries everything InputPipeline needs to read that source's reports and

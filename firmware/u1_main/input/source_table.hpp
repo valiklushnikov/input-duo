@@ -25,7 +25,9 @@ public:
 
     void on_event(const SourceEvent& event, const SourceIdentity& identity,
                   std::uint32_t now_ms);
-    bool resolve(std::uint8_t index, SourceIdentity& out) const;
+    /// Copies only the saved-source key; no reference into a reusable slot.
+    /// On failure, out is unchanged.
+    bool resolve(std::uint8_t index, SourceKey& out) const;
     std::uint32_t unclaimed_interfaces() const;
     std::uint32_t revision() const { return revision_; }
     void inventory(SourceInventory& out, std::uint32_t backend_rejections = 0) const;
@@ -47,7 +49,8 @@ private:
 
         bool occupied = false;
         std::uint8_t source_id = 0;
-        SourceIdentity identity{};
+        // Ready's layouts are owned by pipeline. Retain only the diagnostic
+        // snapshot (including the stable key), not another full report set.
         SourceInfo observation{};
         SlotHandler handler;
         InputPipeline pipeline;

@@ -417,8 +417,11 @@ void service_input(std::uint32_t millis) {
         g_adapter.schedule_descriptor_followup(time_us_32());
     }
 
-    duo_input::u1::input::SourceEvent event{};
-    duo_input::u1::input::SourceIdentity identity{};
+    // Only Core 1's non-reentrant service loop owns these buffers. The adapter
+    // fills them by value, and synchronous dispatch copies every retained
+    // field before another event can overwrite them.
+    static duo_input::u1::input::SourceEvent event{};
+    static duo_input::u1::input::SourceIdentity identity{};
     if (g_adapter.take_event(event, identity)) {
         duo_input::u1::reference::dispatch_source_event(
             g_runtime, g_sources, event, identity, millis);

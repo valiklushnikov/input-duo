@@ -1,6 +1,7 @@
 #include "pio_usb/hid_setup.hpp"
 
 #include "crypto/sha256.hpp"
+#include <new>
 
 namespace duo_input::u1::pio_usb {
 namespace {
@@ -8,15 +9,16 @@ namespace {
 constexpr std::uint8_t kProtocolKeyboard = 1;
 constexpr std::uint8_t kProtocolMouse = 2;
 
-input::hid::HidReportSet boot_report_set(input::DeviceKind kind) {
-    input::hid::HidReportSet set;
+void boot_report_set(input::DeviceKind kind, input::hid::HidReportSet& set) {
+    // Build into the caller's configuration; no full report-set temporary
+    // remains in classify_hid_layout while it calls the parser or SHA-256.
+    new (&set) input::hid::HidReportSet{};
     set.count = 1;
     set.entries[0].role = kind == input::DeviceKind::Mouse
                               ? input::hid::ReportRole::Mouse
                               : input::hid::ReportRole::Keyboard;
     set.entries[0].keyboard = input::hid::boot_keyboard_layout();
     set.entries[0].mouse = input::hid::boot_mouse_layout();
-    return set;
 }
 
 input::hid::ReportDescriptorError report_error(
@@ -98,14 +100,14 @@ HidLayoutSource classify_hid_layout(std::uint8_t protocol,
 
     if (protocol == kProtocolKeyboard) {
         out.kind = input::DeviceKind::Keyboard;
-        out.report_set = boot_report_set(out.kind);
+        boot_report_set(out.kind, out.report_set);
         out.keyboard_layout = out.report_set.entries[0].keyboard;
         out.layout_source = 2;
         return HidLayoutSource::BootProtocol;
     }
     if (protocol == kProtocolMouse) {
         out.kind = input::DeviceKind::Mouse;
-        out.report_set = boot_report_set(out.kind);
+        boot_report_set(out.kind, out.report_set);
         out.mouse_layout = out.report_set.entries[0].mouse;
         out.layout_source = 2;
         return HidLayoutSource::BootProtocol;

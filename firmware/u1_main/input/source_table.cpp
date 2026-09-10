@@ -39,8 +39,24 @@ void SourceTable::on_event(const SourceEvent& event, const SourceIdentity& ident
 
         slot->occupied = true;
         slot->source_id = event.source_id;
-        slot->identity = identity;
         slot->observation = {};
+        auto& info = slot->observation;
+        info.layout_source = identity.layout_source;
+        info.keyboard_error = identity.keyboard_error;
+        info.consumer_error = identity.consumer_error;
+        const bool mouse = identity.kind == DeviceKind::Mouse;
+        const auto& keyboard_layout = identity.keyboard_layout;
+        const auto& mouse_layout = identity.mouse_layout;
+        info.report_id = mouse ? (mouse_layout.report_id ? mouse_layout.report_id_value : 0)
+                               : (keyboard_layout.report_id ? keyboard_layout.report_id_value : 0);
+        info.minimum_body_bytes = mouse ? mouse_layout.minimum_body_bytes : keyboard_layout.minimum_body_bytes;
+        info.vendor_id = identity.vendor_id;
+        info.product_id = identity.product_id;
+        info.interface_number = identity.interface_number;
+        info.device_address = identity.device_address;
+        info.kind = static_cast<std::uint8_t>(identity.kind);
+        std::memcpy(info.product_name, identity.product_name, sizeof(info.product_name));
+        info.product_name[sizeof(info.product_name) - 1] = 0;
         ++revision_;
         slot->pipeline.set_report_set(identity.report_set);
         return;
@@ -73,11 +89,14 @@ void SourceTable::on_event(const SourceEvent& event, const SourceIdentity& ident
     }
 }
 
-bool SourceTable::resolve(std::uint8_t index, SourceIdentity& out) const {
+bool SourceTable::resolve(std::uint8_t index, SourceKey& out) const {
     if (index >= slots_.size() || !slots_[index].occupied) {
         return false;
     }
-    out = slots_[index].identity;
+    const auto& info = slots_[index].observation;
+    out.vendor_id = info.vendor_id;
+    out.product_id = info.product_id;
+    out.interface_number = info.interface_number;
     return true;
 }
 
@@ -90,29 +109,14 @@ void SourceTable::inventory(SourceInventory& out, std::uint32_t backend_rejectio
         if (!slot.occupied) continue;
         auto& info = out.sources[out.count++];
         info = slot.observation;
-        info.layout_source = slot.identity.layout_source;
-        info.keyboard_error = slot.identity.keyboard_error;
-        info.consumer_error = slot.identity.consumer_error;
-        const bool mouse = slot.identity.kind == DeviceKind::Mouse;
-        const auto& keyboard_layout = slot.identity.keyboard_layout;
-        const auto& mouse_layout = slot.identity.mouse_layout;
-        info.report_id = mouse ? (mouse_layout.report_id ? mouse_layout.report_id_value : 0)
-                               : (keyboard_layout.report_id ? keyboard_layout.report_id_value : 0);
-        info.minimum_body_bytes = mouse ? mouse_layout.minimum_body_bytes : keyboard_layout.minimum_body_bytes;
-        info.vendor_id = slot.identity.vendor_id; info.product_id = slot.identity.product_id;
-        info.interface_number = slot.identity.interface_number;
-        info.device_address = slot.identity.device_address;
-        info.kind = static_cast<std::uint8_t>(slot.identity.kind);
-        std::memcpy(info.product_name, slot.identity.product_name, sizeof(info.product_name));
-        info.product_name[sizeof(info.product_name) - 1] = 0;
     }
 }
 
 void SourceTable::set_product_name(std::uint8_t address, const char* name) {
     for (auto& slot : slots_) {
-        if (!slot.occupied || slot.identity.device_address != address) continue;
-        std::strncpy(slot.identity.product_name, name, kProductNameBytes - 1);
-        slot.identity.product_name[kProductNameBytes - 1] = 0;
+        if (!slot.occupied || slot.observation.device_address != address) continue;
+        std::strncpy(slot.observation.product_name, name, kProductNameBytes - 1);
+        slot.observation.product_name[kProductNameBytes - 1] = 0;
         ++revision_;
     }
 }

@@ -32,7 +32,9 @@ public:
     bool convert(const ch375::Ch375Event& event, SourceEvent& out) const;
 
     /// Read a SourceIdentity out of a DescriptorSetup once it is Done.
-    SourceIdentity identity(const ch375::DescriptorSetup& setup) const;
+    /// Fill caller-owned storage directly; a full report set must not become
+    /// a temporary on the Core 1 event-dispatch stack.
+    void identity(const ch375::DescriptorSetup& setup, SourceIdentity& out) const;
 
 private:
     std::uint8_t source_id_;

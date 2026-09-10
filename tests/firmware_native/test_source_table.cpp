@@ -99,6 +99,41 @@ SourceIdentity mouse_identity(std::uint8_t interface_number) {
 
 }  // namespace
 
+// Derive the public lookup value so this test runs against both the old full
+// configuration copy and the small stable identity. A report set must never
+// ride the synchronous binding/capture stack merely to match a source.
+template <typename T>
+T resolved_value_type(bool (SourceTable::*)(std::uint8_t, T&) const);
+using ResolvedSource = decltype(resolved_value_type(&SourceTable::resolve));
+
+TEST_CASE(source_lookup_has_a_small_owned_value_and_table_does_not_duplicate_report_sets) {
+    CHECK(sizeof(ResolvedSource) <= 8u);
+    CHECK(std::is_trivially_copyable<ResolvedSource>::value);
+    CHECK(sizeof(SourceTable) <= 9000u);
+}
+
+TEST_CASE(resolved_source_survives_slot_reuse_and_configuration_buffer_reuse) {
+    RecordingHandler handler;
+    SourceTable table(handler);
+    auto configuration = duo::test::multi_report_hid::identity();
+    table.on_event(ready_event(42), configuration, 0);
+    ResolvedSource saved{};
+    CHECK(table.resolve(0, saved));
+    configuration = mouse_identity(7); // backend overwrites its event scratch
+    table.on_event(detached_event(42), configuration, 1);
+    CHECK_FALSE(table.resolve(0, saved));
+    CHECK_FALSE(table.resolve(255, saved));
+    table.on_event(ready_event(5), configuration, 2);
+    ResolvedSource current{};
+    CHECK(table.resolve(0, current));
+    CHECK_EQ(saved.vendor_id, 0x3434);
+    CHECK_EQ(saved.product_id, 0xD030);
+    CHECK_EQ(saved.interface_number, 2);
+    CHECK_EQ(current.vendor_id, 0x1234);
+    CHECK_EQ(current.product_id, 0x5678);
+    CHECK_EQ(current.interface_number, 7);
+}
+
 TEST_CASE(a_composite_device_gets_one_slot_per_interface) {
     RecordingHandler handler;
     SourceTable table(handler);
@@ -143,7 +178,7 @@ TEST_CASE(a_composite_device_gets_one_slot_per_interface) {
         CHECK(handler.events[2].source_index == 2);
     }
 
-    SourceIdentity resolved{};
+    ResolvedSource resolved{};
     if (table.resolve(1, resolved)) {
         CHECK(resolved.interface_number == 1);
         CHECK(resolved.vendor_id == 0x1234);
@@ -196,7 +231,7 @@ TEST_CASE(detaching_a_source_releases_held_input_and_frees_its_slot) {
         CHECK(handler.events[1].source_index == 0);
     }
 
-    SourceIdentity resolved{};
+    ResolvedSource resolved{};
     CHECK_FALSE(table.resolve(0, resolved));
 
     const SourceIdentity replacement = mouse_identity(2);
@@ -232,7 +267,7 @@ TEST_CASE(a_source_fault_releases_held_input_and_frees_its_slot) {
         CHECK(handler.events[1].source_index == 0);
     }
 
-    SourceIdentity resolved{};
+    ResolvedSource resolved{};
     CHECK_FALSE(table.resolve(0, resolved));
 }
 
@@ -281,7 +316,7 @@ TEST_CASE(a_full_source_table_refuses_the_ninth_interface_without_displacing_a_s
     }
 
     for (std::uint8_t slot = 0; slot < SourceTable::kMaxSources; ++slot) {
-        SourceIdentity resolved{};
+        ResolvedSource resolved{};
         CHECK(table.resolve(slot, resolved));
         if (table.resolve(slot, resolved)) {
             CHECK(resolved.interface_number == slot);
@@ -372,7 +407,7 @@ TEST_CASE(every_keychron_report_keeps_one_source_index_and_unknown_ids_are_count
         CHECK(event.code != 0x03);
     }
     table.on_event(ready_event(42), source, 7);
-    SourceIdentity resolved;
+    ResolvedSource resolved;
     CHECK(table.resolve(1, resolved));
     CHECK_EQ(resolved.vendor_id, 0x3434);
     CHECK_EQ(resolved.product_id, 0xD030);

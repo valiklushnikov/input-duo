@@ -535,8 +535,12 @@ void core1_entry() {
                 // pass or two ago, and timing it from now would hide exactly
                 // the backlog worth knowing about.
                 g_runtime.set_event_origin_us(source_event.received_us);
-                g_sources.on_event(source_event,
-                                   sources[index]->identity(*setups[index]), now_ms);
+                // Core 1 alone owns this scratch and dispatch is synchronous.
+                // SourceTable copies metadata/layouts before the next event;
+                // no handler retains a reference to this reused buffer.
+                static duo_input::u1::input::SourceIdentity source_identity;
+                sources[index]->identity(*setups[index], source_identity);
+                g_sources.on_event(source_event, source_identity, now_ms);
                 // Cleared immediately. A stamp left standing would be attached
                 // to whatever the device did next - a macro step, a timeout's
                 // release - and the further from the report that happened, the

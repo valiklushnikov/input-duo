@@ -86,7 +86,7 @@ std::uint8_t CaptureController::source_modifiers(std::uint8_t source_index) cons
 }
 
 void CaptureController::fill_source(const InputEvent& event) {
-    input::SourceIdentity identity;
+    input::SourceKey identity;
     if (sources_ != nullptr && sources_->resolve(event.source_index, identity)) {
         trigger_.vendor_id = identity.vendor_id;
         trigger_.product_id = identity.product_id;

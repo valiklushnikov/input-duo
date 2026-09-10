@@ -105,7 +105,7 @@ private:
     };
 
     bool matches(const Binding& binding, const input::InputEvent& event,
-                 const input::SourceIdentity* source) const;
+                 const input::SourceKey* source) const;
     bool apply_binding(Outcome& outcome, const Binding& binding);
     bool remember(const input::InputEvent& event, bool suppressed);
     bool forget(const input::InputEvent& event);

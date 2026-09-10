@@ -377,7 +377,8 @@ TEST_CASE(identity_reads_kind_layout_and_hash_from_a_settled_mouse_setup) {
     CHECK(rig.setup.has_mouse_layout());
 
     Ch375SourceAdapter adapter(0);
-    const SourceIdentity identity = adapter.identity(rig.setup);
+    SourceIdentity identity;
+    adapter.identity(rig.setup, identity);
 
     // Read through its own report descriptor, not left on the boot
     // fallback - the whole reason this device has a wheel field at all.
@@ -407,7 +408,8 @@ TEST_CASE(identity_uses_the_first_accepted_report_instead_of_the_configuration_h
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
 
     Ch375SourceAdapter adapter(0);
-    const SourceIdentity identity = adapter.identity(rig.setup);
+    SourceIdentity identity;
+    adapter.identity(rig.setup, identity);
 
     CHECK(identity.kind == DeviceKind::Consumer);
     CHECK(identity.keyboard_layout.consumer);
@@ -426,7 +428,8 @@ TEST_CASE(identity_preserves_vendor_and_product_ids_from_setup) {
     CHECK_EQ(static_cast<int>(rig.settle()), static_cast<int>(SetupProgress::Done));
 
     Ch375SourceAdapter adapter(0);
-    const SourceIdentity identity = adapter.identity(rig.setup);
+    SourceIdentity identity;
+    adapter.identity(rig.setup, identity);
 
     // A transposed assignment still compiles and would cause bindings to
     // resolve against the wrong physical source.
