@@ -52,6 +52,25 @@ def page(qtbot, service) -> DiagnosticsPage:
 # ---------------------------------------------------------------- the page
 
 
+def test_deleted_page_stops_following_service_state(qtbot, service, emulator):
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QWidget
+
+    owner = QWidget()
+    deleted_page = DiagnosticsPage(service, owner)
+    surviving_page = DiagnosticsPage(service)
+    qtbot.addWidget(surviving_page)
+    owner.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    with qtbot.captureExceptions() as errors:
+        with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
+            service.connect_device(emulator)
+
+    assert errors == []
+    assert surviving_page.value("protocol_version") == "1.0"
+
+
 def test_refresh_shows_interface_boundary_evidence(page, emulator, qtbot, monkeypatch):
     legacy = bytearray(252); legacy[43] = 9
     inventory = struct.pack("<BHBIHHBBB48s", 1, 63, 1, 0, 0x1234, 0x5678, 2, 1, 1, b"Receiver")

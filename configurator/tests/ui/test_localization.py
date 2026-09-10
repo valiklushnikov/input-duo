@@ -222,6 +222,16 @@ def test_switching_back_to_english_restores_the_source_text(qapp, settings):
 # ------------------------------------------------------------------ settings
 
 
+@pytest.mark.parametrize(
+    "language, expected", (("ru", "Наборы HID-отчётов"), ("en", "HID report sets"))
+)
+def test_report_set_diagnostics_label_uses_the_chosen_language(qapp, settings, language, expected):
+    manager = TranslationManager(qapp, settings=settings)
+    manager.set_language(language)
+
+    assert qapp.translate("DiagnosticsPage", "HID report sets") == expected
+
+
 @pytest.fixture
 def page(qtbot, qapp, settings) -> SettingsPage:
     page = SettingsPage(TranslationManager(qapp, settings=settings), settings=settings)

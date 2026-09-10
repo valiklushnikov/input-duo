@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QT_TRANSLATE_NOOP, Qt
+from PySide6.QtCore import QT_TRANSLATE_NOOP, Qt, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -175,7 +175,7 @@ class DiagnosticsPage(QWidget):
 
         # The page follows the link itself, so it is correct even when it is
         # not the page the operator happens to be looking at.
-        self._service.state_changed.connect(lambda _state: self.refresh())
+        self._service.state_changed.connect(self.refresh)
         self.refresh()
 
     # ---------------------------------------------------------------- layout
@@ -291,6 +291,7 @@ class DiagnosticsPage(QWidget):
         """How one field currently reads: a counter, or the absence of one."""
         return str(self._values[key].property("role") or "")
 
+    @Slot()
     def refresh(self) -> None:
         """Repaint from whatever the service already knows."""
         snapshot = self.snapshot()
