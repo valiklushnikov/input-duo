@@ -489,9 +489,21 @@ class MouseSwitchPage(QWidget):
         try:
             kind = self.trigger_kind.currentData()
             friendly_capture = self._shows_friendly_capture()
+            neutral_name = self.tr("Not applicable")
+            self.key_combo.setAccessibleName(
+                neutral_name if friendly_capture else self.tr("Keyboard key")
+            )
+            self.consumer_usage.setAccessibleName(
+                neutral_name if friendly_capture else self.tr("Consumer usage")
+            )
             self.consumer_usage.setSpecialValueText("—" if friendly_capture else "")
             for key, label, _bit in MODIFIER_BITS:
                 self.modifier_boxes[key].setText("" if friendly_capture else label)
+                self.modifier_boxes[key].setAccessibleName(
+                    neutral_name
+                    if friendly_capture
+                    else self.tr("{0} modifier").format(label)
+                )
             self.consumer_usage.setEnabled(kind is TriggerKind.CONSUMER_USAGE)
             self.key_combo.setEnabled(kind is TriggerKind.KEYBOARD_USAGE)
             self.mouse_combo.setEnabled(kind is TriggerKind.MOUSE_BUTTON)

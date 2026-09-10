@@ -1199,6 +1199,7 @@
     <message>
         <location filename="../../ui/mouse.py" line="139"/>
         <location filename="../../ui/mouse.py" line="147"/>
+        <location filename="../../ui/mouse.py" line="494"/>
         <source>Keyboard key</source>
         <translation>Клавиша клавиатуры</translation>
     </message>
@@ -1240,6 +1241,7 @@
     </message>
     <message>
         <location filename="../../ui/mouse.py" line="157"/>
+        <location filename="../../ui/mouse.py" line="497"/>
         <source>Consumer usage</source>
         <translation>Код consumer-управления</translation>
     </message>
@@ -1267,6 +1269,7 @@
     </message>
     <message>
         <location filename="../../ui/mouse.py" line="184"/>
+        <location filename="../../ui/mouse.py" line="505"/>
         <source>{0} modifier</source>
         <translation>Модификатор {0}</translation>
     </message>
@@ -1382,6 +1385,11 @@
         <translation>Кнопка {0}</translation>
     </message>
     <message>
+        <location filename="../../ui/mouse.py" line="492"/>
+        <source>Not applicable</source>
+        <translation>Неприменимо</translation>
+    </message>
+    <message>
         <location filename="../../ui/mouse.py" line="434"/>
         <source>Toggle</source>
         <translation>Переключение</translation>
@@ -1391,23 +1399,23 @@
         <translation type="vanished">Дополнительная кнопка мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="528"/>
-        <location filename="../../ui/mouse.py" line="533"/>
+        <location filename="../../ui/mouse.py" line="540"/>
+        <location filename="../../ui/mouse.py" line="545"/>
         <source>Choose what you press first.</source>
         <translation>Сначала выберите, что вы нажимаете.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="530"/>
+        <location filename="../../ui/mouse.py" line="542"/>
         <source>No mouse is attached, so no mouse button can be bound.</source>
         <translation>Мышь не подключена, поэтому назначить кнопку мыши нельзя.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="537"/>
+        <location filename="../../ui/mouse.py" line="549"/>
         <source>{0} is already bound in this profile.</source>
         <translation>{0} уже назначен в этом профиле.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="554"/>
+        <location filename="../../ui/mouse.py" line="566"/>
         <source>{0} is bound here but the attached mouse has not reported it.</source>
         <translation>{0} назначена здесь, но подключённая мышь о ней не сообщала.</translation>
     </message>

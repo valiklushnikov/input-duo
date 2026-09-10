@@ -1198,6 +1198,7 @@
     <message>
         <location filename="../../ui/mouse.py" line="139" />
         <location filename="../../ui/mouse.py" line="147" />
+        <location filename="../../ui/mouse.py" line="494" />
         <source>Keyboard key</source>
         <translation>Keyboard key</translation>
     </message>
@@ -1239,6 +1240,7 @@
     </message>
     <message>
         <location filename="../../ui/mouse.py" line="157" />
+        <location filename="../../ui/mouse.py" line="497" />
         <source>Consumer usage</source>
         <translation>Consumer usage</translation>
     </message>
@@ -1266,6 +1268,7 @@
     </message>
     <message>
         <location filename="../../ui/mouse.py" line="184" />
+        <location filename="../../ui/mouse.py" line="505" />
         <source>{0} modifier</source>
         <translation>{0} modifier</translation>
     </message>
@@ -1381,6 +1384,11 @@
         <translation>Button {0}</translation>
     </message>
     <message>
+        <location filename="../../ui/mouse.py" line="492" />
+        <source>Not applicable</source>
+        <translation>Not applicable</translation>
+    </message>
+    <message>
         <location filename="../../ui/mouse.py" line="434" />
         <source>Toggle</source>
         <translation>Toggle</translation>
@@ -1390,23 +1398,23 @@
         <translation>Additional mouse button</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="528" />
-        <location filename="../../ui/mouse.py" line="533" />
+        <location filename="../../ui/mouse.py" line="540" />
+        <location filename="../../ui/mouse.py" line="545" />
         <source>Choose what you press first.</source>
         <translation>Choose what you press first.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="530" />
+        <location filename="../../ui/mouse.py" line="542" />
         <source>No mouse is attached, so no mouse button can be bound.</source>
         <translation>No mouse is attached, so no mouse button can be bound.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="537" />
+        <location filename="../../ui/mouse.py" line="549" />
         <source>{0} is already bound in this profile.</source>
         <translation>{0} is already bound in this profile.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="554" />
+        <location filename="../../ui/mouse.py" line="566" />
         <source>{0} is bound here but the attached mouse has not reported it.</source>
         <translation>{0} is bound here but the attached mouse has not reported it.</translation>
     </message>

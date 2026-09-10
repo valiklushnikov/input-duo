@@ -435,6 +435,43 @@ def test_a_mouse_origin_consumer_control_uses_the_same_friendly_selection(page):
     assert page.current_trigger() == captured
 
 
+def test_a_friendly_capture_neutralizes_and_restores_accessible_editor_names(page):
+    """Leaving low-level accessible names behind must fail this test."""
+    page.set_capabilities(
+        MouseCapabilities(advertised=True).with_peripherals((_attached_mouse(),))
+    )
+    page.apply_captured_trigger(
+        Trigger(TriggerKind.KEYBOARD_USAGE, CAPTURED_KEY, LEFT_CTRL, CAPTURED_SOURCE)
+    )
+
+    assert page.trigger_kind.accessibleName() == "Trigger kind"
+    assert page.mouse_combo.accessibleName() == "Mouse button"
+    assert page.key_combo.accessibleName() == "Not applicable"
+    assert page.consumer_usage.accessibleName() == "Not applicable"
+    assert all(
+        box.accessibleName() == "Not applicable"
+        for box in page.modifier_boxes.values()
+    )
+
+    page.select_trigger_kind(TriggerKind.KEYBOARD_USAGE)
+
+    assert page.key_combo.accessibleName() == "Keyboard key"
+    assert page.consumer_usage.accessibleName() == "Consumer usage"
+    assert {
+        key: box.accessibleName()
+        for key, box in page.modifier_boxes.items()
+    } == {
+        "ctrl": "Ctrl modifier",
+        "shift": "Shift modifier",
+        "alt": "Alt modifier",
+        "gui": "Win modifier",
+        "right_ctrl": "Right Ctrl modifier",
+        "right_shift": "Right Shift modifier",
+        "right_alt": "Right Alt modifier",
+        "right_gui": "Right Win modifier",
+    }
+
+
 def test_selecting_a_standard_button_clears_a_friendly_capture(page):
     page.set_capabilities(
         MouseCapabilities(advertised=True)
