@@ -146,6 +146,29 @@ def test_a_local_copy_after_our_publish_is_not_suppressed():
     assert len(emitted) == 1
 
 
+def test_own_change_count_branch_suppresses_and_resets():
+    """Прямое покрытие защитного пояса в _poll (current == own != last_seen).
+
+    Даже если publish() перестанет обновлять _last_seen_change_count, опрос,
+    видящий ровно наш собственный changeCount, обязан подавить эмиссию и
+    сбросить _own_change_count в None - иначе своя же публикация утекла бы как
+    локальное копирование.
+    """
+    backend, pasteboard = _backend(count=20)
+    backend.start()
+    backend._last_seen_change_count = 20
+    backend._own_change_count = 25
+    pasteboard.set_count(25)
+
+    emitted: list = []
+    backend.snapshot_taken.connect(emitted.append)
+    backend._poll()
+
+    assert emitted == []
+    assert backend._own_change_count is None
+    assert backend._last_seen_change_count == 25
+
+
 def test_suppression_holds_without_any_origin_marker():
     """Главный инвариант: корректность держится на changeCount, не на MIME.
 
