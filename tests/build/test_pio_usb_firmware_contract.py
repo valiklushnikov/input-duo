@@ -37,7 +37,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "tests" / "build"))
 
 from pio_usb_flash_contract import (
     assert_flash_path_sram_safe,
-    assert_unified_sof_gate,
+    assert_unified_sof_service,
 )
 
 
@@ -314,8 +314,8 @@ def test_flash_keepalive_executes_entirely_outside_xip_flash():
 
 
 @pio_usb_elf_required
-def test_linked_ordinary_and_flash_frames_share_one_sram_due_gate():
-    assert_unified_sof_gate(_pio_usb_build_dir(), _pio_elf)
+def test_linked_ordinary_and_flash_frames_share_one_sram_service_path():
+    assert_unified_sof_service(_pio_usb_build_dir(), _pio_elf)
 
 
 @pio_usb_elf_required

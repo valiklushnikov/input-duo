@@ -133,23 +133,27 @@ def assert_flash_path_sram_safe(build_dir: Path, elf: Path, park_symbol: str) ->
         )
 
 
-def assert_unified_sof_gate(build_dir: Path, elf: Path) -> None:
+def assert_unified_sof_service(build_dir: Path, elf: Path) -> None:
     disassembly = _disassembly(build_dir, elf)
     bodies, addresses = _function_bodies(disassembly)
-    gate_prefix = "pio_usb_host_service_frame_if_due"
+    service_prefix = "pio_usb_host_service_frame"
 
-    reached_gates: list[set[str]] = []
+    reached_services: list[set[str]] = []
     for entry in ("pio_usb_host_frame", "pio_usb_host_flash_keepalive"):
         closure = _reachable(bodies, entry)
-        gates = {symbol for symbol in closure if symbol.startswith(gate_prefix)}
-        assert len(gates) == 1, f"{entry} reaches scheduler gates {sorted(gates)}"
-        reached_gates.append(gates)
+        services = {
+            symbol for symbol in closure if symbol.startswith(service_prefix)
+        }
+        assert len(services) == 1, (
+            f"{entry} reaches frame-service functions {sorted(services)}"
+        )
+        reached_services.append(services)
 
-    assert reached_gates[0] == reached_gates[1], (
-        "ordinary and flash service reach different SOF scheduler gates"
+    assert reached_services[0] == reached_services[1], (
+        "ordinary and flash entry points reach different frame-service paths"
     )
-    gate = next(iter(reached_gates[0]))
-    address = addresses[gate]
+    service = next(iter(reached_services[0]))
+    address = addresses[service]
     assert 0x20000000 <= address < 0x20042000, (
-        f"shared SOF scheduler gate is outside SRAM at 0x{address:08x}"
+        f"shared SOF frame service is outside SRAM at 0x{address:08x}"
     )

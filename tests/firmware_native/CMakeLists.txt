@@ -229,7 +229,6 @@ add_executable(duo_flash_park_test
 target_link_libraries(duo_flash_park_test PRIVATE duo_common)
 target_include_directories(duo_flash_park_test PRIVATE
     ${CMAKE_SOURCE_DIR}/firmware/u1_main
-    ${CMAKE_SOURCE_DIR}/.deps/pico-pio-usb/src
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 

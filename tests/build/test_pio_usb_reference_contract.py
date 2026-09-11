@@ -54,7 +54,7 @@ from reference_build_support import (
 )
 from pio_usb_flash_contract import (
     assert_flash_path_sram_safe,
-    assert_unified_sof_gate,
+    assert_unified_sof_service,
 )
 
 
@@ -475,8 +475,8 @@ def test_reference_flash_keepalive_executes_entirely_outside_xip_flash():
     )
 
 
-def test_reference_linked_ordinary_and_flash_frames_share_one_sram_due_gate():
-    assert_unified_sof_gate(REFERENCE_BUILD, REFERENCE_ELF)
+def test_reference_linked_ordinary_and_flash_frames_share_one_sram_service_path():
+    assert_unified_sof_service(REFERENCE_BUILD, REFERENCE_ELF)
 
 
 def test_the_reference_callbacks_left_main_but_not_the_build():

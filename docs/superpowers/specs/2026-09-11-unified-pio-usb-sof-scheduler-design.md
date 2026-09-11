@@ -18,18 +18,22 @@ before the power cycle.
 
 ## Selected Design
 
-Pico-PIO-USB becomes the sole owner of the SOF deadline. Both its repeating
-timer callback and `pio_usb_host_flash_keepalive()` enter one RAM-resident
-`service-frame-if-due` path. That path reads the RP2040 hardware timer directly,
-emits at most one frame when the shared deadline is due, services the already
-queued endpoints, advances the frame number, and moves the deadline forward by
-1 ms. A late call skips missed slots instead of sending a catch-up burst.
+Pico-PIO-USB becomes the sole owner of the SOF deadline and one RAM-resident
+frame-service path. Ordinary repeating-timer callbacks are authoritative: each
+one records its actual timestamp and sends a frame, accepting the timer's normal
+roughly 999--1001 us jitter instead of applying a second deadline that can
+suppress an entire fixed-phase callback. Flash-loop offers read the RP2040
+hardware timer directly and enter the same service path only when the shared
+deadline is due. An accepted late flash offer moves the deadline to one
+millisecond after its actual timestamp and never replays missed slots as a
+catch-up burst.
 
 The application flash loop no longer owns or resets a cadence. It calls the
 RAM-resident keepalive service continuously while Core 0 has XIP unavailable;
-the library's shared deadline makes early calls no-ops. Pause and resume still
-cancel and recreate the SDK repeating timer so an overdue SDK alarm cannot
-burst after a flash window.
+the library's shared deadline makes early flash offers no-ops. Pause cancels
+the SDK repeating timer before the flash window and resume recreates it with
+its first callback one millisecond later. The authoritative ordinary callback
+therefore cannot race immediately behind the last accepted flash frame.
 
 The same shared send path records the minimum and maximum actual intervals in
 microseconds between frame transmissions. Two append-only `uint32_t` fields,
@@ -37,6 +41,13 @@ microseconds between frame transmissions. Two append-only `uint32_t` fields,
 the configurator parser, the Diagnostics page/export, and protocol-size tests.
 Zero means fewer than two frames have been transmitted. These are diagnostic
 measurements, not enforcement thresholds.
+
+The pure C scheduler state machine lives in the tracked
+`firmware/common/pio_usb_sof_scheduler.h`. Pico-PIO-USB's patched production C
+source and the native behavioral test both include that one file through
+`duo_common`'s public include path. Native-only configure/build therefore
+neither requires nor trusts the ignored `.deps` checkout, and the patch does
+not carry a second copy that can drift.
 
 ## Alternatives Rejected
 
@@ -69,9 +80,12 @@ publish.
 ## Verification
 
 Tests must first demonstrate that the current two-scheduler implementation can
-schedule a flash frame immediately after an ordinary frame. Source and ELF
-contracts then require both ordinary and flash entry points to use the same
-deadline and require the application flash loop to contain no SOF cadence.
+schedule a flash frame immediately after an ordinary frame. A native behavioral
+integration case also observes ordinary callbacks at 1001, 2000, and 3000 us,
+with an intervening early flash offer, and requires all three ordinary frames
+with measured 999--1000 us intervals. ELF contracts require both ordinary and
+flash entry points to reach the same SRAM frame-service path; the only retained
+source assertion requires the application flash loop to contain no SOF cadence.
 Parser, serializer-size, export-label, native firmware, PIO main/reference, and
 CH375 builds must remain green.
 

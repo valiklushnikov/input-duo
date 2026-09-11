@@ -135,7 +135,6 @@ def test_each_pico_pio_usb_patch_stays_inside_its_reviewed_surface():
         "0006-duo-input-unified-sof-scheduler.patch": {
             "src/pio_usb.h",
             "src/pio_usb_host.c",
-            "src/pio_usb_sof_scheduler.h",
         },
     }
     for patch in sorted((REPOSITORY_ROOT / "patches" / "pico-pio-usb").glob("*.patch")):
@@ -296,27 +295,20 @@ CONTROL_TRACE_PATCH = (
     REPOSITORY_ROOT / "patches" / "pico-pio-usb" / "0003-duo-input-control-trace.patch"
 )
 
-UNIFIED_SOF_PATCH = (
-    REPOSITORY_ROOT
-    / "patches"
-    / "pico-pio-usb"
-    / "0006-duo-input-unified-sof-scheduler.patch"
-)
+def test_native_scheduler_uses_one_tracked_source_of_truth():
+    scheduler = (
+        REPOSITORY_ROOT
+        / "firmware"
+        / "common"
+        / "pio_usb_sof_scheduler.h"
+    )
+    native_cmake = (
+        REPOSITORY_ROOT / "tests" / "firmware_native" / "CMakeLists.txt"
+    ).read_text(encoding="utf-8")
 
-
-def test_ordinary_and_flash_frames_share_one_due_gate():
-    source = _patched_file(UNIFIED_SOF_PATCH, "src/pio_usb_host.c")
-    gate = "pio_usb_host_service_frame_if_due"
-    ordinary = source[
-        source.index("(pio_usb_host_frame)(") :
-        source.index("(pio_usb_host_flash_keepalive)(")
-    ]
-    flash = source[
-        source.index("(pio_usb_host_flash_keepalive)(") :
-        source.index("(sof_timer)(")
-    ]
-    assert gate in ordinary
-    assert gate in flash
+    assert scheduler.is_file()
+    assert ".deps/pico-pio-usb/src" not in native_cmake
+    assert "patches/pico-pio-usb/include" not in native_cmake
 
 
 def _control_trace_source() -> str:
