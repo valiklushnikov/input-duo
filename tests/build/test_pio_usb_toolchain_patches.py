@@ -42,7 +42,7 @@ PICO_PIO_USB_BASE_REVISION = "3c1eec341a5232640e4c00628b889b641af34b28"
 #: bases above, with the fixed identity and date below. These are what the
 #: build is verified against.
 TINYUSB_PATCHED_REVISION = "507766faf14f38a6752401fb4f324cc00cd145dd"
-PICO_PIO_USB_PATCHED_REVISION = "e2119238c35f7f16d7e25f5608dc56aa0971db3d"
+PICO_PIO_USB_PATCHED_REVISION = "c219ccab8ba7b83a1b502d0fe42c1eda0a586f9a"
 
 #: Fixed so the commit SHA is reproducible.
 PATCH_COMMIT_IDENTITY = "toolchain@duo-input.invalid"

@@ -29,7 +29,7 @@ BACKPORT = (
 UPSTREAM_DIFF_SHA256 = (
     "22474d37eb325ce980a96b1dba44f5a3199a81248cc3aae2d3c10fc712dc4135"
 )
-PATCHED_REVISION = "e2119238c35f7f16d7e25f5608dc56aa0971db3d"
+PATCHED_REVISION = "c219ccab8ba7b83a1b502d0fe42c1eda0a586f9a"
 
 
 def _normalized_payload() -> bytes:

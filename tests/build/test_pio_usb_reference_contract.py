@@ -37,7 +37,7 @@ FIXED_SOURCE_DATE_EPOCH = "1788691431"
 # applied - see cmake/pio_usb_toolchain_lock.cmake. The examples/ directory the
 # reference copies come from is untouched by that patch, so the upstream blob
 # hashes below still hold.
-PINNED_PICO_PIO_USB_REVISION = "e2119238c35f7f16d7e25f5608dc56aa0971db3d"
+PINNED_PICO_PIO_USB_REVISION = "c219ccab8ba7b83a1b502d0fe42c1eda0a586f9a"
 REVIEWED_REFERENCE_SHA256 = {
     "main.c": "e8539134690e597be9254ee179f72a2b5cc93becf355e033f994d08955ea8ea1",
     "tusb_config.h": "4ce4ff7a45fc93b5695ddc9375c091995ce19ab078fc32a23d3f4299ee95594c",

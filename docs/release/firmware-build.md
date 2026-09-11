@@ -94,7 +94,7 @@ else CH375 depends on:
 |---|---|---|
 | Pico SDK | `98a542c1a62fb549ffb5d66a3e5892b06276b670` | unmodified |
 | TinyUSB | `86ad6e56c1700e85f1c5678607a762cfe3aa2f47` | `507766faf14f38a6752401fb4f324cc00cd145dd` (+ `patches/tinyusb/`) |
-| Pico-PIO-USB | `3c1eec341a5232640e4c00628b889b641af34b28` | `e2119238c35f7f16d7e25f5608dc56aa0971db3d` (+ `patches/pico-pio-usb/`) |
+| Pico-PIO-USB | `3c1eec341a5232640e4c00628b889b641af34b28` | `c219ccab8ba7b83a1b502d0fe42c1eda0a586f9a` (+ `patches/pico-pio-usb/`) |
 
 These are exact commits, not tags - `cmake/pio_usb_toolchain_lock.cmake` is
 the single source of truth for them.
