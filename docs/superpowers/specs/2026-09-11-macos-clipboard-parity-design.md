@@ -43,11 +43,27 @@ macOS   ←→ macOS      (этот этап)
 
 ## Результат спайка (шлагбаум)
 
-Спайк на macOS 15.1.1 (PySide6 6.10.1) **подтвердил ленивость**: реальные данные
-(`text/plain`) не материализуются при `QClipboard.setMimeData` — только при первом
-фактическом чтении pasteboard. Скопированное и не вставленное содержимое машину не
-покидает. Нативный `NSPasteboard`-мост для *чтения* не нужен. Три уточнения из
-спайка формируют дизайн:
+Спайк на macOS 15.1.1 (PySide6 6.10.1) **подтвердил возможность ленивой семантики**:
+реальные данные (`text/plain`) не материализуются при `QClipboard.setMimeData` —
+только при первом фактическом чтении pasteboard. Скопированное и не вставленное
+содержимое машину не покидает.
+
+Важное уточнение контракта публикации: спайк доказал, что Qt/macOS *способен*
+сохранять lazy-семантику, но **production-публикация на macOS использует нативный
+`NSPasteboardItemDataProvider`, а не `RemoteMimeData`** — потому что host-only
+(защита от Handoff) достижим только через нативный `NSPasteboard`. `RemoteMimeData`
+(Qt) на macOS не используется вовсе; она остаётся путём публикации только на
+Windows. Контракт по платформам:
+
+```
+Windows publish → RemoteMimeData → QClipboard
+macOS   publish → NSPasteboardItemDataProvider → ContentFetcher → NSPasteboard (host-only)
+```
+
+Снимок локального буфера (чтение) ни на одной платформе `RemoteMimeData` не
+использует — он читает `QMimeData` напрямую через `formats.py`.
+
+Три уточнения из спайка формируют дизайн:
 
 1. Qt при регистрации типа делает служебный вызов
    `retrieveData('application/x-qt-mime-type-name')` — не наши данные, обрабатывать
@@ -64,8 +80,10 @@ macOS   ←→ macOS      (этот этап)
 Весь сетевой слой уже платформо-независим и переиспользуется без изменений:
 `identity`, `trust`, `offer`, `wire`, `peer`, `listener`, `discovery`, `pairing`,
 `service`, `coordinator`, а также `backend.py` (`ClipboardBackend` Protocol,
-`RemoteMimeData`, `ClipboardSnapshot`). Выноса в общий `transfer/`-слой в этом
-этапе **нет** — это задел под файлы, отдельный milestone (YAGNI сейчас).
+`ClipboardSnapshot` и `RemoteMimeData`). `RemoteMimeData` остаётся в `backend.py`,
+но используется **только Windows-путём публикации**; macOS публикует нативно
+(Секция 4). Выноса в общий `transfer/`-слой в этом этапе **нет** — это задел под
+файлы, отдельный milestone (YAGNI сейчас).
 
 Граф зависимостей:
 
@@ -253,10 +271,13 @@ return b"\r\n".join(bytes(u.toEncoded()) for u in urls) + b"\r\n"
 **`png_bytes`** — порядок строгий:
 1. Есть реальный `image/png` → вернуть напрямую **без перекодирования** (экономит
    CPU, не трогает метаданные/цветовой профиль).
-2. PNG нет, но `hasImage()` → `imageData()` → `QImage` → кодировать PNG (через
-   `QBuffer` + `QImage.save(buffer, "PNG")`).
-3. Изображения нет, либо `imageData()` вернул неожиданный тип (не `QImage`) →
-   `None` (предсказуемо, без скрытых различий Windows/macOS).
+2. PNG нет, но `hasImage()` → `imageData()`, привести Qt-тип и кодировать PNG
+   (через `QBuffer` + `QImage.save(buffer, "PNG")`):
+   - `QImage` → PNG напрямую;
+   - `QPixmap` → `toImage()` → PNG (дешёвая нормализация, делает helper реально
+     platform-neutral);
+3. Изображения нет, либо тип не приводится к `QImage`/`QPixmap` → `None`
+   (предсказуемо, без скрытых различий Windows/macOS).
 
 **`text/plain` / `text/html`** — прямой путь. RTF-only (без HTML) не синхронизируем;
 конвертацию RTF→HTML в этот milestone не вводим.
@@ -344,9 +365,14 @@ Windows-версии со своими `PRIVATE_MARKERS`. Точный вид и
   гарантируют, что Windows-граф пакет не трогает.
 - **Протокол не меняется:** `wire` = `PROTOCOL_MAJOR=1, MINOR=0`. Parity не
   добавляет типов сообщений. Win↔Mac совместимость — на уровне канонических
-  payload'ов (Секция 3). Файлы будут отдельным protocol v2.
+  payload'ов (Секция 3). Файловый milestone определит собственные protocol/
+  capability requirements отдельно; этот spec **не принимает** решения о
+  необходимости `PROTOCOL_MAJOR=2`.
 - **Packaging вне scope** этого этапа (`.app`/подпись/нотаризация/`.dmg` — этап 5).
   Достаточно запуска из `.venv-mac`/исходников для разработки и ручной проверки.
+  Apple Developer Program, Developer ID signing и notarization **не являются
+  prerequisite** этого milestone; разработка и acceptance выполняются из
+  `.venv-mac`.
 - **Dev-окружение:** `.venv-mac` (Python 3.14.4, PySide6 6.10.1 universal2). Тесты
   на Mac: `.venv-mac/bin/python -m pytest`.
 
@@ -372,7 +398,8 @@ Windows-версии со своими `PRIVATE_MARKERS`. Точный вид и
   как их отдаёт Qt в `mime_data.formats()`.
 - Переживает ли кастомный `ORIGIN_MIME` round-trip через NSPasteboard/Qt (если нет
   — работает только пояс `changeCount`, что и заложено инвариантом).
-- Тип возврата `imageData()` (QImage vs QPixmap) на macOS.
+- Что фактически возвращает `imageData()` на macOS (ожидаем `QImage` или
+  `QPixmap` — оба поддержаны Секцией 3; иной тип → `None`).
 
 ## Технический долг (не в этом milestone)
 
