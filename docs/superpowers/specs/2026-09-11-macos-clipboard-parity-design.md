@@ -305,8 +305,9 @@ Windows переводится на общий `normalized_payload`; измен�
   `mimeData()` напрямую.
 
 > **Инвариант жизненного цикла:** NSPasteboard не удерживает data provider сильной
-> ссылкой. `MacOSClipboardBackend` обязан хранить ссылку на текущий provider, иначе
-> GC его соберёт и `⌘V` вернёт пусто.
+> ссылкой. Ссылку на текущий provider удерживает `macos_pasteboard` (модульная
+> переменная), иначе GC его соберёт и `⌘V` вернёт пусто. `MacOSClipboardBackend`
+> про provider не знает.
 
 **Три пояса против «утечки без вставки»:**
 1. host-only убирает Handoff-читателя;
