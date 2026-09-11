@@ -37,7 +37,7 @@ FIXED_SOURCE_DATE_EPOCH = "1788691431"
 # applied - see cmake/pio_usb_toolchain_lock.cmake. The examples/ directory the
 # reference copies come from is untouched by that patch, so the upstream blob
 # hashes below still hold.
-PINNED_PICO_PIO_USB_REVISION = "ce67882de7c6e75734087e3181caeb2511f48c46"
+PINNED_PICO_PIO_USB_REVISION = "e2119238c35f7f16d7e25f5608dc56aa0971db3d"
 REVIEWED_REFERENCE_SHA256 = {
     "main.c": "e8539134690e597be9254ee179f72a2b5cc93becf355e033f994d08955ea8ea1",
     "tusb_config.h": "4ce4ff7a45fc93b5695ddc9375c091995ce19ab078fc32a23d3f4299ee95594c",
@@ -52,6 +52,7 @@ from reference_build_support import (
     rebuild_reference_u1_artifacts,
     rebuild_target_artifacts,
 )
+from pio_usb_flash_contract import assert_flash_path_sram_safe
 
 
 #: The reference is a maintained copy of the upstream example, and every
@@ -108,6 +109,30 @@ def _reference_symbols(elf: Path) -> dict:
         "pico-pio-usb-reference-release first"
     )
     return Elf32(elf.read_bytes()).symbols()
+
+
+def _reference_function_disassembly(symbol: str) -> str:
+    cache = (REFERENCE_BUILD / "CMakeCache.txt").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    match = re.search(r"^CMAKE_OBJDUMP:[^=]*=(.+)$", cache, re.MULTILINE)
+    assert match, "CMAKE_OBJDUMP is absent from the reference CMake cache"
+    output = subprocess.run(
+        [match.group(1).strip(), "-d", "-C", str(REFERENCE_ELF)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    marker = f"<{symbol}>:"
+    lines = output.splitlines()
+    start = next((index for index, line in enumerate(lines) if marker in line), None)
+    assert start is not None, f"reference ELF disassembly has no {symbol}"
+    body = []
+    for line in lines[start + 1 :]:
+        if re.match(r"^[0-9a-fA-F]+ <.*>:$", line):
+            break
+        body.append(line)
+    return "\n".join(body)
 
 
 def _configured_make_program() -> str:
@@ -372,6 +397,7 @@ def test_the_reference_keeps_the_upstream_host_lifecycle_in_order():
     main_ordered = [
         "set_sys_clock_khz(120000, true)",
         "multicore_reset_core1()",
+        "set_core1_running(true)",
         "multicore_launch_core1(core1_main)",
         # UsbService::begin() is tud_init(0) with the reason written down: the
         # argument-less tusb_init() brings up BOTH stacks on this TinyUSB, which
@@ -404,6 +430,7 @@ def test_the_reference_keeps_the_upstream_host_lifecycle_in_order():
     # paid for once.
     assert "tud_init" not in core1_body
     assert "tuh_init" not in main_body
+    assert "set_core1_running(true)" not in core1_body
     # Never the argument-less form, on either core. Checked against code
     # rather than the whole file: main.cpp explains in a comment why that call
     # must not appear, and a naive search would fail on the explanation.
@@ -411,6 +438,37 @@ def test_the_reference_keeps_the_upstream_host_lifecycle_in_order():
     assert "tusb_init(" not in code, (
         "tusb_init() brings up both stacks on this TinyUSB; the device stack "
         "must be started with tud_init(0) alone"
+    )
+
+
+def test_reference_core1_flash_window_is_wired_pause_park_resume_finish_in_order():
+    source = (ROOT / "firmware" / "u1_reference" / "main.cpp").read_text(encoding="utf-8")
+    core1_body = source[source.index("void core1_main") : source.index("int main(")]
+    source_order = (
+        "pio_usb_host_flash_pause()",
+        "service_core1_flash_window()",
+        "pio_usb_host_flash_resume()",
+        "finish_core1_flash_window()",
+    )
+    source_positions = [core1_body.index(fragment) for fragment in source_order]
+    assert source_positions == sorted(source_positions)
+
+    body = _reference_function_disassembly("core1_main")
+    elf_order = (
+        "pio_usb_host_flash_pause",
+        "service_core1_flash_windowEv_veneer",
+        "pio_usb_host_flash_resume",
+        "duo_input::u1::finish_core1_flash_window()",
+    )
+    elf_positions = [body.index(symbol) for symbol in elf_order]
+    assert elf_positions == sorted(elf_positions)
+
+
+def test_reference_flash_keepalive_executes_entirely_outside_xip_flash():
+    assert_flash_path_sram_safe(
+        REFERENCE_BUILD,
+        REFERENCE_ELF,
+        "duo_input::u1::service_core1_flash_window()",
     )
 
 

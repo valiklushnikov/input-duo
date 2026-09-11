@@ -33,6 +33,9 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "tools"))
+sys.path.insert(0, str(REPOSITORY_ROOT / "tests" / "build"))
+
+from pio_usb_flash_contract import assert_flash_path_sram_safe
 
 
 # ------------------------------------------------------------- CMake inputs
@@ -183,6 +186,17 @@ def test_every_core0_runtime_spi_transfer_uses_the_clock_startup_gate():
     assert guarded.count("send_release_all(now_ms)") == 2
 
 
+def test_core0_publishes_core1_before_it_can_be_launched():
+    source = _source_text("firmware/u1_main/main.cpp")
+    core1_body = source[source.index("void core1_entry()") : source.index("int main()")]
+    main_body = source[source.index("int main()") :]
+
+    publish = main_body.index("set_core1_running(true)")
+    launch = main_body.index("multicore_launch_core1(core1_entry)")
+    assert publish < launch
+    assert "set_core1_running(true)" not in core1_body
+
+
 def test_task6_callbacks_only_capture_records_and_never_arm_or_route():
     callbacks = _source_text("firmware/u1_main/pio_usb/tinyusb_host_callbacks.cpp")
     without_comments = re.sub(r"//.*?$|/\*.*?\*/", "", callbacks, flags=re.MULTILINE | re.DOTALL)
@@ -284,6 +298,58 @@ def test_pio_usb_elf_contains_tuh_task():
         "TinyUSB's always-inline tuh_task() compiles down to) - Core 1 "
         "cannot be servicing the host stack without it"
     )
+
+
+@pio_usb_elf_required
+def test_flash_keepalive_executes_entirely_outside_xip_flash():
+    """Catch code or fixed USB data added to the flash-time path in XIP."""
+    assert_flash_path_sram_safe(
+        _pio_usb_build_dir(),
+        _pio_elf,
+        "duo_input::u1::service_core1_flash_window()",
+    )
+
+
+@pio_usb_elf_required
+def test_core1_flash_window_is_wired_pause_park_resume_finish_in_order():
+    disassembly = _disassembly(_pio_usb_build_dir(), _pio_elf)
+    body = _function_disassembly(disassembly, "(anonymous namespace)::core1_entry()")
+    ordered = (
+        "pio_usb_host_flash_pause",
+        "service_core1_flash_windowEv_veneer",
+        "pio_usb_host_flash_resume",
+        "duo_input::u1::finish_core1_flash_window()",
+    )
+    positions = [body.index(symbol) for symbol in ordered]
+    assert positions == sorted(positions)
+
+
+def test_flash_sof_cadence_is_retained_across_page_program_windows():
+    source = (REPOSITORY_ROOT / "firmware/u1_main/pico_flash.cpp").read_text(
+        encoding="utf-8"
+    )
+    service = source[
+        source.index("service_core1_flash_window") :
+        source.index("finish_core1_flash_window")
+    ]
+
+    assert "FlashSofCadence g_flash_sof_cadence" in source
+    assert "g_flash_sof_cadence.due(now_us)" in service
+    assert "FlashSofCadence cadence" not in service
+
+
+@pio_usb_elf_required
+def test_flash_backend_uses_cooperative_core1_window_not_multicore_lockout():
+    disassembly = _disassembly(_pio_usb_build_dir(), _pio_elf)
+    for symbol in (
+        "duo_input::u1::PicoFlash::erase(unsigned long, unsigned int)",
+        "duo_input::u1::PicoFlash::program(unsigned long, unsigned char const*, unsigned int)",
+    ):
+        body = _function_disassembly(disassembly, symbol)
+        assert "duo_input::u1::begin_core1_flash_window()" in body
+        assert "duo_input::u1::end_core1_flash_window()" in body
+        assert "multicore_lockout_start_blocking" not in body
+        assert "multicore_lockout_end_blocking" not in body
 
 
 @pio_usb_elf_required

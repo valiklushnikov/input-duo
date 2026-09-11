@@ -8,9 +8,9 @@
 // landing mid-erase would try to fetch code from a chip that is busy erasing
 // itself. And the second core must not be executing from flash either.
 //
-// Erases take milliseconds, during which USB is not serviced. That is
-// survivable because a host tolerates a device that is briefly quiet, and
-// because a configuration write is a deliberate, occasional act.
+// Erases take longer than USB suspend detection. Core 1 therefore enters a
+// cooperative SRAM-only window instead of the SDK lockout, and the PIO USB
+// build continues emitting SOF while XIP is unavailable.
 
 #include <cstdint>
 
@@ -18,19 +18,31 @@
 
 namespace duo_input::u1 {
 
-/// Say whether the second core is running and can be stopped.
+/// Publish that Core 0 is about to launch the second core.
 ///
-/// Both halves of that matter. A core executing from flash while flash is
-/// being erased fetches instructions from a chip that is busy erasing itself;
-/// a core that has not armed itself to be stopped never answers the request to
-/// stop, and the erase waits forever. So Core 1 announces itself, once, after
-/// arming - not Core 0 on its behalf.
+/// Core 0 owns both this publication and multicore_launch_core1(), so a false
+/// read cannot race a newly launched XIP reader. Once published, every flash
+/// operation must use the cooperative park window.
 void set_core1_running(bool running);
 
-/// Whether it is. Anything that would stop the other core has to ask first:
-/// a core that has not armed itself never answers the request to stop, and
-/// the caller waits forever.
+/// Whether launch has been published. Before that point no second core can
+/// start until Core 0 returns to the launch sequence.
 bool core1_running();
+
+/// Core 0: ask Core 1 to enter its SRAM-only flash window and wait for it.
+bool begin_core1_flash_window();
+
+/// Core 0: release the window and wait until Core 1 has resumed normal work.
+void end_core1_flash_window();
+
+/// Core 1: whether Core 0 is waiting for the safe loop.
+bool core1_flash_window_requested();
+
+/// Core 1: acknowledge and remain in SRAM until Core 0 releases the window.
+void service_core1_flash_window();
+
+/// Core 1: publish that normal timer/host work has been restored.
+void finish_core1_flash_window();
 
 class PicoFlash : public storage::FlashBackend {
 public:

@@ -1,0 +1,227 @@
+diff --git a/src/pio_usb.c b/src/pio_usb.c
+index 05dce39..927f865 100644
+--- a/src/pio_usb.c
++++ b/src/pio_usb.c
+@@ -531,7 +531,11 @@ static inline __force_inline void prepare_tx_data(endpoint_t *ep) {
+   buffer[0] = USB_SYNC;
+   buffer[1] = (ep->data_id == 1) ? USB_PID_DATA1
+                                  : USB_PID_DATA0; // USB_PID_SETUP also DATA0
+-  memcpy(buffer + 2, ep->app_buf, xact_len);
++  volatile uint8_t *out = buffer + 2;
++  volatile const uint8_t *in = ep->app_buf;
++  for (uint16_t idx = 0; idx < xact_len; idx++) {
++    out[idx] = in[idx];
++  }
+ 
+   uint16_t const crc16 = calc_usb_crc16(ep->app_buf, xact_len);
+   buffer[2 + xact_len] = crc16 & 0xff;
+diff --git a/src/pio_usb.h b/src/pio_usb.h
+index 05f8450..e3a1bdb 100644
+--- a/src/pio_usb.h
++++ b/src/pio_usb.h
+@@ -20,8 +20,8 @@ uint32_t pio_usb_host_get_frame_number(void);
+ void pio_usb_host_frame(void);
+ 
+ // Suspend the normal host timer around an XIP flash operation. While it is
+-// suspended, call the RAM-resident keepalive once per millisecond. No endpoint
+-// transfer or TinyUSB callback is serviced by the keepalive path.
++// suspended, call the RAM-resident keepalive once per millisecond. It services
++// queued endpoint transfers but defers their TinyUSB callbacks until resume.
+ void pio_usb_host_flash_pause(void);
+ void pio_usb_host_flash_keepalive(void);
+ void pio_usb_host_flash_resume(void);
+diff --git a/src/pio_usb_host.c b/src/pio_usb_host.c
+index a0ba9ee..eb66c60 100644
+--- a/src/pio_usb_host.c
++++ b/src/pio_usb_host.c
+@@ -125,8 +125,10 @@ static void __no_inline_not_in_flash_func(ctrl_trace_record)(
+   if (bytes == NULL) {
+     copied = 0;
+   }
++  volatile uint8_t *trace_out = entry->bytes;
++  volatile const uint8_t *trace_in = bytes;
+   for (uint16_t idx = 0; idx < copied; idx++) {
+-    entry->bytes[idx] = bytes[idx];
++    trace_out[idx] = trace_in[idx];
+   }
+   entry->byte_count = (uint8_t)copied;
+ 
+@@ -398,6 +400,70 @@ static int usb_setup_transaction(pio_port_t *pp, endpoint_t *ep);
+ static int usb_in_transaction(pio_port_t *pp, endpoint_t *ep);
+ static int usb_out_transaction(pio_port_t *pp, endpoint_t *ep);
+ 
++static void __no_inline_not_in_flash_func(pio_usb_flash_copy_bytes)(
++    uint8_t *dst, const uint8_t *src, uint16_t len) {
++  volatile uint8_t *out = dst;
++  volatile const uint8_t *in = src;
++  while (len--) {
++    *out++ = *in++;
++  }
++}
++
++// Keep already-queued traffic alive while XIP is unavailable. Transfer
++// completion only updates endpoint/root state in SRAM; pio_usb_host_irq_handler
++// is deliberately left to the first ordinary frame after flash, because its
++// TinyUSB callbacks may execute from XIP.
++static void __no_inline_not_in_flash_func(pio_usb_host_flash_service_endpoints)(
++    pio_port_t *pp) {
++  for (int root_idx = 0; root_idx < PIO_USB_ROOT_PORT_CNT; root_idx++) {
++    root_port_t *root = PIO_USB_ROOT_PORT(root_idx);
++    if (!(root->initialized && root->connected && !root->suspended)) {
++      continue;
++    }
++
++    configure_root_port(pp, root);
++    for (int ep_pool_idx = 0; ep_pool_idx < PIO_USB_EP_POOL_CNT;
++         ep_pool_idx++) {
++      endpoint_t *ep = PIO_USB_ENDPOINT(ep_pool_idx);
++      if ((ep->root_idx != root_idx) || !ep->size) {
++        continue;
++      }
++
++      bool const is_periodic = ((ep->attr & 0x03) == EP_ATTR_INTERRUPT);
++      if (is_periodic && (ep->interval_counter > 0)) {
++        ep->interval_counter--;
++        continue;
++      }
++
++      if (ep->has_transfer && !ep->transfer_aborted) {
++        ep->transfer_started = true;
++        if (ep->need_pre) {
++          pp->need_pre = true;
++        }
++
++        if (ep->ep_num == 0 && ep->data_id == USB_PID_SETUP) {
++          usb_setup_transaction(pp, ep);
++        } else {
++          if (ep->ep_num & EP_IN) {
++            usb_in_transaction(pp, ep);
++          } else {
++            usb_out_transaction(pp, ep);
++          }
++          if (is_periodic) {
++            ep->interval_counter = ep->interval - 1;
++          }
++        }
++
++        if (ep->need_pre) {
++          pp->need_pre = false;
++          restore_fs_bus(pp);
++        }
++        ep->transfer_started = false;
++      }
++    }
++  }
++}
++
+ void __not_in_flash_func(pio_usb_host_frame)(void) {
+   if (!timer_active) {
+     return;
+@@ -422,57 +488,8 @@ void __not_in_flash_func(pio_usb_host_frame)(void) {
+     }
+   }
+ 
+-  // Carry out all queued endpoint transaction
+-  for (int root_idx = 0; root_idx < PIO_USB_ROOT_PORT_CNT; root_idx++) {
+-    root_port_t *root = PIO_USB_ROOT_PORT(root_idx);
+-    if (!(root->initialized && root->connected && !root->suspended)) {
+-      continue;
+-    }
+-
+-    configure_root_port(pp, root);
+-
+-    for (int ep_pool_idx = 0; ep_pool_idx < PIO_USB_EP_POOL_CNT;
+-         ep_pool_idx++) {
+-      endpoint_t *ep = PIO_USB_ENDPOINT(ep_pool_idx);
+-      if ((ep->root_idx == root_idx) && ep->size) {
+-        bool const is_periodic = ((ep->attr & 0x03) == EP_ATTR_INTERRUPT);
+-
+-        if (is_periodic && (ep->interval_counter > 0)) {
+-          ep->interval_counter--;
+-          continue;
+-        }
+-
+-        if (ep->has_transfer && !ep->transfer_aborted) {
+-          ep->transfer_started = true;
+-
+-          if (ep->need_pre) {
+-            pp->need_pre = true;
+-          }
+-
+-          if (ep->ep_num == 0 && ep->data_id == USB_PID_SETUP) {
+-            usb_setup_transaction(pp, ep);
+-          } else {
+-            if (ep->ep_num & EP_IN) {
+-              usb_in_transaction(pp, ep);
+-            } else {
+-              usb_out_transaction(pp, ep);
+-            }
+-
+-            if (is_periodic) {
+-              ep->interval_counter = ep->interval - 1;
+-            }
+-          }
+-
+-          if (ep->need_pre) {
+-            pp->need_pre = false;
+-            restore_fs_bus(pp);
+-          }
+-
+-          ep->transfer_started = false;
+-        }
+-      }
+-    }
+-  }
++  // Carry out all queued endpoint transactions.
++  pio_usb_host_flash_service_endpoints(pp);
+ 
+   // check for new connection to root hub
+   for (int root_idx = 0; root_idx < PIO_USB_ROOT_PORT_CNT; root_idx++) {
+@@ -521,6 +538,8 @@ void __no_inline_not_in_flash_func(pio_usb_host_flash_keepalive)(void) {
+     }
+   }
+ 
++  pio_usb_host_flash_service_endpoints(pp);
++
+   sof_count++;
+   uint16_t const sof_count_11b = sof_count & 0x7ff;
+   sof_packet[2] = sof_count_11b & 0xff;
+@@ -717,7 +736,7 @@ static int __no_inline_not_in_flash_func(usb_in_transaction)(pio_port_t *pp,
+ 
+   if (receive_len >= 0) {
+     if (receive_pid == expect_pid) {
+-      memcpy(ep->app_buf, &pp->usb_rx_buffer[2], receive_len);
++      pio_usb_flash_copy_bytes(ep->app_buf, &pp->usb_rx_buffer[2], receive_len);
+       pio_usb_ll_transfer_continue(ep, receive_len);
+     } else {
+       if ((ep->ep_num & 0x7f) != 0) {
+@@ -732,7 +751,7 @@ static int __no_inline_not_in_flash_func(usb_in_transaction)(pio_port_t *pp,
+         if (++ep->failed_count >= TRANSACTION_MAX_RETRY) {
+           ep->failed_count = 0;
+           ep->data_id = (receive_pid == USB_PID_DATA1) ? 1 : 0;
+-          memcpy(ep->app_buf, &pp->usb_rx_buffer[2], receive_len);
++          pio_usb_flash_copy_bytes(ep->app_buf, &pp->usb_rx_buffer[2], receive_len);
+           pio_usb_ll_transfer_continue(ep, receive_len);
+         } else {
+           res = -1; // discard and retry next frame
+diff --git a/src/usb_crc.c b/src/usb_crc.c
+index 1d58d17..ead741c 100644
+--- a/src/usb_crc.c
++++ b/src/usb_crc.c
+@@ -52,7 +52,8 @@ const uint16_t __not_in_flash("crc_tbl") crc16_tbl[256] = {
+     0x4540, 0x8701, 0x47c0, 0x4680, 0x8641, 0x8201, 0x42c0, 0x4380, 0x8341,
+     0x4100, 0x81c1, 0x8081, 0x4040};
+ 
+-uint16_t calc_usb_crc16(const uint8_t *data, uint16_t len) {
++uint16_t __no_inline_not_in_flash_func(calc_usb_crc16)(const uint8_t *data,
++                                                       uint16_t len) {
+   uint16_t crc = 0xffff;
+ 
+   for (int idx = 0; idx < len; idx++) {
+@@ -60,4 +61,4 @@ uint16_t calc_usb_crc16(const uint8_t *data, uint16_t len) {
+   }
+ 
+   return crc ^ 0xffff;
+-}
+\ No newline at end of file
++}

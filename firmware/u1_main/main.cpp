@@ -42,6 +42,7 @@
 #ifdef DUO_INPUT_BACKEND_CH375
 #include "input/ch375_source_adapter.hpp"
 #else
+#include "pio_usb.h"
 #include "pio_usb/backend.hpp"
 #include "pio_usb/host_observation_mapping.hpp"
 #endif
@@ -419,16 +420,6 @@ public:
 /// which is what lets Core 0 keep feeding a two-second watchdog while a macro
 /// with a two-second pause in it is running.
 void core1_entry() {
-    // Core 0 erases and programs flash, and it cannot do that while this core
-    // might be fetching instructions from the chip being erased. This is what
-    // lets it stop us; without it the request would wait forever.
-    //
-    // Announced from here rather than from Core 0, and only after arming:
-    // between launching a core and that core arming itself there is a window
-    // where it is running from flash and cannot yet be stopped, and a write
-    // landing in it would be a request that never returns.
-    multicore_lockout_victim_init();
-    duo_input::u1::set_core1_running(true);
     g_runtime.engine().set_sources(g_sources);
     g_runtime.capture().set_sources(g_sources);
 
@@ -449,6 +440,20 @@ void core1_entry() {
 
     while (true) {
         const std::uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+
+        if (duo_input::u1::core1_flash_window_requested()) {
+#ifndef DUO_INPUT_BACKEND_CH375
+            // Still executing from flash here, while Core 0 waits. Cancelling
+            // the repeating timer prevents its negative-period scheduler from
+            // emitting a burst of overdue frames when the window ends.
+            pio_usb_host_flash_pause();
+#endif
+            duo_input::u1::service_core1_flash_window();
+#ifndef DUO_INPUT_BACKEND_CH375
+            pio_usb_host_flash_resume();
+#endif
+            duo_input::u1::finish_core1_flash_window();
+        }
 
         // First thing in the pass, between one whole turn and the next: not
         // inside a binding table, not inside the macro definitions, not
@@ -1188,6 +1193,11 @@ int main() {
     duo_input::u1::SpiMaster::internal_loopback(kSelfTestTx, self_test_rx, sizeof(kSelfTestTx));
     const std::uint8_t wire_walk = duo_input::u1::SpiMaster::wire_walk();
 #endif
+
+    // Core 0 owns both this publication and the launch, so a flash operation
+    // can never observe "not running" and then race a newly launched XIP
+    // reader. From this point onward every flash operation must park Core 1.
+    duo_input::u1::set_core1_running(true);
 
 #ifdef DUO_INPUT_BACKEND_PIO_USB
     // Match Pico-PIO-USB's working dual-role example all the way through the

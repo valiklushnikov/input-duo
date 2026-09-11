@@ -63,6 +63,7 @@ target_sources(duo_u1_reference PRIVATE
     # behind it, the CDC-facing service, and the handshake that carries a
     # configuration change to Core 1.
     ${_duo_u1_main_dir}/pico_flash.cpp
+    ${_duo_u1_main_dir}/flash_park.cpp
     ${_duo_u1_main_dir}/config_service.cpp
     ${_duo_u1_main_dir}/core_bridge.cpp
     ${_duo_u1_main_dir}/input/pipeline.cpp

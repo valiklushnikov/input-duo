@@ -220,6 +220,24 @@ endif()
 
 add_test(NAME core_bridge COMMAND duo_core_bridge_test)
 
+add_executable(duo_flash_park_test
+    test_main.cpp
+    test_flash_park.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main/flash_park.cpp
+)
+
+target_link_libraries(duo_flash_park_test PRIVATE duo_common)
+target_include_directories(duo_flash_park_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u1_main
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+if(MSVC)
+    target_compile_options(duo_flash_park_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME flash_park COMMAND duo_flash_park_test)
+
 add_executable(duo_buttons_test
     test_main.cpp
     test_buttons.cpp

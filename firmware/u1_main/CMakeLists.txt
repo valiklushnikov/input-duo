@@ -17,6 +17,7 @@ set(_duo_u1_sources
     config_profiles.cpp
     core1_runtime.cpp
     core_bridge.cpp
+    flash_park.cpp
     input/pipeline.cpp
     input/source_table.cpp
 )

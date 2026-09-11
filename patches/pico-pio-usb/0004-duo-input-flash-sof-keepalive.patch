@@ -1,0 +1,71 @@
+diff --git a/src/pio_usb.h b/src/pio_usb.h
+index 30a87d3..05f8450 100644
+--- a/src/pio_usb.h
++++ b/src/pio_usb.h
+@@ -19,6 +19,13 @@ uint32_t pio_usb_host_get_frame_number(void);
+ // Call this every 1ms when skip_alarm_pool is true.
+ void pio_usb_host_frame(void);
+ 
++// Suspend the normal host timer around an XIP flash operation. While it is
++// suspended, call the RAM-resident keepalive once per millisecond. No endpoint
++// transfer or TinyUSB callback is serviced by the keepalive path.
++void pio_usb_host_flash_pause(void);
++void pio_usb_host_flash_keepalive(void);
++void pio_usb_host_flash_resume(void);
++
+ // Device functions
+ usb_device_t *pio_usb_device_init(const pio_usb_configuration_t *c,
+                                   const usb_descriptor_buffers_t *buffers);
+diff --git a/src/pio_usb_host.c b/src/pio_usb_host.c
+index 678453a..a0ba9ee 100644
+--- a/src/pio_usb_host.c
++++ b/src/pio_usb_host.c
+@@ -195,10 +195,17 @@ static void start_timer(alarm_pool_t *alarm_pool) {
+ }
+ 
+ static __unused void stop_timer(void) {
++  if (!timer_active) {
++    return;
++  }
+   cancel_repeating_timer(&sof_rt);
+   timer_active = false;
+ }
+ 
++void pio_usb_host_flash_pause(void) { stop_timer(); }
++
++void pio_usb_host_flash_resume(void) { start_timer(_alarm_pool); }
++
+ usb_device_t *pio_usb_host_init(const pio_usb_configuration_t *c) {
+   pio_port_t *pp = PIO_USB_PIO_PORT(0);
+   root_port_t *root = PIO_USB_ROOT_PORT(0);
+@@ -498,6 +505,30 @@ void __not_in_flash_func(pio_usb_host_frame)(void) {
+       pio_usb_ll_encode_tx_data(sof_packet, sizeof(sof_packet), sof_packet_encoded);
+ }
+ 
++void __no_inline_not_in_flash_func(pio_usb_host_flash_keepalive)(void) {
++  pio_port_t *pp = PIO_USB_PIO_PORT(0);
++
++  for (int root_idx = 0; root_idx < PIO_USB_ROOT_PORT_CNT; root_idx++) {
++    root_port_t *root = PIO_USB_ROOT_PORT(root_idx);
++    if (!(root->initialized && root->connected && !root->suspended)) {
++      continue;
++    }
++    configure_root_port(pp, root);
++    if (root->is_fullspeed) {
++      pio_usb_bus_usb_transfer(pp, sof_packet_encoded, sof_packet_encoded_len);
++    } else {
++      pio_usb_bus_usb_transfer(pp, keepalive_encoded, 1);
++    }
++  }
++
++  sof_count++;
++  uint16_t const sof_count_11b = sof_count & 0x7ff;
++  sof_packet[2] = sof_count_11b & 0xff;
++  sof_packet[3] = (calc_usb_crc5(sof_count_11b) << 3) | (sof_count_11b >> 8);
++  sof_packet_encoded_len =
++      pio_usb_ll_encode_tx_data(sof_packet, sizeof(sof_packet), sof_packet_encoded);
++}
++
+ static bool __no_inline_not_in_flash_func(sof_timer)(repeating_timer_t *_rt) {
+   (void)_rt;
+ 

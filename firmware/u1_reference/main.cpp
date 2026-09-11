@@ -529,18 +529,6 @@ extern "C" bool reference_descriptor_unmounted(std::uint8_t dev_addr,
 
 // core1: the USB host, and everything that reads what it produced
 extern "C" void core1_main() {
-    // Core 0 erases and programs flash, and it cannot do that while this core
-    // might be fetching instructions from the chip being erased. This is what
-    // lets it stop us; without it a flash write would wait forever.
-    //
-    // Announced from here rather than from Core 0, and only after arming -
-    // the same reason u1_main's core1_entry announces it here: between
-    // launching a core and that core arming itself there is a window where it
-    // is running from flash and cannot yet be stopped, and a write landing in
-    // it would be a request that never returns. Before anything else below
-    // touches tuh_task or a clock this target does not own.
-    multicore_lockout_victim_init();
-    duo_input::u1::set_core1_running(true);
     g_runtime.engine().set_sources(g_sources);
     g_runtime.capture().set_sources(g_sources);
 
@@ -589,6 +577,13 @@ extern "C" void core1_main() {
     install_macros(installed_profile);
 
     while (true) {
+        if (duo_input::u1::core1_flash_window_requested()) {
+            pio_usb_host_flash_pause();
+            duo_input::u1::service_core1_flash_window();
+            pio_usb_host_flash_resume();
+            duo_input::u1::finish_core1_flash_window();
+        }
+
         // First thing in the pass, between one whole turn and the next: not
         // inside a binding table, not inside the macro definitions, not
         // holding an event half-processed. Mirrors u1_main's core1_entry -
@@ -672,6 +667,9 @@ int main() {
     }
 
     multicore_reset_core1();
+    // Publish on the same core that launches. Once true is visible, Core 1
+    // cannot begin fetching XIP without every flash operation parking it.
+    duo_input::u1::set_core1_running(true);
     // all USB host task run in core1
     multicore_launch_core1(core1_main);
 

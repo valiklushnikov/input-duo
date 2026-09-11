@@ -42,7 +42,7 @@ PICO_PIO_USB_BASE_REVISION = "3c1eec341a5232640e4c00628b889b641af34b28"
 #: bases above, with the fixed identity and date below. These are what the
 #: build is verified against.
 TINYUSB_PATCHED_REVISION = "507766faf14f38a6752401fb4f324cc00cd145dd"
-PICO_PIO_USB_PATCHED_REVISION = "ce67882de7c6e75734087e3181caeb2511f48c46"
+PICO_PIO_USB_PATCHED_REVISION = "e2119238c35f7f16d7e25f5608dc56aa0971db3d"
 
 #: Fixed so the commit SHA is reproducible.
 PATCH_COMMIT_IDENTITY = "toolchain@duo-input.invalid"
@@ -122,6 +122,16 @@ def test_each_pico_pio_usb_patch_stays_inside_its_reviewed_surface():
         },
         "0002-duo-input-host-fixes.patch": {"src/pio_usb_host.c"},
         "0003-duo-input-control-trace.patch": {"src/pio_usb_host.c"},
+        "0004-duo-input-flash-sof-keepalive.patch": {
+            "src/pio_usb.h",
+            "src/pio_usb_host.c",
+        },
+        "0005-duo-input-flash-endpoint-service.patch": {
+            "src/pio_usb.c",
+            "src/pio_usb.h",
+            "src/pio_usb_host.c",
+            "src/usb_crc.c",
+        },
     }
     for patch in sorted((REPOSITORY_ROOT / "patches" / "pico-pio-usb").glob("*.patch")):
         text = patch.read_text(encoding="utf-8")
