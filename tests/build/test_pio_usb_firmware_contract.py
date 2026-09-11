@@ -35,7 +35,10 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "tools"))
 sys.path.insert(0, str(REPOSITORY_ROOT / "tests" / "build"))
 
-from pio_usb_flash_contract import assert_flash_path_sram_safe
+from pio_usb_flash_contract import (
+    assert_flash_path_sram_safe,
+    assert_unified_sof_gate,
+)
 
 
 # ------------------------------------------------------------- CMake inputs
@@ -311,6 +314,11 @@ def test_flash_keepalive_executes_entirely_outside_xip_flash():
 
 
 @pio_usb_elf_required
+def test_linked_ordinary_and_flash_frames_share_one_sram_due_gate():
+    assert_unified_sof_gate(_pio_usb_build_dir(), _pio_elf)
+
+
+@pio_usb_elf_required
 def test_core1_flash_window_is_wired_pause_park_resume_finish_in_order():
     disassembly = _disassembly(_pio_usb_build_dir(), _pio_elf)
     body = _function_disassembly(disassembly, "(anonymous namespace)::core1_entry()")
@@ -324,7 +332,7 @@ def test_core1_flash_window_is_wired_pause_park_resume_finish_in_order():
     assert positions == sorted(positions)
 
 
-def test_flash_sof_cadence_is_retained_across_page_program_windows():
+def test_application_flash_loop_owns_no_sof_clock():
     source = (REPOSITORY_ROOT / "firmware/u1_main/pico_flash.cpp").read_text(
         encoding="utf-8"
     )
@@ -333,9 +341,8 @@ def test_flash_sof_cadence_is_retained_across_page_program_windows():
         source.index("finish_core1_flash_window")
     ]
 
-    assert "FlashSofCadence g_flash_sof_cadence" in source
-    assert "g_flash_sof_cadence.due(now_us)" in service
-    assert "FlashSofCadence cadence" not in service
+    assert "FlashSofCadence" not in source
+    assert "pio_usb_host_flash_keepalive();" in service
 
 
 @pio_usb_elf_required

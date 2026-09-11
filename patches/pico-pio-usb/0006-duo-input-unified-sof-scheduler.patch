@@ -1,0 +1,225 @@
+diff --git a/src/pio_usb.h b/src/pio_usb.h
+index e3a1bdb..a70c63f 100644
+--- a/src/pio_usb.h
++++ b/src/pio_usb.h
+@@ -15,13 +15,18 @@ void pio_usb_host_task(void);
+ void pio_usb_host_stop(void);
+ void pio_usb_host_restart(void);
+ uint32_t pio_usb_host_get_frame_number(void);
++// Actual intervals between accepted frame-service invocations. Both remain
++// zero until a second frame has established the first interval.
++uint32_t pio_usb_host_sof_interval_min_us(void);
++uint32_t pio_usb_host_sof_interval_max_us(void);
+ 
+ // Call this every 1ms when skip_alarm_pool is true.
+ void pio_usb_host_frame(void);
+ 
+ // Suspend the normal host timer around an XIP flash operation. While it is
+-// suspended, call the RAM-resident keepalive once per millisecond. It services
+-// queued endpoint transfers but defers their TinyUSB callbacks until resume.
++// suspended, call the RAM-resident keepalive continuously. The shared
++// scheduler limits wire service to one frame per millisecond, services queued
++// endpoint transfers, and defers their TinyUSB callbacks until resume.
+ void pio_usb_host_flash_pause(void);
+ void pio_usb_host_flash_keepalive(void);
+ void pio_usb_host_flash_resume(void);
+diff --git a/src/pio_usb_host.c b/src/pio_usb_host.c
+index eb66c60..37fd39e 100644
+--- a/src/pio_usb_host.c
++++ b/src/pio_usb_host.c
+@@ -14,9 +14,11 @@
+ #include "hardware/sync.h"
+ #include "hardware/pio.h"
+ #include "hardware/gpio.h"
++#include "hardware/structs/timer.h"
+ 
+ #include "pio_usb.h"
+ #include "pio_usb_ll.h"
++#include "pio_usb_sof_scheduler.h"
+ #include "usb_crc.h"
+ 
+ enum {
+@@ -25,6 +27,7 @@ enum {
+ 
+ static alarm_pool_t *_alarm_pool = NULL;
+ static repeating_timer_t sof_rt;
++static pio_usb_sof_scheduler_t sof_scheduler;
+ // The sof_count may be incremented and then read on different cores.
+ static volatile uint32_t sof_count = 0;
+ static bool timer_active;
+@@ -464,33 +467,55 @@ static void __no_inline_not_in_flash_func(pio_usb_host_flash_service_endpoints)(
+   }
+ }
+ 
+-void __not_in_flash_func(pio_usb_host_frame)(void) {
+-  if (!timer_active) {
+-    return;
++static bool __no_inline_not_in_flash_func(
++    pio_usb_host_service_frame_if_due)(void) {
++  uint32_t const now_us = timer_hw->timerawl;
++  if (!pio_usb_sof_scheduler_due(&sof_scheduler, now_us)) {
++    return false;
+   }
+-
+   pio_port_t *pp = PIO_USB_PIO_PORT(0);
+ 
+-  // Send SOF
+   for (int root_idx = 0; root_idx < PIO_USB_ROOT_PORT_CNT; root_idx++) {
+     root_port_t *root = PIO_USB_ROOT_PORT(root_idx);
+-    if (!(root->initialized && root->connected && !root->suspended &&
+-          connection_check(root))) {
++    if (!(root->initialized && root->connected && !root->suspended)) {
+       continue;
+     }
+     configure_root_port(pp, root);
+     if (root->is_fullspeed) {
+-      // Send SOF for full speed
+       pio_usb_bus_usb_transfer(pp, sof_packet_encoded, sof_packet_encoded_len);
+     } else {
+-      // Send Keep alive for low speed
+       pio_usb_bus_usb_transfer(pp, keepalive_encoded, 1);
+     }
+   }
+ 
+-  // Carry out all queued endpoint transactions.
+   pio_usb_host_flash_service_endpoints(pp);
+ 
++  sof_count++;
++
++  uint16_t const sof_count_11b = sof_count & 0x7ff;
++  sof_packet[2] = sof_count_11b & 0xff;
++  sof_packet[3] = (calc_usb_crc5(sof_count_11b) << 3) | (sof_count_11b >> 8);
++  sof_packet_encoded_len =
++      pio_usb_ll_encode_tx_data(sof_packet, sizeof(sof_packet), sof_packet_encoded);
++  return true;
++}
++
++void __no_inline_not_in_flash_func(pio_usb_host_frame)(void) {
++  if (!timer_active) {
++    return;
++  }
++
++  for (int root_idx = 0; root_idx < PIO_USB_ROOT_PORT_CNT; root_idx++) {
++    root_port_t *root = PIO_USB_ROOT_PORT(root_idx);
++    if (root->initialized && root->connected && !root->suspended) {
++      connection_check(root);
++    }
++  }
++
++  if (!pio_usb_host_service_frame_if_due()) {
++    return;
++  }
++
+   // check for new connection to root hub
+   for (int root_idx = 0; root_idx < PIO_USB_ROOT_PORT_CNT; root_idx++) {
+     root_port_t *root = PIO_USB_ROOT_PORT(root_idx);
+@@ -512,40 +537,10 @@ void __not_in_flash_func(pio_usb_host_frame)(void) {
+     }
+   }
+ 
+-  sof_count++;
+-
+-  // SOF counter is 11-bit
+-  uint16_t const sof_count_11b = sof_count & 0x7ff;
+-  sof_packet[2] = sof_count_11b & 0xff;
+-  sof_packet[3] = (calc_usb_crc5(sof_count_11b) << 3) | (sof_count_11b >> 8);
+-  sof_packet_encoded_len =
+-      pio_usb_ll_encode_tx_data(sof_packet, sizeof(sof_packet), sof_packet_encoded);
+ }
+ 
+ void __no_inline_not_in_flash_func(pio_usb_host_flash_keepalive)(void) {
+-  pio_port_t *pp = PIO_USB_PIO_PORT(0);
+-
+-  for (int root_idx = 0; root_idx < PIO_USB_ROOT_PORT_CNT; root_idx++) {
+-    root_port_t *root = PIO_USB_ROOT_PORT(root_idx);
+-    if (!(root->initialized && root->connected && !root->suspended)) {
+-      continue;
+-    }
+-    configure_root_port(pp, root);
+-    if (root->is_fullspeed) {
+-      pio_usb_bus_usb_transfer(pp, sof_packet_encoded, sof_packet_encoded_len);
+-    } else {
+-      pio_usb_bus_usb_transfer(pp, keepalive_encoded, 1);
+-    }
+-  }
+-
+-  pio_usb_host_flash_service_endpoints(pp);
+-
+-  sof_count++;
+-  uint16_t const sof_count_11b = sof_count & 0x7ff;
+-  sof_packet[2] = sof_count_11b & 0xff;
+-  sof_packet[3] = (calc_usb_crc5(sof_count_11b) << 3) | (sof_count_11b >> 8);
+-  sof_packet_encoded_len =
+-      pio_usb_ll_encode_tx_data(sof_packet, sizeof(sof_packet), sof_packet_encoded);
++  (void)pio_usb_host_service_frame_if_due();
+ }
+ 
+ static bool __no_inline_not_in_flash_func(sof_timer)(repeating_timer_t *_rt) {
+@@ -564,6 +559,14 @@ uint32_t pio_usb_host_get_frame_number(void) {
+   return sof_count;
+ }
+ 
++uint32_t pio_usb_host_sof_interval_min_us(void) {
++  return pio_usb_sof_scheduler_interval_min_us(&sof_scheduler);
++}
++
++uint32_t pio_usb_host_sof_interval_max_us(void) {
++  return pio_usb_sof_scheduler_interval_max_us(&sof_scheduler);
++}
++
+ void pio_usb_host_port_reset_start(uint8_t root_idx) {
+   root_port_t *root = PIO_USB_ROOT_PORT(root_idx);
+ 
+diff --git a/src/pio_usb_sof_scheduler.h b/src/pio_usb_sof_scheduler.h
+new file mode 100644
+index 0000000..edf2a03
+--- /dev/null
++++ b/src/pio_usb_sof_scheduler.h
+@@ -0,0 +1,46 @@
++#pragma once
++
++#include <stdbool.h>
++#include <stdint.h>
++
++typedef struct {
++  uint32_t next_sof_us;
++  uint32_t last_sof_us;
++  uint32_t interval_min_us;
++  uint32_t interval_max_us;
++  bool deadline_started;
++} pio_usb_sof_scheduler_t;
++
++static inline bool pio_usb_sof_scheduler_due(
++    pio_usb_sof_scheduler_t *scheduler, uint32_t now_us) {
++  if (scheduler->deadline_started &&
++      (int32_t)(now_us - scheduler->next_sof_us) < 0) {
++    return false;
++  }
++
++  if (scheduler->deadline_started) {
++    uint32_t const interval = now_us - scheduler->last_sof_us;
++    if (scheduler->interval_min_us == 0 ||
++        interval < scheduler->interval_min_us) {
++      scheduler->interval_min_us = interval;
++    }
++    if (interval > scheduler->interval_max_us) {
++      scheduler->interval_max_us = interval;
++    }
++  }
++
++  scheduler->deadline_started = true;
++  scheduler->last_sof_us = now_us;
++  scheduler->next_sof_us = now_us + 1000u;
++  return true;
++}
++
++static inline uint32_t pio_usb_sof_scheduler_interval_min_us(
++    pio_usb_sof_scheduler_t const *scheduler) {
++  return scheduler->interval_min_us;
++}
++
++static inline uint32_t pio_usb_sof_scheduler_interval_max_us(
++    pio_usb_sof_scheduler_t const *scheduler) {
++  return scheduler->interval_max_us;
++}
+

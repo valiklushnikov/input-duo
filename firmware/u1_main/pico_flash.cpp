@@ -3,7 +3,6 @@
 #include <cstring>
 
 #include "hardware/flash.h"
-#include "hardware/structs/timer.h"
 #include "hardware/sync.h"
 #include "pico/multicore.h"
 
@@ -30,12 +29,6 @@ const std::uint8_t* const kXipBase = reinterpret_cast<const std::uint8_t*>(XIP_B
 /// owns both this publication and launch, closing the startup check/use race.
 std::atomic<bool> g_core1_running{false};
 FlashPark g_flash_park;
-#if defined(DUO_INPUT_BACKEND_PIO_USB) || defined(DUO_INPUT_BACKEND_PIO_USB_REFERENCE)
-// One clock for the lifetime of the host, not one clock per flash API call.
-// AbStore programs one 256-byte page at a time; recreating this for every
-// page lets every short window end before its first 1 ms deadline.
-FlashSofCadence g_flash_sof_cadence;
-#endif
 
 }  // namespace
 
@@ -81,10 +74,7 @@ void __no_inline_not_in_flash_func(service_core1_flash_window)() {
 
     while (!g_flash_park.release_requested()) {
 #if defined(DUO_INPUT_BACKEND_PIO_USB) || defined(DUO_INPUT_BACKEND_PIO_USB_REFERENCE)
-        const std::uint32_t now_us = timer_hw->timerawl;
-        if (g_flash_sof_cadence.due(now_us)) {
-            pio_usb_host_flash_keepalive();
-        }
+        pio_usb_host_flash_keepalive();
 #else
         __asm volatile("nop");
 #endif

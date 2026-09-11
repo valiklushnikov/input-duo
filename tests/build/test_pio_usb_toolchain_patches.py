@@ -132,6 +132,11 @@ def test_each_pico_pio_usb_patch_stays_inside_its_reviewed_surface():
             "src/pio_usb_host.c",
             "src/usb_crc.c",
         },
+        "0006-duo-input-unified-sof-scheduler.patch": {
+            "src/pio_usb.h",
+            "src/pio_usb_host.c",
+            "src/pio_usb_sof_scheduler.h",
+        },
     }
     for patch in sorted((REPOSITORY_ROOT / "patches" / "pico-pio-usb").glob("*.patch")):
         text = patch.read_text(encoding="utf-8")
@@ -290,6 +295,28 @@ def _patched_file(patch: Path, path: str) -> str:
 CONTROL_TRACE_PATCH = (
     REPOSITORY_ROOT / "patches" / "pico-pio-usb" / "0003-duo-input-control-trace.patch"
 )
+
+UNIFIED_SOF_PATCH = (
+    REPOSITORY_ROOT
+    / "patches"
+    / "pico-pio-usb"
+    / "0006-duo-input-unified-sof-scheduler.patch"
+)
+
+
+def test_ordinary_and_flash_frames_share_one_due_gate():
+    source = _patched_file(UNIFIED_SOF_PATCH, "src/pio_usb_host.c")
+    gate = "pio_usb_host_service_frame_if_due"
+    ordinary = source[
+        source.index("(pio_usb_host_frame)(") :
+        source.index("(pio_usb_host_flash_keepalive)(")
+    ]
+    flash = source[
+        source.index("(pio_usb_host_flash_keepalive)(") :
+        source.index("(sof_timer)(")
+    ]
+    assert gate in ordinary
+    assert gate in flash
 
 
 def _control_trace_source() -> str:

@@ -1,10 +1,10 @@
 // The two-core handshake that makes flash writes safe without silencing USB SOF.
 
 #include "flash_park.hpp"
+#include "pio_usb_sof_scheduler.h"
 #include "test_support.hpp"
 
 using duo_input::u1::FlashPark;
-using duo_input::u1::FlashSofCadence;
 
 TEST_CASE(core0_and_core1_complete_one_flash_park_handshake) {
     FlashPark park;
@@ -46,46 +46,63 @@ TEST_CASE(release_without_a_park_is_refused) {
     CHECK(park.idle());
 }
 
-TEST_CASE(flash_sof_cadence_emits_once_per_millisecond) {
-    FlashSofCadence cadence;
+TEST_CASE(pio_usb_scheduler_emits_once_per_millisecond) {
+    pio_usb_sof_scheduler_t scheduler{};
 
-    CHECK(cadence.due(100u));
-    CHECK_FALSE(cadence.due(1099u));
-    CHECK(cadence.due(1100u));
-    CHECK_FALSE(cadence.due(1100u));
-    CHECK_FALSE(cadence.due(2099u));
-    CHECK(cadence.due(2100u));
+    CHECK(pio_usb_sof_scheduler_due(&scheduler, 100u));
+    CHECK_FALSE(pio_usb_sof_scheduler_due(&scheduler, 1099u));
+    CHECK(pio_usb_sof_scheduler_due(&scheduler, 1100u));
+    CHECK_FALSE(pio_usb_sof_scheduler_due(&scheduler, 1100u));
+    CHECK_FALSE(pio_usb_sof_scheduler_due(&scheduler, 2099u));
+    CHECK(pio_usb_sof_scheduler_due(&scheduler, 2100u));
 }
 
-TEST_CASE(flash_sof_cadence_skips_missed_frames_without_a_catch_up_burst) {
-    FlashSofCadence cadence;
+TEST_CASE(pio_usb_scheduler_skips_missed_frames_without_a_catch_up_burst) {
+    pio_usb_sof_scheduler_t scheduler{};
 
-    CHECK(cadence.due(100u));
-    CHECK(cadence.due(15100u));
-    CHECK_FALSE(cadence.due(15100u));
-    CHECK_FALSE(cadence.due(16099u));
-    CHECK(cadence.due(16100u));
+    CHECK(pio_usb_sof_scheduler_due(&scheduler, 100u));
+    CHECK(pio_usb_sof_scheduler_due(&scheduler, 15100u));
+    CHECK_FALSE(pio_usb_sof_scheduler_due(&scheduler, 15100u));
+    CHECK_FALSE(pio_usb_sof_scheduler_due(&scheduler, 16099u));
+    CHECK(pio_usb_sof_scheduler_due(&scheduler, 16100u));
 }
 
-TEST_CASE(flash_sof_cadence_handles_the_32_bit_timer_wrapping) {
-    FlashSofCadence cadence;
+TEST_CASE(pio_usb_scheduler_handles_the_32_bit_timer_wrapping) {
+    pio_usb_sof_scheduler_t scheduler{};
 
-    CHECK(cadence.due(0xFFFFFF00u));
-    CHECK_FALSE(cadence.due(743u));
-    CHECK(cadence.due(744u));
-    CHECK_FALSE(cadence.due(744u));
+    CHECK(pio_usb_sof_scheduler_due(&scheduler, 0xFFFFFF00u));
+    CHECK_FALSE(pio_usb_sof_scheduler_due(&scheduler, 743u));
+    CHECK(pio_usb_sof_scheduler_due(&scheduler, 744u));
+    CHECK_FALSE(pio_usb_sof_scheduler_due(&scheduler, 744u));
 }
 
-TEST_CASE(flash_sof_cadence_survives_consecutive_short_flash_windows) {
-    FlashSofCadence cadence;
+TEST_CASE(pio_usb_scheduler_survives_consecutive_short_flash_windows) {
+    pio_usb_sof_scheduler_t scheduler{};
 
     // Each observation represents a separate page-program park. None lasts
     // for 1 ms by itself, but their combined wall time does.
-    CHECK(cadence.due(100u));
-    CHECK_FALSE(cadence.due(450u));
-    CHECK_FALSE(cadence.due(800u));
-    CHECK(cadence.due(1150u));
-    CHECK_FALSE(cadence.due(1500u));
-    CHECK_FALSE(cadence.due(1850u));
-    CHECK(cadence.due(2200u));
+    CHECK(pio_usb_sof_scheduler_due(&scheduler, 100u));
+    CHECK_FALSE(pio_usb_sof_scheduler_due(&scheduler, 450u));
+    CHECK_FALSE(pio_usb_sof_scheduler_due(&scheduler, 800u));
+    CHECK(pio_usb_sof_scheduler_due(&scheduler, 1150u));
+    CHECK_FALSE(pio_usb_sof_scheduler_due(&scheduler, 1500u));
+    CHECK_FALSE(pio_usb_sof_scheduler_due(&scheduler, 1850u));
+    CHECK(pio_usb_sof_scheduler_due(&scheduler, 2200u));
+}
+
+TEST_CASE(pio_usb_scheduler_reports_intervals_only_after_two_frames) {
+    pio_usb_sof_scheduler_t scheduler{};
+
+    CHECK(pio_usb_sof_scheduler_interval_min_us(&scheduler) == 0u);
+    CHECK(pio_usb_sof_scheduler_interval_max_us(&scheduler) == 0u);
+    CHECK(pio_usb_sof_scheduler_due(&scheduler, 100u));
+    CHECK(pio_usb_sof_scheduler_interval_min_us(&scheduler) == 0u);
+    CHECK(pio_usb_sof_scheduler_interval_max_us(&scheduler) == 0u);
+
+    CHECK(pio_usb_sof_scheduler_due(&scheduler, 1100u));
+    CHECK(pio_usb_sof_scheduler_interval_min_us(&scheduler) == 1000u);
+    CHECK(pio_usb_sof_scheduler_interval_max_us(&scheduler) == 1000u);
+    CHECK(pio_usb_sof_scheduler_due(&scheduler, 2600u));
+    CHECK(pio_usb_sof_scheduler_interval_min_us(&scheduler) == 1000u);
+    CHECK(pio_usb_sof_scheduler_interval_max_us(&scheduler) == 1500u);
 }
