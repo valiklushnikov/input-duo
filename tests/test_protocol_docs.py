@@ -126,7 +126,12 @@ class HostBlockDocumentationTest(unittest.TestCase):
         which would make every reply declare fewer bytes than it carries.
         """
         widths = {"u8": 1, "u16": 2, "u32": 4}
-        serialised = sum(widths[width] for _, width in _serialised_host_fields())
+        serialised_fields = _serialised_host_fields()
+        self.assertEqual(
+            serialised_fields[-2:],
+            [("sof_interval_min_us", "u32"), ("sof_interval_max_us", "u32")],
+        )
+        serialised = sum(widths[width] for _, width in serialised_fields)
 
         header = CONFIG_SERVICE_HEADER.read_text(encoding="utf-8")
         declared = header[

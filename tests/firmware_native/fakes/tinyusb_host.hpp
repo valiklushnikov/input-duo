@@ -50,6 +50,8 @@ void set_host_inited(bool inited);
 void set_system_clock_hz(std::uint32_t hz);
 /// What pio_usb_host_get_frame_number() returns from here on.
 void set_sof_frame_count(std::uint32_t frames);
+/// What the Pico-PIO-USB SOF-interval getters return from here on.
+void set_sof_intervals(std::uint32_t minimum_us, std::uint32_t maximum_us);
 /// Populate one Pico-PIO-USB endpoint-pool entry with the two fields the
 /// backend samples for its bounded wire-progress high-water marks.
 void set_endpoint(std::size_t index, std::uint16_t size, std::uint8_t failed_count);

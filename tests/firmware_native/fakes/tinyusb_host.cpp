@@ -9,8 +9,8 @@
 
 // The same two headers firmware/u1_main/pio_usb/backend.cpp includes; in this
 // build they resolve to fakes/hardware/clocks.h and fakes/pio_usb.h, whose
-// clock_get_hz(), pio_usb_host_get_frame_number() and pio_usb_root_port are
-// the settable stand-ins defined at the bottom of this file.
+// clock_get_hz(), the SOF getters, and pio_usb_root_port are the settable
+// stand-ins defined at the bottom of this file.
 #include "hardware/clocks.h"
 #include "host/hcd.h"
 #include "pio_usb.h"
@@ -65,6 +65,8 @@ bool host_inited = false;
 std::uint32_t system_clock_hz = 0;
 std::uint32_t system_clock_hz_at_configure = 0;
 std::uint32_t sof_frames = 0;
+std::uint32_t sof_interval_min_us = 0;
+std::uint32_t sof_interval_max_us = 0;
 bool hub_mounted = false;
 std::array<bool, 16> device_mounted{};
 std::uint32_t stack_pointer = 0;
@@ -105,6 +107,8 @@ void reset() {
     system_clock_hz = 120000000u;
     system_clock_hz_at_configure = 0;
     sof_frames = 0;
+    sof_interval_min_us = 0;
+    sof_interval_max_us = 0;
     hub_mounted = false;
     device_mounted = {};
     stack_pointer = 0;
@@ -175,6 +179,11 @@ void set_host_inited(bool inited) { host_inited = inited; }
 void set_system_clock_hz(std::uint32_t hz) { system_clock_hz = hz; }
 
 void set_sof_frame_count(std::uint32_t frames) { sof_frames = frames; }
+
+void set_sof_intervals(std::uint32_t minimum_us, std::uint32_t maximum_us) {
+    sof_interval_min_us = minimum_us;
+    sof_interval_max_us = maximum_us;
+}
 
 void set_endpoint(std::size_t index, std::uint16_t size, std::uint8_t failed_count) {
     if (index < PIO_USB_EP_POOL_CNT) {
@@ -337,6 +346,14 @@ extern "C" std::uint32_t clock_get_hz(std::uint32_t clock) {
 }
 
 extern "C" std::uint32_t pio_usb_host_get_frame_number(void) { return sof_frames; }
+
+extern "C" std::uint32_t pio_usb_host_sof_interval_min_us(void) {
+    return sof_interval_min_us;
+}
+
+extern "C" std::uint32_t pio_usb_host_sof_interval_max_us(void) {
+    return sof_interval_max_us;
+}
 
 extern "C" bool tuh_configure(std::uint8_t rhport, std::uint8_t cfg_id,
                                 const void* config) {

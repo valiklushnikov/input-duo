@@ -474,6 +474,8 @@ HostObservability PioUsbBackend::observe() const {
     out.core1_min_sp = callbacks.core1_min_sp;
     out.xfer_completions_at_attach = callbacks.xfer_completions_at_attach;
     out.enum_stall_recoveries = enum_stall_recoveries_.load(std::memory_order_relaxed);
+    out.sof_interval_min_us = pio_usb_host_sof_interval_min_us();
+    out.sof_interval_max_us = pio_usb_host_sof_interval_max_us();
 
     const root_port_t& root = pio_usb_root_port[0];
     std::uint8_t state = 0;

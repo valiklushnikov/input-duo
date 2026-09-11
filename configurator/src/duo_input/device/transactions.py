@@ -556,6 +556,11 @@ class HostObservation:
     #: value proves the bounded recovery request repeated, not why the status
     #: stage was retried.
     enum_stall_recoveries: int | None = None
+    #: Shortest and longest actual intervals between accepted SOF frame-service
+    #: invocations. Both are zero until the second frame establishes the first
+    #: interval, and ``None`` when reading an older host-block shape.
+    sof_interval_min_us: int | None = None
+    sof_interval_max_us: int | None = None
     #: That subtraction, done here rather than at a bench.
     #:
     #: DERIVED, not a wire field: the device sends the two numbers above and
@@ -1404,6 +1409,8 @@ def _parse_host_observation(block: bytes) -> tuple[HostObservation | None, bytes
         "<I",
         "<I",
         "<I",
+        "<I",
+        "<I",
     ):
         width = struct.calcsize(field)
         if declared == at:
@@ -1457,6 +1464,8 @@ def _parse_host_observation(block: bytes) -> tuple[HostObservation | None, bytes
             ep_transfer_flags=extension[15],
             xfer_completions_at_attach=extension[16],
             enum_stall_recoveries=extension[17],
+            sof_interval_min_us=extension[18],
+            sof_interval_max_us=extension[19],
             xfer_completions_since_attach=_completions_since_attach(
                 extension[10], extension[16]
             ),

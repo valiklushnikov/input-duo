@@ -556,6 +556,17 @@ def test_the_report_carries_what_the_host_stack_and_root_port_are_doing(
         7,
         2,
         1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        975,
+        1128,
     )
     service = DeviceService(timeout_ms=5000)
     with qtbot.waitSignal(service.operation_succeeded, timeout=5000):
@@ -586,6 +597,8 @@ def test_the_report_carries_what_the_host_stack_and_root_port_are_doing(
     assert host["Largest SOF-frame advance between passes"] == "7"
     assert host["Root-port resets seen (lower bound)"] == "2"
     assert host["Hub mounts seen (lower bound)"] == "1"
+    assert host["Shortest actual SOF interval (us)"] == "975"
+    assert host["Longest actual SOF interval (us)"] == "1128"
     # No derived clock row. There was one, it called a healthy board faulty,
     # and it separated nothing - a healthy board prints these same two numbers.
     assert not any("unchanged since bring-up" in label for label in host)
@@ -735,6 +748,8 @@ WEDGED_MID_ENUMERATION = (
     0x00270101,  # slots 0/1 idle; slot2 active SETUP host-out
     41,  # current total is 41 too: no completion after downstream attach
     0,  # enum_stall_recoveries: the watchdog has not fired
+    975,
+    1128,
 )
 
 

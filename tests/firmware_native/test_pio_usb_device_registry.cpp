@@ -681,6 +681,18 @@ TEST_CASE(the_sof_frame_count_is_read_live_rather_than_cached_by_a_pass) {
     CHECK_EQ(backend.observe().core1_passes, 0u);
 }
 
+TEST_CASE(the_actual_sof_interval_extrema_are_read_live_from_pio_usb) {
+    duo::test::tinyusb_host::reset();
+    PioUsbBackend backend;
+    backend.begin();
+
+    duo::test::tinyusb_host::set_sof_intervals(975u, 1128u);
+    const auto observed = backend.observe();
+
+    CHECK_EQ(observed.sof_interval_min_us, 975u);
+    CHECK_EQ(observed.sof_interval_max_us, 1128u);
+}
+
 TEST_CASE(pio_identity_uses_descriptor_interface_number_and_polls_transport_instance) {
     RegistryRig rig;
     rig.device(3, 0x1234, 0x5678);

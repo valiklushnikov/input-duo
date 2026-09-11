@@ -1349,6 +1349,8 @@ TEST_CASE(the_diagnostics_carry_what_the_host_stack_and_root_port_are_doing) {
     observation.ep_transfer_flags = 0x00002F01u;
     observation.xfer_completions_at_attach = 37u;
     observation.enum_stall_recoveries = 4u;
+    observation.sof_interval_min_us = 975u;
+    observation.sof_interval_max_us = 1128u;
     link.service.set_host_observation(observation);
 
     const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
@@ -1390,12 +1392,14 @@ TEST_CASE(the_diagnostics_carry_what_the_host_stack_and_root_port_are_doing) {
     CHECK_EQ(read_u32(p + at + 67), 37u);
     // The round-6 recovery counter, appended behind the round-5 pair.
     CHECK_EQ(read_u32(p + at + 71), 4u);
+    CHECK_EQ(read_u32(p + at + 75), 975u);
+    CHECK_EQ(read_u32(p + at + 79), 1128u);
     // This test never calls set_reference_counters, so the ceiling is one
     // field-block short of reached - the reference-counters block sends its
     // own single not-published marker byte instead of the full ten.
     CHECK_EQ(reply.payload.size,
-             duo_input::u1::kDiagnosticsPayloadSize -
-                 duo_input::u1::kReferenceCounterFieldBytes - 448 - 188);
+             duo_input::u1::kBackendBlockOffset + duo_input::u1::kBackendBlockBytes +
+                 duo_input::u1::kHostBlockBytes + 1u);
 }
 
 // The two clocks are the whole point of carrying both. A host brought up at
@@ -1472,7 +1476,7 @@ TEST_CASE(a_base_only_host_observation_declares_the_base_shape_and_stops_there) 
     CHECK_EQ(static_cast<std::uint16_t>(p[at + 15] | (p[at + 16] << 8)), 2u);
     CHECK_EQ(read_u32(p + at + 17), 987654u);
     // The block ends here: one length byte plus kHostObservationBaseBytes,
-    // never the sixteen further fields the full shape would carry.
+    // never the twenty further fields the full shape would carry.
     CHECK_EQ(reply.payload.size,
              at + 1 + duo_input::u1::kHostObservationBaseBytes + 1);
 }
@@ -1498,8 +1502,8 @@ TEST_CASE(the_host_block_leaves_the_prefix_byte_for_byte_unchanged) {
     // field-block short of reached - see the same note on the host-stack
     // test above.
     CHECK_EQ(published.payload.size,
-             duo_input::u1::kDiagnosticsPayloadSize -
-                 duo_input::u1::kReferenceCounterFieldBytes - 448 - 188);
+             duo_input::u1::kBackendBlockOffset + duo_input::u1::kBackendBlockBytes +
+                 duo_input::u1::kHostBlockBytes + 1u);
     for (std::size_t index = 0; index < sizeof(kFrozenLegacyDiagnosticsPrefix); ++index) {
         CHECK_EQ(published.payload.data[index], kFrozenLegacyDiagnosticsPrefix[index]);
     }
@@ -1540,6 +1544,8 @@ TEST_CASE(the_real_host_mapping_reaches_the_wire_without_relabeling_or_overwrite
     observed.ep_transfer_flags = 0x393A3B3Cu;
     observed.xfer_completions_at_attach = 0x3D3E3F40u;
     observed.enum_stall_recoveries = 0x41424344u;
+    observed.sof_interval_min_us = 0x45464748u;
+    observed.sof_interval_max_us = 0x494A4B4Cu;
 
     Link link;
     link.hello();
@@ -1548,14 +1554,15 @@ TEST_CASE(the_real_host_mapping_reaches_the_wire_without_relabeling_or_overwrite
     const CdcFrame reply = link.send(CdcMessageType::GET_DIAGNOSTICS);
     const std::size_t at = duo_input::u1::kBackendBlockOffset + 2u;
     const std::uint8_t expected[] = {
-        0x4A, 0x0D, 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55,
+        0x52, 0x0D, 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55,
         0xCC, 0xBB, 0xAA, 0x99, 0x0B, 0x34, 0x12, 0xEF, 0xBE, 0xAD,
         0xDE, 0x02, 0x01, 0x04, 0x03, 0x06, 0x05, 0x07, 0x08, 0x40,
         0x30, 0x20, 0x10, 0x12, 0x11, 0x14, 0x13, 0x16, 0x15, 0x24,
         0x23, 0x22, 0x21, 0x28, 0x27, 0x26, 0x25, 0x2C, 0x2B, 0x2A,
         0x29, 0x30, 0x2F, 0x2E, 0x2D, 0x34, 0x33, 0x32, 0x31, 0x38,
         0x37, 0x36, 0x35, 0x3C, 0x3B, 0x3A, 0x39, 0x40, 0x3F, 0x3E,
-        0x3D, 0x44, 0x43, 0x42, 0x41,
+        0x3D, 0x44, 0x43, 0x42, 0x41, 0x48, 0x47, 0x46, 0x45,
+        0x4C, 0x4B, 0x4A, 0x49,
     };
     // This test never calls set_reference_counters, so that block sends only
     // its own single not-published marker byte.
@@ -2337,6 +2344,17 @@ TEST_CASE(a_new_session_forgets_a_confirmation_nobody_used) {
     // necessarily the same person.
     CHECK_EQ(error_of(link.send(CdcMessageType::FACTORY_RESET_ARM)),
              CdcError::PhysicalConfirmationRequired);
+}
+
+TEST_CASE(the_diagnostics_budget_uses_mutually_exclusive_backend_layouts) {
+    CHECK_EQ(duo_input::u1::kCh375DiagnosticsPayloadSize, 888u);
+    CHECK_EQ(duo_input::u1::kPioUsbDiagnosticsPayloadSize, 1018u);
+    CHECK_EQ(duo_input::u1::kPioUsbReferenceDiagnosticsPayloadSize, 918u);
+    CHECK_EQ(duo_input::u1::kLargestBackendDiagnosticsPayloadSize, 1018u);
+    CHECK_EQ(duo_input::u1::kDiagnosticsPayloadSize, 1020u);
+    CHECK_EQ(duo_input::u1::kDiagnosticsPayloadSize -
+                 duo_input::u1::kLargestBackendDiagnosticsPayloadSize,
+             2u);
 }
 
 TEST_CASE(hid_descriptor_diagnostics_is_advertised_and_capability_gated) {

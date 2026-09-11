@@ -678,6 +678,10 @@ std::size_t ConfigService::write_host_observation(std::uint8_t* out) const {
     at += 4;
     put_u32(out + at, host_observation_.enum_stall_recoveries);
     at += 4;
+    put_u32(out + at, host_observation_.sof_interval_min_us);
+    at += 4;
+    put_u32(out + at, host_observation_.sof_interval_max_us);
+    at += 4;
     return at;
 }
 

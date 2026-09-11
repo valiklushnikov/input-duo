@@ -140,8 +140,8 @@ each self-delimiting so the one behind it can always be found:
   max_sof_gap:u16, root_port_resets:u16, hub_mount_events:u16, ep_slot_map:u32,
   host_event_counts:u32, enum_progress_mask:u32, long_pass_count:u32,
   long_pass_total_ms:u32, core1_min_sp:u32, ep_transfer_flags:u32,
-  xfer_completions_at_attach:u32, enum_stall_recoveries:u32`. Its length byte plays the same
-  role the backend
+  xfer_completions_at_attach:u32, enum_stall_recoveries:u32, sof_interval_min_us:u32,
+  sof_interval_max_us:u32`. Its length byte plays the same role the backend
   block's count does: an image with no host stack sends zero, which is a different fact from an
   older firmware that sends no block at all.
 
@@ -159,7 +159,11 @@ each self-delimiting so the one behind it can always be found:
   `root_port_state` packs `initialized`, `connected`, `suspended` and `is_fullspeed` as bits 0-3.
   `sof_frame_count` is raw root-port activity below the host stack: zero and static means the bus
   is not being driven at all, climbing while every backend counter is still zero means it is being
-  driven and nothing on it answers. `root_port_connects` is a **lower bound**, not a total:
+  driven and nothing on it answers. `sof_interval_min_us` and `sof_interval_max_us` are the
+  shortest and longest actual intervals between accepted SOF frame-service invocations. They are
+  both zero until a second frame establishes the first interval. These trailing fields are
+  append-only: a shorter older host block has neither reading, and a reader must report both as
+  unavailable rather than as measured zeros. `root_port_connects` is a **lower bound**, not a total:
   nothing below the host stack reports an attach edge, so the device polls the line once per
   input-core pass, and an attach and detach that both fall between two passes leaves no trace -
   zero is strong evidence that nothing attached rather than proof of it. `core1_passes` unchanged
@@ -178,7 +182,8 @@ each self-delimiting so the one behind it can always be found:
   during enumeration and do not mean the SOF ISR was starved. `root_port_resets` is a saturating,
   polled lower bound over connected suspended-to-running cycles.
 
-  The last nine fields read inside the window where enumeration stops. Everything in front of
+  The nine fields from `ep_slot_map` through `enum_stall_recoveries` read inside the window where
+  enumeration stops. Everything in front of
   them says whether the host stack started and whether anything ever attached; by the time a
   board reaches this window both answers are yes, and none of the fields above can say which
   step stopped it.

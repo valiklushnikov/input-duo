@@ -50,6 +50,8 @@ extern "C" {
 #endif
 
 uint32_t pio_usb_host_get_frame_number(void);
+uint32_t pio_usb_host_sof_interval_min_us(void);
+uint32_t pio_usb_host_sof_interval_max_us(void);
 extern endpoint_t pio_usb_ep_pool[PIO_USB_EP_POOL_CNT];
 
 #ifdef __cplusplus

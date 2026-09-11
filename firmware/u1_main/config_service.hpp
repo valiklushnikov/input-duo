@@ -313,12 +313,17 @@ struct HostObservation {
     /// saturating. Zero is not a health verdict and this is not a successful-
     /// restart count.
     std::uint32_t enum_stall_recoveries = 0;
+    /// Shortest and longest actual intervals between accepted SOF frame-service
+    /// invocations. Both remain zero until the second frame establishes the
+    /// first interval.
+    std::uint32_t sof_interval_min_us = 0;
+    std::uint32_t sof_interval_max_us = 0;
 };
 
 /// The observation's own bytes on the wire, without its leading length.
 inline constexpr std::size_t kHostObservationBytes =
     1 + 4 + 4 + 4 + 1 + 2 + 4 + 2 + 2 + 2 + 1 + 1 + 4 + 2 + 2 + 2 + 4 + 4 + 4 +
-    4 + 4 + 4 + 4 + 4 + 4;
+    4 + 4 + 4 + 4 + 4 + 4 + 4 + 4;
 
 /// The base reading alone, without its leading length: whether the host
 /// started, on which clock, the free-running frame counter, the root port's
@@ -376,16 +381,39 @@ inline constexpr std::size_t kReferenceCounterFieldBytes = 4 + 4 + 1 + 1;
 /// CH375's empty host block reports HostObservation::state == "none".
 inline constexpr std::size_t kReferenceCounterBlockBytes = 1 + kReferenceCounterFieldBytes;
 
-/// The longest a GET_DIAGNOSTICS reply can be: a backend publishing every
-/// counter, a host block with every field, and a reference-counters block
-/// with its own fields. A backend publishing none sends 4 * kBackendCounterCount
-/// fewer bytes, an image with no host stack sends kHostObservationBytes
-/// fewer, and a build that never calls set_reference_counters sends
-/// kReferenceCounterFieldBytes fewer, so this is a ceiling and not a length.
-inline constexpr std::size_t kDiagnosticsPayloadSize =
-    kBackendBlockOffset + kBackendBlockBytes + kHostBlockBytes +
-    kReferenceCounterBlockBytes + 8 + input::kSourceCapacity * (7 + input::kProductNameBytes) +
+/// The common maximal source inventory: its versioned inventory and report
+/// tails. Every backend can publish this, but its backend, host, and reference
+/// blocks differ. Keep it separate so the budget below cannot accidentally
+/// combine mutually exclusive blocks.
+inline constexpr std::size_t kInputSourcesDiagnosticsPayloadBytes =
+    8 + input::kSourceCapacity * (7 + input::kProductNameBytes) +
     4 + input::kSourceCapacity * 23;
+
+/// The actual longest reply each shipping backend can produce. CH375 has no
+/// host observation or reference counters. PIO_USB has the full backend and
+/// host blocks, but its reference-counter block is only its zero-length
+/// marker. PIO_USB_REFERENCE has no backend counters, a base-only host block,
+/// and its reference counters.
+inline constexpr std::size_t kCh375DiagnosticsPayloadSize =
+    kBackendBlockOffset + 2 + 1 + 1 + kInputSourcesDiagnosticsPayloadBytes;
+inline constexpr std::size_t kPioUsbDiagnosticsPayloadSize =
+    kBackendBlockOffset + kBackendBlockBytes + kHostBlockBytes + 1 +
+    kInputSourcesDiagnosticsPayloadBytes;
+inline constexpr std::size_t kPioUsbReferenceDiagnosticsPayloadSize =
+    kBackendBlockOffset + 2 + 1 + kHostObservationBaseBytes +
+    kReferenceCounterBlockBytes + kInputSourcesDiagnosticsPayloadBytes;
+inline constexpr std::size_t kLargestBackendDiagnosticsPayloadSize =
+    kPioUsbDiagnosticsPayloadSize > kPioUsbReferenceDiagnosticsPayloadSize
+        ? (kPioUsbDiagnosticsPayloadSize > kCh375DiagnosticsPayloadSize
+               ? kPioUsbDiagnosticsPayloadSize
+               : kCh375DiagnosticsPayloadSize)
+        : (kPioUsbReferenceDiagnosticsPayloadSize > kCh375DiagnosticsPayloadSize
+               ? kPioUsbReferenceDiagnosticsPayloadSize
+               : kCh375DiagnosticsPayloadSize);
+
+/// GET_DIAGNOSTICS has a frozen wire ceiling. The actual PIO_USB maximum is
+/// 1018 bytes, preserving two bytes of the established 1020-byte budget.
+inline constexpr std::size_t kDiagnosticsPayloadSize = 1020;
 
 /// Separate report-set evidence; GET_DIAGNOSTICS remains frozen at 1020 bytes.
 inline constexpr std::size_t kHidReportSetEntryBytes = 3;
@@ -394,6 +422,18 @@ inline constexpr std::size_t kHidReportSetSourceBytes =
 inline constexpr std::size_t kHidReportSetsPayloadSize =
     3 + input::kSourceCapacity * kHidReportSetSourceBytes;
 
+static_assert(kCh375DiagnosticsPayloadSize == 888,
+              "the CH375 diagnostics layout changed");
+static_assert(kPioUsbDiagnosticsPayloadSize == 1018,
+              "the PIO_USB diagnostics layout must retain two bytes of headroom");
+static_assert(kPioUsbReferenceDiagnosticsPayloadSize == 918,
+              "the PIO_USB_REFERENCE diagnostics layout changed");
+static_assert(kLargestBackendDiagnosticsPayloadSize == 1018,
+              "the conservative backend-layout maximum changed");
+static_assert(kLargestBackendDiagnosticsPayloadSize <= kDiagnosticsPayloadSize,
+              "a real backend layout exceeds GET_DIAGNOSTICS' frozen budget");
+static_assert(kDiagnosticsPayloadSize - kLargestBackendDiagnosticsPayloadSize == 2,
+              "PIO_USB must retain the two-byte diagnostics headroom");
 static_assert(kDiagnosticsPayloadSize <= protocol::ProtocolLimits::CDC_MAX_PAYLOAD,
               "the diagnostics reply has to fit in one frame");
 static_assert(kDiagnosticsPayloadSize == 1020,

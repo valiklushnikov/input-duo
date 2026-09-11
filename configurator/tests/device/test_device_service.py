@@ -1495,6 +1495,8 @@ def _host_block(
     ep_transfer_flags: int | None = None,
     xfer_completions_at_attach: int = 0,
     enum_stall_recoveries: int = 0,
+    sof_interval_min_us: int | None = None,
+    sof_interval_max_us: int = 0,
 ) -> bytes:
     """The appended host suffix: one length byte, then the fields behind it."""
     import struct
@@ -1540,6 +1542,10 @@ def _host_block(
                         xfer_completions_at_attach,
                         enum_stall_recoveries,
                     )
+                    if sof_interval_min_us is not None:
+                        fields += struct.pack(
+                            "<II", sof_interval_min_us, sof_interval_max_us
+                        )
     return bytes((len(fields),)) + fields
 
 
@@ -1641,6 +1647,8 @@ def test_the_host_block_is_read_behind_a_backend_that_publishes_counters() -> No
             ep_transfer_flags=0x00270101,
             xfer_completions_at_attach=41,
             enum_stall_recoveries=2,
+            sof_interval_min_us=975,
+            sof_interval_max_us=1128,
         )
     )
 
@@ -1689,7 +1697,8 @@ def test_the_host_block_is_read_behind_a_backend_that_publishes_counters() -> No
     assert observation.ep_transfer_flags == 0x00270101
     assert observation.xfer_completions_at_attach == 41
     assert observation.enum_stall_recoveries == 2
-    assert observation.enum_stall_recoveries == 2
+    assert observation.sof_interval_min_us == 975
+    assert observation.sof_interval_max_us == 1128
     assert observation.xfer_completions_since_attach == 0
 
 
@@ -1827,16 +1836,20 @@ def test_every_complete_and_partial_host_append_boundary_is_classified() -> None
         ep_transfer_flags=0x00270101,
         xfer_completions_at_attach=41,
         enum_stall_recoveries=2,
+        sof_interval_min_us=975,
+        sof_interval_max_us=1128,
     )[1:]
 
     complete_boundaries = (
-        20, 22, 24, 26, 27, 28, 32, 34, 36, 38, 42, 46, 50, 54, 58, 62, 66, 70, 74,
+        20, 22, 24, 26, 27, 28, 32, 34, 36, 38, 42, 46, 50, 54, 58, 62, 66, 70,
+        74, 78, 82,
     )
     partial_boundaries = (
         21, 23, 25, 29, 30, 31, 33, 35, 37,
         39, 40, 41, 43, 44, 45, 47, 48, 49,
         51, 52, 53, 55, 56, 57, 59, 60, 61,
         63, 64, 65, 67, 68, 69, 71, 72, 73,
+        75, 76, 77, 79, 80, 81,
     )
     for boundary in complete_boundaries:
         block = bytes((boundary,)) + full_body[:boundary]
@@ -1864,6 +1877,13 @@ def test_every_complete_and_partial_host_append_boundary_is_classified() -> None
     assert first_round_five_field.ep_transfer_flags == 0x00270101
     assert first_round_five_field.xfer_completions_at_attach is None
 
+    previous_full_shape = parse_diagnostics(
+        prefix + bytes((74,)) + full_body[:74]
+    ).host_observation
+    assert previous_full_shape is not None
+    assert previous_full_shape.sof_interval_min_us is None
+    assert previous_full_shape.sof_interval_max_us is None
+
 
 def test_a_longer_host_block_than_this_configurator_knows_is_read_as_far_as_it_goes() -> None:
     """Append-only in the other direction: the length byte finds the end.
@@ -1877,7 +1897,7 @@ def test_a_longer_host_block_than_this_configurator_knows_is_read_as_far_as_it_g
     import struct
 
     fields = struct.pack(
-        "<BIIIBHIHHHBBIHHHIIIIIIIII",
+        "<BIIIBHIHHHBBIHHHIIIIIIIIIII",
         0b1110,
         120_000_000,
         120_000_000,
@@ -1903,6 +1923,8 @@ def test_a_longer_host_block_than_this_configurator_knows_is_read_as_far_as_it_g
         0x00270101,
         41,
         2,
+        975,
+        1128,
     )
     opaque_future_tail = b"\xA5\x5A\xC3\x3C\x10\x20\x30\x40\x50"
     fields += opaque_future_tail
@@ -1928,6 +1950,8 @@ def test_a_longer_host_block_than_this_configurator_knows_is_read_as_far_as_it_g
     assert observation.ep_transfer_flags == 0x00270101
     assert observation.xfer_completions_at_attach == 41
     assert observation.enum_stall_recoveries == 2
+    assert observation.sof_interval_min_us == 975
+    assert observation.sof_interval_max_us == 1128
 
 
 def test_the_emulator_and_the_parser_agree_about_the_host_block() -> None:
@@ -2002,6 +2026,8 @@ def test_the_emulator_can_speak_the_whole_current_host_block() -> None:
         0x00270101,
         41,
         2,
+        975,
+        1128,
     )
 
     observation = parse_diagnostics(
@@ -2019,6 +2045,8 @@ def test_the_emulator_can_speak_the_whole_current_host_block() -> None:
     assert observation.ep_transfer_flags == 0x00270101
     assert observation.xfer_completions_at_attach == 41
     assert observation.enum_stall_recoveries == 2
+    assert observation.sof_interval_min_us == 975
+    assert observation.sof_interval_max_us == 1128
 
 
 # ------------------------------------------------- the reference target's own counters

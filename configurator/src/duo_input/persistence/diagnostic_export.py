@@ -341,6 +341,8 @@ _HOST_STACK_ROWS = (
     # somewhere this reading never saw.
     ("clock_hz_now", "System clock now, and the PIO divider clock (Hz)"),
     ("sof_frame_count", "Root-port frames sent"),
+    ("sof_interval_min_us", "Shortest actual SOF interval (us)"),
+    ("sof_interval_max_us", "Longest actual SOF interval (us)"),
     ("root_port_initialized", "Root port initialised"),
     ("root_port_connected", "Root port connected"),
     ("root_port_suspended", "Root port suspended"),

@@ -36,6 +36,8 @@ inline HostObservation to_wire_host_observation(const HostObservability& observe
     out.ep_transfer_flags = observed.ep_transfer_flags;
     out.xfer_completions_at_attach = observed.xfer_completions_at_attach;
     out.enum_stall_recoveries = observed.enum_stall_recoveries;
+    out.sof_interval_min_us = observed.sof_interval_min_us;
+    out.sof_interval_max_us = observed.sof_interval_max_us;
     return out;
 }
 

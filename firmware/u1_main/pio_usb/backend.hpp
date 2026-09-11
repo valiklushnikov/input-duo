@@ -183,6 +183,11 @@ struct HostObservability {
     /// mounted child, or capped. A value that rises proves this bounded
     /// recovery request repeated; it does not identify the NAK's cause.
     std::uint32_t enum_stall_recoveries = 0;
+    /// Shortest and longest actual intervals between accepted SOF frame-service
+    /// invocations. Both remain zero until the second frame establishes the
+    /// first interval.
+    std::uint32_t sof_interval_min_us = 0;
+    std::uint32_t sof_interval_max_us = 0;
 };
 
 struct HostCallbackObservability {
