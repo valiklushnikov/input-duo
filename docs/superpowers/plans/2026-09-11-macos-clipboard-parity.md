@@ -476,7 +476,8 @@ git commit -m "Route the Windows snapshot through the shared format rules"
 - Consumes: `ClipboardOffer` из `offer.py`; `ContentFetcher` из `backend.py`; `ORIGIN_MIME` из `backend.py`.
 - Produces:
   - `change_count() -> int`
-  - `publish_with_origin(offer: ClipboardOffer, fetcher: ContentFetcher) -> int` — публикует host-only лениво и возвращает новый `changeCount`. Держать ссылку на data provider обязан вызывающий (см. Task 4).
+  - `publish_with_origin(offer: ClipboardOffer, fetcher: ContentFetcher) -> int` — публикует host-only лениво и возвращает `changeCount` итогового состояния (после `writeObjects_`). Ссылку на data provider удерживает сам модуль (`_live_provider`) до следующей публикации; вызывающий про lifetime provider ничего не знает.
+  - `PasteboardPublishError(Exception)` — `writeObjects_` вернул false.
 
 - [ ] **Step 1: Записать зависимость**
 
@@ -525,19 +526,25 @@ def test_change_count_grows_after_a_native_write():
     assert change_count() != before
 
 
-def test_publish_returns_a_new_change_count_and_serves_the_fetcher():
-    before = change_count()
-    provider_ref = []
-
+def test_publish_returns_the_authoritative_change_count():
     def fetch(mime: str) -> bytes:
         return b"lazy from peer" if mime == "text/plain" else b""
 
     count = publish_with_origin(_offer(), fetch)
-    provider_ref.append(count)  # держим что-нибудь живым на время теста
 
-    assert isinstance(count, int)
-    assert count != before
-    # Первый внешний читатель материализует ленивый payload.
+    # Возвращённое значение должно совпадать с итоговым changeCount буфера,
+    # иначе подавление петли примет нашу публикацию за локальное копирование.
+    assert count == change_count()
+
+
+def test_publish_serves_the_fetcher_lazily_to_an_external_reader():
+    def fetch(mime: str) -> bytes:
+        return b"lazy from peer" if mime == "text/plain" else b""
+
+    publish_with_origin(_offer(), fetch)
+
+    # Первый внешний читатель материализует ленивый payload. Если бы provider
+    # не удерживался живым внутри macos_pasteboard, здесь была бы пустота.
     pasted = subprocess.run(["/usr/bin/pbpaste"], capture_output=True).stdout
     assert pasted == b"lazy from peer"
 ```
@@ -637,8 +644,19 @@ def objc_super_init(instance):
 _live_provider = None
 
 
+class PasteboardPublishError(Exception):
+    """NSPasteboard отказался принять опубликованный элемент."""
+
+
 def publish_with_origin(offer: ClipboardOffer, fetcher: ContentFetcher) -> int:
     """Опубликовать удалённый буфер host-only и лениво. Вернуть новый changeCount.
+
+    Возвращается changeCount ПОСЛЕ writeObjects_, а не после
+    prepareForNewContentsWithOptions_: подавление петли в MacOSClipboardBackend
+    сравнивает на равенство именно с итоговым счётчиком опубликованного
+    состояния. Вернуть промежуточное значение означало бы, что следующий опрос
+    увидит больший count и примет нашу же публикацию за локальное копирование -
+    прямой источник зацикливания.
 
     Provider удерживается живым внутри модуля (см. _live_provider): NSPasteboard
     его сильной ссылкой не держит, а материализация ленива и произойдёт позже,
@@ -647,9 +665,7 @@ def publish_with_origin(offer: ClipboardOffer, fetcher: ContentFetcher) -> int:
     global _live_provider
 
     pasteboard = NSPasteboard.generalPasteboard()
-    count = int(
-        pasteboard.prepareForNewContentsWithOptions_(NSPasteboardContentsCurrentHostOnly)
-    )
+    pasteboard.prepareForNewContentsWithOptions_(NSPasteboardContentsCurrentHostOnly)
 
     provider = _DuoDataProvider.alloc().initWithOffer_fetcher_(offer, fetcher)
     item = NSPasteboardItem.alloc().init()
@@ -663,13 +679,19 @@ def publish_with_origin(offer: ClipboardOffer, fetcher: ContentFetcher) -> int:
     marker = f"{offer.origin_id}:{offer.seq}".encode("ascii")
     item.setData_forType_(_to_nsdata(marker), ORIGIN_UTI)
 
-    pasteboard.writeObjects_([item])
+    if not pasteboard.writeObjects_([item]):
+        raise PasteboardPublishError("NSPasteboard.writeObjects вернул false")
 
     _live_provider = provider  # удержать до следующей публикации
-    return count
+    return int(pasteboard.changeCount())
 
 
-__all__ = ["ORIGIN_UTI", "change_count", "publish_with_origin"]
+__all__ = [
+    "ORIGIN_UTI",
+    "PasteboardPublishError",
+    "change_count",
+    "publish_with_origin",
+]
 ```
 
 Примечание для исполнителя: точные имена UTI (`public.html`, `public.png`, `public.url`) и то, как Qt показывает `ORIGIN_UTI` при обратном чтении, — предмет микро-проверки из spec. Если интеграционный тест по `text/plain` проходит, база верна; расхождения по html/png/url правятся здесь же, в `_MIME_TO_UTI`.
@@ -677,7 +699,7 @@ __all__ = ["ORIGIN_UTI", "change_count", "publish_with_origin"]
 - [ ] **Step 5: Убедиться, что тесты проходят**
 
 Run: `cd configurator && ../.venv-mac/bin/python -m pytest tests/clipboard/test_macos_pasteboard.py -q`
-Expected: PASS, 3 теста (на реальной сессии macOS).
+Expected: PASS, 4 теста (на реальной сессии macOS).
 
 - [ ] **Step 6: Commit**
 
@@ -1072,6 +1094,44 @@ def test_an_unknown_platform_is_refused(monkeypatch):
 
     with pytest.raises(UnsupportedPlatformError, match="sunos5"):
         create_backend(clipboard=object())
+
+
+def test_importing_the_factory_does_not_pull_in_concrete_backends():
+    """Сам импорт фабрики не должен грузить ни один конкретный бэкенд."""
+    import importlib
+    import sys
+
+    for name in (
+        "duo_input.clipboard.platform_backend",
+        "duo_input.clipboard.windows_backend",
+        "duo_input.clipboard.macos_backend",
+        "duo_input.clipboard.macos_pasteboard",
+    ):
+        sys.modules.pop(name, None)
+
+    importlib.import_module("duo_input.clipboard.platform_backend")
+
+    assert "duo_input.clipboard.windows_backend" not in sys.modules
+    assert "duo_input.clipboard.macos_backend" not in sys.modules
+    assert "duo_input.clipboard.macos_pasteboard" not in sys.modules
+
+
+def test_the_windows_path_never_loads_macos_modules(monkeypatch):
+    """Windows-ветка не должна затягивать macOS/pyobjc в runtime-граф.
+
+    Это доказывает инвариант фактически, а не по тексту исходников: даже на
+    macOS-хосте выбор win32-ветки не импортирует нативные модули.
+    """
+    import sys
+
+    sys.modules.pop("duo_input.clipboard.macos_backend", None)
+    sys.modules.pop("duo_input.clipboard.macos_pasteboard", None)
+    monkeypatch.setattr(platform_backend.sys, "platform", "win32")
+
+    create_backend(clipboard=object())
+
+    assert "duo_input.clipboard.macos_backend" not in sys.modules
+    assert "duo_input.clipboard.macos_pasteboard" not in sys.modules
 ```
 
 Примечание: `test_darwin_platform_builds_the_macos_backend` создаёт `MacOSClipboardBackend` с настоящим `macos_pasteboard` по умолчанию, но конструктор его не вызывает (импорт модуля происходит, вызовов AppKit нет). На darwin с установленным pyobjc это безопасно. На не-darwin тест пропустится вместе с невозможностью импортировать AppKit — обернуть его `@pytest.mark.skipif(sys.platform != "darwin")`, чтобы Windows-CI не падал на импорте `macos_pasteboard`.
@@ -1128,7 +1188,7 @@ __all__ = ["UnsupportedPlatformError", "create_backend"]
 - [ ] **Step 4: Убедиться, что тесты проходят**
 
 Run: `cd configurator && ../.venv-mac/bin/python -m pytest tests/clipboard/test_platform_backend.py -q`
-Expected: PASS (на macOS — 3 теста; на Windows один пропущен).
+Expected: PASS (на macOS — 5 тестов; на Windows `darwin`-тест пропущен, остальные 4 проходят, включая runtime-граф).
 
 - [ ] **Step 5: Commit**
 
@@ -1217,7 +1277,9 @@ git commit -m "Pin cross-platform snapshot equality as a contract"
 - Consumes: ничего.
 - Produces: только тесты.
 
-- [ ] **Step 1: Написать падающие тесты** (добавить в `test_boundaries.py`)
+- [ ] **Step 1: Добавить архитектурные regression-тесты** (в `test_boundaries.py`)
+
+Эти тесты пишутся после Task 3–5, когда модули уже существуют, поэтому они сразу проходят (characterization/architecture), а не идут через красную фазу — их задача не дать границе размыться в будущем.
 
 ```python
 _NATIVE_PREFIXES = ("AppKit", "Foundation", "objc", "PyObjCTools", "Cocoa")
@@ -1340,6 +1402,7 @@ Expected: PASS (на macOS все, включая нативные Task 3; на 
 4. Убедиться, что `file://` из Finder **не** уходит (copy файла в Finder → на втором ничего для вставки как текст/URL).
 5. Убедиться в отсутствии петли: скопировать на A, вставить на B, затем скопировать на B — на A приходит именно новое содержимое B, без зацикливания.
 6. Проверить host-only: скопированный remote-контент не всплывает на iPhone/другом Mac через Universal Clipboard до вставки.
+7. **Центральное свойство — ленивость.** Наблюдать `duo-input.log` (в `~/.local/share/DuoInput/logs/`): после прихода offer на Mac запись о сетевом fetch содержимого **не** появляется; она появляется только после `⌘V`. Для наблюдаемости на время проверки добавить в `ClipboardService._fetch` временный `logger.info("fetch %s seq=%s", mime, offer.seq)` (или включить `DEBUG`), убедиться в порядке «offer → тишина → ⌘V → fetch», затем убрать временный лог. Это доказывает, что скопированное и не вставленное содержимое машину не покидает.
 
 - [ ] **Step 5: Commit**
 
@@ -1359,4 +1422,5 @@ git commit -m "Select the clipboard backend by platform at startup"
 ## Известные риски исполнения
 
 - Нативный `NSPasteboardItemDataProvider` через pyobjc — самая тонкая часть (Task 3). Интеграционный тест по `text/plain` — шлагбаум; UTI для html/png/url правятся в `_MIME_TO_UTI` по месту.
-- Удержание provider (`self._provider`) — если Cmd+V на настоящей сессии возвращает пусто, первым делом проверять именно живучесть ссылки (ручная проверка Task 8, шаг 4).
+- Удержание provider (`_live_provider` в `macos_pasteboard.py`) — если `⌘V` на настоящей сессии возвращает пусто, первым делом проверять живучесть этой ссылки (интеграционный тест Task 3 `test_publish_serves_the_fetcher_lazily_to_an_external_reader` и ручная проверка Task 8).
+- Возврат `changeCount` из `publish_with_origin` — берётся строго после `writeObjects_`; ошибка здесь даёт clipboard loop (Task 3 `test_publish_returns_the_authoritative_change_count`).
