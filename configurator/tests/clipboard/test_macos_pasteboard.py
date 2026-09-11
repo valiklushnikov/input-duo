@@ -14,8 +14,30 @@ pytestmark = pytest.mark.skipif(
 
 pytest.importorskip("AppKit")
 
-from duo_input.clipboard.macos_pasteboard import change_count, publish_with_origin  # noqa: E402
+from duo_input.clipboard.macos_pasteboard import (  # noqa: E402
+    change_count,
+    is_concealed,
+    publish_with_origin,
+)
 from duo_input.clipboard.offer import ClipboardOffer, describe  # noqa: E402
+
+from AppKit import NSPasteboard, NSPasteboardItem  # noqa: E402
+from Foundation import NSData  # noqa: E402
+
+
+def _write_native(uti_to_bytes: dict[str, bytes]) -> None:
+    """Записать элемент напрямую через NSPasteboard, в обход macos_pasteboard.
+
+    is_concealed() обязан видеть маркер конвенции nspasteboard.org даже когда
+    его положил не наш код - Qt эти UTI на macOS вообще не отдаёт, поэтому
+    единственный надёжный источник правды - сам NSPasteboard.types().
+    """
+    pasteboard = NSPasteboard.generalPasteboard()
+    pasteboard.clearContents()
+    item = NSPasteboardItem.alloc().init()
+    for uti, payload in uti_to_bytes.items():
+        item.setData_forType_(NSData.dataWithBytes_length_(payload, len(payload)), uti)
+    assert pasteboard.writeObjects_([item])
 
 
 def _offer() -> ClipboardOffer:
@@ -68,3 +90,31 @@ def test_publish_serves_the_fetcher_lazily_to_an_external_reader():
     pasted, _ = process.communicate(timeout=5)
 
     assert pasted == b"lazy from peer"
+
+
+def test_is_concealed_is_true_for_a_natively_marked_concealed_item():
+    _write_native(
+        {
+            "public.utf8-plain-text": b"secret",
+            "org.nspasteboard.ConcealedType": b"",
+        }
+    )
+
+    assert is_concealed() is True
+
+
+def test_is_concealed_is_true_for_a_natively_marked_transient_item():
+    _write_native(
+        {
+            "public.utf8-plain-text": b"one-shot",
+            "org.nspasteboard.TransientType": b"",
+        }
+    )
+
+    assert is_concealed() is True
+
+
+def test_is_concealed_is_false_for_a_plain_text_only_item():
+    _write_native({"public.utf8-plain-text": b"nothing to hide"})
+
+    assert is_concealed() is False

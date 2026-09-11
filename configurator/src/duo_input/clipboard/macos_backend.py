@@ -16,6 +16,12 @@ QClipboard: только так Universal Clipboard не материализу�
 модуля): он тянет за собой AppKit/Foundation через pyobjc, а этот файл должен
 оставаться импортируемым на любой платформе и в юнит-тестах без нативных
 зависимостей - тесты подставляют собственный фейк через параметр pasteboard.
+
+Детект приватного контента (org.nspasteboard.Concealed/TransientType) идёт
+ЧЕРЕЗ pasteboard.is_concealed() в _poll, а не по QMimeData.formats(): Qt на
+macOS эти UTI из formats() не отдаёт (проверено вручную - буфер с системным
+паролем даёт formats() = ['text/plain']), а NSPasteboard.types() их честно
+показывает. Проверка меток по строкам formats() здесь была бы мёртвым кодом.
 """
 
 from __future__ import annotations
@@ -26,21 +32,22 @@ from .backend import ORIGIN_MIME, ClipboardSnapshot, ContentFetcher
 from .formats import collect_payloads
 from .offer import ClipboardOffer
 
-#: Метки конвенции nspasteboard.org: не запоминать и не пересылать.
-PRIVATE_MARKERS = (
-    "org.nspasteboard.ConcealedType",
-    "org.nspasteboard.TransientType",
-)
-
 #: Как часто опрашивать changeCount. 300 мс - хороший баланс отзывчивости и CPU.
 POLL_MS = 300
 
 
 def is_private(formats: list[str]) -> bool:
-    """Просило ли содержимое, чтобы его не запоминали и не пересылали."""
-    if ORIGIN_MIME in formats:
-        return True
-    return any(marker in formats for marker in PRIVATE_MARKERS)
+    """Наш ли это собственный round-trip (второй, best-effort пояс подавления петли).
+
+    Детект приватности контента (org.nspasteboard.Concealed/TransientType)
+    здесь НЕ живёт: Qt на macOS эти UTI из QMimeData.formats() не отдаёт
+    (проверено вручную - буфер с системным паролем даёт formats() =
+    ['text/plain']), так что проверка строк была бы мёртвым кодом,
+    создающим ложное чувство защищённости. Настоящий гейт - нативный,
+    через MacOSClipboardBackend._pasteboard.is_concealed() в _poll, потому
+    что NSPasteboard.types() эти маркеры честно показывает.
+    """
+    return ORIGIN_MIME in formats
 
 
 def snapshot_from(mime_data) -> ClipboardSnapshot:
@@ -112,6 +119,11 @@ class MacOSClipboardBackend(QObject):
             self._own_change_count = None
             return
         self._last_seen_change_count = current
+        if self._pasteboard.is_concealed():
+            # Qt на macOS не отдаёт org.nspasteboard.Concealed/TransientType
+            # через QMimeData.formats(), поэтому единственный надёжный гейт -
+            # нативный, до чтения mimeData() и снятия снапшота.
+            return
         snapshot = snapshot_from(self._clipboard.mimeData())
         if snapshot.payloads:
             self._local = snapshot
@@ -120,7 +132,6 @@ class MacOSClipboardBackend(QObject):
 
 __all__ = [
     "POLL_MS",
-    "PRIVATE_MARKERS",
     "MacOSClipboardBackend",
     "is_private",
     "snapshot_from",

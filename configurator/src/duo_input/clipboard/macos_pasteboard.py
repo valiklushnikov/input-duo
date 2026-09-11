@@ -30,6 +30,18 @@ logger = logging.getLogger(__name__)
 #: Кастомный тип-метка происхождения (defense-in-depth, см. spec §4).
 ORIGIN_UTI = "com.duo-input.origin"
 
+#: Метки конвенции nspasteboard.org: не запоминать и не пересылать.
+#:
+#: Qt на macOS эти UTI из QMimeData.formats() НЕ отдаёт (проверено вручную:
+#: конкретный пример - системный пароль в буфере, formats() = ['text/plain'],
+#: тогда как NSPasteboard.generalPasteboard().types() честно содержит
+#: 'org.nspasteboard.ConcealedType'). Поэтому детект приватности живёт здесь,
+#: на нативном уровне, а не в macos_backend.is_private().
+PRIVACY_MARKERS = (
+    "org.nspasteboard.ConcealedType",
+    "org.nspasteboard.TransientType",
+)
+
 #: MIME parity -> UTI, которыми pasteboard объявляет форматы.
 _MIME_TO_UTI = {
     "text/plain": "public.utf8-plain-text",
@@ -50,6 +62,17 @@ _DATA_PROVIDER_PROTOCOL = objc.protocolNamed("NSPasteboardItemDataProvider")
 def change_count() -> int:
     """Текущий счётчик изменений общего pasteboard."""
     return int(NSPasteboard.generalPasteboard().changeCount())
+
+
+def is_concealed() -> bool:
+    """Попросил ли текущий владелец буфера не запоминать и не пересылать его.
+
+    Чтение types() синхронно и не требует run loop - в отличие от ленивого
+    provideDataForType_, здесь просто список деклараций текущего owner'а.
+    """
+    types = NSPasteboard.generalPasteboard().types() or []
+    marker_set = set(PRIVACY_MARKERS)
+    return any(str(uti) in marker_set for uti in types)
 
 
 def _to_nsdata(payload: bytes) -> NSData:
@@ -130,7 +153,9 @@ def publish_with_origin(offer: ClipboardOffer, fetcher: ContentFetcher) -> int:
 
 __all__ = [
     "ORIGIN_UTI",
+    "PRIVACY_MARKERS",
     "PasteboardPublishError",
     "change_count",
+    "is_concealed",
     "publish_with_origin",
 ]

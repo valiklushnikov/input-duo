@@ -21,12 +21,19 @@ class _FakePasteboard:
     def __init__(self, count: int = 10) -> None:
         self._count = count
         self.published: list[ClipboardOffer] = []
+        self._concealed = False
 
     def change_count(self) -> int:
         return self._count
 
     def set_count(self, value: int) -> None:
         self._count = value
+
+    def is_concealed(self) -> bool:
+        return self._concealed
+
+    def set_concealed(self, value: bool) -> None:
+        self._concealed = value
 
     def publish_with_origin(self, offer, fetcher) -> int:
         self.published.append(offer)
@@ -72,8 +79,23 @@ def _backend(count=10, payloads=None) -> tuple[MacOSClipboardBackend, _FakePaste
     return backend, pasteboard
 
 
-def test_is_private_respects_the_concealed_marker():
-    assert is_private(["text/plain", "org.nspasteboard.ConcealedType"]) is True
+def test_a_concealed_local_change_is_never_snapshotted():
+    """Qt на macOS не отдаёт org.nspasteboard.ConcealedType через formats() -
+    единственный источник правды здесь нативный is_concealed() у pasteboard.
+
+    changeCount меняется как при обычном копировании, но нативный гейт в
+    _poll обязан остановить снятие снапшота ДО чтения mimeData().
+    """
+    backend, pasteboard = _backend(count=10)
+    emitted: list = []
+    backend.snapshot_taken.connect(emitted.append)
+    backend.start()
+
+    pasteboard.set_concealed(True)
+    pasteboard.set_count(11)
+    backend._poll()
+
+    assert emitted == []
 
 
 def test_is_private_respects_our_own_origin():
