@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from unittest.mock import MagicMock
 
 import pytest
-from PySide6.QtCore import QMimeData, QObject, Signal
+from PySide6.QtCore import QMimeData, QObject, QUrl, Signal
 
 from duo_input.clipboard.backend import ORIGIN_MIME, ClipboardSnapshot
 from duo_input.clipboard.offer import MAX_CONTENT_BYTES, ClipboardOffer, ContentDescriptor
@@ -31,8 +31,20 @@ class _FakeMimeData:
     def formats(self) -> list[str]:
         return list(self._payloads)
 
+    def hasFormat(self, mime: str) -> bool:  # noqa: N802 - Qt API
+        return mime in self._payloads
+
     def data(self, mime: str) -> bytes:
         return self._payloads.get(mime, b"")
+
+    def hasUrls(self) -> bool:  # noqa: N802 - Qt API
+        return False
+
+    def urls(self) -> list:
+        return []
+
+    def hasImage(self) -> bool:  # noqa: N802 - Qt API
+        return False
 
 
 class _FakeClipboard(QObject):
@@ -85,11 +97,39 @@ def test_our_own_marker_makes_the_clipboard_private_to_us():
 
 
 def test_snapshot_keeps_only_the_formats_we_synchronise():
-    data = _FakeMimeData({"text/plain": b"hello", "text/html": b"<b>hello</b>"})
+    data = _FakeMimeData({"text/plain": b"hello", "text/rtf": b"{\\rtf1}"})
 
     snapshot = snapshot_from(data)
 
     assert set(snapshot.payloads) == {"text/plain"}
+
+
+def test_snapshot_keeps_text_html():
+    data = QMimeData()
+    data.setData("text/plain", b"hello")
+    data.setData("text/html", b"<b>hello</b>")
+
+    snapshot = snapshot_from(data)
+
+    assert snapshot.payloads["text/html"] == b"<b>hello</b>"
+
+
+def test_snapshot_uri_list_keeps_only_web_urls():
+    data = QMimeData()
+    data.setUrls([QUrl("https://example.com"), QUrl("file:///C:/secret.txt")])
+
+    snapshot = snapshot_from(data)
+
+    assert snapshot.payloads["text/uri-list"] == b"https://example.com\r\n"
+
+
+def test_snapshot_of_only_file_urls_has_no_uri_list():
+    data = QMimeData()
+    data.setUrls([QUrl("file:///C:/a.txt"), QUrl("file:///C:/b.txt")])
+
+    snapshot = snapshot_from(data)
+
+    assert "text/uri-list" not in snapshot.payloads
 
 
 def test_snapshot_of_an_oversized_payload_is_empty():
