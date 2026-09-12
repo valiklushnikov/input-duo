@@ -445,6 +445,11 @@ TEST_CASE(toggling_out_of_both_lands_where_the_pointer_is) {
 
         engine.handle(key(InputEventKind::KeyDown, 0x40));
 
+        // The old unconditional flip out of BOTH also landed on PC1, so the
+        // PC1 iteration passes under either rule and proves nothing by
+        // itself - it is here to state the rule in full, not to verify it.
+        // PC2 is the iteration that actually distinguishes "follows the
+        // pointer" from "always PC1".
         const KeyboardRoute expected =
             mouse == MouseRoute::PC1 ? KeyboardRoute::PC1 : KeyboardRoute::PC2;
         CHECK_EQ(static_cast<int>(engine.keyboard_route()), static_cast<int>(expected));
