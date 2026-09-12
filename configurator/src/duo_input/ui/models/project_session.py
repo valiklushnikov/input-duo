@@ -121,6 +121,16 @@ class SetActiveProfile:
         return replace(project, active_profile_id=self.profile_id)
 
 
+@dataclass(frozen=True)
+class SetSynchronisedControl:
+    """Switch the keyboard and the mouse between travelling together or apart."""
+
+    enabled: bool
+
+    def apply_to(self, project: DeviceProject) -> DeviceProject:
+        return replace(project, synchronised_control=self.enabled)
+
+
 def _replace_profile(
     project: DeviceProject, profile_id: int, change: Callable[[Profile], Profile]
 ) -> DeviceProject:
@@ -647,6 +657,7 @@ __all__ = [
     "SetMacroTarget",
     "SetProfileColor",
     "SetProfileRoutes",
+    "SetSynchronisedControl",
     "UpdateBinding",
     "default_project",
 ]

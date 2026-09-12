@@ -41,6 +41,7 @@ from duo_input.ui.models.project_session import (
     AddBinding,
     ProjectSession,
     RemoveBinding,
+    SetSynchronisedControl,
     UpdateBinding,
 )
 from duo_input.ui.theme import (
@@ -114,6 +115,7 @@ class MouseSwitchPage(QWidget):
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, SPACE_SM, 0)
         body_layout.setSpacing(SPACE_LG)
+        body_layout.addWidget(self._build_synchronised())
         body_layout.addWidget(self._build_editor())
         body_layout.addWidget(self._build_existing(), 1)
 
@@ -125,6 +127,42 @@ class MouseSwitchPage(QWidget):
         self._refresh()
 
     # ---------------------------------------------------------------- layout
+
+    def _build_synchronised(self) -> QWidget:
+        box = QGroupBox(self.tr("Both devices at once"), self)
+        box.setMaximumWidth(820)
+        layout = QVBoxLayout(box)
+        layout.setSpacing(SPACE_SM)
+
+        self.synchronised_check = QCheckBox(
+            self.tr("Switch the keyboard and the mouse together"), box
+        )
+        self.synchronised_check.setAccessibleName(
+            self.tr("Switch the keyboard and the mouse together")
+        )
+        self.synchronised_check.toggled.connect(self._on_synchronised_toggled)
+        layout.addWidget(self.synchronised_check)
+
+        # The fields around this one belong to a profile. Without saying so,
+        # this reads as another of them.
+        hint = QLabel(
+            self.tr(
+                "Switching either the keyboard or the mouse sends both devices to "
+                "the same computer. This setting applies to every profile."
+            ),
+            box,
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        return box
+
+    def _on_synchronised_toggled(self, enabled: bool) -> None:
+        # _updating is raised while the page is being filled in from a project;
+        # without it, loading a project that has this on would emit an edit
+        # that rewrites the project on open.
+        if self._updating:
+            return
+        self.command_requested.emit(SetSynchronisedControl(enabled))
 
     def _build_editor(self) -> QWidget:
         box = QGroupBox(self.tr("Switch the mouse"), self)
@@ -487,6 +525,7 @@ class MouseSwitchPage(QWidget):
             return
         self._updating = True
         try:
+            self.synchronised_check.setChecked(self._session.project.synchronised_control)
             kind = self.trigger_kind.currentData()
             friendly_capture = self._shows_friendly_capture()
             neutral_name = self.tr("Not applicable")

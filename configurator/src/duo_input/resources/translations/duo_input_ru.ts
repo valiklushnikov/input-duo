@@ -1171,87 +1171,103 @@
 <context>
     <name>MouseSwitchPage</name>
     <message>
-        <location filename="../../ui/mouse.py" line="102"/>
+        <location filename="../../ui/mouse.py" line="103"/>
         <source>Mouse</source>
         <extracomment>Every action this page can produce, in the order it offers them. A mouse button the device just reported, so the shell can remember it.</extracomment>
         <translation>Мышь</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="104"/>
+        <location filename="../../ui/mouse.py" line="105"/>
         <source>Choose the key or mouse button that sends the pointer to PC1 or PC2.</source>
         <translation>Выберите клавишу или кнопку мыши для переключения указателя между ПК1 и ПК2.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="130"/>
+        <location filename="../../ui/mouse.py" line="132"/>
+        <source>Both devices at once</source>
+        <translation>Оба устройства сразу</translation>
+    </message>
+    <message>
+        <location filename="../../ui/mouse.py" line="138"/>
+        <location filename="../../ui/mouse.py" line="141"/>
+        <source>Switch the keyboard and the mouse together</source>
+        <translation>Переключать клавиатуру и мышь вместе</translation>
+    </message>
+    <message>
+        <location filename="../../ui/mouse.py" line="150"/>
+        <source>Switching either the keyboard or the mouse sends both devices to the same computer. This setting applies to every profile.</source>
+        <translation>При переключении клавиатуры или мыши оба устройства будут направлены на один компьютер. Настройка действует для всех профилей.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/mouse.py" line="168"/>
         <source>Switch the mouse</source>
         <translation>Переключение мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="137"/>
+        <location filename="../../ui/mouse.py" line="175"/>
         <source>Trigger kind</source>
         <translation>Вид триггера</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="138"/>
+        <location filename="../../ui/mouse.py" line="176"/>
         <source>Choose...</source>
         <translation>Выберите...</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="139"/>
-        <location filename="../../ui/mouse.py" line="147"/>
-        <location filename="../../ui/mouse.py" line="494"/>
+        <location filename="../../ui/mouse.py" line="177"/>
+        <location filename="../../ui/mouse.py" line="185"/>
+        <location filename="../../ui/mouse.py" line="533"/>
         <source>Keyboard key</source>
         <translation>Клавиша клавиатуры</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="140"/>
-        <location filename="../../ui/mouse.py" line="163"/>
+        <location filename="../../ui/mouse.py" line="178"/>
+        <location filename="../../ui/mouse.py" line="201"/>
         <source>Mouse button</source>
         <translation>Кнопка мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="143"/>
+        <location filename="../../ui/mouse.py" line="181"/>
         <source>1. What do you press?</source>
         <translation>1. Что вы нажимаете?</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="151"/>
+        <location filename="../../ui/mouse.py" line="189"/>
         <source>Key:</source>
         <translation>Клавиша:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="169"/>
+        <location filename="../../ui/mouse.py" line="207"/>
         <source>Detect button or key</source>
         <translation>Определить кнопку или клавишу</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="402"/>
+        <location filename="../../ui/mouse.py" line="440"/>
         <source>Press the button or key on the mouse you want to use.</source>
         <translation>Нажмите на мыши кнопку или клавишу, которую хотите использовать.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="171"/>
+        <location filename="../../ui/mouse.py" line="209"/>
         <source>Detect a button or key on the mouse</source>
         <translation>Определить кнопку или клавишу на мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="141"/>
+        <location filename="../../ui/mouse.py" line="179"/>
         <source>Consumer control</source>
         <translation>Мультимедийное управление</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="157"/>
-        <location filename="../../ui/mouse.py" line="497"/>
+        <location filename="../../ui/mouse.py" line="195"/>
+        <location filename="../../ui/mouse.py" line="536"/>
         <source>Consumer usage</source>
         <translation>Код consumer-управления</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="159"/>
+        <location filename="../../ui/mouse.py" line="197"/>
         <source>Consumer usage:</source>
         <translation>Код consumer-управления:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="177"/>
+        <location filename="../../ui/mouse.py" line="215"/>
         <source>Button:</source>
         <translation>Кнопка:</translation>
     </message>
@@ -1268,129 +1284,129 @@
         <translation type="vanished">Изменить обнаруженный триггер вручную</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="184"/>
-        <location filename="../../ui/mouse.py" line="505"/>
+        <location filename="../../ui/mouse.py" line="222"/>
+        <location filename="../../ui/mouse.py" line="544"/>
         <source>{0} modifier</source>
         <translation>Модификатор {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="191"/>
+        <location filename="../../ui/mouse.py" line="229"/>
         <source>Modifiers:</source>
         <translation>Модификаторы:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="195"/>
+        <location filename="../../ui/mouse.py" line="233"/>
         <source>What the trigger does</source>
         <translation>Что делает триггер</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="196"/>
+        <location filename="../../ui/mouse.py" line="234"/>
         <source>Toggle between PC1 and PC2</source>
         <translation>Переключать между ПК1 и ПК2</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="197"/>
+        <location filename="../../ui/mouse.py" line="235"/>
         <source>Always PC1</source>
         <translation>Всегда ПК1</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="198"/>
+        <location filename="../../ui/mouse.py" line="236"/>
         <source>Always PC2</source>
         <translation>Всегда ПК2</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="200"/>
+        <location filename="../../ui/mouse.py" line="238"/>
         <source>2. What should it do?</source>
         <translation>2. Что это должно делать?</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="203"/>
+        <location filename="../../ui/mouse.py" line="241"/>
         <source>Binding mode</source>
         <translation>Режим назначения</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="204"/>
+        <location filename="../../ui/mouse.py" line="242"/>
         <source>Replace the key</source>
         <translation>Заменить клавишу</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="205"/>
+        <location filename="../../ui/mouse.py" line="243"/>
         <source>Add to the key</source>
         <translation>Добавить к клавише</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="206"/>
+        <location filename="../../ui/mouse.py" line="244"/>
         <source>Mode:</source>
         <translation>Режим:</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="210"/>
+        <location filename="../../ui/mouse.py" line="248"/>
         <source>Mouse switching warnings</source>
         <translation>Предупреждения о переключении мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="217"/>
+        <location filename="../../ui/mouse.py" line="255"/>
         <source>Bind</source>
         <translation>Назначить</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="218"/>
+        <location filename="../../ui/mouse.py" line="256"/>
         <source>Bind this trigger to the mouse route</source>
         <translation>Назначить этот триггер на маршрут мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="227"/>
+        <location filename="../../ui/mouse.py" line="265"/>
         <source>Mouse switching in this profile</source>
         <translation>Переключение мыши в этом профиле</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="230"/>
+        <location filename="../../ui/mouse.py" line="268"/>
         <source>Existing mouse switch bindings</source>
         <translation>Существующие назначения переключения мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="421"/>
-        <location filename="../../ui/mouse.py" line="456"/>
+        <location filename="../../ui/mouse.py" line="459"/>
+        <location filename="../../ui/mouse.py" line="494"/>
         <source>Side button</source>
         <translation>Боковая кнопка</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="444"/>
+        <location filename="../../ui/mouse.py" line="482"/>
         <source>Left button</source>
         <translation>Левая</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="445"/>
+        <location filename="../../ui/mouse.py" line="483"/>
         <source>Right button</source>
         <translation>Правая</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="446"/>
+        <location filename="../../ui/mouse.py" line="484"/>
         <source>Middle button (wheel)</source>
         <translation>Средняя (колесо)</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="447"/>
+        <location filename="../../ui/mouse.py" line="485"/>
         <source>Side button 1</source>
         <translation>Боковая кнопка 1</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="448"/>
+        <location filename="../../ui/mouse.py" line="486"/>
         <source>Side button 2</source>
         <translation>Боковая кнопка 2</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="450"/>
+        <location filename="../../ui/mouse.py" line="488"/>
         <source>Button {0}</source>
         <translation>Кнопка {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="492"/>
+        <location filename="../../ui/mouse.py" line="531"/>
         <source>Not applicable</source>
         <translation>Неприменимо</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="434"/>
+        <location filename="../../ui/mouse.py" line="472"/>
         <source>Toggle</source>
         <translation>Переключение</translation>
     </message>
@@ -1399,23 +1415,23 @@
         <translation type="vanished">Дополнительная кнопка мыши</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="540"/>
-        <location filename="../../ui/mouse.py" line="545"/>
+        <location filename="../../ui/mouse.py" line="579"/>
+        <location filename="../../ui/mouse.py" line="584"/>
         <source>Choose what you press first.</source>
         <translation>Сначала выберите, что вы нажимаете.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="542"/>
+        <location filename="../../ui/mouse.py" line="581"/>
         <source>No mouse is attached, so no mouse button can be bound.</source>
         <translation>Мышь не подключена, поэтому назначить кнопку мыши нельзя.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="549"/>
+        <location filename="../../ui/mouse.py" line="588"/>
         <source>{0} is already bound in this profile.</source>
         <translation>{0} уже назначен в этом профиле.</translation>
     </message>
     <message>
-        <location filename="../../ui/mouse.py" line="566"/>
+        <location filename="../../ui/mouse.py" line="605"/>
         <source>{0} is bound here but the attached mouse has not reported it.</source>
         <translation>{0} назначена здесь, но подключённая мышь о ней не сообщала.</translation>
     </message>
@@ -1562,13 +1578,13 @@
 <context>
     <name>PairingDialog</name>
     <message>
-        <location filename="../../app.py" line="144"/>
+        <location filename="../../app.py" line="156"/>
         <source>Подтвердите связывание</source>
         <extracomment>Console script target declared in ``pyproject.toml``. Аргумент командной строки, которым автозапуск просит не показывать окно - см. persistence/autostart.py и §4 спецификации.</extracomment>
         <translation>Подтвердите связывание</translation>
     </message>
     <message>
-        <location filename="../../app.py" line="145"/>
+        <location filename="../../app.py" line="157"/>
         <source>Компьютер «{0}» показывает тот же код?
 
 Код: {1}</source>
@@ -1577,12 +1593,12 @@
 Код: {1}</translation>
     </message>
     <message>
-        <location filename="../../app.py" line="155"/>
+        <location filename="../../app.py" line="167"/>
         <source>Связать</source>
         <translation>Связать</translation>
     </message>
     <message>
-        <location filename="../../app.py" line="159"/>
+        <location filename="../../app.py" line="171"/>
         <source>Отказать</source>
         <translation>Отказать</translation>
     </message>
@@ -1622,7 +1638,7 @@
     </message>
     <message>
         <location filename="../../ui/profiles.py" line="124"/>
-        <location filename="../../ui/profiles.py" line="302"/>
+        <location filename="../../ui/profiles.py" line="308"/>
         <source>Profile colour</source>
         <translation>Цвет профиля</translation>
     </message>
@@ -1680,6 +1696,11 @@
         <location filename="../../ui/profiles.py" line="241"/>
         <source>{0} - {1} ({2} bindings, {3} macros){4}</source>
         <translation>{0} - {1} (назначений: {2}, макросов: {3}){4}</translation>
+    </message>
+    <message>
+        <location filename="../../ui/profiles.py" line="261"/>
+        <source>{0} — brought together on activation</source>
+        <translation>{0} — сводятся при активации</translation>
     </message>
 </context>
 <context>

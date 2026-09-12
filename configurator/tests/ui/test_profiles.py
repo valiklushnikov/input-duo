@@ -210,3 +210,23 @@ def test_the_page_uses_the_shared_visual_hierarchy(page):
 
     assert titles == ["Profiles"]
     assert page.routes_label.property("role") == theme.ROLE_MONO
+
+
+def test_profile_routes_say_when_the_device_will_bring_them_together(qtbot):
+    from dataclasses import replace
+
+    from duo_input.ui.models.project_session import ProjectSession
+    from duo_input.ui.profiles import ProfilesPage
+
+    from duo_input.ui.models.project_session import default_project
+
+    page = ProfilesPage()
+    qtbot.addWidget(page)
+    page.set_session(
+        ProjectSession(project=replace(default_project(), synchronised_control=True))
+    )
+
+    # The device settles the pair when the profile is activated, so a page
+    # showing "PC1 / PC2" with nothing else would be showing routes the
+    # operator will never have.
+    assert "together" in page.routes_label.text().lower()

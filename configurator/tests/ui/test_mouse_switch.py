@@ -29,6 +29,7 @@ from duo_input.ui.bindings import CaptureDialog
 from duo_input.ui.models.project_session import (
     AddBinding,
     ProjectSession,
+    SetSynchronisedControl,
     UpdateBinding,
 )
 from duo_input.ui.mouse import MouseSwitchPage
@@ -894,3 +895,51 @@ def test_a_conflict_is_shown_as_an_error_not_a_warning(page):
 
     assert page.warning_label.text()
     assert page.warning_label.property("signal") == theme.SIGNAL_ERROR
+
+
+# --------------------------------------------------------------- synchronised
+
+
+def test_the_page_offers_a_synchronised_control_switch(page):
+    assert page.synchronised_check.isChecked() is False
+    assert "together" in page.synchronised_check.text().lower()
+
+
+def test_clicking_the_real_checkbox_asks_for_synchronised_control(page, qtbot):
+    # Through the widget, not the model. A test that sets the field directly
+    # passes with the handler entirely disconnected.
+    with qtbot.waitSignal(page.command_requested) as blocker:
+        QTest.mouseClick(
+            page.synchronised_check,
+            Qt.MouseButton.LeftButton,
+            pos=QPoint(6, page.synchronised_check.height() // 2),
+        )
+
+    command = blocker.args[0]
+    assert isinstance(command, SetSynchronisedControl)
+    assert command.enabled is True
+
+
+def test_the_checkbox_shows_what_the_project_already_says(page):
+    from dataclasses import replace
+
+    from duo_input.ui.models.project_session import default_project
+
+    page.set_session(
+        ProjectSession(project=replace(default_project(), synchronised_control=True))
+    )
+
+    assert page.synchronised_check.isChecked() is True
+
+
+def test_reloading_the_session_does_not_ask_for_a_change(page, qtbot):
+    # Setting the checkbox from the project must not echo back as an edit: a
+    # toggled() that fires on every load rewrites the project on open.
+    from dataclasses import replace
+
+    from duo_input.ui.models.project_session import default_project
+
+    session = ProjectSession(project=replace(default_project(), synchronised_control=True))
+
+    with qtbot.assertNotEmitted(page.command_requested):
+        page.set_session(session)

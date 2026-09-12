@@ -388,3 +388,15 @@ def test_removing_an_unused_macro_is_allowed():
 
     assert _profile(session, 1).macros == ()
     assert validate_project(session.project) == ()
+
+
+def test_set_synchronised_control_changes_only_that_setting():
+    from duo_input.ui.models.project_session import SetSynchronisedControl, default_project
+
+    project = default_project()
+    changed = SetSynchronisedControl(True).apply_to(project)
+
+    assert changed.synchronised_control is True
+    assert changed.profiles == project.profiles
+    assert changed.active_profile_id == project.active_profile_id
+    assert SetSynchronisedControl(False).apply_to(changed).synchronised_control is False

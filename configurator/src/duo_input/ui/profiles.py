@@ -250,10 +250,16 @@ class ProfilesPage(QWidget):
             red, green, blue = profile.color_rgb
             self.color_button.setText(f"#{red:02X}{green:02X}{blue:02X}")
             self.color_button.setIcon(_swatch(profile.color_rgb))
-            self.routes_label.setText(
+            routes = (
                 f"{profile.keyboard_route.name} / {profile.mouse_route.name}"
                 f" / {profile.text_layout.name}"
             )
+            if self._session.project.synchronised_control:
+                # The device brings the pair together when this profile is
+                # activated. Showing the stored pair alone would promise routes
+                # the operator will never actually have.
+                routes = self.tr("{0} — brought together on activation").format(routes)
+            self.routes_label.setText(routes)
             self.copy_target.clear()
             for candidate in self._session.project.profiles:
                 if candidate.id != profile.id:
