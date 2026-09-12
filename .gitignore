@@ -2,7 +2,9 @@
 /build/
 .python312/
 .venv/
+.venv-mac/
 __pycache__/
+.DS_Store
 *.pyc
 configurator/dist/
 configurator/dist-debug/

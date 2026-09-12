@@ -55,8 +55,20 @@ def configure_application() -> Path:
 
 
 def icon_path() -> Path:
-    """The application icon, as it sits beside the package."""
-    return Path(__file__).resolve().parent / "resources" / "duo-input.ico"
+    """The application icon, as it sits beside the package.
+
+    In a frozen standalone build the entry module's ``__file__`` does not point
+    beside the bundled ``duo_input`` package, so also look next to the running
+    executable, where Nuitka places the data files (``duo_input/resources/``).
+    """
+    candidates = (
+        Path(__file__).resolve().parent / "resources" / "duo-input.ico",
+        Path(sys.executable).resolve().parent / "duo_input" / "resources" / "duo-input.ico",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
 
 
 def build_main_window(
