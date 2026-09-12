@@ -701,3 +701,147 @@ TEST_CASE(a_key_is_never_pressed_twice_on_the_far_side_without_a_release) {
     walk(engine.release_everything());
     CHECK(!down_on_far_side);
 }
+
+namespace {
+
+/// Drive an engine to a given pair of routes, then apply one switch.
+///
+/// The bindings are fixed: 0x3E sets the keyboard, 0x3F sets the mouse, 0x40
+/// toggles the keyboard and 0x41 toggles the mouse.
+BindingEngine synchronised_engine(KeyboardRoute keyboard, MouseRoute mouse) {
+    BindingEngine engine;
+    engine.set_bindings({bound(0x3E, BindingMode::REPLACE, ActionKind::SET_KEYBOARD_ROUTE,
+                               static_cast<std::uint8_t>(keyboard)),
+                         bound(0x3F, BindingMode::REPLACE, ActionKind::SET_MOUSE_ROUTE,
+                               static_cast<std::uint8_t>(mouse)),
+                         bound(0x40, BindingMode::REPLACE, ActionKind::TOGGLE_KEYBOARD_ROUTE),
+                         bound(0x41, BindingMode::REPLACE, ActionKind::TOGGLE_MOUSE_ROUTE)});
+    // Placed while synchronisation is off, so the starting pair is exactly
+    // what the table asks for - including the two diverged rows, which is the
+    // state switching the mode on over parted routes leaves behind.
+    engine.set_synchronised_control(false);
+    engine.handle(key(InputEventKind::KeyDown, 0x3F));
+    engine.handle(key(InputEventKind::KeyUp, 0x3F));
+    engine.handle(key(InputEventKind::KeyDown, 0x3E));
+    engine.handle(key(InputEventKind::KeyUp, 0x3E));
+    engine.set_synchronised_control(true);
+    return engine;
+}
+
+}  // namespace
+
+TEST_CASE(synchronised_switching_puts_both_devices_on_one_computer) {
+    struct Row {
+        KeyboardRoute keyboard;
+        MouseRoute mouse;
+        std::uint16_t press;
+        KeyboardRoute expect_keyboard;
+        MouseRoute expect_mouse;
+    };
+    // The acceptance table from the design, row for row.
+    const Row rows[] = {
+        {KeyboardRoute::PC1, MouseRoute::PC1, 0x40, KeyboardRoute::PC2, MouseRoute::PC2},
+        {KeyboardRoute::PC1, MouseRoute::PC1, 0x41, KeyboardRoute::PC2, MouseRoute::PC2},
+        {KeyboardRoute::PC1, MouseRoute::PC2, 0x40, KeyboardRoute::PC2, MouseRoute::PC2},
+        {KeyboardRoute::PC2, MouseRoute::PC1, 0x41, KeyboardRoute::PC2, MouseRoute::PC2},
+        {KeyboardRoute::BOTH, MouseRoute::PC1, 0x40, KeyboardRoute::PC1, MouseRoute::PC1},
+        {KeyboardRoute::BOTH, MouseRoute::PC2, 0x40, KeyboardRoute::PC2, MouseRoute::PC2},
+        {KeyboardRoute::BOTH, MouseRoute::PC1, 0x41, KeyboardRoute::PC2, MouseRoute::PC2},
+    };
+
+    for (const Row& row : rows) {
+        BindingEngine engine = synchronised_engine(row.keyboard, row.mouse);
+        engine.handle(key(InputEventKind::KeyDown, row.press));
+
+        CHECK_EQ(static_cast<int>(engine.keyboard_route()), static_cast<int>(row.expect_keyboard));
+        CHECK_EQ(static_cast<int>(engine.mouse_route()), static_cast<int>(row.expect_mouse));
+    }
+}
+
+TEST_CASE(synchronised_control_leaves_the_mouse_alone_when_the_keyboard_goes_to_both) {
+    // BOTH is the one pause. There is no mouse route that could follow the
+    // keyboard there, and inventing one would put the pointer on two computers
+    // where it follows neither.
+    BindingEngine engine = synchronised_engine(KeyboardRoute::PC1, MouseRoute::PC1);
+    engine.set_bindings({bound(0x42, BindingMode::REPLACE, ActionKind::SET_KEYBOARD_ROUTE,
+                               static_cast<std::uint8_t>(KeyboardRoute::BOTH))});
+
+    engine.handle(key(InputEventKind::KeyDown, 0x42));
+
+    CHECK_EQ(static_cast<int>(engine.keyboard_route()), static_cast<int>(KeyboardRoute::BOTH));
+    CHECK_EQ(static_cast<int>(engine.mouse_route()), static_cast<int>(MouseRoute::PC1));
+}
+
+TEST_CASE(synchronised_control_leaves_a_diverged_mouse_alone_when_the_keyboard_goes_to_both) {
+    // The case above cannot see this guard: it starts with the mouse on PC1,
+    // and mouse_beside(BOTH) answers PC1, so a build with the guard deleted
+    // writes the value that was already there. With the pointer on the far
+    // computer the difference is visible - the keyboard reaches BOTH either
+    // way, and only an unguarded build drags the mouse back to PC1.
+    BindingEngine engine = synchronised_engine(KeyboardRoute::PC1, MouseRoute::PC2);
+    engine.set_bindings({bound(0x42, BindingMode::REPLACE, ActionKind::SET_KEYBOARD_ROUTE,
+                               static_cast<std::uint8_t>(KeyboardRoute::BOTH))});
+
+    engine.handle(key(InputEventKind::KeyDown, 0x42));
+
+    CHECK_EQ(static_cast<int>(engine.keyboard_route()), static_cast<int>(KeyboardRoute::BOTH));
+    CHECK_EQ(static_cast<int>(engine.mouse_route()), static_cast<int>(MouseRoute::PC2));
+}
+
+TEST_CASE(a_held_mouse_button_is_released_when_the_keyboard_switch_takes_the_mouse_along) {
+    // The whole reason this lives in the engine and not in Routes. A button
+    // still under a finger when the pointer moves would stay down on the
+    // computer being left, and that computer never hears about it again.
+    BindingEngine engine = synchronised_engine(KeyboardRoute::PC1, MouseRoute::PC1);
+
+    InputEvent button;
+    button.kind = InputEventKind::MouseButtonDown;
+    button.code = 1;
+    button.source_index = 0;
+    CHECK(engine.handle(button).count == 1);
+
+    const Outcome outcome = engine.handle(key(InputEventKind::KeyDown, 0x40));
+
+    CHECK(count_of(outcome, ActionRequestKind::ReleaseTarget) >= 1);
+    CHECK_EQ(static_cast<int>(engine.mouse_route()), static_cast<int>(MouseRoute::PC2));
+
+    // The release of a button the far side never saw must not arrive there.
+    InputEvent release = button;
+    release.kind = InputEventKind::MouseButtonUp;
+    CHECK_EQ(count_of(engine.handle(release), ActionRequestKind::SendInput), 0);
+}
+
+TEST_CASE(a_refused_route_moves_neither_device) {
+    // Validity is settled before anything is released. A refused route that
+    // released the old computer first would let go of keys for a switch that
+    // never happened.
+    BindingEngine engine = synchronised_engine(KeyboardRoute::PC1, MouseRoute::PC1);
+    engine.set_bindings({bound(0x43, BindingMode::REPLACE, ActionKind::SET_MOUSE_ROUTE,
+                               static_cast<std::uint8_t>(KeyboardRoute::BOTH))});
+
+    engine.handle(key(InputEventKind::KeyDown, 0x43));
+
+    CHECK_EQ(static_cast<int>(engine.keyboard_route()), static_cast<int>(KeyboardRoute::PC1));
+    CHECK_EQ(static_cast<int>(engine.mouse_route()), static_cast<int>(MouseRoute::PC1));
+}
+
+TEST_CASE(a_macro_step_moves_both_devices_under_synchronised_control) {
+    // Macro steps reach move_route through set_keyboard_route, so one rule
+    // covers the operator's buttons and the scripts alike.
+    BindingEngine engine = synchronised_engine(KeyboardRoute::PC1, MouseRoute::PC1);
+
+    engine.set_keyboard_route(KeyboardRoute::PC2);
+
+    CHECK_EQ(static_cast<int>(engine.keyboard_route()), static_cast<int>(KeyboardRoute::PC2));
+    CHECK_EQ(static_cast<int>(engine.mouse_route()), static_cast<int>(MouseRoute::PC2));
+}
+
+TEST_CASE(switching_is_independent_again_when_synchronised_control_is_off) {
+    BindingEngine engine = synchronised_engine(KeyboardRoute::PC1, MouseRoute::PC1);
+    engine.set_synchronised_control(false);
+
+    engine.handle(key(InputEventKind::KeyDown, 0x40));
+
+    CHECK_EQ(static_cast<int>(engine.keyboard_route()), static_cast<int>(KeyboardRoute::PC2));
+    CHECK_EQ(static_cast<int>(engine.mouse_route()), static_cast<int>(MouseRoute::PC1));
+}

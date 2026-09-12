@@ -326,15 +326,28 @@ bool BindingEngine::move_route(Outcome& outcome, bool keyboard, bool toggle,
         return false;
     }
 
+    // Does the other device travel too? Only where the leader lands on one
+    // computer. A toggle always does; a set does unless it is the keyboard
+    // being sent to BOTH, which no pointer can follow - so the mouse stays
+    // where it is and synchronisation is paused until the next ordinary
+    // switch brings the pair back together.
+    const bool leader_lands_on_one_computer =
+        toggle || !keyboard ||
+        static_cast<config::KeyboardRoute>(parameter) != config::KeyboardRoute::BOTH;
+    const bool follower_travels = synchronised_ && leader_lands_on_one_computer;
+    const bool moving_keyboard = keyboard || follower_travels;
+    const bool moving_mouse = !keyboard || follower_travels;
+
     Outcome releases;
-    release_reached(releases, keyboard, !keyboard);
+    release_reached(releases, moving_keyboard, moving_mouse);
     if (outcome.count + releases.count > kMaxActionsPerEvent) return false;
 
     // Released before the route moves, while "where this reaches" still means
     // the computer being left behind. That machine will never hear about these
-    // keys again.
-    release_reached(outcome, keyboard, !keyboard);
-    orphan(keyboard, !keyboard);
+    // keys again - and under synchronised control that covers the mouse
+    // buttons too, which is why this belongs here and not in Routes.
+    release_reached(outcome, moving_keyboard, moving_mouse);
+    orphan(moving_keyboard, moving_mouse);
 
     if (keyboard) {
         if (toggle) {
@@ -347,6 +360,18 @@ bool BindingEngine::move_route(Outcome& outcome, bool keyboard, bool toggle,
             routes_.toggle_mouse();
         } else {
             routes_.set_mouse(static_cast<config::MouseRoute>(parameter));
+        }
+    }
+
+    // The follower is placed on the computer the leader reached, rather than
+    // toggled in its own right. Two independent toggles would preserve a
+    // divergence instead of ending it - and the routes can be diverged, by
+    // switching this setting on after they have parted.
+    if (follower_travels) {
+        if (keyboard) {
+            routes_.set_mouse(Routes::mouse_beside(routes_.keyboard()));
+        } else {
+            routes_.set_keyboard(Routes::keyboard_beside(routes_.mouse()));
         }
     }
     return true;

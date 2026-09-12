@@ -71,6 +71,13 @@ public:
     /// Attach on the input core before events arrive. The table must outlive us.
     void set_sources(const input::SourceTable& sources) { sources_ = &sources; }
 
+    /// One logical point of control: every route change moves the keyboard and
+    /// the mouse to the same computer. Set from the stored configuration
+    /// before a profile is installed - a profile applied under the old setting
+    /// would be applied under the wrong rule.
+    void set_synchronised_control(bool synchronised) { synchronised_ = synchronised; }
+    bool synchronised_control() const { return synchronised_; }
+
     void set_bindings(std::initializer_list<Binding> bindings);
     void set_bindings(const Binding* bindings, std::size_t count);
 
@@ -132,6 +139,8 @@ private:
     std::size_t held_count_ = 0;
     /// Which modifiers are down, as the bindings' conditions see them.
     std::uint8_t modifiers_ = 0;
+    /// Whether the two devices travel together. See ``move_route``.
+    bool synchronised_ = false;
 };
 
 }  // namespace duo_input::u1::mapping
