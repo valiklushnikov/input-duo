@@ -348,7 +348,9 @@ def test_probe_query_get_data_records_the_answer_for_every_probe(monkeypatch):
     assert len([m for m in messages if m.startswith("RegisterClipboardFormatW")]) == 2
     assert len(answers) == len(spike.INSPECT_PROBES)
     assert answers[("FileGroupDescriptorW", -1, spike.TYMED_HGLOBAL)] == spike.S_OK
-    assert answers[("FileContents", 0, spike.TYMED_ISTREAM)] == spike.S_OK
+    # Entry 0 is the Photos directory, so it has no contents; entry 1 is a file.
+    assert answers[("FileContents", 0, spike.TYMED_ISTREAM)] == spike.DV_E_FORMATETC
+    assert answers[("FileContents", 1, spike.TYMED_ISTREAM)] == spike.S_OK
     assert answers[("FileContents", 0, spike.TYMED_HGLOBAL)] == spike.DV_E_TYMED
 
 
@@ -380,7 +382,8 @@ def test_inspect_clipboard_dumps_the_foreign_shape_and_releases_the_object(monke
     assert f"cfFormat={obj.cf_descriptor} (FileGroupDescriptorW)" in dump
     assert f"cfFormat={obj.cf_contents} (FileContents)" in dump
     assert "dwAspect=1 lindex=0 tymed=4" in dump
-    assert "QueryGetData(FileContents, lindex=0, tymed=4) -> 0x00000000" in dump
+    assert "QueryGetData(FileContents, lindex=1, tymed=4) -> 0x00000000" in dump
+    assert "QueryGetData(FileContents, lindex=0, tymed=4) -> 0x80040064" in dump
     assert "QueryGetData(FileContents, lindex=0, tymed=1) -> 0x80040069" in dump
     assert "IDataObjectAsyncCapability: False" in dump
 
@@ -449,3 +452,69 @@ def test_file_contents_rejects_an_index_outside_the_entry_list(monkeypatch):
 
     assert obj.streams == []
     assert any("lindex=-1 is not a zero-based entry index" in message for message in messages)
+
+
+def test_query_get_data_agrees_with_get_data_on_every_file_contents_index(monkeypatch):
+    monkeypatch.setattr(spike, "log", lambda _message: None)
+    obj = spike.DataObject()
+    medium = spike.STGMEDIUM()
+
+    for lindex in (-2, -1, 0, 1, 2, len(spike.ENTRIES)):
+        fmt = spike.FORMATETC(
+            obj.cf_contents, None, spike.DVASPECT_CONTENT, lindex, spike.TYMED_ISTREAM
+        )
+        promised = obj._query_get_data(None, ctypes.byref(fmt))
+        delivered = obj._get_data(None, ctypes.byref(fmt), ctypes.byref(medium))
+        assert promised == delivered, f"lindex={lindex} promised {promised}, delivered {delivered}"
+
+
+def test_query_get_data_rejects_a_file_contents_index_outside_the_entry_list(monkeypatch):
+    messages = []
+    monkeypatch.setattr(spike, "log", messages.append)
+    obj = spike.DataObject()
+    fmt = spike.FORMATETC(
+        obj.cf_contents, None, spike.DVASPECT_CONTENT, -1, spike.TYMED_ISTREAM
+    )
+
+    assert obj._query_get_data(None, ctypes.byref(fmt)) == spike.DV_E_FORMATETC
+
+    assert any("lindex=-1 is not a zero-based entry index" in message for message in messages)
+
+
+def test_enumerate_formats_stops_and_says_so_when_an_enumerator_never_ends(monkeypatch):
+    messages = []
+    monkeypatch.setattr(spike, "log", messages.append)
+    monkeypatch.setattr(spike, "INSPECT_BATCH", 1)
+    monkeypatch.setattr(spike, "INSPECT_MAX_BATCHES", 3)
+
+    def endless_next(_self, _this, celt, rgelt, fetched):
+        target = ctypes.cast(rgelt, ctypes.POINTER(spike.FORMATETC))
+        for index in range(celt):
+            target[index] = spike.FORMATETC(1, None, spike.DVASPECT_CONTENT, -1, 1)
+        ctypes.cast(fetched, ctypes.POINTER(ctypes.wintypes.ULONG))[0] = celt
+        return spike.S_OK
+
+    monkeypatch.setattr(spike.FormatEnumerator, "_next", endless_next)
+    obj = spike.DataObject()
+
+    formats = spike.enumerate_formats(obj.pointer)
+
+    assert len(formats) == 3
+    assert any("enumeration truncated" in message for message in messages)
+
+
+def test_file_contents_refuses_a_directory_entry_on_both_entry_points(monkeypatch):
+    messages = []
+    monkeypatch.setattr(spike, "log", messages.append)
+    obj = spike.DataObject()
+    medium = spike.STGMEDIUM()
+    assert spike.ENTRIES[0][1] is True, "entry 0 is meant to be the Photos directory"
+    fmt = spike.FORMATETC(
+        obj.cf_contents, None, spike.DVASPECT_CONTENT, 0, spike.TYMED_ISTREAM
+    )
+
+    assert obj._query_get_data(None, ctypes.byref(fmt)) == spike.DV_E_FORMATETC
+    assert obj._get_data(None, ctypes.byref(fmt), ctypes.byref(medium)) == spike.DV_E_FORMATETC
+
+    assert obj.streams == []
+    assert any("is a directory" in message for message in messages)

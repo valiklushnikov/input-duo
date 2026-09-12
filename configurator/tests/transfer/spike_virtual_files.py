@@ -559,18 +559,10 @@ class DataObject(COMObject):
             medium.pUnkForRelease = None
             return S_OK
         if fmt.cfFormat == self.cf_contents:
-            if not fmt.tymed & TYMED_ISTREAM:
-                log(f"  -> DV_E_TYMED: requested tymed={fmt.tymed}, not ISTREAM")
-                return DV_E_TYMED
-            if not 0 <= fmt.lindex < len(ENTRIES):
-                # CFSTR_FILECONTENTS is indexed from zero; serving ENTRIES[-1]
-                # for the OLE layer's lindex=-1 render would hide which file
-                # the consumer actually asked for.
-                log(f"  -> DV_E_FORMATETC: lindex={fmt.lindex} is not a zero-based entry index")
-                return DV_E_FORMATETC
-            _name, is_directory, size = ENTRIES[fmt.lindex]
-            if is_directory:
-                return DV_E_FORMATETC
+            refusal = self._file_contents_refusal(fmt)
+            if refusal is not None:
+                return refusal
+            _name, _is_directory, size = ENTRIES[fmt.lindex]
             stream = StreamObject(fmt.lindex, size)
             # Keep the Python-owned callbacks alive while Explorer owns the COM pointer.
             self.streams.append(stream)
@@ -587,11 +579,36 @@ class DataObject(COMObject):
             f"QueryGetData(cfFormat={fmt.cfFormat} ({format_name(fmt.cfFormat)}), "
             f"lindex={fmt.lindex}, tymed={fmt.tymed})"
         )
-        if fmt.cfFormat == self.cf_contents and not fmt.tymed & TYMED_ISTREAM:
-            return DV_E_TYMED
-        if fmt.cfFormat in (self.cf_descriptor, self.cf_drop_effect, self.cf_contents):
+        if fmt.cfFormat == self.cf_contents:
+            refusal = self._file_contents_refusal(fmt)
+            return S_OK if refusal is None else refusal
+        if fmt.cfFormat in (self.cf_descriptor, self.cf_drop_effect):
             return S_OK
         return DV_E_FORMATETC
+
+    def _file_contents_refusal(self, fmt) -> int | None:
+        """Why this FileContents FORMATETC cannot be served, or None if it can.
+
+        GetData and QueryGetData must answer the same FORMATETC the same way:
+        QueryGetData's whole purpose is to predict GetData.  Keeping the two
+        decisions in one place is what stops them drifting apart, and this
+        object is the instrument used to measure FileContents indexing, so a
+        disagreement here would corrupt the measurement.
+        """
+        if not fmt.tymed & TYMED_ISTREAM:
+            log(f"  -> DV_E_TYMED: requested tymed={fmt.tymed}, not ISTREAM")
+            return DV_E_TYMED
+        if not 0 <= fmt.lindex < len(ENTRIES):
+            # CFSTR_FILECONTENTS is indexed from zero; serving ENTRIES[-1] for
+            # the OLE layer's lindex=-1 render would hide which file the
+            # consumer actually asked for.
+            log(f"  -> DV_E_FORMATETC: lindex={fmt.lindex} is not a zero-based entry index")
+            return DV_E_FORMATETC
+        name, is_directory, _size = ENTRIES[fmt.lindex]
+        if is_directory:
+            log(f"  -> DV_E_FORMATETC: entry {fmt.lindex} ({name!r}) is a directory")
+            return DV_E_FORMATETC
+        return None
 
     def _get_data_here(self, _this, _fmt, _medium) -> int:
         log("GetDataHere() -> E_NOTIMPL")
@@ -689,6 +706,11 @@ class DataObject(COMObject):
 #: Batch size for draining a foreign IEnumFORMATETC; Shell objects advertise many.
 INSPECT_BATCH = 64
 
+#: Cap on Next calls while draining.  A foreign enumerator that never returns
+#: S_FALSE would otherwise hang the console during the one capture the plan is
+#: waiting on, so stop and make the truncation visible in the log instead.
+INSPECT_MAX_BATCHES = 64
+
 #: (format name, lindex, tymed) triples worth asking a foreign object about.
 INSPECT_PROBES = (
     ("FileGroupDescriptorW", -1, TYMED_HGLOBAL),
@@ -720,7 +742,7 @@ def enumerate_formats(pointer) -> list[FORMATETC]:
         return []
     next_method = _enum_slot(out, 3, _ENUM_NEXT)
     collected: list[FORMATETC] = []
-    while True:
+    for _batch_number in range(INSPECT_MAX_BATCHES):
         batch = (FORMATETC * INSPECT_BATCH)()
         fetched = wintypes.ULONG(0)
         result = next_method(out, INSPECT_BATCH, batch, ctypes.byref(fetched))
@@ -728,6 +750,11 @@ def enumerate_formats(pointer) -> list[FORMATETC]:
         collected.extend(batch[index] for index in range(fetched.value))
         if not fetched.value or result != S_OK:
             break
+    else:
+        log(
+            f"  Next never reported the end after {INSPECT_MAX_BATCHES} batches; "
+            f"enumeration truncated at {len(collected)} entries"
+        )
     _enum_slot(out, 2, _REFCOUNT)(out)
     return collected
 
