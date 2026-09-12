@@ -280,6 +280,12 @@ bool BindingEngine::apply_binding(Outcome& outcome, const Binding& binding) {
                                   binding.action == config::ActionKind::TOGGLE_KEYBOARD_ROUTE;
             const bool toggle = binding.action == config::ActionKind::TOGGLE_KEYBOARD_ROUTE ||
                                 binding.action == config::ActionKind::TOGGLE_MOUSE_ROUTE;
+            // This repeats move_route's own validity check below, and that
+            // duplication is deliberate, not dead: this one breaks out of the
+            // switch, so later bindings in the same chain still run, while
+            // move_route's returns false and aborts the whole chain. Collapsing
+            // them into one check would change which bindings after an invalid
+            // route survive it.
             if (!toggle &&
                 !(keyboard ? Routes::keyboard_route_is_valid(
                                  static_cast<config::KeyboardRoute>(binding.parameter))

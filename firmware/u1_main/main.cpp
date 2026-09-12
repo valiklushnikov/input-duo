@@ -438,6 +438,11 @@ void core1_entry() {
     g_pio_usb_backend.begin();
 #endif
 
+    // Unlike adopt_configuration's `loaded &&` guard, this needs none: by the
+    // time Core 1 runs, main() has already either loaded a stored
+    // configuration or found none, and StoredProfiles::load zeroes
+    // synchronised_control_ up front, so a failed or absent load leaves this
+    // false on its own.
     g_runtime.set_synchronised_control(g_profiles.synchronised_control());
     std::uint8_t installed = g_profiles.active_profile_id();
     g_runtime.set_profile_now(installed);

@@ -230,3 +230,37 @@ def test_profile_routes_say_when_the_device_will_bring_them_together(qtbot):
     # showing "PC1 / PC2" with nothing else would be showing routes the
     # operator will never have.
     assert "together" in page.routes_label.text().lower()
+
+
+def test_a_both_profile_gets_no_bringing_together_note(qtbot):
+    # The default profile used above stores keyboard=PC1, so it cannot tell
+    # the BOTH guard apart from no guard at all: mouse_beside would not run
+    # for it either way. core1_runtime.cpp keeps a BOTH profile's own mouse
+    # route - no mouse route can follow the keyboard there - so the displayed
+    # pair is exactly what happens, and the "brought together" note would be
+    # false for it.
+    from dataclasses import replace
+
+    from duo_input.generated.protocol import KeyboardRoute, MouseRoute
+    from duo_input.ui.models.project_session import ProjectSession, default_project
+    from duo_input.ui.profiles import ProfilesPage
+
+    project = default_project()
+    profiles = list(project.profiles)
+    profiles[0] = replace(
+        profiles[0], keyboard_route=KeyboardRoute.BOTH, mouse_route=MouseRoute.PC1
+    )
+    profiles[1] = replace(
+        profiles[1], keyboard_route=KeyboardRoute.PC1, mouse_route=MouseRoute.PC2
+    )
+    project = replace(project, profiles=tuple(profiles), synchronised_control=True)
+
+    page = ProfilesPage()
+    qtbot.addWidget(page)
+    page.set_session(ProjectSession(project=project))
+
+    # Slot 0 (id 1) is selected by default and stores keyboard=BOTH.
+    assert "together" not in page.routes_label.text().lower()
+
+    page.slots.setCurrentRow(1)
+    assert "together" in page.routes_label.text().lower()

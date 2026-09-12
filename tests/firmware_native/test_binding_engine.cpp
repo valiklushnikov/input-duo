@@ -738,7 +738,10 @@ TEST_CASE(synchronised_switching_puts_both_devices_on_one_computer) {
         KeyboardRoute expect_keyboard;
         MouseRoute expect_mouse;
     };
-    // The acceptance table from the design, row for row.
+    // Seven of the design's eight rows, row for row. The eighth
+    // (K=PC1 M=PC1 + set keyboard BOTH -> K=BOTH M=PC1) is covered by
+    // synchronised_control_leaves_the_mouse_alone_when_the_keyboard_goes_to_both
+    // below, as its own dedicated test rather than a row here.
     const Row rows[] = {
         {KeyboardRoute::PC1, MouseRoute::PC1, 0x40, KeyboardRoute::PC2, MouseRoute::PC2},
         {KeyboardRoute::PC1, MouseRoute::PC1, 0x41, KeyboardRoute::PC2, MouseRoute::PC2},
@@ -809,6 +812,29 @@ TEST_CASE(a_held_mouse_button_is_released_when_the_keyboard_switch_takes_the_mou
     InputEvent release = button;
     release.kind = InputEventKind::MouseButtonUp;
     CHECK_EQ(count_of(engine.handle(release), ActionRequestKind::SendInput), 0);
+}
+
+TEST_CASE(a_held_mouse_button_on_the_far_computer_is_released_there_too) {
+    // Parted routes are reachable: the setting can be switched on after they
+    // have. The button is down on PC2 and the keyboard switch moves the pair,
+    // so PC2 must be told to let go - orphaning alone leaves it stuck there.
+    BindingEngine engine = synchronised_engine(KeyboardRoute::PC1, MouseRoute::PC2);
+    InputEvent button;
+    button.kind = InputEventKind::MouseButtonDown;
+    button.code = 1;
+    button.source_index = 0;
+    CHECK(engine.handle(button).count == 1);
+
+    const Outcome outcome = engine.handle(key(InputEventKind::KeyDown, 0x40));
+
+    bool released_pc2 = false;
+    for (std::size_t i = 0; i < outcome.count; ++i) {
+        if (outcome.actions[i].kind == ActionRequestKind::ReleaseTarget &&
+            outcome.actions[i].target == Target::Pc2) {
+            released_pc2 = true;
+        }
+    }
+    CHECK(released_pc2);
 }
 
 TEST_CASE(a_refused_route_moves_neither_device) {

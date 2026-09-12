@@ -200,6 +200,35 @@ def test_core0_publishes_core1_before_it_can_be_launched():
     assert "set_core1_running(true)" not in core1_body
 
 
+def test_synchronised_control_is_set_before_the_profile_at_both_call_sites():
+    # main.cpp is not in the native build, and nothing else asserts that
+    # these two calls exist at all - so a deleted call site here is a silent
+    # no-op: on adopt_configuration, a configuration write stops taking
+    # effect; on core1_entry, the boot path does. The order matters as much
+    # as the presence, because set_profile_now applies the profile's stored
+    # routes, and applying them under the previous synchronised-control
+    # setting is a different, wrong, profile activation.
+    source = _source_text("firmware/u1_main/main.cpp")
+    adopt_configuration_body = source[
+        source.index("bool adopt_configuration(") : source.index(
+            "bool hand_configuration_to_core1("
+        )
+    ]
+    core1_entry_body = source[
+        source.index("void core1_entry()") : source.index("void configure_button(")
+    ]
+
+    for body, label in (
+        (adopt_configuration_body, "adopt_configuration"),
+        (core1_entry_body, "core1_entry"),
+    ):
+        synchronised = body.index("set_synchronised_control(")
+        profile = body.index("set_profile_now(")
+        assert synchronised < profile, (
+            f"{label} must call set_synchronised_control before set_profile_now"
+        )
+
+
 def test_task6_callbacks_only_capture_records_and_never_arm_or_route():
     callbacks = _source_text("firmware/u1_main/pio_usb/tinyusb_host_callbacks.cpp")
     without_comments = re.sub(r"//.*?$|/\*.*?\*/", "", callbacks, flags=re.MULTILINE | re.DOTALL)

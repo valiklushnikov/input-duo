@@ -49,6 +49,11 @@ STEP_SIZE = 12
 #: Every header flag this build understands. A package carrying anything else
 #: was written by a newer configurator, and the bit's meaning cannot be
 #: guessed - so the package is refused rather than read without it.
+#:
+#: The int() is load-bearing, not noise: ``~ConfigFlag.SYNCHRONISED_CONTROL``
+#: is IntFlag's bounded complement, ``<ConfigFlag: 0>`` - not the byte mask
+#: 0xFE - and the guard below (``flags & ~KNOWN_CONFIG_FLAGS``) would then
+#: accept all 256 byte values instead of rejecting everything but {0, 1}.
 KNOWN_CONFIG_FLAGS = int(ConfigFlag.SYNCHRONISED_CONTROL)
 
 _HEADER = struct.Struct("<4sBBBBIIBBBBIIIII24s")

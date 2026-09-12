@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from duo_input.domain.models import Profile
+from duo_input.generated.protocol import KeyboardRoute
 from duo_input.ui.models.project_session import (
     ClearProfile,
     CopyProfile,
@@ -254,10 +255,17 @@ class ProfilesPage(QWidget):
                 f"{profile.keyboard_route.name} / {profile.mouse_route.name}"
                 f" / {profile.text_layout.name}"
             )
-            if self._session.project.synchronised_control:
+            if (
+                self._session.project.synchronised_control
+                and profile.keyboard_route is not KeyboardRoute.BOTH
+            ):
                 # The device brings the pair together when this profile is
                 # activated. Showing the stored pair alone would promise routes
-                # the operator will never actually have.
+                # the operator will never actually have. BOTH is the one
+                # exception: core1_runtime.cpp keeps the profile's own mouse
+                # route there because no mouse route can follow the keyboard
+                # to BOTH, so the displayed pair is honoured verbatim and the
+                # note would be false.
                 routes = self.tr("{0} — brought together on activation").format(routes)
             self.routes_label.setText(routes)
             self.copy_target.clear()

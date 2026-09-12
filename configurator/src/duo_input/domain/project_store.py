@@ -132,6 +132,11 @@ def _migrate_1_0_to_1_1(document: dict[str, Any]) -> dict[str, Any]:
 def _migrate_1_1_to_1_2(document: dict[str, Any]) -> dict[str, Any]:
     # 1.1 had no such setting, and a project written then meant the devices
     # switched apart - which is what its absence says here.
+    #
+    # _project_from_json below defaults a missing key to False too, so this
+    # line looks redundant and deleting it keeps every test green - but a
+    # migration's job is to produce a complete 1.2 document, not to rely on
+    # the reader's default to paper over an incomplete one. Keep it.
     migrated = dict(document)
     migrated["synchronised_control"] = False
     migrated["schema_version"] = PROJECT_SCHEMA_VERSION
