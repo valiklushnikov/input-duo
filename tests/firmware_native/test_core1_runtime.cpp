@@ -27,6 +27,7 @@ using duo_input::config::TriggerKind;
 using duo_input::runtime::CommandKind;
 using duo_input::runtime::kPhysicalOwner;
 using duo_input::runtime::OutputCommand;
+using duo_input::runtime::Route;
 using duo_input::u1::Core1Runtime;
 using duo_input::u1::ICommandSink;
 using duo_input::u1::IProfileSource;
@@ -700,6 +701,48 @@ TEST_CASE(the_profile_loaded_at_startup_starts_in_its_routes_too) {
     }
     CHECK_EQ(static_cast<int>(sink.commands[0].route),
              static_cast<int>(duo_input::runtime::Route::Both));
+}
+
+TEST_CASE(a_profile_with_parted_routes_is_brought_together_under_synchronised_control) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    // Stored apart: the configurator does not forbid it, so the device is what
+    // settles it - and it settles it before either route is applied.
+    profiles.keyboard_one = duo_input::config::KeyboardRoute::PC2;
+    profiles.mouse_one = duo_input::config::MouseRoute::PC1;
+    Core1Runtime runtime(sink, profiles);
+    runtime.set_synchronised_control(true);
+
+    runtime.set_profile_now(1);
+
+    CHECK_EQ(static_cast<int>(runtime.keyboard_route()), static_cast<int>(Route::Pc2));
+    CHECK_EQ(static_cast<int>(runtime.mouse_route()), static_cast<int>(Route::Pc2));
+}
+
+TEST_CASE(a_profile_on_both_keeps_its_own_mouse_route_under_synchronised_control) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    profiles.keyboard_one = duo_input::config::KeyboardRoute::BOTH;
+    profiles.mouse_one = duo_input::config::MouseRoute::PC2;
+    Core1Runtime runtime(sink, profiles);
+    runtime.set_synchronised_control(true);
+
+    runtime.set_profile_now(1);
+
+    CHECK_EQ(static_cast<int>(runtime.mouse_route()), static_cast<int>(Route::Pc2));
+}
+
+TEST_CASE(a_profile_keeps_parted_routes_when_synchronised_control_is_off) {
+    RecordingSink sink;
+    TwoProfiles profiles;
+    profiles.keyboard_one = duo_input::config::KeyboardRoute::PC2;
+    profiles.mouse_one = duo_input::config::MouseRoute::PC1;
+    Core1Runtime runtime(sink, profiles);
+
+    runtime.set_profile_now(1);
+
+    CHECK_EQ(static_cast<int>(runtime.keyboard_route()), static_cast<int>(Route::Pc2));
+    CHECK_EQ(static_cast<int>(runtime.mouse_route()), static_cast<int>(Route::Pc1));
 }
 
 TEST_CASE(a_source_that_has_no_such_profile_leaves_the_routes_where_they_are) {

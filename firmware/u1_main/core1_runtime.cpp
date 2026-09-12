@@ -414,6 +414,17 @@ void Core1Runtime::set_profile_now(std::uint8_t profile, std::uint32_t now_ms) {
     config::KeyboardRoute keyboard = engine_.keyboard_route();
     config::MouseRoute mouse = engine_.mouse_route();
     if (profiles_.routes_for(profile, keyboard, mouse)) {
+        // Under synchronised control a profile names one computer, not two
+        // routes that happen to be stored side by side. Settled here, before
+        // either is applied: applying the keyboard first carries the mouse
+        // with it, and applying the profile's own mouse route afterwards would
+        // part them again - the second move undoing the first.
+        //
+        // BOTH keeps the profile's own mouse route. There is no mouse route
+        // that could follow the keyboard there.
+        if (engine_.synchronised_control() && keyboard != config::KeyboardRoute::BOTH) {
+            mouse = mapping::Routes::mouse_beside(keyboard);
+        }
         if (keyboard != engine_.keyboard_route()) {
             apply(engine_.set_keyboard_route(keyboard), now_ms);
         }

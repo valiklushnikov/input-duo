@@ -339,6 +339,10 @@ duo_input::u1::ConfigHandoff g_config_handoff;
 bool adopt_configuration(duo_input::protocol::ByteView package) {
     g_runtime.release_all();
     const bool loaded = g_profiles.load(package);
+    // Before the profile, not after: set_profile_now applies the profile's
+    // stored routes, and whether those two routes mean one computer or two is
+    // exactly what this setting decides.
+    g_runtime.set_synchronised_control(loaded && g_profiles.synchronised_control());
     // A package that is not a configuration leaves StoredProfiles empty, which
     // is also what a factory reset asks for. Profile zero is what an empty
     // configuration answers to.
@@ -434,6 +438,7 @@ void core1_entry() {
     g_pio_usb_backend.begin();
 #endif
 
+    g_runtime.set_synchronised_control(g_profiles.synchronised_control());
     std::uint8_t installed = g_profiles.active_profile_id();
     g_runtime.set_profile_now(installed);
     install_macros(installed);

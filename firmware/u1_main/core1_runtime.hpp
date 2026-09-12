@@ -142,6 +142,12 @@ public:
     /// costs nothing.
     void set_profile_now(std::uint8_t profile, std::uint32_t now_ms = 0);
 
+    /// Whether the keyboard and the mouse travel together. Comes from the
+    /// stored configuration, and must be set before a profile is installed:
+    /// installing one under the old setting applies the profile's routes under
+    /// the wrong rule.
+    void set_synchronised_control(bool synchronised) { engine_.set_synchronised_control(synchronised); }
+
     // --- macros
 
     void define_macro(std::uint8_t macro_id, const macros::MacroDefinition& definition);
@@ -185,6 +191,13 @@ public:
     mapping::BindingEngine& engine() { return engine_; }
     mapping::CaptureController& capture() { return capture_; }
 
+    /// The routes as this runtime sees them, in runtime::Route's space rather
+    /// than the configuration's KeyboardRoute/MouseRoute. Tests use these to
+    /// check where a profile settled without pushing an input event through
+    /// just to read the route back off a queued command.
+    runtime::Route keyboard_route() const;
+    runtime::Route mouse_route() const;
+
 private:
     /// 1 begin, 2 cancel, 0 nothing asked for.
     static constexpr std::uint8_t kCaptureRequestBegin = 1;
@@ -197,9 +210,6 @@ private:
     void swap_profile(std::uint8_t profile, std::uint32_t now_ms, bool requested_by_host);
     void request_profile_from_core1(std::uint8_t profile);
     void publish_capture_state();
-
-    runtime::Route keyboard_route() const;
-    runtime::Route mouse_route() const;
 
     ICommandSink& sink_;
     IProfileSource& profiles_;
