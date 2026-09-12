@@ -317,7 +317,7 @@ _DADVISE = ctypes.WINFUNCTYPE(
 
 
 class DataObject(COMObject):
-    """IDataObject advertising group descriptors, but no file contents."""
+    """IDataObject advertising descriptors and synthetic IStream file contents."""
 
     def __init__(self) -> None:
         super().__init__([IID_IUNKNOWN, IID_IDATAOBJECT])
@@ -377,6 +377,8 @@ class DataObject(COMObject):
     def _query_get_data(self, _this, pformatetc) -> int:
         fmt = ctypes.cast(pformatetc, ctypes.POINTER(FORMATETC)).contents
         log(f"QueryGetData(cfFormat={fmt.cfFormat}, lindex={fmt.lindex})")
+        if fmt.cfFormat == self.cf_contents and not fmt.tymed & TYMED_ISTREAM:
+            return DV_E_TYMED
         if fmt.cfFormat in (self.cf_descriptor, self.cf_drop_effect, self.cf_contents):
             return S_OK
         return DV_E_FORMATETC
