@@ -14,6 +14,7 @@
 // every later keystroke there means, and you cannot fix it from here.
 
 #include "mapping/engine.hpp"
+#include "mapping/routes.hpp"
 #include "input/source_table.hpp"
 #include "test_support.hpp"
 
@@ -424,6 +425,42 @@ TEST_CASE(toggling_moves_the_keyboard_and_toggling_again_moves_it_back) {
 
     CHECK_EQ(static_cast<int>(moved), static_cast<int>(KeyboardRoute::PC2));
     CHECK_EQ(static_cast<int>(engine.keyboard_route()), static_cast<int>(KeyboardRoute::PC1));
+}
+
+TEST_CASE(toggling_out_of_both_lands_where_the_pointer_is) {
+    // The cursor is the only thing telling the operator which computer they
+    // are working on. A keyboard leaving BOTH for anywhere else lands on the
+    // machine they are not looking at.
+    for (auto mouse : {MouseRoute::PC1, MouseRoute::PC2}) {
+        BindingEngine engine;
+        engine.set_bindings({bound(0x3E, BindingMode::REPLACE, ActionKind::SET_KEYBOARD_ROUTE,
+                                   static_cast<std::uint8_t>(KeyboardRoute::BOTH)),
+                             bound(0x3F, BindingMode::REPLACE, ActionKind::SET_MOUSE_ROUTE,
+                                   static_cast<std::uint8_t>(mouse)),
+                             bound(0x40, BindingMode::REPLACE, ActionKind::TOGGLE_KEYBOARD_ROUTE)});
+
+        engine.handle(key(InputEventKind::KeyDown, 0x3F));
+        engine.handle(key(InputEventKind::KeyDown, 0x3E));
+        CHECK_EQ(static_cast<int>(engine.keyboard_route()), static_cast<int>(KeyboardRoute::BOTH));
+
+        engine.handle(key(InputEventKind::KeyDown, 0x40));
+
+        const KeyboardRoute expected =
+            mouse == MouseRoute::PC1 ? KeyboardRoute::PC1 : KeyboardRoute::PC2;
+        CHECK_EQ(static_cast<int>(engine.keyboard_route()), static_cast<int>(expected));
+    }
+}
+
+TEST_CASE(routes_translate_between_the_two_devices_on_one_computer) {
+    using duo_input::u1::mapping::Routes;
+    CHECK_EQ(static_cast<int>(Routes::mouse_beside(KeyboardRoute::PC1)),
+             static_cast<int>(MouseRoute::PC1));
+    CHECK_EQ(static_cast<int>(Routes::mouse_beside(KeyboardRoute::PC2)),
+             static_cast<int>(MouseRoute::PC2));
+    CHECK_EQ(static_cast<int>(Routes::keyboard_beside(MouseRoute::PC1)),
+             static_cast<int>(KeyboardRoute::PC1));
+    CHECK_EQ(static_cast<int>(Routes::keyboard_beside(MouseRoute::PC2)),
+             static_cast<int>(KeyboardRoute::PC2));
 }
 
 // ------------------------------------------- what is held when the route moves

@@ -26,6 +26,12 @@ public:
     static bool keyboard_route_is_valid(config::KeyboardRoute route);
     static bool mouse_route_is_valid(config::MouseRoute route);
 
+    /// The mouse route serving the same computer as this keyboard route, and
+    /// the reverse. BOTH has no answer here and must not be asked: it is the
+    /// one keyboard route no pointer can follow.
+    static config::MouseRoute mouse_beside(config::KeyboardRoute route);
+    static config::KeyboardRoute keyboard_beside(config::MouseRoute route);
+
     /// Returns false if the route was not one the keyboard can take.
     bool set_keyboard(config::KeyboardRoute route);
     bool set_mouse(config::MouseRoute route);

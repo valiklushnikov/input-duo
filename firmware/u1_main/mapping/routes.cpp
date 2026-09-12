@@ -15,6 +15,16 @@ bool Routes::mouse_route_is_valid(config::MouseRoute route) {
     return route == config::MouseRoute::PC1 || route == config::MouseRoute::PC2;
 }
 
+config::MouseRoute Routes::mouse_beside(config::KeyboardRoute route) {
+    return route == config::KeyboardRoute::PC2 ? config::MouseRoute::PC2
+                                               : config::MouseRoute::PC1;
+}
+
+config::KeyboardRoute Routes::keyboard_beside(config::MouseRoute route) {
+    return route == config::MouseRoute::PC2 ? config::KeyboardRoute::PC2
+                                            : config::KeyboardRoute::PC1;
+}
+
 bool Routes::set_keyboard(config::KeyboardRoute route) {
     if (!keyboard_route_is_valid(route)) {
         return false;
@@ -32,9 +42,15 @@ bool Routes::set_mouse(config::MouseRoute route) {
 }
 
 void Routes::toggle_keyboard() {
-    // From BOTH the sensible other side is the second computer: somebody
-    // typing on both who wants one has more use for the far machine than the
-    // near one, which is in front of them already.
+    // Out of BOTH, to the computer the pointer is already on. The cursor is
+    // the only thing telling the operator which machine they are working on,
+    // and a keyboard that lands anywhere else lands where they are not
+    // looking. Under synchronised control this also brings the pair back
+    // together without dragging the pointer across a screen.
+    if (keyboard_ == config::KeyboardRoute::BOTH) {
+        keyboard_ = keyboard_beside(mouse_);
+        return;
+    }
     keyboard_ = keyboard_ == config::KeyboardRoute::PC1 ? config::KeyboardRoute::PC2
                                                         : config::KeyboardRoute::PC1;
 }
