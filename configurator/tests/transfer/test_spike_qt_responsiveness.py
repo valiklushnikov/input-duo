@@ -135,23 +135,20 @@ def test_the_ceiling_stops_even_a_consumer_that_is_still_reading():
 def test_run_ends_on_quiescence_and_still_returns_the_tick_statistics(qapp):
     counted = iter([1, 2, 3, 4])
     latest = 0
-    pumped = 0
 
     def activity():
         nonlocal latest
         latest = next(counted, latest)
         return latest
 
-    def pump():
-        nonlocal pumped
-        pumped += 1
-        if pumped > 600:
-            # Rescue bound, inside the loop: a QTimer started here would
-            # stay pending afterwards and exit somebody else's loop.
-            qapp.exit(1)
-
+    # Nothing here bounds the loop except the watchdog and its own ceiling.
+    # A rescue that called qapp.exit() would latch Qt's quit state exactly as
+    # quit() does - measured: every later QEventLoop.exec() returns -1 after
+    # 0.0 ms - which is the defect this test exists to protect. If the watchdog
+    # ever stops working this test hangs, and the mutation sweep scores that
+    # timeout as a kill.
     outcome = run(
-        pump,
+        lambda: None,
         idle_seconds=0.3,
         paste_window_seconds=0.3,
         max_seconds=5.0,

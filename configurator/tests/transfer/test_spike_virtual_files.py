@@ -605,7 +605,7 @@ def test_main_exits_nonzero_and_leads_the_tail_with_the_truncation_banner(
     def fake_run(_pump, **_knobs):
         spike.READ_LOG.append((2, 810287104, 262144, 262144))
         spike.READ_STARTED_AT[2] = time.perf_counter() - 183.0
-        spike.note_stream_read(2)
+        spike.note_stream_read(2, 810287104)
         return spike.Outcome(
             report="ticks 3513, median 54.8 ms, p99 87.1 ms, max 120.2 ms",
             reason="fixed --seconds 180 budget expired",
@@ -712,4 +712,42 @@ def test_the_activity_counter_notices_every_kind_of_consumer_call(fresh_call_log
 
     assert spike.consumer_call_count(obj) == 5, (
         "a call the counter ignores looks like silence, and silence ends the run"
+    )
+
+
+def test_a_read_at_offset_zero_starts_the_measured_pass_over(monkeypatch, fresh_call_logs):
+    monkeypatch.setattr(spike, "log", lambda _message: None)
+
+    spike.note_stream_read(2, 0)
+    first_pass = spike.READ_STARTED_AT[2]
+    spike.note_stream_read(2, 262144)
+
+    assert spike.READ_STARTED_AT[2] == first_pass, "a read mid-pass is not a new pass"
+
+    spike.note_stream_read(2, 0)
+
+    assert spike.READ_STARTED_AT[2] > first_pass, (
+        "the brief's protocol pastes twice in one run, and a second paste "
+        "builds a fresh stream from offset 0; keeping the first paste's start "
+        "makes the banner's rate span both pastes and the idle gap between "
+        "them while counting only the second paste's bytes"
+    )
+
+
+def test_an_idle_window_short_enough_to_accuse_a_clean_run_is_refused(
+    monkeypatch, capsys, fresh_call_logs
+):
+    _explorer_stubs(monkeypatch)
+    monkeypatch.setattr(spike, "DataObject", lambda **_k: pytest.fail("must not publish"))
+    monkeypatch.setattr(sys, "argv", ["spike_virtual_files.py", "--idle-seconds", "3"])
+
+    with pytest.raises(SystemExit) as refusal:
+        spike.main()
+
+    assert refusal.value.code == 2
+    complaint = capsys.readouterr().err
+    assert "--idle-seconds" in complaint, (
+        "quiescence shorter than the live-stream window makes a clean run end "
+        "with its last read inside the window, so the shutdown accuses itself "
+        "of truncating a transfer that actually finished"
     )

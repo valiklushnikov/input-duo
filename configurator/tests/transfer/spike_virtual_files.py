@@ -91,7 +91,7 @@ STAT_LOG: list[int] = []
 LIFECYCLE_LOG: list[tuple[str, int]] = []
 # perf_counter of the most recent IStream::Read; None until a consumer reads.
 LAST_READ_AT: float | None = None
-# entry_index -> perf_counter of that entry's first read, for a measured rate.
+# entry_index -> perf_counter of the current pass's first read, for a rate.
 READ_STARTED_AT: dict[int, float] = {}
 
 #: A read this recent at shutdown means we are cutting off a live transfer.
@@ -103,11 +103,19 @@ def log(message: str) -> None:
     print(f"[{elapsed:8.3f}s tid={threading.get_ident():>6}] {message}", flush=True)
 
 
-def note_stream_read(entry_index: int) -> None:
-    """Remember when a consumer last pulled bytes, and from when it started."""
+def note_stream_read(entry_index: int, offset: int) -> None:
+    """Remember when a consumer last pulled bytes, and when this pass began.
+
+    A read at offset 0 begins a fresh pass over the entry, so the start time is
+    replaced rather than kept: the brief's protocol pastes twice in one run and
+    the second paste builds a new stream from 0, which would otherwise make the
+    banner measure a rate over both pastes plus the idle gap between them while
+    counting only the second paste's bytes.
+    """
     global LAST_READ_AT
     LAST_READ_AT = time.perf_counter()
-    READ_STARTED_AT.setdefault(entry_index, LAST_READ_AT)
+    if offset == 0 or entry_index not in READ_STARTED_AT:
+        READ_STARTED_AT[entry_index] = LAST_READ_AT
 
 
 def note(event: str) -> None:
@@ -202,7 +210,7 @@ class StreamObject(COMObject):
         count = min(int(cb), available)
         payload = synthetic_bytes(self.entry_index, self.position, count)
         READ_LOG.append((self.entry_index, self.position, int(cb), count))
-        note_stream_read(self.entry_index)
+        note_stream_read(self.entry_index, self.position)
         log(f"IStream::Read(entry={self.entry_index}, off={self.position}, cb={cb}) -> {count}")
         if count:
             ctypes.memmove(pv, payload, count)
@@ -972,7 +980,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--idle-seconds",
         type=float,
         default=DEFAULT_IDLE_SECONDS,
-        help="end the run once no consumer call has arrived for this long",
+        help="end the run once no consumer call has arrived for this long; "
+        f"must be at least {LIVE_STREAM_WINDOW_SECONDS:.0f}",
     )
     parser.add_argument(
         "--paste-window-seconds",
@@ -996,7 +1005,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    arguments = build_parser().parse_args()
+    parser = build_parser()
+    arguments = parser.parse_args()
+    if arguments.idle_seconds < LIVE_STREAM_WINDOW_SECONDS:
+        parser.error(
+            f"--idle-seconds must be at least {LIVE_STREAM_WINDOW_SECONDS:.0f}: "
+            "a shorter quiescence ends the run with its last read still inside "
+            f"the {LIVE_STREAM_WINDOW_SECONDS:.0f}s live-stream window, and the "
+            "shutdown would accuse itself of truncating a transfer that finished"
+        )
 
     ole_initialize()
     if arguments.inspect_clipboard:
