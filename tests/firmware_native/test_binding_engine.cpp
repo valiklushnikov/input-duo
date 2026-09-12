@@ -815,14 +815,62 @@ TEST_CASE(a_refused_route_moves_neither_device) {
     // Validity is settled before anything is released. A refused route that
     // released the old computer first would let go of keys for a switch that
     // never happened.
+    //
+    // The two route values alone do not prove that: Routes::set_mouse guards
+    // its own validity independently, and the follower placement here
+    // computes keyboard_beside(PC1) == PC1, reproducing the starting value -
+    // so deleting the gate at the top of move_route would still leave both
+    // routes looking right. What the gate actually prevents is
+    // release_reached/orphan running for a switch that never happened, so
+    // this checks that directly, with a key held before the refused switch.
+    //
+    // This exercises the binding path, and apply_binding runs this exact
+    // same validity check before it ever calls move_route - so a binding
+    // never reaches move_route with a bad parameter in the first place, and
+    // this case cannot see move_route's own gate deleted. It documents the
+    // binding path's refusal, nothing more; see
+    // a_refused_route_from_set_mouse_route_moves_neither_device_and_releases_nothing
+    // below for the gate move_route itself owns.
     BindingEngine engine = synchronised_engine(KeyboardRoute::PC1, MouseRoute::PC1);
     engine.set_bindings({bound(0x43, BindingMode::REPLACE, ActionKind::SET_MOUSE_ROUTE,
                                static_cast<std::uint8_t>(KeyboardRoute::BOTH))});
 
-    engine.handle(key(InputEventKind::KeyDown, 0x43));
+    const Outcome held = engine.handle(key(InputEventKind::KeyDown, 0x04));
+    CHECK(sends_input(held));
+
+    const Outcome outcome = engine.handle(key(InputEventKind::KeyDown, 0x43));
 
     CHECK_EQ(static_cast<int>(engine.keyboard_route()), static_cast<int>(KeyboardRoute::PC1));
     CHECK_EQ(static_cast<int>(engine.mouse_route()), static_cast<int>(MouseRoute::PC1));
+    CHECK_EQ(count_of(outcome, ActionRequestKind::ReleaseTarget), 0);
+
+    // The held key must still be live: its release still reaches the far
+    // side. A key wrongly orphaned by the refused switch would swallow it.
+    CHECK_EQ(count_of(engine.handle(key(InputEventKind::KeyUp, 0x04)), ActionRequestKind::SendInput), 1);
+}
+
+TEST_CASE(a_refused_route_from_set_mouse_route_moves_neither_device_and_releases_nothing) {
+    // a_refused_route_moves_neither_device above goes through a binding, and
+    // apply_binding runs this exact same validity check before it ever calls
+    // move_route - so that path can never see move_route's own gate deleted.
+    // set_mouse_route and set_keyboard_route are what a macro step, or the
+    // host, call directly: they skip apply_binding entirely, so this is the
+    // path move_route's own gate is actually guarding.
+    BindingEngine engine = synchronised_engine(KeyboardRoute::PC1, MouseRoute::PC1);
+
+    const Outcome held = engine.handle(key(InputEventKind::KeyDown, 0x04));
+    CHECK(sends_input(held));
+
+    const Outcome outcome =
+        engine.set_mouse_route(static_cast<MouseRoute>(KeyboardRoute::BOTH));
+
+    CHECK_EQ(static_cast<int>(engine.keyboard_route()), static_cast<int>(KeyboardRoute::PC1));
+    CHECK_EQ(static_cast<int>(engine.mouse_route()), static_cast<int>(MouseRoute::PC1));
+    CHECK_EQ(count_of(outcome, ActionRequestKind::ReleaseTarget), 0);
+
+    // The held key must still be live: its release still reaches the far
+    // side. A key wrongly orphaned by the refused switch would swallow it.
+    CHECK_EQ(count_of(engine.handle(key(InputEventKind::KeyUp, 0x04)), ActionRequestKind::SendInput), 1);
 }
 
 TEST_CASE(a_macro_step_moves_both_devices_under_synchronised_control) {
