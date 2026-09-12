@@ -210,12 +210,39 @@ def test_async_capability_vtable_slots_track_mode_and_every_lifecycle_call(monke
     assert mode.value == 0
     assert [event for event, _thread_id in spike.LIFECYCLE_LOG] == [
         "SetAsyncMode(1)",
-        "GetAsyncMode",
+        "GetAsyncMode -> TRUE",
         "StartOperation",
         "InOperation",
         "EndOperation(hResult=0x00000000, effects=1)",
         "InOperation",
     ]
+
+
+def test_get_async_mode_declares_capability_before_any_set_async_mode_call(monkeypatch):
+    """Run B's whole lifecycle was a single GetAsyncMode, before anything else.
+
+    GetAsyncMode is the source declaring its own capability to the target,
+    not a readback of a mode only SetAsyncMode ever sets.  With no
+    SetAsyncMode call having happened yet - the exact order the real desktop
+    run recorded - GetAsyncMode must still answer TRUE, or Explorer never
+    has a reason to try async at all.
+    """
+    monkeypatch.setattr(spike, "register_format", lambda _name: 1)
+    spike.LIFECYCLE_LOG.clear()
+    obj = spike.DataObject(async_capability=True)
+    async_pointer = _async_capability_pointer(obj)
+    mode = ctypes.wintypes.BOOL(0)
+
+    assert spike._stream_slot(async_pointer, 4, spike._GETASYNC)(
+        async_pointer, ctypes.byref(mode)
+    ) == spike.S_OK
+
+    assert mode.value == 1, (
+        "GetAsyncMode declined async before Explorer ever asked for it - "
+        "the exact defect that made Run B's lifecycle empty of everything "
+        "past this one call"
+    )
+    assert [event for event, _tid in spike.LIFECYCLE_LOG] == ["GetAsyncMode -> TRUE"]
 
 
 def test_async_mode_retains_one_reference_until_end_operation(monkeypatch):
@@ -698,6 +725,44 @@ def test_the_real_parser_still_accepts_the_fixed_budget_the_brief_documents(
     assert knobs["idle_seconds"] == 45.0
     assert knobs["paste_window_seconds"] == 90.0
     assert knobs["max_seconds"] == 1200.0
+
+
+def test_main_states_advertised_async_capability_before_explorer_can_ask(
+    monkeypatch, fresh_call_logs
+):
+    messages = _explorer_stubs(monkeypatch)
+    monkeypatch.setattr(
+        spike, "run", lambda _pump, **_k: spike.Outcome(report="ticks 0", reason="quiescent")
+    )
+    monkeypatch.setattr(sys, "argv", ["spike_virtual_files.py", "--async-capability"])
+
+    assert spike.main() == 0
+
+    assert any(
+        m == "async capability: advertised - GetAsyncMode will answer TRUE"
+        for m in messages
+    ), (
+        "the run's posture must be a stated fact in the log, not something a "
+        "reader infers from an empty Lifecycle calls list"
+    )
+
+
+def test_main_states_async_capability_is_not_advertised_without_the_flag(
+    monkeypatch, fresh_call_logs
+):
+    messages = _explorer_stubs(monkeypatch)
+    monkeypatch.setattr(
+        spike, "run", lambda _pump, **_k: spike.Outcome(report="ticks 0", reason="quiescent")
+    )
+    monkeypatch.setattr(sys, "argv", ["spike_virtual_files.py"])
+
+    assert spike.main() == 0
+
+    assert any(
+        m == "async capability: not advertised (pass --async-capability to enable it)"
+        for m in messages
+    )
+    assert not any(m.startswith("async capability: advertised") for m in messages)
 
 
 def test_the_activity_counter_notices_every_kind_of_consumer_call(fresh_call_logs):

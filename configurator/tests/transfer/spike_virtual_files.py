@@ -703,10 +703,18 @@ class DataObject(COMObject):
         return S_OK
 
     def _get_async_mode(self, _this, out) -> int:
-        note("GetAsyncMode")
+        # This is the source declaring its own capability to the target, not
+        # a readback of a mode only SetAsyncMode ever sets - Explorer asks
+        # this before it has called SetAsyncMode at all (it is the very
+        # first lifecycle call in the operator's Run B).  Reachable only
+        # when --async-capability constructed this interface at all, so the
+        # answer is always TRUE: an object that did not want async support
+        # would not expose this interface in the first place.
         if not out:
+            note("GetAsyncMode -> E_POINTER, no output pointer")
             return E_POINTER
-        out[0] = 1 if self.async_mode else 0
+        out[0] = 1
+        note("GetAsyncMode -> TRUE")
         return S_OK
 
     def _start_operation(self, _this, _reserved) -> int:
@@ -1020,6 +1028,11 @@ def main() -> int:
         return inspect_clipboard()
 
     obj = DataObject(async_capability=arguments.async_capability)
+    log(
+        "async capability: advertised - GetAsyncMode will answer TRUE"
+        if arguments.async_capability
+        else "async capability: not advertised (pass --async-capability to enable it)"
+    )
     result = ctypes.windll.ole32.OleSetClipboard(obj.pointer)
     log(f"OleSetClipboard -> 0x{result & 0xFFFFFFFF:08X}")
     automatic = settle(obj, make_pump())
