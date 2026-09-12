@@ -1,12 +1,12 @@
-"""Throwaway spike: descriptor-only IDataObject on the clipboard.
+"""Throwaway spike: virtual-file IDataObject on the clipboard.
 
 Run in a real interactive Windows session (not offscreen)::
 
-    .venv\\Scripts\\python.exe configurator/tests/transfer/spike_virtual_files.py --descriptor-only
+    .venv\\Scripts\\python.exe configurator/tests/transfer/spike_virtual_files.py --seconds 300
 
 The script places an object advertising three virtual-file entries on the
-clipboard and logs every QueryGetData/GetData call.  No file content is
-provided at this stage; the probe isolates descriptor negotiation.
+clipboard and logs descriptor negotiation plus synthetic IStream reads.  The
+4 GiB entry is deterministic and is never stored or fetched from a network.
 """
 
 from __future__ import annotations
@@ -27,12 +27,20 @@ from spike_com_vtable import (
 )
 
 IID_IDATAOBJECT = "{0000010E-0000-0000-C000-000000000046}"
+IID_ISTREAM = "{0000000C-0000-0000-C000-000000000046}"
 
 DV_E_FORMATETC = -2147221404  # 0x80040064
+DV_E_TYMED = -2147221399  # 0x80040069
 E_NOTIMPL = -2147467263
+STG_E_INVALIDFUNCTION = -2147287039  # 0x80030001
 
 TYMED_HGLOBAL = 1
+TYMED_ISTREAM = 4
 DATADIR_GET = 1
+
+STREAM_SEEK_SET = 0
+STREAM_SEEK_CUR = 1
+STREAM_SEEK_END = 2
 
 DROPEFFECT_COPY = 1
 FILE_ATTRIBUTE_DIRECTORY = 0x10
@@ -41,6 +49,13 @@ FD_ATTRIBUTES = 0x04
 FD_PROGRESSUI = 0x4000
 
 _START = time.perf_counter()
+
+# (entry_index, offset, requested_cb, returned), once per IStream::Read.
+READ_LOG: list[tuple[int, int, int, int]] = []
+# (entry_index, origin, offset), once per IStream::Seek.
+SEEK_LOG: list[tuple[int, int, int]] = []
+# entry_index, once per IStream::Stat.
+STAT_LOG: list[int] = []
 
 
 def log(message: str) -> None:
@@ -68,6 +83,137 @@ class STGMEDIUM(ctypes.Structure):
 
 class FILETIME(ctypes.Structure):
     _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+
+def synthetic_bytes(entry_index: int, offset: int, count: int) -> bytes:
+    """Return deterministic data without storing the virtual file."""
+    return bytes((entry_index * 7 + (offset + index) * 31) & 0xFF for index in range(count))
+
+
+_READ = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p
+)
+_WRITE = _READ
+_SEEK = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_longlong, wintypes.DWORD, ctypes.c_void_p
+)
+_SETSIZE = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_longlong)
+_COPYTO = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_longlong,
+    ctypes.c_void_p, ctypes.c_void_p,
+)
+_COMMIT = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, wintypes.DWORD)
+_REVERT = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
+_LOCK = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_longlong, ctypes.c_longlong, wintypes.DWORD
+)
+_STAT = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD)
+_CLONE = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
+
+
+class STATSTG(ctypes.Structure):
+    _fields_ = [
+        ("pwcsName", ctypes.c_wchar_p),
+        ("type", wintypes.DWORD),
+        ("cbSize", ctypes.c_ulonglong),
+        ("mtime", FILETIME),
+        ("ctime", FILETIME),
+        ("atime", FILETIME),
+        ("grfMode", wintypes.DWORD),
+        ("grfLocksSupported", wintypes.DWORD),
+        ("clsid", GUID),
+        ("grfStateBits", wintypes.DWORD),
+        ("reserved", wintypes.DWORD),
+    ]
+
+
+class StreamObject(COMObject):
+    """IStream over a synthetic generator; it uses neither disk nor network."""
+
+    def __init__(self, entry_index: int, size: int) -> None:
+        super().__init__([IID_IUNKNOWN, IID_ISTREAM])
+        self.entry_index = entry_index
+        self.size = size
+        self.position = 0
+        self._own = [
+            _READ(self._read), _WRITE(self._write), _SEEK(self._seek),
+            _SETSIZE(self._set_size), _COPYTO(self._copy_to), _COMMIT(self._commit),
+            _REVERT(self._revert), _LOCK(self._lock), _LOCK(self._unlock),
+            _STAT(self._stat), _CLONE(self._clone),
+        ]
+        self._vtable = make_vtable(*self._callbacks, *self._own)
+        self._slot = ctypes.c_void_p(ctypes.addressof(self._vtable))
+        self.pointer = ctypes.c_void_p(ctypes.addressof(self._slot))
+
+    def _read(self, _this, pv, cb, pcb_read) -> int:
+        available = max(0, self.size - self.position)
+        count = min(int(cb), available)
+        payload = synthetic_bytes(self.entry_index, self.position, count)
+        READ_LOG.append((self.entry_index, self.position, int(cb), count))
+        log(f"IStream::Read(entry={self.entry_index}, off={self.position}, cb={cb}) -> {count}")
+        if count:
+            ctypes.memmove(pv, payload, count)
+        self.position += count
+        if pcb_read:
+            ctypes.cast(pcb_read, ctypes.POINTER(wintypes.ULONG))[0] = count
+        return S_OK
+
+    def _seek(self, _this, offset, origin, new_position) -> int:
+        SEEK_LOG.append((self.entry_index, int(origin), int(offset)))
+        log(f"IStream::Seek(entry={self.entry_index}, origin={origin}, offset={offset})")
+        if origin == STREAM_SEEK_SET:
+            target = int(offset)
+        elif origin == STREAM_SEEK_CUR:
+            target = self.position + int(offset)
+        elif origin == STREAM_SEEK_END:
+            target = self.size + int(offset)
+        else:
+            return STG_E_INVALIDFUNCTION
+        if target < 0:
+            return STG_E_INVALIDFUNCTION
+        self.position = target
+        if new_position:
+            ctypes.cast(new_position, ctypes.POINTER(ctypes.c_ulonglong))[0] = target
+        return S_OK
+
+    def _stat(self, _this, pstatstg, _flags) -> int:
+        STAT_LOG.append(self.entry_index)
+        log(f"IStream::Stat(entry={self.entry_index})")
+        if not pstatstg:
+            return E_POINTER
+        stat = ctypes.cast(pstatstg, ctypes.POINTER(STATSTG)).contents
+        ctypes.memset(ctypes.byref(stat), 0, ctypes.sizeof(STATSTG))
+        stat.type = 2
+        stat.cbSize = self.size
+        return S_OK
+
+    def _write(self, _this, _pv, _cb, _written) -> int: return STG_E_INVALIDFUNCTION
+    def _set_size(self, _this, _size) -> int: return STG_E_INVALIDFUNCTION
+    def _copy_to(self, _this, _dest, _cb, _read, _written) -> int: return E_NOTIMPL
+    def _commit(self, _this, _flags) -> int: return S_OK
+    def _revert(self, _this) -> int: return S_OK
+    def _lock(self, _this, _offset, _cb, _type) -> int: return E_NOTIMPL
+    def _unlock(self, _this, _offset, _cb, _type) -> int: return E_NOTIMPL
+    def _clone(self, _this, _out) -> int: return E_NOTIMPL
+
+
+def _stream_slot(pointer, index, prototype):
+    vtable = ctypes.cast(pointer, ctypes.POINTER(ctypes.c_void_p)).contents
+    entries = ctypes.cast(vtable, ctypes.POINTER(ctypes.c_void_p))
+    return prototype(entries[index])
+
+
+def stream_read(pointer: ctypes.c_void_p, count: int) -> bytes:
+    buffer = (ctypes.c_char * count)()
+    read = wintypes.ULONG(0)
+    _stream_slot(pointer, 3, _READ)(pointer, buffer, count, ctypes.byref(read))
+    return bytes(buffer[:read.value])
+
+
+def stream_seek(pointer: ctypes.c_void_p, offset: int, origin: int) -> int:
+    position = ctypes.c_ulonglong(0)
+    _stream_slot(pointer, 5, _SEEK)(pointer, offset, origin, ctypes.byref(position))
+    return position.value
 
 
 class FILEDESCRIPTORW(ctypes.Structure):
@@ -179,6 +325,7 @@ class DataObject(COMObject):
         self.cf_contents = register_format("FileContents")
         self.cf_drop_effect = register_format("Preferred DropEffect")
         self.get_data_calls: list[tuple[int, int]] = []
+        self.streams: list[StreamObject] = []
 
         self._own = [
             _GETDATA(self._get_data),
@@ -210,7 +357,21 @@ class DataObject(COMObject):
             medium.data = to_hglobal(DROPEFFECT_COPY.to_bytes(4, "little"))
             medium.pUnkForRelease = None
             return S_OK
-        log("  -> DV_E_FORMATETC (content intentionally unavailable)")
+        if fmt.cfFormat == self.cf_contents:
+            if not fmt.tymed & TYMED_ISTREAM:
+                log(f"  -> DV_E_TYMED: requested tymed={fmt.tymed}, not ISTREAM")
+                return DV_E_TYMED
+            _name, is_directory, size = ENTRIES[fmt.lindex]
+            if is_directory:
+                return DV_E_FORMATETC
+            stream = StreamObject(fmt.lindex, size)
+            # Keep the Python-owned callbacks alive while Explorer owns the COM pointer.
+            self.streams.append(stream)
+            medium.tymed = TYMED_ISTREAM
+            medium.data = stream.pointer
+            medium.pUnkForRelease = None
+            return S_OK
+        log("  -> DV_E_FORMATETC")
         return DV_E_FORMATETC
 
     def _query_get_data(self, _this, pformatetc) -> int:
@@ -255,11 +416,8 @@ class DataObject(COMObject):
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--descriptor-only", action="store_true")
     parser.add_argument("--seconds", type=int, default=120)
     arguments = parser.parse_args()
-    if not arguments.descriptor_only:
-        parser.error("pass --descriptor-only")
 
     ctypes.oledll.ole32.OleInitialize(None)
     obj = DataObject()
@@ -276,6 +434,9 @@ def main() -> int:
         time.sleep(0.01)
 
     log(f"GetData calls: {obj.get_data_calls}")
+    log(f"Read calls: {READ_LOG}")
+    log(f"Seek calls: {SEEK_LOG}")
+    log(f"Stat calls: {STAT_LOG}")
     ctypes.windll.ole32.OleFlushClipboard()
     return 0
 
