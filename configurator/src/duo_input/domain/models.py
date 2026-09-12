@@ -88,3 +88,5 @@ class DeviceProject:
     schema_version: str
     active_profile_id: int
     profiles: tuple[Profile, ...]
+    #: Every route change moves the keyboard and the mouse to one computer.
+    synchronised_control: bool = False

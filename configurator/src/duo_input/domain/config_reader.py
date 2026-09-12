@@ -42,6 +42,7 @@ def binary_to_project(package: bytes) -> DeviceProject:
         schema_version=PROJECT_SCHEMA_VERSION,
         active_profile_id=config.active_profile_id,
         profiles=config.profiles,
+        synchronised_control=config.synchronised_control,
     )
 
 

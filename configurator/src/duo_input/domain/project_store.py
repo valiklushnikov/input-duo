@@ -30,9 +30,9 @@ from duo_input.generated.protocol import (
 )
 
 
-PROJECT_SCHEMA_VERSION = "1.1"
+PROJECT_SCHEMA_VERSION = "1.2"
 _SUPPORTED_SCHEMA_MAJOR = 1
-_SUPPORTED_OLDER_MINORS = {0}
+_SUPPORTED_OLDER_MINORS = {0, 1}
 
 
 class ProjectError(ValueError):
@@ -108,6 +108,9 @@ def _migrate_document(document: dict[str, Any]) -> dict[str, Any]:
         if minor == 0:
             migrated = _migrate_1_0_to_1_1(migrated)
             minor = 1
+        elif minor == 1:
+            migrated = _migrate_1_1_to_1_2(migrated)
+            minor = 2
         else:  # pragma: no cover - guarded by supported migration table
             raise ProjectVersionError(f"unsupported project schema version {version}")
     return migrated
@@ -122,6 +125,15 @@ def _project_path(path: str | Path) -> Path:
 
 def _migrate_1_0_to_1_1(document: dict[str, Any]) -> dict[str, Any]:
     migrated = dict(document)
+    migrated["schema_version"] = "1.1"
+    return migrated
+
+
+def _migrate_1_1_to_1_2(document: dict[str, Any]) -> dict[str, Any]:
+    # 1.1 had no such setting, and a project written then meant the devices
+    # switched apart - which is what its absence says here.
+    migrated = dict(document)
+    migrated["synchronised_control"] = False
     migrated["schema_version"] = PROJECT_SCHEMA_VERSION
     return migrated
 
@@ -131,6 +143,7 @@ def _project_to_json(project: DeviceProject) -> dict[str, Any]:
         "active_profile_id": project.active_profile_id,
         "profiles": [_profile_to_json(profile) for profile in project.profiles],
         "schema_version": PROJECT_SCHEMA_VERSION,
+        "synchronised_control": project.synchronised_control,
     }
 
 
@@ -197,6 +210,7 @@ def _project_from_json(document: dict[str, Any]) -> DeviceProject:
             schema_version=_required(document, "schema_version", str),
             active_profile_id=_required(document, "active_profile_id", int),
             profiles=tuple(_profile_from_json(value) for value in _required(document, "profiles", list)),
+            synchronised_control=bool(document.get("synchronised_control", False)),
         )
     except (KeyError, TypeError, ValueError, UnicodeError) as exc:
         raise ProjectError(f"malformed project: {exc}") from exc

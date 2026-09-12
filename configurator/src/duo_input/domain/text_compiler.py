@@ -73,6 +73,7 @@ def _resolved_config(project: DeviceProject) -> DeviceConfig:
     return DeviceConfig(
         active_profile_id=project.active_profile_id,
         profiles=tuple(_resolved_profile(profile) for profile in project.profiles),
+        synchronised_control=project.synchronised_control,
     )
 
 

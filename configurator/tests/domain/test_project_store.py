@@ -371,3 +371,34 @@ def test_project_store_rejects_non_project_extensions(tmp_path: Path, project: D
         save_project_atomic(project, wrong_path)
     with pytest.raises(ProjectError, match=".duoinput.json"):
         load_project(wrong_path)
+
+
+def test_synchronised_control_survives_saving_and_loading(tmp_path):
+    from dataclasses import replace
+
+    from duo_input.domain.project_store import load_project, save_project_atomic
+    from duo_input.ui.models.project_session import default_project
+
+    path = tmp_path / "sync.duoinput.json"
+    save_project_atomic(replace(default_project(), synchronised_control=True), path)
+
+    assert load_project(path).synchronised_control is True
+
+
+def test_a_project_written_before_the_setting_existed_loads_with_it_off(tmp_path):
+    import json
+
+    from duo_input.domain.project_store import load_project, save_project_atomic
+    from duo_input.ui.models.project_session import default_project
+
+    path = tmp_path / "old.duoinput.json"
+    save_project_atomic(default_project(), path)
+    document = json.loads(path.read_text("utf-8"))
+    # What a 1.1 project on disk actually looks like: the key is absent, not
+    # false. A reader that demands it would refuse to open a file that was
+    # valid when it was written.
+    document["schema_version"] = "1.1"
+    document.pop("synchronised_control", None)
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    assert load_project(path).synchronised_control is False

@@ -152,3 +152,22 @@ def test_project_compilation_reports_text_untypable_in_its_profile_layout() -> N
     assert error.value.index == 0
     assert error.value.char == "a"
     assert error.value.layout is TextLayout.RU
+
+
+def test_synchronised_control_reaches_the_compiled_package():
+    from dataclasses import replace
+
+    from duo_input.domain.config_reader import binary_to_project
+    from duo_input.domain.text_compiler import compile_project_to_binary
+    from duo_input.ui.models.project_session import default_project
+
+    package = compile_project_to_binary(replace(default_project(), synchronised_control=True))
+
+    assert binary_to_project(package).synchronised_control is True
+
+    # The other half of the pair: a project that never turned the setting on
+    # must not come back on either - guards against a stub that always
+    # reports True regardless of what was compiled.
+    off_package = compile_project_to_binary(default_project())
+
+    assert binary_to_project(off_package).synchronised_control is False
