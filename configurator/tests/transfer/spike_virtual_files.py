@@ -7,6 +7,13 @@ Run in a real interactive Windows session (not offscreen)::
 The script places an object advertising three virtual-file entries on the
 clipboard and logs descriptor negotiation plus synthetic IStream reads.  The
 4 GiB entry is deterministic and is never stored or fetched from a network.
+
+``--inspect-clipboard`` publishes nothing.  It reads whatever IDataObject is
+already on the clipboard and dumps its advertised FORMATETC entries and its
+QueryGetData answers, so a Shell-native virtual-file object (copy a file out
+of a ZIP folder in Explorer) can be diffed against the shape we advertise::
+
+    .venv\\Scripts\\python.exe configurator/tests/transfer/spike_virtual_files.py --inspect-clipboard
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ STG_E_INVALIDFUNCTION = -2147287039  # 0x80030001
 
 TYMED_HGLOBAL = 1
 TYMED_ISTREAM = 4
+TYMED_ISTORAGE = 8
 DATADIR_GET = 1
 DVASPECT_CONTENT = 1
 
@@ -257,6 +265,29 @@ def register_format(name: str) -> int:
     value = ctypes.windll.user32.RegisterClipboardFormatW(ctypes.c_wchar_p(name))
     log(f"RegisterClipboardFormatW({name!r}) -> {value}")
     return value
+
+
+#: GetClipboardFormatNameW fails for the predefined formats, so name them here.
+PREDEFINED_FORMATS = {
+    1: "CF_TEXT", 2: "CF_BITMAP", 3: "CF_METAFILEPICT", 4: "CF_SYLK", 5: "CF_DIF",
+    6: "CF_TIFF", 7: "CF_OEMTEXT", 8: "CF_DIB", 9: "CF_PALETTE", 10: "CF_PENDATA",
+    11: "CF_RIFF", 12: "CF_WAVE", 13: "CF_UNICODETEXT", 14: "CF_ENHMETAFILE",
+    15: "CF_HDROP", 16: "CF_LOCALE", 17: "CF_DIBV5",
+}
+
+_GET_FORMAT_NAME = ctypes.windll.user32.GetClipboardFormatNameW
+_GET_FORMAT_NAME.argtypes = [wintypes.UINT, ctypes.c_wchar_p, ctypes.c_int]
+_GET_FORMAT_NAME.restype = ctypes.c_int
+
+
+def format_name(cf_format: int) -> str:
+    """Resolve a clipboard format id to its name, or ``#id`` when it has none."""
+    if cf_format in PREDEFINED_FORMATS:
+        return PREDEFINED_FORMATS[cf_format]
+    buffer = ctypes.create_unicode_buffer(260)
+    if _GET_FORMAT_NAME(cf_format, buffer, len(buffer)):
+        return buffer.value
+    return f"#{cf_format}"
 
 
 _KERNEL32 = ctypes.windll.kernel32
@@ -512,7 +543,10 @@ class DataObject(COMObject):
     def _get_data(self, _this, pformatetc, pmedium) -> int:
         fmt = ctypes.cast(pformatetc, ctypes.POINTER(FORMATETC)).contents
         self.get_data_calls.append((fmt.cfFormat, fmt.lindex))
-        log(f"GetData(cfFormat={fmt.cfFormat}, lindex={fmt.lindex}, tymed={fmt.tymed})")
+        log(
+            f"GetData(cfFormat={fmt.cfFormat} ({format_name(fmt.cfFormat)}), "
+            f"lindex={fmt.lindex}, tymed={fmt.tymed})"
+        )
         medium = ctypes.cast(pmedium, ctypes.POINTER(STGMEDIUM)).contents
         if fmt.cfFormat == self.cf_descriptor:
             medium.tymed = TYMED_HGLOBAL
@@ -528,6 +562,12 @@ class DataObject(COMObject):
             if not fmt.tymed & TYMED_ISTREAM:
                 log(f"  -> DV_E_TYMED: requested tymed={fmt.tymed}, not ISTREAM")
                 return DV_E_TYMED
+            if not 0 <= fmt.lindex < len(ENTRIES):
+                # CFSTR_FILECONTENTS is indexed from zero; serving ENTRIES[-1]
+                # for the OLE layer's lindex=-1 render would hide which file
+                # the consumer actually asked for.
+                log(f"  -> DV_E_FORMATETC: lindex={fmt.lindex} is not a zero-based entry index")
+                return DV_E_FORMATETC
             _name, is_directory, size = ENTRIES[fmt.lindex]
             if is_directory:
                 return DV_E_FORMATETC
@@ -543,7 +583,10 @@ class DataObject(COMObject):
 
     def _query_get_data(self, _this, pformatetc) -> int:
         fmt = ctypes.cast(pformatetc, ctypes.POINTER(FORMATETC)).contents
-        log(f"QueryGetData(cfFormat={fmt.cfFormat}, lindex={fmt.lindex})")
+        log(
+            f"QueryGetData(cfFormat={fmt.cfFormat} ({format_name(fmt.cfFormat)}), "
+            f"lindex={fmt.lindex}, tymed={fmt.tymed})"
+        )
         if fmt.cfFormat == self.cf_contents and not fmt.tymed & TYMED_ISTREAM:
             return DV_E_TYMED
         if fmt.cfFormat in (self.cf_descriptor, self.cf_drop_effect, self.cf_contents):
@@ -571,7 +614,9 @@ class DataObject(COMObject):
         formats = []
         for cf_format, tymed, lindex in (
             (self.cf_descriptor, TYMED_HGLOBAL, -1),
-            (self.cf_contents, TYMED_ISTREAM, -1),
+            # CFSTR_FILECONTENTS is indexed from zero; only formats that carry
+            # no index at all use lindex -1.
+            (self.cf_contents, TYMED_ISTREAM, 0),
             (self.cf_drop_effect, TYMED_HGLOBAL, -1),
         ):
             formats.append(FORMATETC(cf_format, None, DVASPECT_CONTENT, lindex, tymed))
@@ -641,6 +686,131 @@ class DataObject(COMObject):
         self._retained_async_pointer = None
 
 
+#: Batch size for draining a foreign IEnumFORMATETC; Shell objects advertise many.
+INSPECT_BATCH = 64
+
+#: (format name, lindex, tymed) triples worth asking a foreign object about.
+INSPECT_PROBES = (
+    ("FileGroupDescriptorW", -1, TYMED_HGLOBAL),
+    ("FileGroupDescriptorW", -1, TYMED_ISTREAM),
+    ("FileGroupDescriptorW", 0, TYMED_HGLOBAL),
+    ("FileContents", -1, TYMED_ISTREAM),
+    ("FileContents", 0, TYMED_ISTREAM),
+    ("FileContents", 0, TYMED_HGLOBAL),
+    ("FileContents", 0, TYMED_ISTORAGE),
+    ("FileContents", 0, TYMED_HGLOBAL | TYMED_ISTREAM | TYMED_ISTORAGE),
+    ("FileContents", 1, TYMED_ISTREAM),
+)
+
+
+def describe_format(fmt: FORMATETC) -> str:
+    """Every FORMATETC field verbatim, with the format name resolved."""
+    return (
+        f"cfFormat={fmt.cfFormat} ({format_name(fmt.cfFormat)}) "
+        f"ptd={fmt.ptd} dwAspect={fmt.dwAspect} lindex={fmt.lindex} tymed={fmt.tymed}"
+    )
+
+
+def enumerate_formats(pointer) -> list[FORMATETC]:
+    """Drain a foreign IDataObject's IEnumFORMATETC and return every entry."""
+    out = ctypes.c_void_p()
+    result = _data_object_slot(pointer, 8, _ENUM)(pointer, DATADIR_GET, ctypes.byref(out))
+    log(f"EnumFormatEtc(DATADIR_GET) -> 0x{result & 0xFFFFFFFF:08X}")
+    if result != S_OK or not out.value:
+        return []
+    next_method = _enum_slot(out, 3, _ENUM_NEXT)
+    collected: list[FORMATETC] = []
+    while True:
+        batch = (FORMATETC * INSPECT_BATCH)()
+        fetched = wintypes.ULONG(0)
+        result = next_method(out, INSPECT_BATCH, batch, ctypes.byref(fetched))
+        log(f"  Next(celt={INSPECT_BATCH}) -> 0x{result & 0xFFFFFFFF:08X}, fetched={fetched.value}")
+        collected.extend(batch[index] for index in range(fetched.value))
+        if not fetched.value or result != S_OK:
+            break
+    _enum_slot(out, 2, _REFCOUNT)(out)
+    return collected
+
+
+def probe_query_get_data(pointer) -> list[tuple[str, int, int, int]]:
+    """Ask a foreign IDataObject every probe and return (name, lindex, tymed, hr)."""
+    query = _data_object_slot(pointer, 5, _QUERYGET)
+    probed_names = dict.fromkeys(name for name, _lindex, _tymed in INSPECT_PROBES)
+    identifiers = {name: register_format(name) for name in probed_names}
+    answers: list[tuple[str, int, int, int]] = []
+    for name, lindex, tymed in INSPECT_PROBES:
+        fmt = FORMATETC(identifiers[name], None, DVASPECT_CONTENT, lindex, tymed)
+        result = query(pointer, ctypes.byref(fmt))
+        answers.append((name, lindex, tymed, result))
+        log(f"QueryGetData({name}, lindex={lindex}, tymed={tymed}) -> 0x{result & 0xFFFFFFFF:08X}")
+    return answers
+
+
+def supports_async_capability(pointer) -> bool:
+    """Whether a foreign IDataObject also answers IDataObjectAsyncCapability."""
+    iid = guid_from_string(IID_IASYNCCAPABILITY)
+    out = ctypes.c_void_p()
+    result = _data_object_slot(pointer, 0, _QUERYINTERFACE)(
+        pointer, ctypes.byref(iid), ctypes.byref(out)
+    )
+    if result == S_OK and out.value:
+        _data_object_slot(out, 2, _REFCOUNT)(out)
+        return True
+    return False
+
+
+def get_clipboard_data_object() -> tuple[int, ctypes.c_void_p]:
+    """OleGetClipboard's HRESULT and the IDataObject it handed back."""
+    pointer = ctypes.c_void_p()
+    result = ctypes.windll.ole32.OleGetClipboard(ctypes.byref(pointer))
+    log(f"OleGetClipboard -> 0x{result & 0xFFFFFFFF:08X}")
+    return result, pointer
+
+
+def inspect_clipboard(get_data_object=None) -> int:
+    """Dump the shape of whatever IDataObject is already on the clipboard."""
+    result, pointer = (get_data_object or get_clipboard_data_object)()
+    if result != S_OK or not pointer.value:
+        log("no IDataObject on the clipboard; nothing to inspect")
+        return 1
+    log("--- advertised FORMATETC entries ---")
+    for index, fmt in enumerate(enumerate_formats(pointer)):
+        log(f"  [{index}] {describe_format(fmt)}")
+    log("--- QueryGetData answers ---")
+    probe_query_get_data(pointer)
+    log(f"IDataObjectAsyncCapability: {supports_async_capability(pointer)}")
+    _data_object_slot(pointer, 2, _REFCOUNT)(pointer)
+    return 0
+
+
+def ole_initialize() -> None:
+    ctypes.oledll.ole32.OleInitialize(None)
+
+
+#: Seconds to let clipboard monitors finish probing before inviting a paste.
+SETTLE_SECONDS = 3.0
+
+
+def settle(obj, pump, sleep=time.sleep) -> list[tuple[int, int]]:
+    """Pump until the automatic clipboard probe is over, then divide the log.
+
+    Within ~100 ms of OleSetClipboard returning, and with nobody touching the
+    keyboard, something on the desktop probes the fresh clipboard owner with
+    GetData(Preferred DropEffect), QueryGetData(Shell IDList Array),
+    EnumFormatEtc/Next and SetData.  That is the same call fingerprint a paste
+    would leave, so without this divider a log cannot say which calls came
+    from Explorer and which came from a monitor.
+    """
+    deadline = time.perf_counter() + SETTLE_SECONDS
+    while time.perf_counter() < deadline:
+        pump()
+        sleep(0.01)
+    automatic = list(obj.get_data_calls)
+    log(f"clipboard monitors settled after {SETTLE_SECONDS}s; their GetData calls: {automatic}")
+    log("=== press Ctrl+V in Explorer NOW - every call below is yours ===")
+    return automatic
+
+
 def make_pump():
     message = wintypes.MSG()
 
@@ -656,17 +826,26 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seconds", type=int, default=120)
     parser.add_argument("--async-capability", action="store_true")
+    parser.add_argument(
+        "--inspect-clipboard",
+        action="store_true",
+        help="dump the IDataObject already on the clipboard, then exit",
+    )
     arguments = parser.parse_args()
 
-    ctypes.oledll.ole32.OleInitialize(None)
+    ole_initialize()
+    if arguments.inspect_clipboard:
+        return inspect_clipboard()
+
     obj = DataObject(async_capability=arguments.async_capability)
     result = ctypes.windll.ole32.OleSetClipboard(obj.pointer)
     log(f"OleSetClipboard -> 0x{result & 0xFFFFFFFF:08X}")
-    log("Press Ctrl+V in Explorer. Ctrl+C in this window exits.")
+    automatic = settle(obj, make_pump())
 
     log(f"Qt responsiveness: {run(arguments.seconds, make_pump())}")
 
     log(f"GetData calls: {obj.get_data_calls}")
+    log(f"GetData calls after the settle marker: {obj.get_data_calls[len(automatic):]}")
     log(f"Read calls: {READ_LOG}")
     log(f"Seek calls: {SEEK_LOG}")
     log(f"Stat calls: {STAT_LOG}")

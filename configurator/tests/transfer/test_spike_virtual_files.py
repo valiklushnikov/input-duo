@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ctypes
+import sys
+
 import pytest
 
 import spike_virtual_files as spike
@@ -216,7 +218,7 @@ def test_async_mode_retains_one_reference_until_end_operation(monkeypatch):
     assert release(async_pointer) == 1
 
 
-def test_enum_format_etc_pointer_enumerates_advertised_formats_with_com_semantics(monkeypatch):
+def test_enum_format_etc_advertises_a_zero_based_file_contents_lindex(monkeypatch):
     monkeypatch.setattr(spike, "register_format", lambda name: {"FileGroupDescriptorW": 10, "FileContents": 11, "Preferred DropEffect": 12}[name])
     obj = spike.DataObject()
     out = ctypes.c_void_p()
@@ -228,7 +230,7 @@ def test_enum_format_etc_pointer_enumerates_advertised_formats_with_com_semantic
     assert fetched.value == 3
     assert [(fmt.cfFormat, fmt.dwAspect, fmt.lindex, fmt.tymed) for fmt in formats] == [
         (10, spike.DVASPECT_CONTENT, -1, spike.TYMED_HGLOBAL),
-        (11, spike.DVASPECT_CONTENT, -1, spike.TYMED_ISTREAM),
+        (11, spike.DVASPECT_CONTENT, 0, spike.TYMED_ISTREAM),
         (12, spike.DVASPECT_CONTENT, -1, spike.TYMED_HGLOBAL),
     ]
 
@@ -251,22 +253,6 @@ def test_enum_format_etc_supports_partial_next_skip_reset_clone_and_pointer_vali
     assert spike._enum_slot(enum_pointer, 3, spike._ENUM_NEXT)(enum_pointer, 1, None, ctypes.byref(fetched)) == spike.E_POINTER
 
 
-def test_enum_format_etc_uses_shell_normalized_single_file_contents_format(monkeypatch):
-    monkeypatch.setattr(spike, "register_format", lambda name: {"FileGroupDescriptorW": 10, "FileContents": 11, "Preferred DropEffect": 12}[name])
-    obj = spike.DataObject()
-    out = ctypes.c_void_p()
-    assert spike._data_object_slot(obj.pointer, 8, spike._ENUM)(obj.pointer, spike.DATADIR_GET, ctypes.byref(out)) == spike.S_OK
-    formats = (spike.FORMATETC * 3)()
-    fetched = ctypes.wintypes.ULONG()
-    assert spike._enum_slot(out, 3, spike._ENUM_NEXT)(out, 3, formats, ctypes.byref(fetched)) == spike.S_OK
-    assert fetched.value == 3
-    assert [(fmt.cfFormat, fmt.lindex, fmt.tymed) for fmt in formats] == [
-        (10, -1, spike.TYMED_HGLOBAL),
-        (11, -1, spike.TYMED_ISTREAM),
-        (12, -1, spike.TYMED_HGLOBAL),
-    ]
-
-
 def test_enum_format_etc_methods_log_thread_tagged_events(monkeypatch):
     messages = []
     monkeypatch.setattr(spike, "log", messages.append)
@@ -287,3 +273,179 @@ def test_enum_format_etc_methods_log_thread_tagged_events(monkeypatch):
         "IEnumFORMATETC::Reset",
         "IEnumFORMATETC::Clone",
     ]
+
+
+def test_format_name_resolves_predefined_registered_and_unknown_identifiers():
+    registered = spike.register_format("DuoInputSpikeProbeFormat")
+
+    assert spike.format_name(15) == "CF_HDROP"
+    assert spike.format_name(registered) == "DuoInputSpikeProbeFormat"
+    assert spike.format_name(0xBFFF) == "#49151"
+
+
+def test_query_get_data_logs_the_resolved_format_name_and_tymed(monkeypatch):
+    messages = []
+    monkeypatch.setattr(spike, "log", messages.append)
+    obj = spike.DataObject()
+    fmt = spike.FORMATETC(obj.cf_descriptor, None, spike.DVASPECT_CONTENT, -1, spike.TYMED_HGLOBAL)
+
+    assert obj._query_get_data(None, ctypes.byref(fmt)) == spike.S_OK
+
+    assert (
+        f"QueryGetData(cfFormat={obj.cf_descriptor} (FileGroupDescriptorW), "
+        f"lindex=-1, tymed={spike.TYMED_HGLOBAL})" in messages
+    )
+
+
+def test_get_data_logs_the_resolved_format_name(monkeypatch):
+    messages = []
+    monkeypatch.setattr(spike, "log", messages.append)
+    obj = spike.DataObject()
+    fmt = spike.FORMATETC(obj.cf_drop_effect, None, spike.DVASPECT_CONTENT, -1, spike.TYMED_HGLOBAL)
+    medium = spike.STGMEDIUM()
+
+    assert obj._get_data(None, ctypes.byref(fmt), ctypes.byref(medium)) == spike.S_OK
+
+    assert (
+        f"GetData(cfFormat={obj.cf_drop_effect} (Preferred DropEffect), "
+        f"lindex=-1, tymed={spike.TYMED_HGLOBAL})" in messages
+    )
+
+
+def test_enumerate_formats_collects_every_entry_and_releases_the_enumerator():
+    obj = spike.DataObject()
+
+    formats = spike.enumerate_formats(obj.pointer)
+
+    assert [(fmt.cfFormat, fmt.lindex, fmt.tymed) for fmt in formats] == [
+        (obj.cf_descriptor, -1, spike.TYMED_HGLOBAL),
+        (obj.cf_contents, 0, spike.TYMED_ISTREAM),
+        (obj.cf_drop_effect, -1, spike.TYMED_HGLOBAL),
+    ]
+    assert obj._enumerators[-1].refcount == 0
+
+
+def test_enumerate_formats_keeps_calling_next_across_batches(monkeypatch):
+    monkeypatch.setattr(spike, "INSPECT_BATCH", 2)
+    obj = spike.DataObject()
+
+    formats = spike.enumerate_formats(obj.pointer)
+
+    assert len(formats) == 3
+
+
+def test_probe_query_get_data_records_the_answer_for_every_probe(monkeypatch):
+    obj = spike.DataObject()
+    messages = []
+    monkeypatch.setattr(spike, "log", messages.append)
+
+    answers = dict(
+        ((name, lindex, tymed), hresult)
+        for name, lindex, tymed, hresult in spike.probe_query_get_data(obj.pointer)
+    )
+
+    # Each probed format is registered once, not once per probe row.
+    assert len([m for m in messages if m.startswith("RegisterClipboardFormatW")]) == 2
+    assert len(answers) == len(spike.INSPECT_PROBES)
+    assert answers[("FileGroupDescriptorW", -1, spike.TYMED_HGLOBAL)] == spike.S_OK
+    assert answers[("FileContents", 0, spike.TYMED_ISTREAM)] == spike.S_OK
+    assert answers[("FileContents", 0, spike.TYMED_HGLOBAL)] == spike.DV_E_TYMED
+
+
+def test_async_capability_probe_detects_support_and_releases_the_interface():
+    enabled = spike.DataObject(async_capability=True)
+    start = enabled.refcount
+
+    assert spike.supports_async_capability(enabled.pointer) is True
+
+    assert enabled.refcount == start
+    assert spike.supports_async_capability(spike.DataObject().pointer) is False
+
+
+def test_inspect_clipboard_dumps_the_foreign_shape_and_releases_the_object(monkeypatch):
+    messages = []
+    monkeypatch.setattr(spike, "log", messages.append)
+    obj = spike.DataObject()
+    start = obj.refcount
+
+    def fake_get_data_object():
+        # OleGetClipboard hands back a reference the caller must release.
+        spike._data_object_slot(obj.pointer, 1, spike._REFCOUNT)(obj.pointer)
+        return spike.S_OK, obj.pointer
+
+    assert spike.inspect_clipboard(get_data_object=fake_get_data_object) == 0
+
+    assert obj.refcount == start
+    dump = "\n".join(messages)
+    assert f"cfFormat={obj.cf_descriptor} (FileGroupDescriptorW)" in dump
+    assert f"cfFormat={obj.cf_contents} (FileContents)" in dump
+    assert "dwAspect=1 lindex=0 tymed=4" in dump
+    assert "QueryGetData(FileContents, lindex=0, tymed=4) -> 0x00000000" in dump
+    assert "QueryGetData(FileContents, lindex=0, tymed=1) -> 0x80040069" in dump
+    assert "IDataObjectAsyncCapability: False" in dump
+
+
+def test_inspect_clipboard_reports_a_failed_ole_get_clipboard(monkeypatch):
+    monkeypatch.setattr(spike, "log", lambda _message: None)
+
+    assert spike.inspect_clipboard(get_data_object=lambda: (spike.E_POINTER, ctypes.c_void_p())) == 1
+
+
+def test_inspect_clipboard_flag_is_reachable_from_the_real_argument_parser(monkeypatch):
+    calls = []
+    monkeypatch.setattr(spike, "ole_initialize", lambda: calls.append("ole_initialize"))
+    monkeypatch.setattr(spike, "inspect_clipboard", lambda: calls.append("inspect_clipboard") or 7)
+    monkeypatch.setattr(spike, "DataObject", lambda **_kwargs: pytest.fail("must not publish"))
+    monkeypatch.setattr(sys, "argv", ["spike_virtual_files.py", "--inspect-clipboard"])
+
+    assert spike.main() == 7
+
+    assert calls == ["ole_initialize", "inspect_clipboard"]
+
+
+def test_settle_pumps_then_marks_the_automatic_probe_off_from_human_requests(monkeypatch):
+    messages = []
+    monkeypatch.setattr(spike, "log", messages.append)
+    monkeypatch.setattr(spike, "SETTLE_SECONDS", 0.02)
+    obj = spike.DataObject()
+    obj.get_data_calls.append((obj.cf_drop_effect, -1))
+    pumped = []
+
+    automatic = spike.settle(obj, lambda: pumped.append("pump"), sleep=lambda _seconds: None)
+
+    assert automatic == [(obj.cf_drop_effect, -1)]
+    assert pumped
+    assert any("clipboard monitors settled" in message for message in messages)
+    assert any("every call below is yours" in message for message in messages)
+
+
+def test_main_settles_before_inviting_a_paste(monkeypatch):
+    order = []
+    ole32 = ctypes.windll.ole32
+    monkeypatch.setattr(spike, "ole_initialize", lambda: None)
+    monkeypatch.setattr(spike, "register_format", lambda _name: 1)
+    monkeypatch.setattr(ole32, "OleSetClipboard", lambda _pointer: 0)
+    monkeypatch.setattr(ole32, "OleFlushClipboard", lambda: 0)
+    monkeypatch.setattr(spike, "settle", lambda _obj, _pump: order.append("settle") or [])
+    monkeypatch.setattr(spike, "run", lambda _seconds, _pump: order.append("run") or "measured")
+    monkeypatch.setattr(sys, "argv", ["spike_virtual_files.py", "--seconds", "0"])
+
+    assert spike.main() == 0
+
+    assert order == ["settle", "run"]
+
+
+def test_file_contents_rejects_an_index_outside_the_entry_list(monkeypatch):
+    messages = []
+    monkeypatch.setattr(spike, "log", messages.append)
+    obj = spike.DataObject()
+    medium = spike.STGMEDIUM()
+
+    for lindex in (-1, len(spike.ENTRIES)):
+        fmt = spike.FORMATETC(
+            obj.cf_contents, None, spike.DVASPECT_CONTENT, lindex, spike.TYMED_ISTREAM
+        )
+        assert obj._get_data(None, ctypes.byref(fmt), ctypes.byref(medium)) == spike.DV_E_FORMATETC
+
+    assert obj.streams == []
+    assert any("lindex=-1 is not a zero-based entry index" in message for message in messages)
