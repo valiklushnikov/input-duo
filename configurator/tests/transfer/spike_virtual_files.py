@@ -18,6 +18,7 @@ import time
 from ctypes import wintypes
 
 from spike_com_vtable import (
+    E_NOINTERFACE,
     E_POINTER,
     IID_IUNKNOWN,
     S_OK,
@@ -29,17 +30,20 @@ from spike_com_vtable import (
 from spike_qt_responsiveness import run
 
 IID_IDATAOBJECT = "{0000010E-0000-0000-C000-000000000046}"
+IID_IENUMFORMATETC = "{00000103-0000-0000-C000-000000000046}"
 IID_ISTREAM = "{0000000C-0000-0000-C000-000000000046}"
 IID_IASYNCCAPABILITY = "{3D8B0590-F691-11D2-8EA9-006097DF5BD4}"
 
 DV_E_FORMATETC = -2147221404  # 0x80040064
 DV_E_TYMED = -2147221399  # 0x80040069
 E_NOTIMPL = -2147467263
+S_FALSE = 1
 STG_E_INVALIDFUNCTION = -2147287039  # 0x80030001
 
 TYMED_HGLOBAL = 1
 TYMED_ISTREAM = 4
 DATADIR_GET = 1
+DVASPECT_CONTENT = 1
 
 STREAM_SEEK_SET = 0
 STREAM_SEEK_CUR = 1
@@ -324,6 +328,10 @@ _DADVISE = ctypes.WINFUNCTYPE(
     ctypes.c_void_p,
     ctypes.c_void_p,
 )
+_ENUM_NEXT = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p, ctypes.c_void_p)
+_ENUM_SKIP = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, wintypes.ULONG)
+_ENUM_RESET = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
+_ENUM_CLONE = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
 _QUERYINTERFACE = ctypes.WINFUNCTYPE(
     ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
 )
@@ -345,6 +353,79 @@ def _is_iid(riid, expected_iid: str) -> bool:
     requested = ctypes.cast(riid, ctypes.POINTER(GUID)).contents
     expected = guid_from_string(expected_iid)
     return bytes(memoryview(requested).cast("B")) == bytes(memoryview(expected).cast("B"))
+
+
+def _data_object_slot(pointer, index, prototype):
+    vtable = ctypes.cast(pointer, ctypes.POINTER(ctypes.c_void_p)).contents
+    entries = ctypes.cast(vtable, ctypes.POINTER(ctypes.c_void_p))
+    return prototype(entries[index])
+
+
+def _enum_slot(pointer, index, prototype):
+    return _data_object_slot(pointer, index, prototype)
+
+
+class FormatEnumerator:
+    """Minimal IEnumFORMATETC retaining its owner for COM pointer lifetime."""
+
+    def __init__(self, owner, formats, position=0):
+        self.owner, self.formats, self.position = owner, formats, position
+        self.refcount = 1
+        owner._add_ref(owner.pointer)
+        self._callbacks = [_QUERYINTERFACE(self._query_interface), _REFCOUNT(self._add_ref), _REFCOUNT(self._release)]
+        self._methods = [_ENUM_NEXT(self._next), _ENUM_SKIP(self._skip), _ENUM_RESET(self._reset), _ENUM_CLONE(self._clone)]
+        self._vtable = make_vtable(*self._callbacks, *self._methods)
+        self._slot = ctypes.c_void_p(ctypes.addressof(self._vtable))
+        self.pointer = ctypes.c_void_p(ctypes.addressof(self._slot))
+
+    def _query_interface(self, _this, riid, ppv):
+        if not ppv:
+            return E_POINTER
+        if _is_iid(riid, IID_IUNKNOWN) or _is_iid(riid, IID_IENUMFORMATETC):
+            ctypes.cast(ppv, ctypes.POINTER(ctypes.c_void_p))[0] = self.pointer
+            self.refcount += 1
+            return S_OK
+        ctypes.cast(ppv, ctypes.POINTER(ctypes.c_void_p))[0] = None
+        return E_NOINTERFACE
+
+    def _add_ref(self, _this):
+        self.refcount += 1
+        return self.refcount
+
+    def _release(self, _this):
+        self.refcount -= 1
+        if self.refcount == 0:
+            self.owner._release(self.owner.pointer)
+        return self.refcount
+
+    def _next(self, _this, celt, rgelt, fetched):
+        if not rgelt or (celt != 1 and not fetched):
+            return E_POINTER
+        count = min(int(celt), len(self.formats) - self.position)
+        target = ctypes.cast(rgelt, ctypes.POINTER(FORMATETC))
+        for index in range(count):
+            target[index] = self.formats[self.position + index]
+        self.position += count
+        if fetched:
+            ctypes.cast(fetched, ctypes.POINTER(wintypes.ULONG))[0] = count
+        return S_OK if count == celt else S_FALSE
+
+    def _skip(self, _this, celt):
+        remaining = len(self.formats) - self.position
+        self.position += min(int(celt), remaining)
+        return S_OK if celt <= remaining else S_FALSE
+
+    def _reset(self, _this):
+        self.position = 0
+        return S_OK
+
+    def _clone(self, _this, out):
+        if not out:
+            return E_POINTER
+        clone = FormatEnumerator(self.owner, self.formats, self.position)
+        self.owner._enumerators.append(clone)
+        ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = clone.pointer
+        return S_OK
 
 
 class AsyncCapabilityInterface:
@@ -388,6 +469,7 @@ class DataObject(COMObject):
         self.cf_drop_effect = register_format("Preferred DropEffect")
         self.get_data_calls: list[tuple[int, int]] = []
         self.streams: list[StreamObject] = []
+        self._enumerators: list[FormatEnumerator] = []
         self.async_mode = False
         self.in_operation = False
         self._retained_async_pointer: ctypes.c_void_p | None = None
@@ -478,7 +560,19 @@ class DataObject(COMObject):
             return E_NOTIMPL
         if not ppenum:
             return E_POINTER
-        return E_NOTIMPL
+        formats = []
+        for cf_format, tymed, lindex in (
+            (self.cf_descriptor, TYMED_HGLOBAL, -1),
+            (self.cf_contents, TYMED_ISTREAM, 0),
+            (self.cf_contents, TYMED_ISTREAM, 1),
+            (self.cf_contents, TYMED_ISTREAM, 2),
+            (self.cf_drop_effect, TYMED_HGLOBAL, -1),
+        ):
+            formats.append(FORMATETC(cf_format, None, DVASPECT_CONTENT, lindex, tymed))
+        enumerator = FormatEnumerator(self, formats)
+        self._enumerators.append(enumerator)
+        ctypes.cast(ppenum, ctypes.POINTER(ctypes.c_void_p))[0] = enumerator.pointer
+        return S_OK
 
     def _d_advise(self, _this, _fmt, _flags, _sink, _connection) -> int:
         log("DAdvise() -> E_NOTIMPL")

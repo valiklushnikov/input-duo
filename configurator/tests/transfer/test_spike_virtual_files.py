@@ -214,3 +214,40 @@ def test_async_mode_retains_one_reference_until_end_operation(monkeypatch):
     ) == spike.S_OK
     assert obj.refcount == 2
     assert release(async_pointer) == 1
+
+
+def test_enum_format_etc_pointer_enumerates_advertised_formats_with_com_semantics(monkeypatch):
+    monkeypatch.setattr(spike, "register_format", lambda name: {"FileGroupDescriptorW": 10, "FileContents": 11, "Preferred DropEffect": 12}[name])
+    obj = spike.DataObject()
+    out = ctypes.c_void_p()
+    assert spike._data_object_slot(obj.pointer, 8, spike._ENUM)(obj.pointer, spike.DATADIR_GET, ctypes.byref(out)) == spike.S_OK
+    enum_pointer = out
+    fetched = ctypes.wintypes.ULONG()
+    formats = (spike.FORMATETC * 5)()
+    assert spike._enum_slot(enum_pointer, 3, spike._ENUM_NEXT)(enum_pointer, 5, formats, ctypes.byref(fetched)) == spike.S_OK
+    assert fetched.value == 5
+    assert [(fmt.cfFormat, fmt.dwAspect, fmt.lindex, fmt.tymed) for fmt in formats] == [
+        (10, spike.DVASPECT_CONTENT, -1, spike.TYMED_HGLOBAL),
+        (11, spike.DVASPECT_CONTENT, 0, spike.TYMED_ISTREAM),
+        (11, spike.DVASPECT_CONTENT, 1, spike.TYMED_ISTREAM),
+        (11, spike.DVASPECT_CONTENT, 2, spike.TYMED_ISTREAM),
+        (12, spike.DVASPECT_CONTENT, -1, spike.TYMED_HGLOBAL),
+    ]
+
+
+def test_enum_format_etc_supports_partial_next_skip_reset_clone_and_pointer_validation(monkeypatch):
+    monkeypatch.setattr(spike, "register_format", lambda _name: 1)
+    obj = spike.DataObject()
+    out = ctypes.c_void_p()
+    assert spike._data_object_slot(obj.pointer, 8, spike._ENUM)(obj.pointer, spike.DATADIR_GET, ctypes.byref(out)) == spike.S_OK
+    enum_pointer = out
+    one = (spike.FORMATETC * 1)()
+    fetched = ctypes.wintypes.ULONG()
+    assert spike._enum_slot(enum_pointer, 3, spike._ENUM_NEXT)(enum_pointer, 1, one, ctypes.byref(fetched)) == spike.S_OK
+    assert spike._enum_slot(enum_pointer, 4, spike._ENUM_SKIP)(enum_pointer, 99) == spike.S_FALSE
+    assert spike._enum_slot(enum_pointer, 5, spike._ENUM_RESET)(enum_pointer) == spike.S_OK
+    clone = ctypes.c_void_p()
+    assert spike._enum_slot(enum_pointer, 6, spike._ENUM_CLONE)(enum_pointer, ctypes.byref(clone)) == spike.S_OK
+    assert clone.value
+    assert spike._enum_slot(enum_pointer, 3, spike._ENUM_NEXT)(enum_pointer, 2, one, None) == spike.E_POINTER
+    assert spike._enum_slot(enum_pointer, 3, spike._ENUM_NEXT)(enum_pointer, 1, None, ctypes.byref(fetched)) == spike.E_POINTER
