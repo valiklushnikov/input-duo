@@ -30,6 +30,7 @@ from duo_input.generated.protocol import (
     PROFILES,
     SCHEMA_VERSION_MAJOR,
     SCHEMA_VERSION_MINOR,
+    ConfigFlag,
     MacroStepType,
 )
 
@@ -44,6 +45,11 @@ PROFILE_SIZE = 36
 BINDING_SIZE = 12
 MACRO_SIZE = 24
 STEP_SIZE = 12
+
+#: Every header flag this build understands. A package carrying anything else
+#: was written by a newer configurator, and the bit's meaning cannot be
+#: guessed - so the package is refused rather than read without it.
+KNOWN_CONFIG_FLAGS = int(ConfigFlag.SYNCHRONISED_CONTROL)
 
 _HEADER = struct.Struct("<4sBBBBIIBBBBIIIII24s")
 _PROFILE = struct.Struct("<BBBB3sBIHHIHHIHHI")
@@ -150,6 +156,8 @@ def _validate_model(config: DeviceConfig):
     active_profile_id = _u8(config.active_profile_id, "active profile ID", minimum=1)
     if active_profile_id not in ids:
         raise ConfigError("active profile references an unknown profile")
+    if not isinstance(config.synchronised_control, bool):
+        raise ConfigError("synchronised control must be a bool")
 
     validated = []
     for profile in config.profiles:
@@ -343,8 +351,9 @@ def compile_device_config(config: DeviceConfig) -> bytes:
             0,
             0,
         )
+    flags = int(ConfigFlag.SYNCHRONISED_CONTROL) if config.synchronised_control else 0
     _HEADER.pack_into(
-        package, 0, MAGIC, SCHEMA_VERSION_MAJOR, SCHEMA_VERSION_MINOR, 0, 0,
+        package, 0, MAGIC, SCHEMA_VERSION_MAJOR, SCHEMA_VERSION_MINOR, flags, 0,
         total_length, 0, PROFILES, config.active_profile_id, PROFILE_SIZE, 0,
         HEADER_SIZE, string_start, len(string_blob), data_start, len(data), b"\0" * 24,
     )
@@ -390,8 +399,10 @@ def decode_device_config(data: bytes) -> DeviceConfig:
         raise ConfigError("invalid package magic")
     if major != SCHEMA_VERSION_MAJOR:
         raise ConfigError("incompatible schema major")
-    if flags != 0 or reserved != 0 or header_reserved != 0 or reserved_tail != b"\0" * 24:
-        raise ConfigError("flags and reserved bytes must be zero")
+    if flags & ~KNOWN_CONFIG_FLAGS:
+        raise ConfigError("unknown header flags")
+    if reserved != 0 or header_reserved != 0 or reserved_tail != b"\0" * 24:
+        raise ConfigError("reserved bytes must be zero")
     if total_length != len(data):
         raise ConfigError("declared total length does not match input")
     crc_input = bytearray(data)
@@ -527,6 +538,10 @@ def decode_device_config(data: bytes) -> DeviceConfig:
         raise ConfigError("string blob contains trailing or overlapping bytes")
     if cursor != data_end:
         raise ConfigError("data blob contains trailing or overlapping bytes")
-    result = DeviceConfig(active_profile_id, tuple(profiles))
+    result = DeviceConfig(
+        active_profile_id,
+        tuple(profiles),
+        bool(flags & ConfigFlag.SYNCHRONISED_CONTROL),
+    )
     _validate_model(result)
     return result

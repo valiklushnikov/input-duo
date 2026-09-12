@@ -59,6 +59,36 @@ def test_consumer_trigger_round_trip_keeps_u16_usage_and_source(usage):
     assert encoded[offset + 6:offset + 12] == bytes.fromhex("34 12 78 56 02 00")
 
 
+def test_the_synchronised_control_flag_survives_a_round_trip():
+    from dataclasses import replace
+
+    from duo_input.domain.config_binary import compile_device_config, decode_device_config
+    from duo_input.generated.protocol import ConfigFlag
+
+    config = minimal_config()
+    assert decode_device_config(compile_device_config(config)).synchronised_control is False
+
+    synchronised = replace(config, synchronised_control=True)
+    package = compile_device_config(synchronised)
+
+    assert package[6] == ConfigFlag.SYNCHRONISED_CONTROL
+    assert decode_device_config(package).synchronised_control is True
+
+
+def test_header_flags_this_build_does_not_know_are_rejected():
+    import zlib
+
+    from duo_input.domain.config_binary import ConfigError, compile_device_config, decode_device_config
+
+    package = bytearray(compile_device_config(minimal_config()))
+    package[6] = 0x02
+    package[12:16] = b"\0" * 4
+    package[12:16] = zlib.crc32(bytes(package)).to_bytes(4, "little")
+
+    with pytest.raises(ConfigError):
+        decode_device_config(bytes(package))
+
+
 def full_config() -> DeviceConfig:
     all_steps = (
         MacroStep(MacroStepType.KEY_TAP, b"\x02\x04"),
@@ -437,7 +467,7 @@ def repair_crc(data: bytearray) -> bytes:
     [
         lambda data: data.__setitem__(slice(0, 4), b"FAIL"),
         lambda data: data.__setitem__(4, 2),
-        lambda data: data.__setitem__(6, 1),
+        lambda data: data.__setitem__(6, 0x02),  # bit 0 is now a known, valid flag
         lambda data: data.__setitem__(7, 1),
         lambda data: data.__setitem__(slice(8, 12), (1).to_bytes(4, "little")),
         lambda data: data.__setitem__(slice(16, 18), (7).to_bytes(2, "little")),
