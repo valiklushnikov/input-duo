@@ -23,7 +23,7 @@ from duo_input.clipboard.coordinator import ClipboardCoordinator
 from duo_input.clipboard.identity import load_or_create
 from duo_input.clipboard.pairing import PairingCandidate
 from duo_input.clipboard.trust import TrustStore
-from duo_input.clipboard.windows_backend import WindowsClipboardBackend
+from duo_input.clipboard.platform_backend import create_backend
 from duo_input.device.service import DeviceService
 from duo_input.i18n import TranslationManager
 from duo_input.persistence import autostart
@@ -202,7 +202,9 @@ class _ClipboardRuntime(QObject):
         self._window = window
         self._settings = settings
         self.coordinator: ClipboardCoordinator | None = None
-        self._backend: WindowsClipboardBackend | None = None
+        from duo_input.clipboard.backend import ClipboardBackend
+
+        self._backend: ClipboardBackend | None = None
         self.tray = TrayIcon(application.windowIcon(), application)
         self.tray.open_requested.connect(window.showNormal)
         self.tray.quit_requested.connect(application.quit)
@@ -266,7 +268,7 @@ class _ClipboardRuntime(QObject):
             parent=application,
         )
 
-        backend = WindowsClipboardBackend(application.clipboard(), coordinator)
+        backend = create_backend(application.clipboard(), coordinator)
         coordinator.service.attach_backend(backend)
         backend.snapshot_taken.connect(coordinator.service.on_local_snapshot)
         backend.start()

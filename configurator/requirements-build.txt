@@ -16,3 +16,7 @@ Nuitka==4.1.3
 # The test suite runs inside the build, so a broken build cannot be packaged.
 pytest==9.1.1
 pytest-qt==4.5.0
+
+# macOS clipboard parity: NSPasteboard.changeCount и host-only lazy provider,
+# которых нет в Qt. Только для сборки/разработки под macOS.
+pyobjc-framework-Cocoa==12.2.2; sys_platform == "darwin"
