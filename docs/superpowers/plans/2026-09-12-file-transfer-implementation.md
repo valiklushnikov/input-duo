@@ -8447,11 +8447,17 @@ and close §22 question 2 with a number.
 
 **Precondition:** Phase 2 is complete and the full gate is green.
 
-**The gate, stated before any measuring:** if one outstanding `FILE_READ` gives
-adequate LAN throughput, **no window and no prefetch are added at all.** YAGNI.
-A window is designed only if a measurement shows a real throughput problem, and
-only together with a generation or read-token rule that stops a stale chunk
-reaching `IStream` after a `Seek`.
+**The gate, stated before any measuring:** if one outstanding `FILE_READ`
+reaches **70% or more of the plain-TCP LAN ceiling**, **no window and no
+prefetch are added at all.** YAGNI.
+
+Below 70% is not permission to add a window either. It is an instruction to
+localise the bottleneck first (Task 3.2, Step 3): a window is permitted only
+when the evidence shows the limit really is the sequential
+`FILE_READ → FILE_CHUNK` round trip, and even then only together with a
+generation or read-token rule that stops a stale chunk reaching `IStream` after
+a `Seek`. A bottleneck in disk read, the GUI thread, the socket or TLS is fixed
+where it lives, not masked with a window.
 
 The same discipline applies to the sender's disk read: it stays on the GUI
 thread only if the p99 measurement says that is safe.
@@ -8471,7 +8477,13 @@ thread only if the p99 measurement says that is safe.
     `peak_rss_bytes: int`, `peak_python_bytes: int`,
     `pipe_high_water: int`, `cancel_latency_seconds: float | None`,
     `gui_tick_p99_ms: float`, `gui_tick_max_ms: float`,
-    `socket_bytes_to_write_max: int`, `heartbeat_gaps_seconds: list[float]`
+    `socket_bytes_to_write_max: int`, `heartbeat_gaps_seconds: list[float]`,
+    `rtt_median_ms: float`, `rtt_p99_ms: float`,
+    `disk_read_median_ms: float`, `disk_read_p99_ms: float`,
+    `bypassed_transport_mib_s: float`
+  - `Measurement.rtt_bound_mib_s(chunk_bytes: int) -> float` — what the
+    sequential round trip alone would allow, which is the number Task 3.2's
+    gate compares against
   - `Measurement.as_table() -> str`
   - `measure(size: int, cancel_after_bytes: int | None = None) -> Measurement`
 
@@ -8507,6 +8519,11 @@ def _measurement(**overrides) -> Measurement:
         gui_tick_p99_ms=18.0,
         gui_tick_max_ms=41.0,
         socket_bytes_to_write_max=65536,
+        rtt_median_ms=0.8,
+        rtt_p99_ms=2.4,
+        disk_read_median_ms=0.3,
+        disk_read_p99_ms=1.1,
+        bypassed_transport_mib_s=112.0,
         heartbeat_gaps_seconds=[10.0, 10.1],
     )
     fields.update(overrides)
@@ -8532,6 +8549,26 @@ def test_the_table_names_the_worst_gui_tick_not_only_the_typical_one():
 
 def test_the_table_reports_the_peak_queue_depth():
     assert "high_water" in _measurement().as_table()
+
+
+def test_the_rtt_bound_says_what_one_sequential_round_trip_alone_would_allow():
+    # 256 КиБ за 0.8 мс = 312 МиБ/с. Если это намного выше измеренной
+    # пропускной способности, узкое место НЕ в круге, и окно его не сдвинет.
+    assert _measurement().rtt_bound_mib_s(256 * 1024) == pytest.approx(312.5, rel=0.01)
+
+
+def test_a_zero_rtt_reports_no_bound_instead_of_dividing_by_zero():
+    assert _measurement(rtt_median_ms=0.0).rtt_bound_mib_s(256 * 1024) == 0.0
+
+
+def test_the_table_names_the_bottleneck_evidence_the_gate_needs():
+    table = _measurement().as_table()
+
+    for needed in ("RTT", "чтение с диска", "транспорт без моста"):
+        assert needed in table, (
+            f"в отчёте нет строки {needed!r} - гейт задачи 3.2 не сможет "
+            "отличить медленный круг от медленного транспорта"
+        )
 
 
 def test_the_table_reports_cancel_latency_as_absent_rather_than_as_zero():
@@ -8581,6 +8618,16 @@ class Measurement:
     gui_tick_p99_ms: float
     gui_tick_max_ms: float
     socket_bytes_to_write_max: int
+    #: Локализация узкого места. Без этих величин гейт задачи 3.2 не может
+    #: отличить медленный круг от медленного транспорта, а он стоит ровно на
+    #: этом различии.
+    rtt_median_ms: float
+    rtt_p99_ms: float
+    disk_read_median_ms: float
+    disk_read_p99_ms: float
+    #: Пропускная способность ТОГО ЖЕ соединения с обойдённым мостом: кадры
+    #: FILE_CHUNK подряд, без IStream и без очереди.
+    bypassed_transport_mib_s: float
     heartbeat_gaps_seconds: list[float] = field(default_factory=list)
 
     @property
@@ -8588,6 +8635,17 @@ class Measurement:
         if self.elapsed_seconds <= 0:
             return 0.0
         return self.bytes_transferred / MIB / self.elapsed_seconds
+
+    def rtt_bound_mib_s(self, chunk_bytes: int) -> float:
+        """Сколько дал бы один последовательный круг и больше ничего.
+
+        Если это число близко к throughput_mib_s, а bypassed_transport_mib_s
+        заметно выше - узкое место действительно в круге, и только тогда окно
+        разрешено (задача 3.2, шаг 3).
+        """
+        if self.rtt_median_ms <= 0:
+            return 0.0
+        return chunk_bytes / MIB / (self.rtt_median_ms / 1000)
 
     def as_table(self) -> str:
         cancel = (
@@ -8614,6 +8672,9 @@ class Measurement:
                 f"| GUI tick p99 | {self.gui_tick_p99_ms:.1f} мс |",
                 f"| GUI tick максимум | {self.gui_tick_max_ms:.1f} мс |",
                 f"| socket bytesToWrite максимум | {self.socket_bytes_to_write_max} Б |",
+                f"| RTT медиана / p99 | {self.rtt_median_ms:.2f} / {self.rtt_p99_ms:.2f} мс |",
+                f"| чтение с диска медиана / p99 | {self.disk_read_median_ms:.2f} / {self.disk_read_p99_ms:.2f} мс |",
+                f"| транспорт без моста | {self.bypassed_transport_mib_s:.1f} МиБ/с |",
                 f"| наибольший промежуток heartbeat | {gaps} |",
             ]
         )
@@ -8624,7 +8685,9 @@ Then the `measure()` driver: stand up the loopback TLS pair exactly as
 `WindowsFileClipboardBackend`, publish a manifest for a generated file of the
 requested size, run `spike_qt_responsiveness.Instrument` in the same process,
 sample `QSslSocket.bytesToWrite()` and `ChunkPipe.high_water` on a 50 ms
-`QTimer`, track `tracemalloc.get_traced_memory()` and RSS via
+`QTimer`, time every `FILE_READ`-to-`FILE_CHUNK` round trip and every
+`SnapshotRegistry.read` call, make one separate back-to-back `FILE_CHUNK` pass
+with the bridge bypassed to obtain `bypassed_transport_mib_s`, track `tracemalloc.get_traced_memory()` and RSS via
 `ctypes.windll.psapi.GetProcessMemoryInfo`, record the interval between `PING`
 frames observed on the link, and — when `cancel_after_bytes` is given — press
 Explorer's Cancel and time how long the blocked `IStream::Read` takes to return.
@@ -8632,7 +8695,7 @@ Explorer's Cancel and time how long the blocked `IStream::Read` takes to return.
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `.venv/Scripts/python.exe -m pytest configurator/tests/transfer/test_spike_measure_bridge.py -v`
-Expected: PASS, 5 passed
+Expected: PASS, 8 passed
 
 - [ ] **Step 5: Commit**
 
@@ -8680,33 +8743,67 @@ Run: `.venv/Scripts/python.exe -c "import socket; print(socket.gethostbyname(soc
 then any plain TCP throughput check between the two machines (`iperf3`, or a
 socket loop) to establish what the LAN itself delivers.
 
-Fill in:
+Fill in every row. The ratio is the decision variable; the rest are the
+bottleneck evidence Step 3 needs.
 
 | | value |
 |---|---|
 | LAN ceiling, plain TCP | |
 | our throughput, one read in flight | |
-| ratio | |
+| **ratio (ours / ceiling)** | |
+| request/response RTT, median and p99 | |
+| sender disk-read latency per chunk, median and p99 | |
 | GUI tick p99 / max under load | |
+| socket `bytesToWrite` maximum | |
+| TLS/PeerLink throughput with the pipe bypassed | |
 | peak Python memory | |
 | pipe high_water | |
 | cancel latency | |
 | largest heartbeat gap | |
 
+The "TLS/PeerLink throughput with the pipe bypassed" row needs its own short
+run: send `FILE_CHUNK` frames of the measured chunk size back to back over the
+same link with no `IStream` and no pipe, and time them. Without that number
+there is no way to tell a slow round trip from a slow transport, and Step 3
+turns on exactly that distinction.
+
 - [ ] **Step 3: Apply the window gate**
 
-**If our throughput is an adequate fraction of the LAN ceiling** — the operator
-decides what "adequate" is, with this table in front of them — then:
+The rule is fixed here, before any number exists, so that an inconvenient
+measurement cannot be reinterpreted into a licence to add machinery.
+
+**If ratio >= 70% of the plain-TCP LAN ceiling** — throughput is sufficient:
 
 - add nothing;
-- record in the spec §8 that one read in flight was measured sufficient, with
-  the numbers;
+- record in spec §8 that one read in flight was measured sufficient, with the
+  numbers;
 - close §22 question 2 as "no window needed, measured".
 
-That is the expected and preferred outcome. Deleting a question is progress.
+That is the expected and preferred outcome. Deleting an open question is
+progress.
 
-**Only if the measurement shows a real throughput problem**, design the window
-as its own task, and it must carry:
+**If ratio < 70%** — this is **not** permission to add a window. It is an
+instruction to localise the bottleneck first, from the rows already in the
+Step 2 table:
+
+| Evidence | What it means | What to do |
+|---|---|---|
+| RTT dominates: `bytes_per_chunk / RTT` ≈ our throughput, and bypassed TLS throughput is far higher | the sequential `FILE_READ → FILE_CHUNK` round trip really is the limit | a window is permitted — design it as its own task, with the rule below |
+| sender disk-read p99 is a large share of RTT | the bottleneck is disk, not the protocol | move the sender's read to a worker thread (Step 4's mechanism), then re-measure |
+| GUI tick p99/max is inflated | the Qt thread is starved and delaying our own replies | fix the starvation, then re-measure |
+| `bytesToWrite` climbs, or bypassed TLS throughput is itself below the ceiling | the bottleneck is the socket or TLS | fix the transport, then re-measure |
+| heartbeat gaps stretched | frames are being delayed behind something | find what, then re-measure |
+
+**A window may only be designed when the evidence shows the bottleneck is
+genuinely the sequential round trip.** If it is disk, the GUI thread, the socket,
+TLS, or anywhere else, fix that — a window there would mask the defect while
+leaving it in place, and masked defects in this repository have a habit of
+resurfacing as something harder to find.
+
+Re-measure after each fix and re-apply this gate. The 70% threshold does not
+move.
+
+**When a window is permitted**, it must carry:
 
 - a `generation` or read-token in `FILE_READ` and echoed in `FILE_CHUNK`;
 - `FileTransferService` bumping the generation on every `Seek`-induced position
@@ -8718,6 +8815,11 @@ as its own task, and it must carry:
 
 Without that rule the window is not added. This is not negotiable by
 convenience: spec §8 names the rule as the condition.
+
+Record in the measurement record which branch of the table fired, with the
+numbers that put it there. "Below 70%, so we added a window" is not a finding;
+"below 70% because RTT dominated at X ms against a bypassed-transport ceiling of
+Y MiB/s" is.
 
 - [ ] **Step 4: Apply the disk-read gate**
 
