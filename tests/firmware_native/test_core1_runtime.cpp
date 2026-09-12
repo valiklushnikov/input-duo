@@ -27,7 +27,6 @@ using duo_input::config::TriggerKind;
 using duo_input::runtime::CommandKind;
 using duo_input::runtime::kPhysicalOwner;
 using duo_input::runtime::OutputCommand;
-using duo_input::runtime::Route;
 using duo_input::u1::Core1Runtime;
 using duo_input::u1::ICommandSink;
 using duo_input::u1::IProfileSource;
@@ -715,8 +714,8 @@ TEST_CASE(a_profile_with_parted_routes_is_brought_together_under_synchronised_co
 
     runtime.set_profile_now(1);
 
-    CHECK_EQ(static_cast<int>(runtime.keyboard_route()), static_cast<int>(Route::Pc2));
-    CHECK_EQ(static_cast<int>(runtime.mouse_route()), static_cast<int>(Route::Pc2));
+    CHECK(runtime.engine().keyboard_route() == duo_input::config::KeyboardRoute::PC2);
+    CHECK(runtime.engine().mouse_route() == duo_input::config::MouseRoute::PC2);
 }
 
 TEST_CASE(a_profile_on_both_keeps_its_own_mouse_route_under_synchronised_control) {
@@ -729,7 +728,8 @@ TEST_CASE(a_profile_on_both_keeps_its_own_mouse_route_under_synchronised_control
 
     runtime.set_profile_now(1);
 
-    CHECK_EQ(static_cast<int>(runtime.mouse_route()), static_cast<int>(Route::Pc2));
+    CHECK(runtime.engine().keyboard_route() == duo_input::config::KeyboardRoute::BOTH);
+    CHECK(runtime.engine().mouse_route() == duo_input::config::MouseRoute::PC2);
 }
 
 TEST_CASE(a_profile_keeps_parted_routes_when_synchronised_control_is_off) {
@@ -741,8 +741,8 @@ TEST_CASE(a_profile_keeps_parted_routes_when_synchronised_control_is_off) {
 
     runtime.set_profile_now(1);
 
-    CHECK_EQ(static_cast<int>(runtime.keyboard_route()), static_cast<int>(Route::Pc2));
-    CHECK_EQ(static_cast<int>(runtime.mouse_route()), static_cast<int>(Route::Pc1));
+    CHECK(runtime.engine().keyboard_route() == duo_input::config::KeyboardRoute::PC2);
+    CHECK(runtime.engine().mouse_route() == duo_input::config::MouseRoute::PC1);
 }
 
 TEST_CASE(a_source_that_has_no_such_profile_leaves_the_routes_where_they_are) {

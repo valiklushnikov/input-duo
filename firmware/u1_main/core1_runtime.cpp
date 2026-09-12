@@ -416,20 +416,34 @@ void Core1Runtime::set_profile_now(std::uint8_t profile, std::uint32_t now_ms) {
     if (profiles_.routes_for(profile, keyboard, mouse)) {
         // Under synchronised control a profile names one computer, not two
         // routes that happen to be stored side by side. Settled here, before
-        // either is applied: applying the keyboard first carries the mouse
-        // with it, and applying the profile's own mouse route afterwards would
-        // part them again - the second move undoing the first.
+        // either route is applied to the engine: computing the merged mouse
+        // value up front, rather than leaning on the engine's own follower
+        // coupling below, is what makes the two apply calls idempotent no
+        // matter which order they run in for every case except BOTH - see the
+        // next comment for why BOTH still needs a specific order.
         //
         // BOTH keeps the profile's own mouse route. There is no mouse route
         // that could follow the keyboard there.
         if (engine_.synchronised_control() && keyboard != config::KeyboardRoute::BOTH) {
             mouse = mapping::Routes::mouse_beside(keyboard);
         }
-        if (keyboard != engine_.keyboard_route()) {
-            apply(engine_.set_keyboard_route(keyboard), now_ms);
-        }
+        // Mouse first, keyboard last - not the order the fields are declared
+        // in. The engine's own move_route() re-derives its follower from
+        // whichever route it is just told to set: a mouse move looks exactly
+        // like a live switch to it, and a live mouse switch is supposed to
+        // pull the keyboard out of BOTH (that is a legitimate row of the
+        // transition table). Applying the keyboard second is what keeps that
+        // coupling from firing here: keyboard_beside() can never return BOTH,
+        // so setting the mouse first and the keyboard last means the
+        // authoritative BOTH the profile asked for is the last write, and
+        // nothing after it can drag it back off BOTH. Applying them in
+        // declaration order set the profile's BOTH and then had the mouse
+        // write immediately undo it.
         if (mouse != engine_.mouse_route()) {
             apply(engine_.set_mouse_route(mouse), now_ms);
+        }
+        if (keyboard != engine_.keyboard_route()) {
+            apply(engine_.set_keyboard_route(keyboard), now_ms);
         }
     }
 

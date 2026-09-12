@@ -191,13 +191,6 @@ public:
     mapping::BindingEngine& engine() { return engine_; }
     mapping::CaptureController& capture() { return capture_; }
 
-    /// The routes as this runtime sees them, in runtime::Route's space rather
-    /// than the configuration's KeyboardRoute/MouseRoute. Tests use these to
-    /// check where a profile settled without pushing an input event through
-    /// just to read the route back off a queued command.
-    runtime::Route keyboard_route() const;
-    runtime::Route mouse_route() const;
-
 private:
     /// 1 begin, 2 cancel, 0 nothing asked for.
     static constexpr std::uint8_t kCaptureRequestBegin = 1;
@@ -210,6 +203,9 @@ private:
     void swap_profile(std::uint8_t profile, std::uint32_t now_ms, bool requested_by_host);
     void request_profile_from_core1(std::uint8_t profile);
     void publish_capture_state();
+
+    runtime::Route keyboard_route() const;
+    runtime::Route mouse_route() const;
 
     ICommandSink& sink_;
     IProfileSource& profiles_;
