@@ -99,6 +99,18 @@ def register_format(name: str) -> int:
     return value
 
 
+_KERNEL32 = ctypes.windll.kernel32
+_GLOBAL_ALLOC = _KERNEL32.GlobalAlloc
+_GLOBAL_ALLOC.argtypes = [wintypes.UINT, ctypes.c_size_t]
+_GLOBAL_ALLOC.restype = wintypes.HGLOBAL
+_GLOBAL_LOCK = _KERNEL32.GlobalLock
+_GLOBAL_LOCK.argtypes = [wintypes.HGLOBAL]
+_GLOBAL_LOCK.restype = ctypes.c_void_p
+_GLOBAL_UNLOCK = _KERNEL32.GlobalUnlock
+_GLOBAL_UNLOCK.argtypes = [wintypes.HGLOBAL]
+_GLOBAL_UNLOCK.restype = wintypes.BOOL
+
+
 def build_group_descriptor() -> bytes:
     """Build a FILEGROUPDESCRIPTORW for the three probe entries."""
     blob = bytearray(ctypes.sizeof(wintypes.DWORD))
@@ -121,12 +133,23 @@ def build_group_descriptor() -> bytes:
     return bytes(blob)
 
 
-def to_hglobal(payload: bytes) -> int:
+def to_hglobal(payload: bytes, kernel32=None) -> int:
     GMEM_MOVEABLE = 0x0002
-    handle = ctypes.windll.kernel32.GlobalAlloc(GMEM_MOVEABLE, len(payload))
-    address = ctypes.windll.kernel32.GlobalLock(handle)
+    kernel32 = kernel32 or _KERNEL32
+    if kernel32 is _KERNEL32:
+        handle = _GLOBAL_ALLOC(GMEM_MOVEABLE, len(payload))
+    else:
+        handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(payload))
+    if not handle:
+        raise MemoryError("GlobalAlloc failed")
+    address = _GLOBAL_LOCK(handle) if kernel32 is _KERNEL32 else kernel32.GlobalLock(handle)
+    if not address:
+        raise MemoryError("GlobalLock failed")
     ctypes.memmove(address, payload, len(payload))
-    ctypes.windll.kernel32.GlobalUnlock(handle)
+    if kernel32 is _KERNEL32:
+        _GLOBAL_UNLOCK(handle)
+    else:
+        kernel32.GlobalUnlock(handle)
     return handle
 
 
@@ -198,12 +221,15 @@ class DataObject(COMObject):
         return DV_E_FORMATETC
 
     def _get_data_here(self, _this, _fmt, _medium) -> int:
+        log("GetDataHere() -> E_NOTIMPL")
         return E_NOTIMPL
 
     def _get_canonical(self, _this, _fmt, _out) -> int:
+        log("GetCanonicalFormatEtc() -> E_NOTIMPL")
         return E_NOTIMPL
 
     def _set_data(self, _this, _fmt, _medium, _release) -> int:
+        log("SetData() -> E_NOTIMPL")
         return E_NOTIMPL
 
     def _enum_format_etc(self, _this, direction, ppenum) -> int:
@@ -215,12 +241,15 @@ class DataObject(COMObject):
         return E_NOTIMPL
 
     def _d_advise(self, _this, _fmt, _flags, _sink, _connection) -> int:
+        log("DAdvise() -> E_NOTIMPL")
         return E_NOTIMPL
 
     def _d_unadvise(self, _this, _connection) -> int:
+        log("DUnadvise() -> E_NOTIMPL")
         return E_NOTIMPL
 
     def _enum_d_advise(self, _this, _out) -> int:
+        log("EnumDAdvise() -> E_NOTIMPL")
         return E_NOTIMPL
 
 
