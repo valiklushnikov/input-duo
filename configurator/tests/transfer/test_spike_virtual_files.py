@@ -223,14 +223,12 @@ def test_enum_format_etc_pointer_enumerates_advertised_formats_with_com_semantic
     assert spike._data_object_slot(obj.pointer, 8, spike._ENUM)(obj.pointer, spike.DATADIR_GET, ctypes.byref(out)) == spike.S_OK
     enum_pointer = out
     fetched = ctypes.wintypes.ULONG()
-    formats = (spike.FORMATETC * 5)()
-    assert spike._enum_slot(enum_pointer, 3, spike._ENUM_NEXT)(enum_pointer, 5, formats, ctypes.byref(fetched)) == spike.S_OK
-    assert fetched.value == 5
+    formats = (spike.FORMATETC * 3)()
+    assert spike._enum_slot(enum_pointer, 3, spike._ENUM_NEXT)(enum_pointer, 3, formats, ctypes.byref(fetched)) == spike.S_OK
+    assert fetched.value == 3
     assert [(fmt.cfFormat, fmt.dwAspect, fmt.lindex, fmt.tymed) for fmt in formats] == [
         (10, spike.DVASPECT_CONTENT, -1, spike.TYMED_HGLOBAL),
-        (11, spike.DVASPECT_CONTENT, 0, spike.TYMED_ISTREAM),
-        (11, spike.DVASPECT_CONTENT, 1, spike.TYMED_ISTREAM),
-        (11, spike.DVASPECT_CONTENT, 2, spike.TYMED_ISTREAM),
+        (11, spike.DVASPECT_CONTENT, -1, spike.TYMED_ISTREAM),
         (12, spike.DVASPECT_CONTENT, -1, spike.TYMED_HGLOBAL),
     ]
 
@@ -251,3 +249,41 @@ def test_enum_format_etc_supports_partial_next_skip_reset_clone_and_pointer_vali
     assert clone.value
     assert spike._enum_slot(enum_pointer, 3, spike._ENUM_NEXT)(enum_pointer, 2, one, None) == spike.E_POINTER
     assert spike._enum_slot(enum_pointer, 3, spike._ENUM_NEXT)(enum_pointer, 1, None, ctypes.byref(fetched)) == spike.E_POINTER
+
+
+def test_enum_format_etc_uses_shell_normalized_single_file_contents_format(monkeypatch):
+    monkeypatch.setattr(spike, "register_format", lambda name: {"FileGroupDescriptorW": 10, "FileContents": 11, "Preferred DropEffect": 12}[name])
+    obj = spike.DataObject()
+    out = ctypes.c_void_p()
+    assert spike._data_object_slot(obj.pointer, 8, spike._ENUM)(obj.pointer, spike.DATADIR_GET, ctypes.byref(out)) == spike.S_OK
+    formats = (spike.FORMATETC * 3)()
+    fetched = ctypes.wintypes.ULONG()
+    assert spike._enum_slot(out, 3, spike._ENUM_NEXT)(out, 3, formats, ctypes.byref(fetched)) == spike.S_OK
+    assert fetched.value == 3
+    assert [(fmt.cfFormat, fmt.lindex, fmt.tymed) for fmt in formats] == [
+        (10, -1, spike.TYMED_HGLOBAL),
+        (11, -1, spike.TYMED_ISTREAM),
+        (12, -1, spike.TYMED_HGLOBAL),
+    ]
+
+
+def test_enum_format_etc_methods_log_thread_tagged_events(monkeypatch):
+    messages = []
+    monkeypatch.setattr(spike, "log", messages.append)
+    monkeypatch.setattr(spike, "register_format", lambda _name: 1)
+    obj = spike.DataObject()
+    out = ctypes.c_void_p()
+    assert spike._data_object_slot(obj.pointer, 8, spike._ENUM)(obj.pointer, spike.DATADIR_GET, ctypes.byref(out)) == spike.S_OK
+    formats = (spike.FORMATETC * 1)()
+    fetched = ctypes.wintypes.ULONG()
+    spike._enum_slot(out, 3, spike._ENUM_NEXT)(out, 1, formats, ctypes.byref(fetched))
+    spike._enum_slot(out, 4, spike._ENUM_SKIP)(out, 1)
+    spike._enum_slot(out, 5, spike._ENUM_RESET)(out)
+    clone = ctypes.c_void_p()
+    spike._enum_slot(out, 6, spike._ENUM_CLONE)(out, ctypes.byref(clone))
+    assert [message.split("(", 1)[0] for message in messages if message.startswith(("IEnumFORMATETC",))] == [
+        "IEnumFORMATETC::Next",
+        "IEnumFORMATETC::Skip",
+        "IEnumFORMATETC::Reset",
+        "IEnumFORMATETC::Clone",
+    ]

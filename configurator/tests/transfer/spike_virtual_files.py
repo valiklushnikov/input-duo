@@ -400,6 +400,7 @@ class FormatEnumerator:
 
     def _next(self, _this, celt, rgelt, fetched):
         if not rgelt or (celt != 1 and not fetched):
+            log(f"IEnumFORMATETC::Next(celt={celt}) -> E_POINTER")
             return E_POINTER
         count = min(int(celt), len(self.formats) - self.position)
         target = ctypes.cast(rgelt, ctypes.POINTER(FORMATETC))
@@ -408,23 +409,30 @@ class FormatEnumerator:
         self.position += count
         if fetched:
             ctypes.cast(fetched, ctypes.POINTER(wintypes.ULONG))[0] = count
-        return S_OK if count == celt else S_FALSE
+        result = S_OK if count == celt else S_FALSE
+        log(f"IEnumFORMATETC::Next(celt={celt}) -> {count} (0x{result & 0xFFFFFFFF:08X})")
+        return result
 
     def _skip(self, _this, celt):
         remaining = len(self.formats) - self.position
         self.position += min(int(celt), remaining)
-        return S_OK if celt <= remaining else S_FALSE
+        result = S_OK if celt <= remaining else S_FALSE
+        log(f"IEnumFORMATETC::Skip(celt={celt}) -> 0x{result & 0xFFFFFFFF:08X}")
+        return result
 
     def _reset(self, _this):
         self.position = 0
+        log("IEnumFORMATETC::Reset() -> S_OK")
         return S_OK
 
     def _clone(self, _this, out):
         if not out:
+            log("IEnumFORMATETC::Clone() -> E_POINTER")
             return E_POINTER
         clone = FormatEnumerator(self.owner, self.formats, self.position)
         self.owner._enumerators.append(clone)
         ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = clone.pointer
+        log("IEnumFORMATETC::Clone() -> S_OK")
         return S_OK
 
 
@@ -563,9 +571,7 @@ class DataObject(COMObject):
         formats = []
         for cf_format, tymed, lindex in (
             (self.cf_descriptor, TYMED_HGLOBAL, -1),
-            (self.cf_contents, TYMED_ISTREAM, 0),
-            (self.cf_contents, TYMED_ISTREAM, 1),
-            (self.cf_contents, TYMED_ISTREAM, 2),
+            (self.cf_contents, TYMED_ISTREAM, -1),
             (self.cf_drop_effect, TYMED_HGLOBAL, -1),
         ):
             formats.append(FORMATETC(cf_format, None, DVASPECT_CONTENT, lindex, tymed))
