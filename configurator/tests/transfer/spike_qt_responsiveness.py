@@ -85,6 +85,11 @@ class Outcome:
     reason: str
 
 
+def ceiling_reason(elapsed: float, max_seconds: float) -> str:
+    """Word the ceiling once, so both things that can reach it agree."""
+    return f"ceiling reached after {elapsed:.1f}s (--max-seconds {max_seconds:.0f})"
+
+
 def stop_reason(
     elapsed: float,
     quiet_for: float,
@@ -103,7 +108,7 @@ def stop_reason(
     the silence before one is just the operator walking to Explorer.
     """
     if elapsed >= max_seconds:
-        return f"ceiling reached after {elapsed:.1f}s (--max-seconds {max_seconds:.0f})"
+        return ceiling_reason(elapsed, max_seconds)
     if not saw_consumer_call:
         if quiet_for >= paste_window_seconds:
             return (
@@ -134,6 +139,8 @@ def run(
     With ``seconds`` set the run keeps the brief's fixed budget.  Without it
     the run ends on quiescence: ``activity`` returns a count of consumer calls
     so far, and the watchdog stops the loop once that count has stood still.
+    ``max_seconds`` is enforced by a timer of its own, so the ceiling still
+    holds when the watchdog is the thing that is broken.
     """
     if QApplication.instance() is None:
         QApplication([])
@@ -166,6 +173,20 @@ def run(
         stop.timeout.connect(budget_expired)
         stop.start()
     else:
+        # The ceiling gets its own timer, evaluated by nothing but itself.  It
+        # used to be checked only inside watch() below, which left it bounding
+        # nothing in the one case it exists for: a watchdog that never fires.
+        def ceiling_expired() -> None:
+            nonlocal reason
+            reason = ceiling_reason(time.perf_counter() - started, max_seconds)
+            loop.quit()
+
+        ceiling = QTimer()
+        ceiling.setSingleShot(True)
+        ceiling.setInterval(int(max_seconds * 1000))
+        ceiling.timeout.connect(ceiling_expired)
+        ceiling.start()
+
         def watch() -> None:
             nonlocal count, changed_at, saw_consumer_call, reason
             now = time.perf_counter()

@@ -11,6 +11,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import spike_qt_responsiveness
 from spike_qt_responsiveness import Instrument, run, stop_reason
 
 
@@ -179,3 +180,32 @@ def test_a_stopped_instrument_stops_ticking_and_takes_its_window_down(qapp, qtbo
 
     assert len(instrument.intervals) == frozen
     assert not instrument.bar.isVisible()
+
+
+def test_the_ceiling_ends_the_run_even_though_the_watchdog_never_fired(qapp, monkeypatch):
+    """The ceiling must not be evaluated by the mechanism it backstops.
+
+    The watchdog is pushed out past the ceiling, so during this run it never
+    fires at all - exactly the case in which the ceiling has to hold.  Its
+    thresholds are still short enough to end the run late, so deleting the
+    ceiling's timer fails this test instead of hanging the suite.
+    """
+    monkeypatch.setattr(spike_qt_responsiveness, "WATCHDOG_MS", 2500)
+    polls = []
+
+    outcome = run(
+        lambda: None,
+        idle_seconds=2.0,
+        paste_window_seconds=2.0,
+        max_seconds=0.4,
+        activity=lambda: polls.append(1) or 0,
+    )
+
+    assert len(polls) == 1, (
+        "the watchdog must never have run: the only activity() call belongs to "
+        f"run() itself, but it was polled {len(polls)} times"
+    )
+    assert outcome.reason.startswith("ceiling reached"), (
+        "a ceiling checked only inside the watchdog's callback bounds nothing "
+        "precisely when the watchdog is the thing that is broken"
+    )
