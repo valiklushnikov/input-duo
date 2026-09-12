@@ -5,7 +5,23 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-PACKAGE = Path("src", "duo_input", "clipboard")
+# Anchored to this file, not to the working directory. Relative to the cwd it
+# resolved only when pytest was run from inside configurator/: from the
+# repository root - which is how the release build and the full gate run it -
+# the two tests that open a file by name failed, and the three that glob the
+# package silently passed over an empty directory, checking nothing at all.
+PACKAGE = Path(__file__).resolve().parents[2] / "src" / "duo_input" / "clipboard"
+
+
+def _package_modules() -> list[Path]:
+    """Every module in the package, refusing to report success on none.
+
+    An empty sweep is what made these boundaries look green while they were
+    being enforced against nothing.
+    """
+    modules = sorted(PACKAGE.glob("*.py"))
+    assert modules, f"no modules found under {PACKAGE}"
+    return modules
 
 _NATIVE_PREFIXES = ("AppKit", "Foundation", "objc", "PyObjCTools", "Cocoa")
 
@@ -30,7 +46,7 @@ def _has_native_import(path: Path) -> bool:
 def test_the_clipboard_package_never_imports_qtwidgets():
     offenders = {
         path.name
-        for path in PACKAGE.glob("*.py")
+        for path in _package_modules()
         if any(name.startswith("PySide6.QtWidgets") for name in _imported_modules(path))
     }
 
@@ -43,7 +59,7 @@ def test_the_clipboard_package_never_imports_qtwidgets():
 def test_the_clipboard_package_never_imports_the_ui():
     offenders = {
         path.name
-        for path in PACKAGE.glob("*.py")
+        for path in _package_modules()
         if any(name.startswith("duo_input.ui") for name in _imported_modules(path))
     }
 
@@ -53,7 +69,7 @@ def test_the_clipboard_package_never_imports_the_ui():
 def test_only_macos_pasteboard_touches_pyobjc():
     offenders = {
         path.name
-        for path in PACKAGE.glob("*.py")
+        for path in _package_modules()
         if path.name != "macos_pasteboard.py" and _has_native_import(path)
     }
 
