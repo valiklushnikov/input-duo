@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import ctypes
+import threading
 
 import pytest
 
 import spike_virtual_files as spike
+from spike_com_vtable import E_NOINTERFACE, guid_from_string, query_interface
 
 
 def test_global_memory_api_is_pointer_sized_and_rejects_allocation_failures():
@@ -119,3 +121,54 @@ def test_file_contents_keeps_the_returned_stream_alive():
     retained = obj.streams[0]
     assert spike.stream_read(medium.data, 4) == spike.synthetic_bytes(1, 0, 4)
     assert retained.pointer.value == medium.data
+
+
+def test_async_capability_is_advertised_only_when_the_flag_enables_it(monkeypatch):
+    monkeypatch.setattr(spike, "register_format", lambda _name: 1)
+    enabled = spike.DataObject(async_capability=True)
+    disabled = spike.DataObject()
+    out = ctypes.c_void_p()
+
+    assert query_interface(
+        enabled.pointer, guid_from_string(spike.IID_IASYNCCAPABILITY), ctypes.byref(out)
+    ) == spike.S_OK
+    assert out.value == enabled.pointer.value
+    assert query_interface(
+        disabled.pointer, guid_from_string(spike.IID_IASYNCCAPABILITY), ctypes.byref(out)
+    ) == E_NOINTERFACE
+    assert out.value is None
+
+
+def test_async_capability_vtable_tracks_mode_and_operation_lifecycle(monkeypatch):
+    monkeypatch.setattr(spike, "register_format", lambda _name: 1)
+    spike.LIFECYCLE_LOG.clear()
+    obj = spike.DataObject(async_capability=True)
+    mode = ctypes.c_short()
+
+    assert spike._stream_slot(obj.pointer, 12, spike._SETASYNC)(
+        obj.pointer, spike.VARIANT_TRUE
+    ) == spike.S_OK
+    assert spike._stream_slot(obj.pointer, 13, spike._GETASYNC)(
+        obj.pointer, ctypes.byref(mode)
+    ) == spike.S_OK
+    assert mode.value == spike.VARIANT_TRUE
+    assert spike._stream_slot(obj.pointer, 14, spike._STARTOP)(obj.pointer, None) == spike.S_OK
+    assert spike._stream_slot(obj.pointer, 15, spike._INOP)(
+        obj.pointer, ctypes.byref(mode)
+    ) == spike.S_OK
+    assert mode.value == spike.VARIANT_TRUE
+    assert spike._stream_slot(obj.pointer, 16, spike._ENDOP)(
+        obj.pointer, spike.S_OK, None, spike.DROPEFFECT_COPY
+    ) == spike.S_OK
+    assert spike._stream_slot(obj.pointer, 15, spike._INOP)(
+        obj.pointer, ctypes.byref(mode)
+    ) == spike.S_OK
+
+    assert mode.value == spike.VARIANT_FALSE
+    assert [event for event, _thread_id in spike.LIFECYCLE_LOG] == [
+        "SetAsyncMode(-1)",
+        "GetAsyncMode",
+        "StartOperation",
+        "EndOperation(hResult=0x00000000, effects=1)",
+    ]
+    assert {thread_id for _event, thread_id in spike.LIFECYCLE_LOG} == {threading.get_ident()}

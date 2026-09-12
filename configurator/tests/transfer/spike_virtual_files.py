@@ -25,9 +25,11 @@ from spike_com_vtable import (
     COMObject,
     make_vtable,
 )
+from spike_qt_responsiveness import run
 
 IID_IDATAOBJECT = "{0000010E-0000-0000-C000-000000000046}"
 IID_ISTREAM = "{0000000C-0000-0000-C000-000000000046}"
+IID_IASYNCCAPABILITY = "{3D8B0590-F691-11D2-8EA9-006097DF5BD4}"
 
 DV_E_FORMATETC = -2147221404  # 0x80040064
 DV_E_TYMED = -2147221399  # 0x80040069
@@ -48,6 +50,9 @@ FD_FILESIZE = 0x40
 FD_ATTRIBUTES = 0x04
 FD_PROGRESSUI = 0x4000
 
+VARIANT_TRUE = -1
+VARIANT_FALSE = 0
+
 _START = time.perf_counter()
 
 # (entry_index, offset, requested_cb, returned), once per IStream::Read.
@@ -56,11 +61,18 @@ READ_LOG: list[tuple[int, int, int, int]] = []
 SEEK_LOG: list[tuple[int, int, int]] = []
 # entry_index, once per IStream::Stat.
 STAT_LOG: list[int] = []
+# Every asynchronous-capability call, in arrival order, with its thread id.
+LIFECYCLE_LOG: list[tuple[str, int]] = []
 
 
 def log(message: str) -> None:
     elapsed = time.perf_counter() - _START
     print(f"[{elapsed:8.3f}s tid={threading.get_ident():>6}] {message}", flush=True)
+
+
+def note(event: str) -> None:
+    LIFECYCLE_LOG.append((event, threading.get_ident()))
+    log(f"lifecycle: {event}")
 
 
 class FORMATETC(ctypes.Structure):
@@ -314,18 +326,30 @@ _DADVISE = ctypes.WINFUNCTYPE(
     ctypes.c_void_p,
     ctypes.c_void_p,
 )
+_SETASYNC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_short)
+_GETASYNC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
+_STARTOP = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
+_INOP = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
+_ENDOP = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_long, ctypes.c_void_p, wintypes.DWORD
+)
 
 
 class DataObject(COMObject):
     """IDataObject advertising descriptors and synthetic IStream file contents."""
 
-    def __init__(self) -> None:
-        super().__init__([IID_IUNKNOWN, IID_IDATAOBJECT])
+    def __init__(self, async_capability: bool = False) -> None:
+        supported_iids = [IID_IUNKNOWN, IID_IDATAOBJECT]
+        if async_capability:
+            supported_iids.append(IID_IASYNCCAPABILITY)
+        super().__init__(supported_iids)
         self.cf_descriptor = register_format("FileGroupDescriptorW")
         self.cf_contents = register_format("FileContents")
         self.cf_drop_effect = register_format("Preferred DropEffect")
         self.get_data_calls: list[tuple[int, int]] = []
         self.streams: list[StreamObject] = []
+        self.async_mode = False
+        self.in_operation = False
 
         self._own = [
             _GETDATA(self._get_data),
@@ -338,6 +362,14 @@ class DataObject(COMObject):
             _QUERYGET(self._d_unadvise),
             _QUERYGET(self._enum_d_advise),
         ]
+        if async_capability:
+            self._own.extend([
+                _SETASYNC(self._set_async_mode),
+                _GETASYNC(self._get_async_mode),
+                _STARTOP(self._start_operation),
+                _INOP(self._in_operation_query),
+                _ENDOP(self._end_operation),
+            ])
         self._vtable = make_vtable(*self._callbacks, *self._own)
         self._slot = ctypes.c_void_p(ctypes.addressof(self._vtable))
         self.pointer = ctypes.c_void_p(ctypes.addressof(self._slot))
@@ -415,30 +447,69 @@ class DataObject(COMObject):
         log("EnumDAdvise() -> E_NOTIMPL")
         return E_NOTIMPL
 
+    def _set_async_mode(self, _this, do_op_async) -> int:
+        note(f"SetAsyncMode({do_op_async})")
+        self.async_mode = do_op_async != VARIANT_FALSE
+        return S_OK
+
+    def _get_async_mode(self, _this, out) -> int:
+        note("GetAsyncMode")
+        if not out:
+            return E_POINTER
+        ctypes.cast(out, ctypes.POINTER(ctypes.c_short))[0] = (
+            VARIANT_TRUE if self.async_mode else VARIANT_FALSE
+        )
+        return S_OK
+
+    def _start_operation(self, _this, _reserved) -> int:
+        note("StartOperation")
+        self.in_operation = True
+        return S_OK
+
+    def _in_operation_query(self, _this, out) -> int:
+        if not out:
+            return E_POINTER
+        ctypes.cast(out, ctypes.POINTER(ctypes.c_short))[0] = (
+            VARIANT_TRUE if self.in_operation else VARIANT_FALSE
+        )
+        return S_OK
+
+    def _end_operation(self, _this, result, _reserved, effects) -> int:
+        note(f"EndOperation(hResult=0x{result & 0xFFFFFFFF:08X}, effects={effects})")
+        self.in_operation = False
+        return S_OK
+
+
+def make_pump():
+    message = wintypes.MSG()
+
+    def pump() -> None:
+        while ctypes.windll.user32.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
+            ctypes.windll.user32.TranslateMessage(ctypes.byref(message))
+            ctypes.windll.user32.DispatchMessageW(ctypes.byref(message))
+
+    return pump
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seconds", type=int, default=120)
+    parser.add_argument("--async-capability", action="store_true")
     arguments = parser.parse_args()
 
     ctypes.oledll.ole32.OleInitialize(None)
-    obj = DataObject()
+    obj = DataObject(async_capability=arguments.async_capability)
     result = ctypes.windll.ole32.OleSetClipboard(obj.pointer)
     log(f"OleSetClipboard -> 0x{result & 0xFFFFFFFF:08X}")
     log("Press Ctrl+V in Explorer. Ctrl+C in this window exits.")
 
-    deadline = time.perf_counter() + arguments.seconds
-    message = wintypes.MSG()
-    while time.perf_counter() < deadline:
-        while ctypes.windll.user32.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
-            ctypes.windll.user32.TranslateMessage(ctypes.byref(message))
-            ctypes.windll.user32.DispatchMessageW(ctypes.byref(message))
-        time.sleep(0.01)
+    log(f"Qt responsiveness: {run(arguments.seconds, make_pump())}")
 
     log(f"GetData calls: {obj.get_data_calls}")
     log(f"Read calls: {READ_LOG}")
     log(f"Seek calls: {SEEK_LOG}")
     log(f"Stat calls: {STAT_LOG}")
+    log(f"Lifecycle calls: {LIFECYCLE_LOG}")
     ctypes.windll.ole32.OleFlushClipboard()
     return 0
 
