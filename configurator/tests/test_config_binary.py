@@ -23,7 +23,7 @@ from duo_input.domain.models import (
     TriggerKind,
     TriggerSource,
 )
-from duo_input.generated.protocol import MacroStepType, SCHEMA_VERSION_MINOR
+from duo_input.generated.protocol import MacroStepType
 
 
 VECTOR_DIRECTORY = Path("tests/vectors/config_vectors")
@@ -123,7 +123,10 @@ def test_binding_round_trips_its_source():
     binding_offset = int.from_bytes(encoded[64 + 16 : 64 + 20], "little")
     decoded = decode_device_config(encoded)
 
-    assert encoded[5] == SCHEMA_VERSION_MINOR
+    # Literal, not the generated constant: config_binary.py packs byte 5 from
+    # that same constant, so comparing against it here would only prove the
+    # packer agrees with itself. Pin the number instead.
+    assert encoded[5] == 2
     assert int.from_bytes(encoded[64 + 20 : 64 + 22], "little") == 12
     assert encoded[binding_offset : binding_offset + 6] == b"\x01\x4f\x01\x01\x06\x01"
     assert encoded[binding_offset + 6 : binding_offset + 12] == b"\x34\x34\x30\xd0\x01\x00"

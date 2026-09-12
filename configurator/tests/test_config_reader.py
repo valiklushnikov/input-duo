@@ -122,14 +122,18 @@ def test_a_minor_zero_package_upgrades_without_moving_its_content(name):
     """
     from duo_input.domain.config_binary import compile_device_config
     from duo_input.domain.config_reader import parse_device_config
-    from duo_input.generated.protocol import SCHEMA_VERSION_MINOR
 
     original = _vector(name)
 
     config = parse_device_config(original)
     rewritten = bytearray(compile_device_config(config))
     assert original[5] == 0
-    assert rewritten[5] == SCHEMA_VERSION_MINOR
+    # Literal, not the generated constant: config_binary.py packs byte 5 from
+    # that same constant, so comparing against it here would only prove the
+    # packer agrees with itself through a second import path. A schema bump
+    # nobody intended would pass just as easily. Pin the number instead, the
+    # same way test_config_validator.cpp's static_assert pins it in C++.
+    assert rewritten[5] == 2
     rewritten[5] = 0
 
     assert _recrc(rewritten) == original
