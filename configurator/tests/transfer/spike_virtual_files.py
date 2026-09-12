@@ -23,6 +23,7 @@ from spike_com_vtable import (
     S_OK,
     GUID,
     COMObject,
+    guid_from_string,
     make_vtable,
 )
 from spike_qt_responsiveness import run
@@ -49,9 +50,6 @@ FILE_ATTRIBUTE_DIRECTORY = 0x10
 FD_FILESIZE = 0x40
 FD_ATTRIBUTES = 0x04
 FD_PROGRESSUI = 0x4000
-
-VARIANT_TRUE = -1
-VARIANT_FALSE = 0
 
 _START = time.perf_counter()
 
@@ -326,23 +324,65 @@ _DADVISE = ctypes.WINFUNCTYPE(
     ctypes.c_void_p,
     ctypes.c_void_p,
 )
-_SETASYNC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_short)
-_GETASYNC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
+_QUERYINTERFACE = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+)
+_REFCOUNT = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+_SETASYNC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, wintypes.BOOL)
+_GETASYNC = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL)
+)
 _STARTOP = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
-_INOP = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
+_INOP = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL)
+)
 _ENDOP = ctypes.WINFUNCTYPE(
     ctypes.c_long, ctypes.c_void_p, ctypes.c_long, ctypes.c_void_p, wintypes.DWORD
 )
+
+
+def _is_iid(riid, expected_iid: str) -> bool:
+    requested = ctypes.cast(riid, ctypes.POINTER(GUID)).contents
+    expected = guid_from_string(expected_iid)
+    return bytes(memoryview(requested).cast("B")) == bytes(memoryview(expected).cast("B"))
+
+
+class AsyncCapabilityInterface:
+    """The distinct IUnknown-derived IDataObjectAsyncCapability interface."""
+
+    def __init__(self, owner) -> None:
+        self.owner = owner
+        self._callbacks = [
+            _QUERYINTERFACE(self._query_interface),
+            _REFCOUNT(self._add_ref),
+            _REFCOUNT(self._release),
+        ]
+        self._methods = [
+            _SETASYNC(owner._set_async_mode),
+            _GETASYNC(owner._get_async_mode),
+            _STARTOP(owner._start_operation),
+            _INOP(owner._in_operation_query),
+            _ENDOP(owner._end_operation),
+        ]
+        self._vtable = make_vtable(*self._callbacks, *self._methods)
+        self._slot = ctypes.c_void_p(ctypes.addressof(self._vtable))
+        self.pointer = ctypes.c_void_p(ctypes.addressof(self._slot))
+
+    def _query_interface(self, _this, riid, ppv) -> int:
+        return self.owner._query_interface(self.owner.pointer, riid, ppv)
+
+    def _add_ref(self, _this) -> int:
+        return self.owner._add_ref(self.owner.pointer)
+
+    def _release(self, _this) -> int:
+        return self.owner._release(self.owner.pointer)
 
 
 class DataObject(COMObject):
     """IDataObject advertising descriptors and synthetic IStream file contents."""
 
     def __init__(self, async_capability: bool = False) -> None:
-        supported_iids = [IID_IUNKNOWN, IID_IDATAOBJECT]
-        if async_capability:
-            supported_iids.append(IID_IASYNCCAPABILITY)
-        super().__init__(supported_iids)
+        super().__init__([IID_IUNKNOWN, IID_IDATAOBJECT])
         self.cf_descriptor = register_format("FileGroupDescriptorW")
         self.cf_contents = register_format("FileContents")
         self.cf_drop_effect = register_format("Preferred DropEffect")
@@ -350,6 +390,7 @@ class DataObject(COMObject):
         self.streams: list[StreamObject] = []
         self.async_mode = False
         self.in_operation = False
+        self._retained_async_pointer: ctypes.c_void_p | None = None
 
         self._own = [
             _GETDATA(self._get_data),
@@ -362,17 +403,21 @@ class DataObject(COMObject):
             _QUERYGET(self._d_unadvise),
             _QUERYGET(self._enum_d_advise),
         ]
-        if async_capability:
-            self._own.extend([
-                _SETASYNC(self._set_async_mode),
-                _GETASYNC(self._get_async_mode),
-                _STARTOP(self._start_operation),
-                _INOP(self._in_operation_query),
-                _ENDOP(self._end_operation),
-            ])
         self._vtable = make_vtable(*self._callbacks, *self._own)
         self._slot = ctypes.c_void_p(ctypes.addressof(self._vtable))
         self.pointer = ctypes.c_void_p(ctypes.addressof(self._slot))
+        self._async_capability = (
+            AsyncCapabilityInterface(self) if async_capability else None
+        )
+
+    def _query_interface(self, _this, riid, ppv) -> int:
+        if not ppv:
+            return E_POINTER
+        if self._async_capability is not None and _is_iid(riid, IID_IASYNCCAPABILITY):
+            ctypes.cast(ppv, ctypes.POINTER(ctypes.c_void_p))[0] = self._async_capability.pointer
+            self._add_ref(self.pointer)
+            return S_OK
+        return super()._query_interface(_this, riid, ppv)
 
     def _get_data(self, _this, pformatetc, pmedium) -> int:
         fmt = ctypes.cast(pformatetc, ctypes.POINTER(FORMATETC)).contents
@@ -449,16 +494,18 @@ class DataObject(COMObject):
 
     def _set_async_mode(self, _this, do_op_async) -> int:
         note(f"SetAsyncMode({do_op_async})")
-        self.async_mode = do_op_async != VARIANT_FALSE
+        self.async_mode = bool(do_op_async)
+        if self.async_mode:
+            self._retain_async_interface()
+        else:
+            self._release_retained_async_interface()
         return S_OK
 
     def _get_async_mode(self, _this, out) -> int:
         note("GetAsyncMode")
         if not out:
             return E_POINTER
-        ctypes.cast(out, ctypes.POINTER(ctypes.c_short))[0] = (
-            VARIANT_TRUE if self.async_mode else VARIANT_FALSE
-        )
+        out[0] = 1 if self.async_mode else 0
         return S_OK
 
     def _start_operation(self, _this, _reserved) -> int:
@@ -467,17 +514,31 @@ class DataObject(COMObject):
         return S_OK
 
     def _in_operation_query(self, _this, out) -> int:
+        note("InOperation")
         if not out:
             return E_POINTER
-        ctypes.cast(out, ctypes.POINTER(ctypes.c_short))[0] = (
-            VARIANT_TRUE if self.in_operation else VARIANT_FALSE
-        )
+        out[0] = 1 if self.in_operation else 0
         return S_OK
 
     def _end_operation(self, _this, result, _reserved, effects) -> int:
         note(f"EndOperation(hResult=0x{result & 0xFFFFFFFF:08X}, effects={effects})")
         self.in_operation = False
+        self._release_retained_async_interface()
         return S_OK
+
+    def _retain_async_interface(self) -> None:
+        if self._retained_async_pointer is not None:
+            return
+        if self._async_capability is None:
+            return
+        self._retained_async_pointer = self._async_capability.pointer
+        self._async_capability._add_ref(self._retained_async_pointer)
+
+    def _release_retained_async_interface(self) -> None:
+        if self._retained_async_pointer is None or self._async_capability is None:
+            return
+        self._async_capability._release(self._retained_async_pointer)
+        self._retained_async_pointer = None
 
 
 def make_pump():

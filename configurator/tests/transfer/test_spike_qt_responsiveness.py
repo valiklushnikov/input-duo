@@ -25,3 +25,19 @@ def test_the_report_names_the_worst_interval_not_only_the_typical_one(qapp):
         "an instrument that reports only the median would hide the exact pause "
         "that it exists to measure"
     )
+
+
+def test_started_instrument_ticks_and_advances_the_visible_progress_bar(qapp, qtbot):
+    instrument = Instrument()
+    qtbot.addWidget(instrument.bar)
+    starting_value = instrument.bar.value()
+
+    instrument.start()
+    qtbot.waitUntil(
+        lambda: bool(instrument.intervals) and instrument.bar.value() != starting_value,
+        timeout=1000,
+    )
+
+    assert instrument.intervals
+    assert instrument.bar.value() != starting_value
+    instrument._timer.stop()
