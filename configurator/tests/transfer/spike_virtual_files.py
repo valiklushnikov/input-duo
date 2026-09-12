@@ -2,7 +2,17 @@
 
 Run in a real interactive Windows session (not offscreen)::
 
-    .venv\\Scripts\\python.exe configurator/tests/transfer/spike_virtual_files.py --seconds 300
+    .venv\\Scripts\\python.exe configurator/tests/transfer/spike_virtual_files.py
+
+With no end-condition flags the run ends on quiescence: once no consumer call
+has arrived for ``--idle-seconds``, bounded by ``--max-seconds``.  That is the
+mode for a copy that has to finish, because nobody knows the throughput in
+advance - round 4 gave a 4 GiB entry ``--seconds 180`` of the ~915s it needed,
+cut it at 18.9%, and the truncation was read as an Explorer failure.
+
+``--seconds N`` keeps the old fixed budget for runs that want a fixed window.
+Either way, a run that ends while a consumer is still reading says so in a
+banner and exits 3.
 
 The script places an object advertising three virtual-file entries on the
 clipboard and logs descriptor negotiation plus synthetic IStream reads.  The
@@ -34,7 +44,13 @@ from spike_com_vtable import (
     guid_from_string,
     make_vtable,
 )
-from spike_qt_responsiveness import run
+from spike_qt_responsiveness import (
+    DEFAULT_IDLE_SECONDS,
+    DEFAULT_MAX_SECONDS,
+    DEFAULT_PASTE_WINDOW_SECONDS,
+    Outcome,
+    run,
+)
 
 IID_IDATAOBJECT = "{0000010E-0000-0000-C000-000000000046}"
 IID_IENUMFORMATETC = "{00000103-0000-0000-C000-000000000046}"
@@ -73,11 +89,25 @@ SEEK_LOG: list[tuple[int, int, int]] = []
 STAT_LOG: list[int] = []
 # Every asynchronous-capability call, in arrival order, with its thread id.
 LIFECYCLE_LOG: list[tuple[str, int]] = []
+# perf_counter of the most recent IStream::Read; None until a consumer reads.
+LAST_READ_AT: float | None = None
+# entry_index -> perf_counter of that entry's first read, for a measured rate.
+READ_STARTED_AT: dict[int, float] = {}
+
+#: A read this recent at shutdown means we are cutting off a live transfer.
+LIVE_STREAM_WINDOW_SECONDS = 5.0
 
 
 def log(message: str) -> None:
     elapsed = time.perf_counter() - _START
     print(f"[{elapsed:8.3f}s tid={threading.get_ident():>6}] {message}", flush=True)
+
+
+def note_stream_read(entry_index: int) -> None:
+    """Remember when a consumer last pulled bytes, and from when it started."""
+    global LAST_READ_AT
+    LAST_READ_AT = time.perf_counter()
+    READ_STARTED_AT.setdefault(entry_index, LAST_READ_AT)
 
 
 def note(event: str) -> None:
@@ -172,6 +202,7 @@ class StreamObject(COMObject):
         count = min(int(cb), available)
         payload = synthetic_bytes(self.entry_index, self.position, count)
         READ_LOG.append((self.entry_index, self.position, int(cb), count))
+        note_stream_read(self.entry_index)
         log(f"IStream::Read(entry={self.entry_index}, off={self.position}, cb={cb}) -> {count}")
         if count:
             ctypes.memmove(pv, payload, count)
@@ -849,16 +880,123 @@ def make_pump():
     return pump
 
 
-def main() -> int:
+def live_transfer_warning(now: float | None = None) -> list[str] | None:
+    """Describe the transfer this run is about to cut off, or None if quiet.
+
+    Round 4 ended 1 ms after an IStream::Read of the 4 GiB entry, flushed the
+    clipboard out from under the consumer, and printed its summary as if
+    nothing had happened; the operator read the resulting Explorer error as a
+    failed transfer.  A run that ends mid-stream has to accuse itself.
+    """
+    if LAST_READ_AT is None:
+        return None
+    moment = time.perf_counter() if now is None else now
+    quiet_for = moment - LAST_READ_AT
+    if quiet_for >= LIVE_STREAM_WINDOW_SECONDS:
+        return None
+    entry_index, offset, _requested, returned = READ_LOG[-1]
+    name, _is_directory, size = ENTRIES[entry_index]
+    delivered = offset + returned
+    lines = [
+        "!!! THIS RUN TRUNCATED A LIVE TRANSFER - EXPLORER DID NOT FAIL !!!",
+        f"the last IStream::Read landed {quiet_for:.1f}s ago: entry {entry_index}"
+        f" ({name}) had delivered {delivered} of {size} bytes"
+        f" ({100.0 * delivered / size:.1f}%)",
+        "OleFlushClipboard below revokes the data object while that consumer is"
+        " still reading it, so the copy error on screen belongs to this"
+        " instrument's end condition and not to the transfer",
+    ]
+    started_at = READ_STARTED_AT.get(entry_index)
+    elapsed = moment - started_at if started_at is not None else 0.0
+    if elapsed > 0:
+        rate = delivered / elapsed
+        lines.append(
+            f"measured {rate / 1e6:.2f} MB/s on this entry, which needed about"
+            f" {(size - delivered) / rate:.0f}s more; re-run with no --seconds"
+            " so the run ends on quiescence instead of a guessed budget"
+        )
+    return lines
+
+
+def consumer_call_count(obj: DataObject) -> int:
+    """Count every consumer-driven call, so silence can be recognised."""
+    return (
+        len(obj.get_data_calls)
+        + len(READ_LOG)
+        + len(SEEK_LOG)
+        + len(STAT_LOG)
+        + len(LIFECYCLE_LOG)
+    )
+
+
+#: Exit code for a run that ended while a consumer was still reading.
+TRUNCATED_EXIT_CODE = 3
+
+TRUNCATED_EXIT_LINE = (
+    "EXIT 3: this run ended in the middle of a transfer - see the TRUNCATED "
+    "banner above; nothing failed in Explorer or in COM"
+)
+QUIET_EXIT_LINE = "EXIT 0: no consumer was mid-stream when this run ended"
+
+
+def log_shutdown_summary(outcome: Outcome, get_data_calls, automatic) -> bool:
+    """Log the tail of a run, and report whether it ended mid-transfer.
+
+    The banner goes first, next to the last IStream::Read line, because the
+    per-call summaries below it are thousands of characters wide.
+    """
+    warning = live_transfer_warning()
+    for line in warning or ():
+        log(line)
+    log(f"Qt responsiveness: {outcome.report}")
+    log(f"run ended: {outcome.reason}")
+    log(f"GetData calls: {get_data_calls}")
+    log(f"GetData calls after the settle marker: {get_data_calls[len(automatic):]}")
+    log(f"Read calls: {READ_LOG}")
+    log(f"Seek calls: {SEEK_LOG}")
+    log(f"Stat calls: {STAT_LOG}")
+    log(f"Lifecycle calls: {LIFECYCLE_LOG}")
+    return warning is not None
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """The parser the script really runs; every knob must be reachable here."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--seconds", type=int, default=120)
+    parser.add_argument(
+        "--seconds",
+        type=int,
+        default=None,
+        help="fixed wall-clock budget; omit it to end on quiescence instead",
+    )
+    parser.add_argument(
+        "--idle-seconds",
+        type=float,
+        default=DEFAULT_IDLE_SECONDS,
+        help="end the run once no consumer call has arrived for this long",
+    )
+    parser.add_argument(
+        "--paste-window-seconds",
+        type=float,
+        default=DEFAULT_PASTE_WINDOW_SECONDS,
+        help="give up if no consumer calls at all within this long",
+    )
+    parser.add_argument(
+        "--max-seconds",
+        type=float,
+        default=DEFAULT_MAX_SECONDS,
+        help="absolute ceiling, however busy the consumer still is",
+    )
     parser.add_argument("--async-capability", action="store_true")
     parser.add_argument(
         "--inspect-clipboard",
         action="store_true",
         help="dump the IDataObject already on the clipboard, then exit",
     )
-    arguments = parser.parse_args()
+    return parser
+
+
+def main() -> int:
+    arguments = build_parser().parse_args()
 
     ole_initialize()
     if arguments.inspect_clipboard:
@@ -869,16 +1007,18 @@ def main() -> int:
     log(f"OleSetClipboard -> 0x{result & 0xFFFFFFFF:08X}")
     automatic = settle(obj, make_pump())
 
-    log(f"Qt responsiveness: {run(arguments.seconds, make_pump())}")
-
-    log(f"GetData calls: {obj.get_data_calls}")
-    log(f"GetData calls after the settle marker: {obj.get_data_calls[len(automatic):]}")
-    log(f"Read calls: {READ_LOG}")
-    log(f"Seek calls: {SEEK_LOG}")
-    log(f"Stat calls: {STAT_LOG}")
-    log(f"Lifecycle calls: {LIFECYCLE_LOG}")
+    outcome = run(
+        make_pump(),
+        seconds=arguments.seconds,
+        idle_seconds=arguments.idle_seconds,
+        paste_window_seconds=arguments.paste_window_seconds,
+        max_seconds=arguments.max_seconds,
+        activity=lambda: consumer_call_count(obj),
+    )
+    truncated = log_shutdown_summary(outcome, obj.get_data_calls, automatic)
     ctypes.windll.ole32.OleFlushClipboard()
-    return 0
+    log(TRUNCATED_EXIT_LINE if truncated else QUIET_EXIT_LINE)
+    return TRUNCATED_EXIT_CODE if truncated else 0
 
 
 if __name__ == "__main__":

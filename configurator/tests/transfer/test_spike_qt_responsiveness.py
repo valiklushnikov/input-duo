@@ -1,4 +1,9 @@
-"""The responsiveness instrument must expose a stopped timer and a long pause."""
+"""The responsiveness instrument must expose a stopped timer and a long pause.
+
+Its report is also the one line Task 0.5 quotes verbatim, so it is checked for
+being plain ASCII: the round-4 log recorded it as "Єшъют 3513, ьхфшрэр 54.8 ьё"
+after PowerShell re-encoded Cyrillic labels through the console code page.
+"""
 
 from __future__ import annotations
 
@@ -6,13 +11,13 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from spike_qt_responsiveness import Instrument
+from spike_qt_responsiveness import Instrument, run, stop_reason
 
 
 def test_an_instrument_that_never_ticked_says_so_instead_of_reporting_health(qapp):
     instrument = Instrument()
 
-    assert "нет тиков вовсе" in instrument.report()
+    assert "no ticks at all" in instrument.report()
 
 
 def test_the_report_names_the_worst_interval_not_only_the_typical_one(qapp):
@@ -21,7 +26,7 @@ def test_the_report_names_the_worst_interval_not_only_the_typical_one(qapp):
 
     report = instrument.report()
 
-    assert "максимум 1400.0 мс" in report, (
+    assert "max 1400.0 ms" in report, (
         "an instrument that reports only the median would hide the exact pause "
         "that it exists to measure"
     )
@@ -40,4 +45,140 @@ def test_started_instrument_ticks_and_advances_the_visible_progress_bar(qapp, qt
 
     assert instrument.intervals
     assert instrument.bar.value() != starting_value
-    instrument._timer.stop()
+    instrument.stop()
+
+
+def test_every_report_is_plain_ascii_so_a_redirected_log_stays_readable(qapp):
+    silent = Instrument()
+    measured = Instrument()
+    measured.intervals = [0.016, 0.054, 0.120]
+
+    for report in (silent.report(), measured.report()):
+        assert report.isascii(), (
+            "the console code page mangles non-ASCII on its way to a file or "
+            "through Tee-Object, and these six numbers are quoted verbatim"
+        )
+
+    assert "ticks 3, median 54.0 ms, p99 120.0 ms, max 120.0 ms" == measured.report()
+
+
+def test_a_busy_consumer_keeps_the_run_alive_past_any_guessed_budget():
+    assert (
+        stop_reason(
+            elapsed=900.0,
+            quiet_for=0.1,
+            saw_consumer_call=True,
+            idle_seconds=20.0,
+            paste_window_seconds=180.0,
+            max_seconds=1800.0,
+        )
+        is None
+    ), "a 4 GiB entry needs ~915s; a run that ends on a guess truncates it"
+
+
+def test_silence_after_the_last_consumer_call_ends_the_run():
+    reason = stop_reason(
+        elapsed=930.0,
+        quiet_for=20.0,
+        saw_consumer_call=True,
+        idle_seconds=20.0,
+        paste_window_seconds=180.0,
+        max_seconds=1800.0,
+    )
+
+    assert reason is not None
+    assert reason.startswith("quiescent:") and "20" in reason
+
+
+def test_waiting_for_the_operator_to_press_ctrl_v_is_not_silence_after_a_transfer():
+    assert (
+        stop_reason(
+            elapsed=30.0,
+            quiet_for=30.0,
+            saw_consumer_call=False,
+            idle_seconds=20.0,
+            paste_window_seconds=180.0,
+            max_seconds=1800.0,
+        )
+        is None
+    ), "quitting after 20s of an unpasted run would end it before the paste"
+
+
+def test_a_run_nobody_ever_pasted_into_says_so_rather_than_finishing_quietly():
+    reason = stop_reason(
+        elapsed=180.0,
+        quiet_for=180.0,
+        saw_consumer_call=False,
+        idle_seconds=20.0,
+        paste_window_seconds=180.0,
+        max_seconds=1800.0,
+    )
+
+    assert reason is not None
+    assert "Ctrl+V" in reason
+
+
+def test_the_ceiling_stops_even_a_consumer_that_is_still_reading():
+    reason = stop_reason(
+        elapsed=1800.0,
+        quiet_for=0.0,
+        saw_consumer_call=True,
+        idle_seconds=20.0,
+        paste_window_seconds=180.0,
+        max_seconds=1800.0,
+    )
+
+    assert reason is not None
+    assert "ceiling" in reason
+
+
+def test_run_ends_on_quiescence_and_still_returns_the_tick_statistics(qapp):
+    counted = iter([1, 2, 3, 4])
+    latest = 0
+    pumped = 0
+
+    def activity():
+        nonlocal latest
+        latest = next(counted, latest)
+        return latest
+
+    def pump():
+        nonlocal pumped
+        pumped += 1
+        if pumped > 600:
+            # Rescue bound, inside the loop: a QTimer started here would
+            # stay pending afterwards and exit somebody else's loop.
+            qapp.exit(1)
+
+    outcome = run(
+        pump,
+        idle_seconds=0.3,
+        paste_window_seconds=0.3,
+        max_seconds=5.0,
+        activity=activity,
+    )
+
+    assert outcome.reason.startswith("quiescent:"), (
+        "without a quiescence watchdog the run can only end on a guessed budget"
+    )
+    assert "ticks" in outcome.report
+
+
+def test_run_still_honours_the_fixed_seconds_budget_the_brief_uses(qapp):
+    outcome = run(lambda: None, seconds=0, activity=lambda: 0)
+
+    assert "--seconds" in outcome.reason
+
+
+def test_a_stopped_instrument_stops_ticking_and_takes_its_window_down(qapp, qtbot):
+    instrument = Instrument()
+    qtbot.addWidget(instrument.bar)
+    instrument.start()
+    qtbot.waitUntil(lambda: bool(instrument.intervals), timeout=1000)
+
+    instrument.stop()
+    frozen = len(instrument.intervals)
+    qtbot.wait(120)
+
+    assert len(instrument.intervals) == frozen
+    assert not instrument.bar.isVisible()

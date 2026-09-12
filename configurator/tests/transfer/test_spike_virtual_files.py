@@ -2,11 +2,36 @@ from __future__ import annotations
 
 import ctypes
 import sys
+import time
 
 import pytest
 
 import spike_virtual_files as spike
 from spike_com_vtable import E_NOINTERFACE, guid_from_string, query_interface, release
+
+
+@pytest.fixture
+def fresh_call_logs(monkeypatch):
+    """Isolate the module-level call records the shutdown check reads."""
+    monkeypatch.setattr(spike, "READ_LOG", [])
+    monkeypatch.setattr(spike, "SEEK_LOG", [])
+    monkeypatch.setattr(spike, "STAT_LOG", [])
+    monkeypatch.setattr(spike, "LIFECYCLE_LOG", [])
+    monkeypatch.setattr(spike, "READ_STARTED_AT", {})
+    monkeypatch.setattr(spike, "LAST_READ_AT", None)
+
+
+def _explorer_stubs(monkeypatch):
+    """Silence OLE and the log so ``main`` can be driven without a desktop."""
+    messages = []
+    ole32 = ctypes.windll.ole32
+    monkeypatch.setattr(spike, "log", messages.append)
+    monkeypatch.setattr(spike, "ole_initialize", lambda: None)
+    monkeypatch.setattr(spike, "register_format", lambda _name: 1)
+    monkeypatch.setattr(ole32, "OleSetClipboard", lambda _pointer: 0)
+    monkeypatch.setattr(ole32, "OleFlushClipboard", lambda: 0)
+    monkeypatch.setattr(spike, "settle", lambda _obj, _pump: [])
+    return messages
 
 
 def test_global_memory_api_is_pointer_sized_and_rejects_allocation_failures():
@@ -422,7 +447,7 @@ def test_settle_pumps_then_marks_the_automatic_probe_off_from_human_requests(mon
     assert any("every call below is yours" in message for message in messages)
 
 
-def test_main_settles_before_inviting_a_paste(monkeypatch):
+def test_main_settles_before_inviting_a_paste(monkeypatch, fresh_call_logs):
     order = []
     ole32 = ctypes.windll.ole32
     monkeypatch.setattr(spike, "ole_initialize", lambda: None)
@@ -430,7 +455,12 @@ def test_main_settles_before_inviting_a_paste(monkeypatch):
     monkeypatch.setattr(ole32, "OleSetClipboard", lambda _pointer: 0)
     monkeypatch.setattr(ole32, "OleFlushClipboard", lambda: 0)
     monkeypatch.setattr(spike, "settle", lambda _obj, _pump: order.append("settle") or [])
-    monkeypatch.setattr(spike, "run", lambda _seconds, _pump: order.append("run") or "measured")
+    monkeypatch.setattr(
+        spike,
+        "run",
+        lambda _pump, **_knobs: order.append("run")
+        or spike.Outcome(report="ticks 0", reason="fixed --seconds 0 budget expired"),
+    )
     monkeypatch.setattr(sys, "argv", ["spike_virtual_files.py", "--seconds", "0"])
 
     assert spike.main() == 0
@@ -518,3 +548,168 @@ def test_file_contents_refuses_a_directory_entry_on_both_entry_points(monkeypatc
 
     assert obj.streams == []
     assert any("is a directory" in message for message in messages)
+def test_a_stream_read_records_when_the_consumer_last_pulled_bytes(
+    monkeypatch, fresh_call_logs
+):
+    monkeypatch.setattr(spike, "log", lambda _message: None)
+    stream = spike.StreamObject(2, 4 * 1024 * 1024 * 1024)
+    before = time.perf_counter()
+
+    spike.stream_read(stream.pointer, 8)
+
+    assert spike.LAST_READ_AT is not None and spike.LAST_READ_AT >= before, (
+        "without the moment of the last read, a run cannot tell that it is "
+        "ending in the middle of somebody else's transfer"
+    )
+    assert spike.READ_STARTED_AT[2] == spike.LAST_READ_AT
+
+
+def test_a_read_that_just_landed_makes_the_shutdown_name_the_truncated_transfer(
+    monkeypatch, fresh_call_logs
+):
+    spike.READ_LOG.append((2, 810287104, 262144, 262144))
+    spike.READ_STARTED_AT[2] = 100.0
+    monkeypatch.setattr(spike, "LAST_READ_AT", 283.0)
+
+    banner = "\n".join(spike.live_transfer_warning(now=283.1))
+
+    assert "TRUNCATED" in banner and "EXPLORER DID NOT FAIL" in banner
+    assert "big.bin" in banner
+    assert "810549248 of 4294967296 bytes (18.9%)" in banner
+    assert "4.43 MB/s" in banner and "787s" in banner, (
+        "the operator had no way to size --seconds against an unknown "
+        "throughput, so the banner has to measure it for them"
+    )
+
+
+def test_a_stream_quiet_since_before_the_window_is_not_called_truncated(
+    monkeypatch, fresh_call_logs
+):
+    spike.READ_LOG.append((2, 0, 262144, 262144))
+    monkeypatch.setattr(spike, "LAST_READ_AT", 100.0)
+
+    quiet_since = 100.0 + spike.LIVE_STREAM_WINDOW_SECONDS
+
+    assert spike.live_transfer_warning(now=quiet_since) is None
+
+
+def test_a_run_no_consumer_ever_read_from_is_not_called_truncated(fresh_call_logs):
+    assert spike.live_transfer_warning(now=1000.0) is None
+
+
+def test_main_exits_nonzero_and_leads_the_tail_with_the_truncation_banner(
+    monkeypatch, fresh_call_logs
+):
+    messages = _explorer_stubs(monkeypatch)
+
+    def fake_run(_pump, **_knobs):
+        spike.READ_LOG.append((2, 810287104, 262144, 262144))
+        spike.READ_STARTED_AT[2] = time.perf_counter() - 183.0
+        spike.note_stream_read(2)
+        return spike.Outcome(
+            report="ticks 3513, median 54.8 ms, p99 87.1 ms, max 120.2 ms",
+            reason="fixed --seconds 180 budget expired",
+        )
+
+    monkeypatch.setattr(spike, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["spike_virtual_files.py", "--seconds", "180"])
+
+    assert spike.main() == 3, "a run that truncated a transfer did not succeed"
+
+    banner_at = next(index for index, m in enumerate(messages) if "TRUNCATED" in m)
+    stats_at = next(
+        index for index, m in enumerate(messages) if m.startswith("Qt responsiveness:")
+    )
+    assert banner_at < stats_at, "the banner belongs next to the last Read line"
+    assert messages[-1] == spike.TRUNCATED_EXIT_LINE
+    assert any(m.startswith("run ended: fixed --seconds 180") for m in messages)
+
+
+def test_main_says_plainly_that_no_consumer_was_mid_stream_when_it_ends_quiet(
+    monkeypatch, fresh_call_logs
+):
+    messages = _explorer_stubs(monkeypatch)
+    monkeypatch.setattr(
+        spike,
+        "run",
+        lambda _pump, **_knobs: spike.Outcome(report="ticks 0", reason="quiescent"),
+    )
+    monkeypatch.setattr(sys, "argv", ["spike_virtual_files.py"])
+
+    assert spike.main() == 0
+
+    assert messages[-1] == spike.QUIET_EXIT_LINE
+    assert not any("TRUNCATED" in message for message in messages)
+
+
+def test_the_real_parser_defaults_to_quiescence_and_hands_run_every_knob(
+    monkeypatch, fresh_call_logs
+):
+    _explorer_stubs(monkeypatch)
+    knobs = {}
+
+    def fake_run(_pump, **passed):
+        knobs.update(passed)
+        return spike.Outcome(report="ticks 0", reason="quiescent")
+
+    monkeypatch.setattr(spike, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["spike_virtual_files.py"])
+
+    assert spike.main() == 0
+
+    assert knobs["seconds"] is None, "a guessed wall-clock budget is the trap"
+    assert knobs["idle_seconds"] == spike.DEFAULT_IDLE_SECONDS
+    assert knobs["paste_window_seconds"] == spike.DEFAULT_PASTE_WINDOW_SECONDS
+    assert knobs["max_seconds"] == spike.DEFAULT_MAX_SECONDS
+    assert knobs["activity"]() == 0
+
+
+def test_the_real_parser_still_accepts_the_fixed_budget_the_brief_documents(
+    monkeypatch, fresh_call_logs
+):
+    _explorer_stubs(monkeypatch)
+    knobs = {}
+
+    def fake_run(_pump, **passed):
+        knobs.update(passed)
+        return spike.Outcome(report="ticks 0", reason="quiescent")
+
+    monkeypatch.setattr(spike, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "spike_virtual_files.py",
+            "--async-capability",
+            "--seconds",
+            "300",
+            "--idle-seconds",
+            "45",
+            "--paste-window-seconds",
+            "90",
+            "--max-seconds",
+            "1200",
+        ],
+    )
+
+    assert spike.main() == 0
+
+    assert knobs["seconds"] == 300
+    assert knobs["idle_seconds"] == 45.0
+    assert knobs["paste_window_seconds"] == 90.0
+    assert knobs["max_seconds"] == 1200.0
+
+
+def test_the_activity_counter_notices_every_kind_of_consumer_call(fresh_call_logs):
+    obj = spike.DataObject()
+    assert spike.consumer_call_count(obj) == 0
+
+    obj.get_data_calls.append((obj.cf_contents, 2))
+    spike.READ_LOG.append((2, 0, 262144, 262144))
+    spike.SEEK_LOG.append((2, spike.STREAM_SEEK_SET, 0))
+    spike.STAT_LOG.append(2)
+    spike.LIFECYCLE_LOG.append(("StartOperation", 1))
+
+    assert spike.consumer_call_count(obj) == 5, (
+        "a call the counter ignores looks like silence, and silence ends the run"
+    )
