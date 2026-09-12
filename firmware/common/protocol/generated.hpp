@@ -7,7 +7,7 @@
 namespace duo_input::protocol {
 
 inline constexpr std::uint8_t SCHEMA_VERSION_MAJOR = 1;
-inline constexpr std::uint8_t SCHEMA_VERSION_MINOR = 1;
+inline constexpr std::uint8_t SCHEMA_VERSION_MINOR = 2;
 inline constexpr std::uint8_t PROTOCOL_VERSION_MAJOR = 1;
 inline constexpr std::uint8_t PROTOCOL_VERSION_MINOR = 0;
 
@@ -160,6 +160,10 @@ enum class Capability : std::uint32_t {
     ROUTE_CONTROL = 0x200,
     SPI_ENDPOINT = 0x400,
     TEST_MACRO = 0x40,
+};
+
+enum class ConfigFlag : std::uint8_t {
+    SYNCHRONISED_CONTROL = 0x01,
 };
 
 }  // namespace duo_input::protocol

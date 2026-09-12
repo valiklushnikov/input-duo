@@ -41,7 +41,7 @@ modifiers. Every route, target, command, and layout field uses its context-speci
 | 0 | 4 | ASCII magic `DUOC` |
 | 4 | 1 | schema major (generated `SCHEMA_VERSION_MAJOR`) |
 | 5 | 1 | schema minor (generated `SCHEMA_VERSION_MINOR`) |
-| 6 | 1 | flags, zero |
+| 6 | 1 | flags: bit 0 `SYNCHRONISED_CONTROL`, bits 1..7 zero |
 | 7 | 1 | reserved, zero |
 | 8 | 4 | exact total package length |
 | 12 | 4 | CRC-32/IEEE |
@@ -59,6 +59,11 @@ modifiers. Every route, target, command, and layout field uses its context-speci
 CRC-32 uses the reflected IEEE polynomial and the same result as `zlib.crc32`. Coverage is the
 entire declared package with bytes 12..15 treated as zero. Length and region checks precede CRC
 access. The string blob is followed by zero bytes to the next four-byte boundary.
+
+`SYNCHRONISED_CONTROL` makes every route change move the keyboard and the
+mouse to the same computer. A reader that does not know a flag rejects the
+package: a refusal is visible, while running the configuration without the
+flag would look like working hardware that switches only one device.
 
 ## Profile descriptor (36 bytes)
 
@@ -151,7 +156,8 @@ profile ID byte. Unknown step types and every other payload shape are invalid.
 ## Reader requirements
 
 Readers validate every `offset + count * record_size` and `offset + length` using checked
-arithmetic before reading. They reject incorrect magic/major/flags/reserved/CRC, noncanonical or
-unaligned order, incorrect record sizes and counts, invalid UTF-8/enums/references/duplicates,
-overlap, padding, trailing data, or truncation. A borrowed firmware `ConfigView` may only be
-constructed by successful full validation.
+arithmetic before reading. They reject incorrect magic/major/CRC, reserved bytes that are not
+zero, or header flags this build does not know, noncanonical or unaligned order, incorrect record
+sizes and counts, invalid UTF-8/enums/references/duplicates, overlap, padding, trailing data, or
+truncation. A borrowed firmware `ConfigView` may only be constructed by successful full
+validation.

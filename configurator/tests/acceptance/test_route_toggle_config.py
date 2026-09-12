@@ -60,6 +60,7 @@ from duo_input.domain.config_binary import decode_device_config  # noqa: E402
 from duo_input.generated.protocol import (  # noqa: E402
     MACRO_STEPS_PER_MACRO,
     PROFILES,
+    SCHEMA_VERSION_MINOR,
     ActionKind,
     KeyboardRoute,
     MacroStepType,
@@ -295,7 +296,7 @@ def test_adding_a_second_configuration_did_not_move_the_first():
     import zlib
 
     package = bytearray(build_package())
-    assert package[5] == 1
+    assert package[5] == SCHEMA_VERSION_MINOR
     package[5] = 0
     package[12:16] = b"\0" * 4
     package[12:16] = zlib.crc32(package).to_bytes(4, "little")

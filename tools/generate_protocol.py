@@ -100,6 +100,12 @@ def render_cpp(schema: dict[str, object]) -> str:
         lines.extend(_cpp_enum(enum_name, "std::uint8_t", _items(schema, schema_key)))
         lines.append("")
     lines.extend(_cpp_enum("Capability", "std::uint32_t", _items(schema, "capabilities")))
+    lines.append("")
+    # Header flags of the binary configuration package. A flag enum, not a
+    # value enum: the byte carries a set, and a reader that does not know a bit
+    # must reject the package rather than run a configuration it half
+    # understands.
+    lines.extend(_cpp_enum("ConfigFlag", "std::uint8_t", _items(schema, "config_flags")))
     lines.extend(["", "}  // namespace duo_input::protocol", ""])
     return "\n".join(lines)
 
@@ -154,6 +160,8 @@ def render_python(schema: dict[str, object]) -> str:
         lines.extend(_python_enum(enum_name, "IntEnum", _items(schema, schema_key)))
         lines.append("")
     lines.extend(_python_enum("Capability", "IntFlag", _items(schema, "capabilities")))
+    lines.append("")
+    lines.extend(_python_enum("ConfigFlag", "IntFlag", _items(schema, "config_flags")))
     lines.append("")
     return "\n".join(lines)
 

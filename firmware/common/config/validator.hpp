@@ -94,6 +94,9 @@ private:
 class ConfigView {
 public:
     std::uint8_t active_profile_id() const;
+    /// Does this configuration ask for the keyboard and the mouse to travel
+    /// together?
+    bool synchronised_control() const;
     std::size_t profile_count() const;
     bool profile_at(std::size_t index, ProfileView& output) const;
 

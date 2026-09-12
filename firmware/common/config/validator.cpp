@@ -9,6 +9,13 @@ constexpr std::size_t HEADER_CRC_OFFSET = 12U;
 constexpr std::size_t PROFILE_TABLE_OFFSET = CONFIG_HEADER_SIZE;
 constexpr std::uint8_t MAGIC[4] = {'D', 'U', 'O', 'C'};
 
+/// Every header flag this build understands. A package carrying anything else
+/// was written by a newer configurator, and what the unknown bit asks for
+/// cannot be guessed at - so the whole package is refused rather than run
+/// without it.
+constexpr std::uint8_t kKnownConfigFlags =
+    static_cast<std::uint8_t>(protocol::ConfigFlag::SYNCHRONISED_CONTROL);
+
 bool has_region(protocol::ByteView bytes, std::size_t offset, std::size_t length) {
     return offset <= bytes.size && length <= bytes.size - offset;
 }
@@ -273,7 +280,8 @@ ValidationResult validate_config(protocol::ByteView input) {
     }
     if (input.data[0] != MAGIC[0] || input.data[1] != MAGIC[1] || input.data[2] != MAGIC[2] ||
         input.data[3] != MAGIC[3] || input.data[4] != protocol::SCHEMA_VERSION_MAJOR ||
-        input.data[6] != 0U || input.data[7] != 0U || read_u32(input, 8U) != input.size) {
+        (input.data[6] & static_cast<std::uint8_t>(~kKnownConfigFlags)) != 0U ||
+        input.data[7] != 0U || read_u32(input, 8U) != input.size) {
         return ValidationResult::failure(ValidationError::INVALID_FORMAT);
     }
     if (read_u32(input, HEADER_CRC_OFFSET) != config_crc(input)) {
@@ -411,6 +419,10 @@ ValidationResult validate_config(protocol::ByteView input) {
 
 std::uint8_t ConfigView::active_profile_id() const {
     return bytes_.data == nullptr ? 0U : bytes_.data[17U];
+}
+bool ConfigView::synchronised_control() const {
+    return bytes_.data != nullptr &&
+           (bytes_.data[6U] & static_cast<std::uint8_t>(protocol::ConfigFlag::SYNCHRONISED_CONTROL)) != 0U;
 }
 std::size_t ConfigView::profile_count() const {
     return bytes_.data == nullptr ? 0U : bytes_.data[16U];

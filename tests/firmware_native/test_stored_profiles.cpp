@@ -8,6 +8,7 @@
 #include "config_profiles.hpp"
 #include "mapping/engine.hpp"
 #include "protocol/crc.hpp"
+#include "protocol/generated.hpp"
 #include "test_support.hpp"
 
 #include <cstdio>
@@ -47,6 +48,18 @@ std::vector<std::uint8_t> read_vector(const char* name) {
     }
     std::fclose(file);
     return bytes;
+}
+
+void write_u32(std::vector<std::uint8_t>& bytes, std::size_t offset, std::uint32_t value) {
+    bytes[offset] = static_cast<std::uint8_t>(value);
+    bytes[offset + 1U] = static_cast<std::uint8_t>(value >> 8U);
+    bytes[offset + 2U] = static_cast<std::uint8_t>(value >> 16U);
+    bytes[offset + 3U] = static_cast<std::uint8_t>(value >> 24U);
+}
+
+void repair_crc(std::vector<std::uint8_t>& bytes) {
+    write_u32(bytes, 12U, 0U);
+    write_u32(bytes, 12U, duo_input::protocol::crc32_ieee({bytes.data(), bytes.size()}));
 }
 
 struct Loaded {
@@ -440,4 +453,22 @@ TEST_CASE(a_profile_that_is_not_there_has_no_routes_to_give) {
 
     // Not a route of its own invention: the runtime keeps the one it has.
     CHECK_FALSE(loaded.profiles.routes_for(200, keyboard, mouse));
+}
+
+TEST_CASE(stored_profiles_report_whether_the_configuration_asks_for_synchronised_control) {
+    std::vector<std::uint8_t> bytes = read_vector("valid_minimal.bin");
+    StoredProfiles profiles;
+    CHECK(profiles.load({bytes.data(), bytes.size()}));
+    CHECK_FALSE(profiles.synchronised_control());
+
+    bytes[6] = static_cast<std::uint8_t>(duo_input::protocol::ConfigFlag::SYNCHRONISED_CONTROL);
+    repair_crc(bytes);
+    CHECK(profiles.load({bytes.data(), bytes.size()}));
+    CHECK(profiles.synchronised_control());
+
+    // A package that is not a configuration leaves nothing behind, the flag
+    // included: a half-loaded configuration that still switches both devices
+    // is worse than none.
+    CHECK_FALSE(profiles.load({nullptr, 0}));
+    CHECK_FALSE(profiles.synchronised_control());
 }

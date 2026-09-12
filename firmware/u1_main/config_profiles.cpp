@@ -15,6 +15,7 @@ bool StoredProfiles::load(protocol::ByteView blob) {
     used_steps_ = 0;
     dropped_steps_ = 0;
     active_profile_id_ = 0;
+    synchronised_control_ = false;
     blob_ = protocol::ByteView{nullptr, 0};
 
     if (blob.data == nullptr || blob.size == 0) {
@@ -30,6 +31,7 @@ bool StoredProfiles::load(protocol::ByteView blob) {
 
     blob_ = blob;
     active_profile_id_ = result.view().active_profile_id();
+    synchronised_control_ = result.view().synchronised_control();
     loaded_ = true;
     return true;
 }

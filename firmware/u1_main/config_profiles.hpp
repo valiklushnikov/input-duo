@@ -50,6 +50,10 @@ public:
     /// Which profile the configuration says to run.
     std::uint8_t active_profile_id() const { return active_profile_id_; }
 
+    /// Whether the stored configuration asks for the keyboard and the mouse to
+    /// travel together. False for anything that did not load.
+    bool synchronised_control() const { return synchronised_control_; }
+
     /// Bindings for a profile, keyed by the format's own profile id.
     ///
     /// Nothing is renumbered: the ids the configurator writes are the ids a
@@ -95,6 +99,7 @@ private:
     protocol::ByteView blob_{nullptr, 0};
     bool loaded_ = false;
     std::uint8_t active_profile_id_ = 0;
+    bool synchronised_control_ = false;
 
     macros::MacroStep steps_[kMaxProfileSteps];
     std::size_t used_steps_ = 0;

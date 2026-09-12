@@ -122,13 +122,14 @@ def test_a_minor_zero_package_upgrades_without_moving_its_content(name):
     """
     from duo_input.domain.config_binary import compile_device_config
     from duo_input.domain.config_reader import parse_device_config
+    from duo_input.generated.protocol import SCHEMA_VERSION_MINOR
 
     original = _vector(name)
 
     config = parse_device_config(original)
     rewritten = bytearray(compile_device_config(config))
     assert original[5] == 0
-    assert rewritten[5] == 1
+    assert rewritten[5] == SCHEMA_VERSION_MINOR
     rewritten[5] = 0
 
     assert _recrc(rewritten) == original

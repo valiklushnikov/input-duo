@@ -51,6 +51,7 @@ from duo_input.device.qt_transport import SynchronousTransportLink  # noqa: E402
 from duo_input.domain.config_binary import decode_device_config  # noqa: E402
 from duo_input.generated.protocol import (  # noqa: E402
     PROFILES,
+    SCHEMA_VERSION_MINOR,
     ActionKind,
     KeyboardRoute,
     MouseRoute,
@@ -322,7 +323,7 @@ def test_adding_a_third_configuration_did_not_move_the_first():
     import zlib
 
     package = bytearray(build_package())
-    assert package[5] == 1
+    assert package[5] == SCHEMA_VERSION_MINOR
     package[5] = 0
     package[12:16] = b"\0" * 4
     package[12:16] = zlib.crc32(package).to_bytes(4, "little")

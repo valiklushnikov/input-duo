@@ -14,6 +14,9 @@
     "SPI_ENDPOINT": 1024,
     "TEST_MACRO": 64
   },
+  "config_flags": {
+    "SYNCHRONISED_CONTROL": 1
+  },
   "keyboard_routes": {
     "BOTH": 3,
     "PC1": 1,
@@ -132,7 +135,7 @@
   },
   "schema_version": {
     "major": 1,
-    "minor": 1
+    "minor": 2
   },
   "spi_messages": {
     "CONSUMER_STATE": 3,

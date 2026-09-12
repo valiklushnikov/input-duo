@@ -2,7 +2,7 @@
 from enum import IntEnum, IntFlag
 
 SCHEMA_VERSION_MAJOR = 1
-SCHEMA_VERSION_MINOR = 1
+SCHEMA_VERSION_MINOR = 2
 PROTOCOL_VERSION_MAJOR = 1
 PROTOCOL_VERSION_MINOR = 0
 
@@ -154,3 +154,6 @@ class Capability(IntFlag):
     ROUTE_CONTROL = 0x200
     SPI_ENDPOINT = 0x400
     TEST_MACRO = 0x40
+
+class ConfigFlag(IntFlag):
+    SYNCHRONISED_CONTROL = 0x01

@@ -82,3 +82,13 @@ def test_the_device_layer_takes_error_codes_from_the_generated_protocol():
     # protocol identifier: that is how host and firmware drift apart silently.
     source = Path("configurator/src/duo_input/device/transactions.py").read_text("utf-8")
     assert "from .emulator import" not in source
+
+
+def test_config_flags_are_generated_from_the_schema():
+    schema = json.loads(Path("protocol/schema.json").read_text("utf-8"))
+
+    assert protocol.ConfigFlag.SYNCHRONISED_CONTROL.value == schema["config_flags"]["SYNCHRONISED_CONTROL"]
+    # A set of bits, not a list of values: two flags must be combinable, and
+    # the reader below tests membership rather than equality.
+    assert isinstance(protocol.ConfigFlag.SYNCHRONISED_CONTROL, protocol.ConfigFlag)
+    assert protocol.SCHEMA_VERSION_MINOR == schema["schema_version"]["minor"]

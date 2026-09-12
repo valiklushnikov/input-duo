@@ -2,6 +2,7 @@
 
 #include "config/validator.hpp"
 #include "protocol/crc.hpp"
+#include "protocol/generated.hpp"
 
 #include <array>
 #include <cstddef>
@@ -39,7 +40,7 @@ static_assert(std::is_same_v<duo_input::config::ActionKind,
                              duo_input::protocol::ActionKind>);
 static_assert(std::is_same_v<decltype(std::declval<const duo_input::config::BindingView&>().source()),
                              duo_input::config::TriggerSource>);
-static_assert(duo_input::protocol::SCHEMA_VERSION_MINOR == 1U);
+static_assert(duo_input::protocol::SCHEMA_VERSION_MINOR == 2U);
 static_assert(!std::is_constructible_v<ValidationResult, ValidationError>);
 static_assert(!std::is_constructible_v<ValidationResult, ValidationError, ConfigView>);
 static_assert(std::is_same_v<decltype(std::declval<const ValidationResult&>().error()),
@@ -430,7 +431,7 @@ TEST_CASE(config_validator_rejects_each_repaired_header_length_and_offset_field)
         {28U, 1U, 4U},       // string length
         {32U, 65U, 4U},      // data offset
         {36U, 1U, 4U},       // data length
-        {6U, 1U, 1U},        // flags
+        {6U, 2U, 1U},        // flags: an unknown bit, not the known SYNCHRONISED_CONTROL bit
         {40U, 1U, 1U},       // reserved tail
     }};
     for (const Mutation& mutation : mutations) {
@@ -555,4 +556,30 @@ TEST_CASE(config_validator_rejects_each_independent_malformed_generated_step_pay
     CHECK(rejects(mutate_step_payload(valid, MacroStepType::SET_MOUSE_ROUTE, 0U, 0U)));
     CHECK(rejects(mutate_step_payload(valid, MacroStepType::SET_MOUSE_ROUTE, 0U, 4U)));
     CHECK(rejects(mutate_step_payload(valid, MacroStepType::SET_PROFILE, 0U, 9U)));
+}
+
+TEST_CASE(config_validator_accepts_the_synchronised_control_flag_and_exposes_it) {
+    std::vector<std::uint8_t> bytes = read_vector("valid_minimal.bin");
+    const auto plain = validate_config({bytes.data(), bytes.size()});
+    CHECK(plain);
+    CHECK_FALSE(plain.view().synchronised_control());
+
+    bytes[6] = static_cast<std::uint8_t>(duo_input::protocol::ConfigFlag::SYNCHRONISED_CONTROL);
+    repair_crc(bytes);
+
+    const auto flagged = validate_config({bytes.data(), bytes.size()});
+    CHECK(flagged);
+    CHECK(flagged.view().synchronised_control());
+}
+
+TEST_CASE(config_validator_rejects_header_flags_it_does_not_know) {
+    // A bit this build has never heard of means the package was written by a
+    // newer configurator, and what that bit asks for is unknown. Running the
+    // rest of the configuration anyway is running something nobody chose.
+    for (std::uint8_t bit : {0x02U, 0x04U, 0x80U}) {
+        std::vector<std::uint8_t> bytes = read_vector("valid_minimal.bin");
+        bytes[6] = bit;
+        repair_crc(bytes);
+        CHECK(rejects(bytes));
+    }
 }
