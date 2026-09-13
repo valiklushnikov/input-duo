@@ -7,11 +7,12 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtNetwork import QSslSocket
 
 from duo_input.clipboard.identity import load_or_create
 from duo_input.clipboard.listener import PeerListener
 from duo_input.clipboard.peer import PeerLink, fingerprint_of_socket
-from duo_input.clipboard.wire import Message, MessageType
+from duo_input.clipboard.wire import MAX_FILE_CHUNK_BYTES, MAX_FRAME_BYTES, Message, MessageType
 
 
 @pytest.fixture
@@ -286,3 +287,73 @@ def test_on_encrypted_treats_an_empty_expectation_as_pinned_not_pairing(identiti
 
     assert connected == []
     assert disconnected != []
+
+
+from duo_input.clipboard.peer import READ_BUFFER_BYTES, WRITE_HIGH_WATER_BYTES
+
+
+def test_the_read_buffer_is_bounded_so_a_flood_cannot_grow_it(qapp, tmp_path):
+    # Один запрос в полёте ограничивает то, что просим МЫ. Он не ограничивает
+    # то, что пришлёт сломанный или враждебный пир.
+    identity = load_or_create(tmp_path)
+    link = PeerLink(identity)
+    socket = QSslSocket(link)
+
+    link._wire_up(socket)
+
+    assert socket.readBufferSize() == READ_BUFFER_BYTES
+    assert socket.readBufferSize() != 0, (
+        "нулевой readBufferSize означает 'без границы' - именно то, что "
+        "этот тест существует чтобы запретить"
+    )
+
+
+def test_the_read_buffer_leaves_room_for_several_chunks_but_not_for_a_flood():
+    assert READ_BUFFER_BYTES >= MAX_FILE_CHUNK_BYTES, (
+        "буфер меньше одного чанка заставил бы Qt резать каждый кадр"
+    )
+    assert READ_BUFFER_BYTES < MAX_FRAME_BYTES
+
+
+def test_a_link_with_no_socket_reports_no_pending_bytes(qapp, tmp_path):
+    link = PeerLink(load_or_create(tmp_path))
+
+    assert link.bytes_to_write == 0
+    assert not link.write_congested
+
+
+def test_congestion_is_reported_when_the_write_queue_passes_the_high_water(
+    qapp, tmp_path, monkeypatch
+):
+    identity = load_or_create(tmp_path)
+    link = PeerLink(identity)
+    socket = QSslSocket(link)
+    link._wire_up(socket)
+    monkeypatch.setattr(
+        type(socket), "bytesToWrite", lambda _self: WRITE_HIGH_WATER_BYTES + 1
+    )
+
+    assert link.write_congested
+
+
+def test_the_congestion_signal_fires_only_when_the_state_actually_changes(
+    qapp, tmp_path, monkeypatch
+):
+    identity = load_or_create(tmp_path)
+    link = PeerLink(identity)
+    socket = QSslSocket(link)
+    link._wire_up(socket)
+    seen: list[bool] = []
+    link.congestion_changed.connect(seen.append)
+    pending = [WRITE_HIGH_WATER_BYTES + 1]
+    monkeypatch.setattr(type(socket), "bytesToWrite", lambda _self: pending[0])
+
+    link._check_congestion()
+    link._check_congestion()
+    pending[0] = 0
+    link._check_congestion()
+
+    assert seen == [True, False], (
+        "сигнал повторился при неизменившемся состоянии - подписчик получал бы "
+        "поток одинаковых уведомлений вместо двух переходов"
+    )

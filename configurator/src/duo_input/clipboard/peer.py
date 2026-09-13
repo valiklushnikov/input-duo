@@ -16,7 +16,23 @@ from PySide6.QtCore import QByteArray, QCryptographicHash, QObject, Signal
 from PySide6.QtNetwork import QSsl, QSslCertificate, QSslConfiguration, QSslKey, QSslSocket
 
 from .identity import NodeIdentity
-from .wire import FrameAssembler, Message, WireError, encode
+from .wire import MAX_FILE_CHUNK_BYTES, FrameAssembler, Message, WireError, encode
+
+#: Сколько Qt разрешено держать непрочитанным в сокете.
+#:
+#: Ноль (по умолчанию) означает "без границы", и до передачи файлов это было
+#: безвредно: 32 МиБ потолка кадра сам по себе был границей. С файлами - нет.
+#: Один запрос в полёте ограничивает то, что просим МЫ, но не то, что
+#: пришлёт сломанный или враждебный пир: поток незапрошенных FILE_CHUNK
+#: отбрасывается в FileTransferService._on_chunk лишь ПОСЛЕ того, как Qt его
+#: сложил, а FrameAssembler собрал.
+#:
+#: Четыре чанка, а не один: меньше одного заставило бы Qt резать каждый кадр,
+#: и сборка шла бы по кусочкам без всякой пользы.
+READ_BUFFER_BYTES = MAX_FILE_CHUNK_BYTES * 4
+
+#: За этой отметкой очередь записи считается затором.
+WRITE_HIGH_WATER_BYTES = MAX_FILE_CHUNK_BYTES * 4
 
 
 def ssl_configuration(identity: NodeIdentity) -> QSslConfiguration:
@@ -52,6 +68,7 @@ class PeerLink(QObject):
     message_received = Signal(object)
     connected = Signal(str)
     disconnected = Signal(str)
+    congestion_changed = Signal(bool)
 
     def __init__(self, identity: NodeIdentity, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -60,6 +77,7 @@ class PeerLink(QObject):
         self._assembler = FrameAssembler()
         self._expected_fingerprint: str | None = None
         self._peer_fingerprint = ""
+        self._congested = False
 
     @property
     def peer_fingerprint(self) -> str:
@@ -105,15 +123,39 @@ class PeerLink(QObject):
             self._socket.abort()
             self._socket = None
 
+    @property
+    def bytes_to_write(self) -> int:
+        if self._socket is None:
+            return 0
+        return int(self._socket.bytesToWrite())
+
+    @property
+    def write_congested(self) -> bool:
+        return self.bytes_to_write > WRITE_HIGH_WATER_BYTES
+
     # ------------------------------------------------------------------ внутреннее
 
     def _wire_up(self, socket: QSslSocket) -> None:
         self._socket = socket
         socket.setParent(self)
+        socket.setReadBufferSize(READ_BUFFER_BYTES)
+        socket.bytesWritten.connect(lambda _count: self._check_congestion())
         socket.sslErrors.connect(self._on_ssl_errors)
         socket.encrypted.connect(self._on_encrypted)
         socket.readyRead.connect(self._on_ready_read)
         socket.disconnected.connect(lambda: self._fail("соединение закрыто"))
+
+    def _check_congestion(self) -> None:
+        """Сообщать о ПЕРЕХОДАХ, а не о состоянии на каждый записанный байт.
+
+        bytesWritten приходит часто; сигнал на каждый его приход превратил бы
+        подписчика в получателя потока одинаковых уведомлений.
+        """
+        congested = self.write_congested
+        if congested == self._congested:
+            return
+        self._congested = congested
+        self.congestion_changed.emit(congested)
 
     def _on_ssl_errors(self, errors) -> None:
         socket = self._socket
