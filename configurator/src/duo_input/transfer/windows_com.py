@@ -443,6 +443,9 @@ class PipeStream(ComObject):
         self._size = size
         self._request = request
         self._timeout = timeout
+        # ChunkPipe has no offsets: after Seek, queued bytes still belong to
+        # the old position and must be discarded before the next request.
+        self._discard_buffer_on_read = False
         self.position = 0
         self.requested: list[tuple[int, int]] = []
         self.on_last_release = on_release
@@ -466,15 +469,22 @@ class PipeStream(ComObject):
     # ------------------------------------------------------------------ IStream
 
     def _read(self, _this, pv, cb, pcb_read) -> int:
+        # A failing COM read returns no bytes. Initialise once so timeout, close,
+        # EOF and success all leave pcbRead coherent without per-exit branches.
+        if pcb_read:
+            ctypes.cast(pcb_read, ctypes.POINTER(wintypes.ULONG))[0] = 0
+
         remaining = max(0, self._size - self.position)
         want = min(int(cb), remaining)
         if want == 0:
             # Конец файла. Запрашивать нечего - отправитель ответил бы пустотой.
-            if pcb_read:
-                ctypes.cast(pcb_read, ctypes.POINTER(wintypes.ULONG))[0] = 0
             return S_OK
 
         try:
+            if self._discard_buffer_on_read:
+                while self._pipe.take(0xFFFFFFFF):
+                    pass
+                self._discard_buffer_on_read = False
             payload = self._pipe.take(want)
             if not payload:
                 # Запрос ПЕРЕД блокировкой. Обратный порядок повис бы навсегда.
@@ -485,11 +495,9 @@ class PipeStream(ComObject):
                     logger.warning("чанк не пришёл за %.0f с", self._timeout)
                     return STG_E_READFAULT
                 payload = self._pipe.take(want)
-        except PipeClosed as error:
+        except PipeClosed:
             # Отмена, разрыв или ошибка. В COM уходит HRESULT, не исключение.
-            logger.info("поток закрыт: %s", error.reason)
-            if pcb_read:
-                ctypes.cast(pcb_read, ctypes.POINTER(wintypes.ULONG))[0] = 0
+            logger.info("поток закрыт")
             return STG_E_READFAULT
 
         if payload:
@@ -513,6 +521,7 @@ class PipeStream(ComObject):
         if target < 0:
             return STG_E_INVALIDFUNCTION
         self.position = target
+        self._discard_buffer_on_read = True
         if new_position:
             ctypes.cast(new_position, ctypes.POINTER(ctypes.c_ulonglong))[0] = target
         return S_OK

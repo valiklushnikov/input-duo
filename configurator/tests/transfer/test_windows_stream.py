@@ -7,6 +7,7 @@ supplied directly so each bridge rule remains deterministic.
 from __future__ import annotations
 
 import ctypes
+import logging
 import sys
 import threading
 import time
@@ -183,6 +184,36 @@ def test_a_closed_pipe_clears_the_returned_byte_count():
     assert read.value == 0
 
 
+def test_a_closed_pipe_does_not_log_an_arbitrary_reason(caplog):
+    stream, pipe, _requested = _stream()
+    private_path = r"C:\Users\Alice\Private\payroll.xlsx"
+    private_reason = f"cancelled at {private_path}"
+    pipe.close(private_reason)
+
+    with caplog.at_level(logging.INFO, logger=windows_com.__name__):
+        _payload, result = call_stream_read(stream.pointer, 4)
+
+    assert result == STG_E_READFAULT
+    assert private_reason not in caplog.text
+    assert private_path not in caplog.text
+    assert "payroll.xlsx" not in caplog.text
+
+
+def test_a_closed_pipe_accepts_a_null_count_pointer_without_escaping_ctypes(monkeypatch):
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    stream, pipe, _requested = _stream()
+    pipe.close("cancelled")
+    buffer = (ctypes.c_char * 4)()
+
+    result = windows_com._slot(stream.pointer, 3, windows_com._STREAM_READ)(
+        stream.pointer, buffer, 4, None
+    )
+
+    assert result == STG_E_READFAULT
+    assert unraisable == []
+
+
 def test_a_pipe_closed_while_a_read_is_blocked_unblocks_it_at_once():
     stream, pipe, _requested = _stream(timeout=30.0)
     results: list[int] = []
@@ -208,6 +239,19 @@ def test_a_read_that_times_out_fails_rather_than_hanging_for_ever():
     _payload, result = call_stream_read(stream.pointer, 4)
 
     assert result == STG_E_READFAULT
+
+
+def test_a_timed_out_read_clears_the_returned_byte_count():
+    stream, _pipe, _requested = _stream(timeout=0.01)
+    read = windows_com.wintypes.ULONG(99)
+    buffer = (ctypes.c_char * 4)()
+
+    result = windows_com._slot(stream.pointer, 3, windows_com._STREAM_READ)(
+        stream.pointer, buffer, 4, ctypes.byref(read)
+    )
+
+    assert result == STG_E_READFAULT
+    assert read.value == 0
 
 
 def test_the_default_timeout_is_passed_to_the_pipe_wait(monkeypatch):
@@ -246,6 +290,27 @@ def test_seeking_changes_where_the_next_read_asks_from():
     call_stream_read(stream.pointer, 8)
 
     assert requested == [(40, 8)]
+
+
+def test_seeking_discards_bytes_buffered_for_the_previous_position():
+    pipe = ChunkPipe(capacity_chunks=2)
+    requested: list[tuple[int, int]] = []
+
+    def request(offset: int, length: int) -> None:
+        requested.append((offset, length))
+        pipe.push(b"ab")
+
+    stream = PipeStream(pipe, size=6, request=request)
+    pipe.push(b"abcd")
+    pipe.push(b"ef")
+    first, first_result = call_stream_read(stream.pointer, 2)
+
+    _position, seek_result = call_stream_seek(stream.pointer, 0, STREAM_SEEK_SET)
+    second, second_result = call_stream_read(stream.pointer, 2)
+
+    assert (first, first_result) == (b"ab", S_OK)
+    assert (seek_result, second, second_result) == (S_OK, b"ab", S_OK)
+    assert requested == [(0, 2)]
 
 
 def test_a_current_seek_is_relative_to_the_current_position():
