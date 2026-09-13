@@ -212,4 +212,64 @@ def _check_segment(segment: str) -> None:
         raise UnsafePath("зарезервированное имя устройства")
 
 
-__all__ = ["MAX_DEPTH", "MAX_PATH_UTF16", "UnsafePath", "sanitize_relative_path"]
+#: Больше этого числа записей - уже не операция копирования, а что-то другое.
+MAX_ENTRIES = 65_536
+
+#: Потолок суммы размеров. 2 ТиБ: больше любого разумного копирования по LAN.
+MAX_TOTAL_BYTES = 2 * 1024 ** 4
+
+
+def sanitize_manifest(manifest):
+    """Манифест с каноническими путями, либо ``UnsafePath`` на весь манифест.
+
+    Отвергается целиком, а не по записям: получивший девять файлов из десяти
+    пользователь об этом не узнает, а об отказе узнает.
+    """
+    from .model import ENTRY_FILE, SkippedEntry, TransferEntry
+
+    if not manifest.entries:
+        raise UnsafePath("манифест пуст - нечего предлагать")
+    if len(manifest.entries) > MAX_ENTRIES:
+        raise UnsafePath(f"записей больше {MAX_ENTRIES}")
+
+    total = 0
+    seen: dict[str, str] = {}
+    entries: list[TransferEntry] = []
+    for entry in manifest.entries:
+        path = sanitize_relative_path(entry.path)
+        # Сравнение по casefold, а не по lower: регистронезависимость Windows
+        # и правила Unicode для сопоставления - не одно и то же.
+        key = path.casefold()
+        if key in seen:
+            raise UnsafePath("две записи манифеста столкнулись бы в одном файле")
+        seen[key] = path
+        if entry.kind == ENTRY_FILE:
+            total += entry.size
+            if total > MAX_TOTAL_BYTES:
+                raise UnsafePath(f"суммарный размер больше {MAX_TOTAL_BYTES}")
+        entries.append(
+            TransferEntry(path=path, kind=entry.kind, size=entry.size, mtime_ns=entry.mtime_ns)
+        )
+
+    skipped = tuple(
+        SkippedEntry(path=sanitize_relative_path(skip.path), reason=skip.reason)
+        for skip in manifest.skipped
+    )
+
+    return type(manifest)(
+        transfer_id=manifest.transfer_id,
+        entries=tuple(entries),
+        skipped=skipped,
+        drop_effect=manifest.drop_effect,
+    )
+
+
+__all__ = [
+    "MAX_DEPTH",
+    "MAX_ENTRIES",
+    "MAX_PATH_UTF16",
+    "MAX_TOTAL_BYTES",
+    "UnsafePath",
+    "sanitize_manifest",
+    "sanitize_relative_path",
+]

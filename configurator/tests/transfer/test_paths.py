@@ -10,7 +10,21 @@ import unicodedata
 
 import pytest
 
-from duo_input.transfer.paths import MAX_PATH_UTF16, UnsafePath, sanitize_relative_path
+from duo_input.transfer.model import (
+    ENTRY_DIRECTORY,
+    ENTRY_FILE,
+    SkippedEntry,
+    TransferEntry,
+    TransferManifest,
+)
+from duo_input.transfer.paths import (
+    MAX_ENTRIES,
+    MAX_PATH_UTF16,
+    MAX_TOTAL_BYTES,
+    UnsafePath,
+    sanitize_manifest,
+    sanitize_relative_path,
+)
 
 
 def test_a_plain_relative_path_passes_through_unchanged():
@@ -349,3 +363,95 @@ def test_zero_width_joiner_and_non_joiner_are_allowed_because_they_change_shapin
     # ("я иду") без ZWNJ читается и пишется иначе.
     persian = "می‌روم.txt"
     assert sanitize_relative_path(persian) == persian
+
+
+def _with(entries) -> TransferManifest:
+    return TransferManifest(transfer_id="t", entries=tuple(entries))
+
+
+def test_a_clean_manifest_comes_back_with_canonical_paths():
+    manifest = _with([
+        TransferEntry(path="Photos", kind=ENTRY_DIRECTORY, size=0, mtime_ns=1),
+        TransferEntry(path="Photos\\img.jpg", kind=ENTRY_FILE, size=4, mtime_ns=2),
+    ])
+
+    result = sanitize_manifest(manifest)
+
+    assert [entry.path for entry in result.entries] == ["Photos", "Photos/img.jpg"]
+
+
+def test_one_bad_entry_refuses_the_whole_manifest_rather_than_dropping_it():
+    manifest = _with([
+        TransferEntry(path="good.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="../evil.exe", kind=ENTRY_FILE, size=1, mtime_ns=1),
+    ])
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+def test_two_entries_differing_only_in_case_are_refused_as_a_collision():
+    # Файловая система Windows регистронезависима: эти две записи попали бы в
+    # один файл, и вторая молча затёрла бы первую.
+    manifest = _with([
+        TransferEntry(path="Photos/IMG.jpg", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="Photos/img.jpg", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+def test_two_entries_colliding_only_after_normalisation_are_refused():
+    manifest = _with([
+        TransferEntry(path="Sa\u0301nchez.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="S\u00e1nchez.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+def test_an_exact_duplicate_path_is_refused():
+    manifest = _with([
+        TransferEntry(path="a.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="a.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+    ])
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+def test_an_empty_manifest_is_refused_because_there_is_nothing_to_offer():
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(_with([]))
+
+
+def test_too_many_entries_are_refused():
+    entries = [
+        TransferEntry(path=f"f{index}", kind=ENTRY_FILE, size=0, mtime_ns=1)
+        for index in range(MAX_ENTRIES + 1)
+    ]
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(_with(entries))
+
+
+def test_a_total_size_above_the_ceiling_is_refused():
+    manifest = _with([
+        TransferEntry(path="huge.bin", kind=ENTRY_FILE, size=MAX_TOTAL_BYTES + 1, mtime_ns=1),
+    ])
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+def test_skipped_entry_paths_are_sanitised_too_because_they_reach_the_screen():
+    manifest = TransferManifest(
+        transfer_id="t",
+        entries=(TransferEntry(path="a.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),),
+        skipped=(SkippedEntry(path="../../etc/passwd", reason="reparse_point"),),
+    )
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
