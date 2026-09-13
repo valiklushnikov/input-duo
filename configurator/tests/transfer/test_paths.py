@@ -498,33 +498,110 @@ def test_sharp_s_and_ss_are_not_treated_as_a_collision():
     assert len(result.entries) == 2
 
 
-# --- ЗНАК КЕЛЬВИНА: отказ здесь ВЕРНЫЙ, а не ограничение ------------------
+# --- Открытый класс ложных срабатываний - оставлены сознательно ----------
 #
-# Другой случай, не тот же, что выше: "K.txt" (ASCII) и "K.txt"
-# (ЗНАК КЕЛЬВИНА, U+212A) на реальной файловой системе - два РАЗНЫХ
-# файла, но sanitize_manifest() всё равно отказывает эту пару - и это
-# ПРАВИЛЬНО, а не известный недостаток: sanitize_relative_path приводит
-# обе записи к NFC до того, как мы сравниваем регистр, а у ЗНАКА
-# КЕЛЬВИНА КАНОНИЧЕСКОЕ разложение в ASCII "K". Обе записи после
-# этого шага - один и тот же путь "K.txt": ЗАПИСАВ ОБА МЫ БЫ ПОЛУЧИЛИ
-# ОДИН ФАЙЛ НА ДИСКЕ, а вторая запись молча затёрла бы первую. Отказ -
-# это точно тот случай, для которого существует проверка коллизий: две
-# записи манифеста были бы записаны как один файл.
+# round 3 ревью (task-1.3-report.md): пять пар ниже - НЕ полный список, а
+# образец открытого класса. NTFS сравнивает регистр по таблице, которая (а)
+# не выходит за пределы BMP и (б) заморожена на старой версии Unicode.
+# casefold() - живой, полный Unicode-фолдинг, обновляемый каждый релиз.
+# Каждая новая пара регистра, добавленная в Unicode для письменности вне
+# старой таблицы NTFS, - это новое расхождение, которое ни casefold(), ни
+# upper(), ни любая другая функция из stdlib не закроет раз и навсегда:
+# сам класс новых букв не закрыт, потому что Unicode их всё ещё добавляет.
+#
+# Каждая пара измерена реальным open() в свежем временном каталоге на этой
+# машине, коллизия подтверждена номером inode, воспроизведено трижды,
+# подтверждено целиком через sanitize_manifest (не только через
+# _collision_key изолированно):
+#
+# - Черокки "Ꭰ" (U+13A0, заглавная) / "ꭰ" (U+AB70, строчная) - строчные
+#   черокки добавлены в Unicode 8.0 (2015)
+# - Дезерет "𐐀" (U+10400) / "𐐨" (U+10428) - дополнительная плоскость,
+#   таблица NTFS её не видит вовсе
+# - Грузинская мтаврули "Ა" (U+1C90) / мхедрули "ა" (U+10D0) - мтаврули
+#   добавлена в Unicode 11.0 (2018)
+# - Долгая s "ſ" (U+017F) / "s" - СОВМЕСТИМЫЙ (не канонический) фолд: NFC
+#   его не трогает (NFC - только канонические разложения), а casefold()
+#   сворачивает
+# - Микро-знак "µ" (U+00B5) / греческая "μ" (U+03BC) - тоже совместимый
+#   фолд, тоже не тронут NFC
+#
+# Мы СОЗНАТЕЛЬНО оставляем эти манифесты отказанными, а не гоняемся за
+# точным повторением таблицы NTFS - таблица не выводится из stdlib (см.
+# docstring _collision_key). Два направления ошибки не симметричны: ложное
+# срабатывание отказывает МАНИФЕСТ ЦЕЛИКОМ с видимой ошибкой, которую
+# пользователь может исправить переименованием одного файла; пропущенная
+# коллизия молча пишет две записи в один файл, и вторая затирает первую без
+# единого сообщения. Отказ - видимая и обратимая ошибка, пропуск -
+# необратимая потеря данных без следа. Пара, различающаяся только одним из
+# этих символов, достаточно редка, чтобы цена отказа была приемлемой.
 
 
-def test_the_collision_key_alone_does_not_fold_kelvin_sign_onto_ascii_k():
-    # Частное наблюдение, не противоречие следующему тесту: сама по себе,
-    # без NFC перед собой, _collision_key() не путает эти два символа (см.
-    # _CASEFOLD_OVERRIDES_TO_IDENTITY в paths.py): обычный casefold() свёл бы
-    # оба в обычную "k". Это свойство _collision_key как функции, не
-    # утверждение о том, что sanitize_manifest() примет эту пару - см.
-    # следующий тест.
-    from duo_input.transfer.paths import _collision_key
+def test_cherokee_capital_and_small_letters_are_refused_as_a_collision():
+    manifest = _with([
+        TransferEntry(path="Ꭰ.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="ꭰ.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
 
-    ascii_k = "K"
-    kelvin_k = "K"
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
 
-    assert _collision_key(ascii_k) != _collision_key(kelvin_k)
+
+def test_deseret_capital_and_small_letters_are_refused_as_a_collision():
+    # Дополнительная плоскость (U+10400/U+10428) - вне BMP, где
+    # останавливается таблица NTFS.
+    manifest = _with([
+        TransferEntry(path="𐐀.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="𐐨.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+def test_georgian_mtavruli_and_mkhedruli_letters_are_refused_as_a_collision():
+    manifest = _with([
+        TransferEntry(path="Ა.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="ა.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+def test_long_s_and_ascii_s_are_refused_as_a_collision():
+    # Совместимое (не каноническое) разложение - NFC его не трогает.
+    manifest = _with([
+        TransferEntry(path="ſ.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="s.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+def test_micro_sign_and_greek_mu_are_refused_as_a_collision():
+    # Тоже совместимое разложение - тоже не тронуто NFC.
+    manifest = _with([
+        TransferEntry(path="µ.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="μ.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+# --- ЗНАК КЕЛЬВИНА, ОМЕГА-ЗНАК, АНГСТРЕМ-ЗНАК: отказ здесь ВЕРНЫЙ --------
+#
+# Не часть открытого класса выше. Каждый из трёх символов ниже имеет
+# КАНОНИЧЕСКОЕ (не совместимое) разложение в одну обычную букву (K, Ω, Å
+# соответственно) - NFC в sanitize_relative_path сворачивает его туда ДО
+# того, как манифест вообще видит два разных символа. Обе записи в каждой
+# паре приходят в sanitize_manifest уже побитово одинаковыми строками, и
+# отказ - это ПРАВИЛЬНОЕ поведение: обе записи были бы записаны Проводником
+# как один и тот же файл, и одна молча затёрла бы другую. Ни одному из трёх
+# не нужен и не помог бы специальный случай в _collision_key - к моменту,
+# когда _collision_key видит строку, различие уже стёрто NFC.
 
 
 def test_kelvin_sign_and_ascii_k_are_correctly_refused_as_the_same_wire_path():
@@ -550,6 +627,39 @@ def test_kelvin_sign_and_ascii_k_are_correctly_refused_as_the_same_wire_path():
     manifest = _with([
         TransferEntry(path="K.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
         TransferEntry(path="K.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+def test_ohm_sign_and_greek_capital_omega_are_correctly_refused_as_the_same_wire_path():
+    # ИЗМЕРЕНО реальным open() на этой машине (round 3 ревью): ОМЕГА-ЗНАК
+    # (U+2126) и греческая заглавная "Ω" (U+03A9) САМИ ПО СЕБЕ - два
+    # РАЗНЫХ файла на диске. Тот же механизм, что у ЗНАКА КЕЛЬВИНА выше:
+    # У ОМЕГА-ЗНАКА КАНОНИЧЕСКОЕ разложение в "Ω"
+    # (unicodedata.decomposition("Ω") == "03A9", без тега <...>), NFC
+    # сворачивает его туда до того, как sanitize_manifest сравнивает
+    # регистр, и отказ здесь - правильный результат по той же причине.
+    manifest = _with([
+        TransferEntry(path="Ω.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="Ω.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+def test_angstrom_sign_and_a_with_ring_above_are_correctly_refused_as_the_same_wire_path():
+    # ИЗМЕРЕНО реальным open() на этой машине (round 3 ревью): АНГСТРЕМ-ЗНАК
+    # (U+212B) и латинская "Å" (U+00C5) САМИ ПО СЕБЕ - два РАЗНЫХ файла на
+    # диске. Тот же механизм: КАНОНИЧЕСКОЕ разложение
+    # (unicodedata.decomposition("Å") == "00C5", без тега <...>), NFC
+    # сворачивает его в "Å" раньше, чем sanitize_manifest сравнивает
+    # регистр, и отказ здесь - правильный результат по той же причине.
+    manifest = _with([
+        TransferEntry(path="Å.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="Å.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
     ])
 
     with pytest.raises(UnsafePath):
