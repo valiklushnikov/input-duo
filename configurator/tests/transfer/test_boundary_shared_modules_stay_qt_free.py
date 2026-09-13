@@ -31,6 +31,7 @@ SHARED_MODULES = [
     "duo_input.transfer.model",
     "duo_input.transfer.paths",
     "duo_input.transfer.pipe",
+    "duo_input.transfer.scanner",
 ]
 
 
