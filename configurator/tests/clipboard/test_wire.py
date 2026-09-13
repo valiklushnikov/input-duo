@@ -6,6 +6,7 @@ import pytest
 
 from duo_input.clipboard.wire import (
     FrameAssembler,
+    MAX_FRAME_BYTES,
     Message,
     MessageType,
     WireError,
@@ -115,3 +116,53 @@ def test_non_object_header_is_refused():
 
     with pytest.raises(WireError, match="не является объектом"):
         FrameAssembler().feed(raw)
+
+
+from duo_input.clipboard.wire import MAX_FILE_CHUNK_BYTES
+
+
+def test_the_six_file_message_types_have_the_numbers_the_protocol_promises():
+    assert (
+        MessageType.FILE_OFFER,
+        MessageType.TRANSFER_BEGIN,
+        MessageType.FILE_READ,
+        MessageType.FILE_CHUNK,
+        MessageType.FILE_ERROR,
+        MessageType.TRANSFER_END,
+    ) == (10, 11, 12, 13, 14, 15)
+
+
+def test_no_message_type_number_is_used_twice():
+    numbers = [int(member) for member in MessageType]
+
+    assert len(numbers) == len(set(numbers))
+
+
+def test_a_file_chunk_survives_the_round_trip_with_its_bytes_intact():
+    payload = bytes(range(256)) * 16
+    message = Message(
+        MessageType.FILE_CHUNK,
+        {"transfer_id": "t", "entry_index": 2, "offset": 4096},
+        payload,
+    )
+
+    assembler = FrameAssembler()
+    [decoded] = assembler.feed(encode(message))
+
+    assert decoded == message
+
+
+def test_the_chunk_ceiling_is_far_below_the_frame_ceiling():
+    # Потолок кадра ловит испорченное поле длины; потолок чанка ограничивает
+    # память. Если бы это было одно число, один FILE_CHUNK нёс бы 32 МиБ.
+    assert MAX_FILE_CHUNK_BYTES == 1_048_576
+    assert MAX_FILE_CHUNK_BYTES * 8 < MAX_FRAME_BYTES
+
+
+def test_a_chunk_at_the_ceiling_still_fits_in_one_frame():
+    message = Message(MessageType.FILE_CHUNK, {"offset": 0}, b"x" * MAX_FILE_CHUNK_BYTES)
+
+    assembler = FrameAssembler()
+    [decoded] = assembler.feed(encode(message))
+
+    assert len(decoded.blob) == MAX_FILE_CHUNK_BYTES

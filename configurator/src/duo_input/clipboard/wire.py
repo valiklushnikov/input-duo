@@ -22,6 +22,14 @@ PROTOCOL_MINOR = 0
 #: Потолок содержимого плюс место под заголовок.
 MAX_FRAME_BYTES = MAX_CONTENT_BYTES + 65_536
 
+#: Потолок одного FILE_CHUNK: 1 МиБ.
+#:
+#: Отдельная величина от MAX_FRAME_BYTES намеренно. Потолок кадра существует,
+#: чтобы испорченное поле длины не заставило нас выделить гигабайт; потолок
+#: чанка существует, чтобы ограничить память под передачу. Одно число вместо
+#: двух означало бы, что один FILE_CHUNK вправе нести 32 МиБ.
+MAX_FILE_CHUNK_BYTES = 1_048_576
+
 _LENGTH_BYTES = 4
 _TYPE_BYTES = 1
 _HEADER_LENGTH_BYTES = 2
@@ -41,6 +49,18 @@ class MessageType(IntEnum):
     PONG = 7
     PAIR_REQUEST = 8
     PAIR_CONFIRM = 9
+    # Передача файлов. Отдельная логическая подсистема поверх того же кадра -
+    # framing к типу сообщения безразличен, о чём сказано в docstring модуля.
+    #
+    # Старый пир, получив любой из этих типов, бросит WireError и оборвёт
+    # соединение целиком, вместе с буфером обмена. Поэтому они не отправляются
+    # никому, кто не объявил files/1 в HELLO - см. coordinator.CAPABILITIES.
+    FILE_OFFER = 10
+    TRANSFER_BEGIN = 11
+    FILE_READ = 12
+    FILE_CHUNK = 13
+    FILE_ERROR = 14
+    TRANSFER_END = 15
 
 
 @dataclass(frozen=True)
@@ -105,6 +125,7 @@ def _decode_payload(payload: bytes) -> Message:
 
 
 __all__ = [
+    "MAX_FILE_CHUNK_BYTES",
     "MAX_FRAME_BYTES",
     "PROTOCOL_MAJOR",
     "PROTOCOL_MINOR",
