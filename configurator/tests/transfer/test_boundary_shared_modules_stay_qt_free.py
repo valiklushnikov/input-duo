@@ -45,6 +45,37 @@ SHARED_MODULES = [
 ]
 
 
+def _imported_names_from_source(
+    source: str, package: str, filename: str = "<source>"
+) -> set[str]:
+    """Имена импортируемых модулей, приведённые к абсолютному виду.
+
+    ``package`` - пакет, в котором лежит разбираемый модуль; относительно
+    него разрешается node.level. Без этого правило ниже не видело ни
+    ``from . import windows_files`` (node.module = None, узел выбрасывался
+    целиком), ни ``from .windows_com import S_OK`` (записывалось голое имя,
+    без пакета - а проверка ищет префикс "duo_input.transfer.windows_").
+    """
+    tree = ast.parse(source, filename=filename)
+    parts = package.split(".") if package else []
+
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = parts[: len(parts) - (node.level - 1)] if node.level else []
+            target = [*base, node.module] if node.module else base
+            if target:
+                names.add(".".join(target))
+            # `from pkg import mod` и `from mod import symbol` в AST
+            # неразличимы, поэтому имя записывается и в уточнённом виде:
+            # лишняя строка вида "...model.TransferEntry" никакому правилу
+            # не мешает, а пропущенный "...transfer.windows_files" - мешает.
+            names.update(".".join([*target, alias.name]) for alias in node.names)
+    return names
+
+
 def _imported_module_names(module_name: str) -> set[str]:
     """Имена модулей из import/from-import верхнего уровня, без исполнения."""
     spec = importlib.util.find_spec(module_name)
@@ -52,15 +83,9 @@ def _imported_module_names(module_name: str) -> set[str]:
         f"не удалось найти исходник модуля {module_name}"
     )
     source = Path(spec.origin).read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=spec.origin)
-
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            names.add(node.module)
-    return names
+    # spec.parent - пакет модуля (для самого пакета это он сам), то есть
+    # ровно то, относительно чего Python считает точки в импорте.
+    return _imported_names_from_source(source, spec.parent or "", spec.origin)
 
 
 def _crosses_the_boundary(imported_module: str) -> bool:
@@ -81,3 +106,39 @@ def test_shared_module_imports_neither_qt_nor_the_windows_transport(module_name)
         "этот модуль обязан оставаться пригодным для импорта из COM-потока "
         "без Qt-рантайма"
     )
+
+
+# Разбор относительных импортов: та же дыра, что была в
+# clipboard/test_boundaries.py, и в том же правиле она значила то же самое.
+# `from . import windows_files` не попадал в набор вовсе (node.module = None),
+# а `from .windows_com import S_OK` записывался голым "windows_com" - и
+# _crosses_the_boundary, которая ищет префикс "duo_input.transfer.windows_",
+# не срабатывала ни на одном, ни на другом.
+_RELATIVE_FORMS = (
+    "from . import windows_files\n"
+    "from .windows_com import S_OK\n"
+    "from ..clipboard import wire\n"
+)
+
+
+def test_the_parser_resolves_relative_imports_to_absolute_names():
+    names = _imported_names_from_source(_RELATIVE_FORMS, "duo_input.transfer")
+
+    assert names == {
+        "duo_input.transfer",
+        "duo_input.transfer.windows_files",
+        "duo_input.transfer.windows_com",
+        "duo_input.transfer.windows_com.S_OK",
+        "duo_input.clipboard",
+        "duo_input.clipboard.wire",
+    }
+
+
+def test_a_relative_import_of_the_windows_transport_crosses_the_boundary():
+    names = _imported_names_from_source(
+        "from . import windows_files\n", "duo_input.transfer"
+    )
+
+    assert sorted(name for name in names if _crosses_the_boundary(name)) == [
+        "duo_input.transfer.windows_files"
+    ], "самая короткая дорога из общего модуля в Qt-обвязку осталась незамеченной"
