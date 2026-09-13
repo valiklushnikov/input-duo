@@ -242,6 +242,73 @@ _STREAM_STAT = ctypes.WINFUNCTYPE(
 _STREAM_CLONE = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
 
 
+# --------------------------------------------------------------------------
+# Прототипы IDataObject, IEnumFORMATETC и IDataObjectAsyncCapability
+# --------------------------------------------------------------------------
+#
+# Прототип здесь - это ABI, а не подсказка типов, и ошибка в нём не даёт
+# красного теста: она приходит как 0xC0000005 из чужого потока и уносит с
+# собой интерпретатор. Ширина и порядок аргументов взяты из objidl.h и
+# shlobj_core.h; каждый указатель объявлен c_void_p, потому что структуру по
+# ту сторону мы разбираем сами и типизированный указатель здесь только
+# добавил бы ctypes поводов для преобразований.
+
+_GET_DATA = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+)
+_GET_DATA_HERE = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+)
+_QUERY_GET_DATA = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
+_GET_CANONICAL = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+)
+#: SetData(FORMATETC*, STGMEDIUM*, BOOL fRelease): последний аргумент -
+#: четырёхбайтовый BOOL, а не указатель.
+_SET_DATA = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, wintypes.BOOL
+)
+_ENUM_FORMAT_ETC = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p
+)
+_D_ADVISE = ctypes.WINFUNCTYPE(
+    ctypes.c_long,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+)
+_D_UNADVISE = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, wintypes.DWORD)
+_ENUM_D_ADVISE = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
+
+_ENUM_NEXT = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p, ctypes.c_void_p
+)
+_ENUM_SKIP = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, wintypes.ULONG)
+_ENUM_RESET = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
+_ENUM_CLONE = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
+
+#: IDataObjectAsyncCapability. BOOL здесь - обычный Win32 BOOL (1/0), а не
+#: VARIANT_BOOL: оболочка читает четыре байта и сравнивает их с нулём.
+#: Объявленный типизированным POINTER(BOOL) out-параметр приходит в
+#: обработчик как указатель, у которого NULL ложен, - на этом и держится
+#: проверка E_POINTER.
+_SET_ASYNC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, wintypes.BOOL)
+_GET_ASYNC = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL)
+)
+_START_OP = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
+_IN_OP = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL)
+)
+#: EndOperation(HRESULT hResult, IBindCtx*, DWORD dwEffects): hResult знаковый,
+#: и отмена приходит как 0x800704C7, то есть отрицательным c_long.
+_END_OP = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_long, ctypes.c_void_p, wintypes.DWORD
+)
+
+
 def make_vtable(*callbacks) -> ctypes.Array:
     """Массив указателей на функции - ровно то, чем COM считает интерфейс.
 
@@ -300,6 +367,75 @@ def call_stream_stat(pointer) -> tuple[int, int]:
     stat = STATSTG()
     result = _slot(pointer, 12, _STREAM_STAT)(pointer, ctypes.byref(stat), 0)
     return stat.cbSize, result
+
+
+def call_query_get_data(pointer, cf_format: int, lindex: int, tymed: int) -> int:
+    """Call IDataObject::QueryGetData through vtable slot 5.
+
+    FORMATETC собирается здесь, а не у вызывающего: dwAspect - единственное
+    поле, которое никого не интересует ровно до того дня, когда оно окажется
+    нулём, и тогда объект откажет в формате, который он объявляет.
+    """
+    fmt = FORMATETC(cf_format, None, DVASPECT_CONTENT, lindex, tymed)
+    return _slot(pointer, 5, _QUERY_GET_DATA)(pointer, ctypes.byref(fmt))
+
+
+def call_get_data(
+    pointer, cf_format: int, lindex: int, tymed: int, want_medium: bool = False
+):
+    """Call IDataObject::GetData through vtable slot 3.
+
+    Возвращает ``(hresult, payload)``, а при ``want_medium`` -
+    ``(hresult, medium.tymed, payload)``.
+
+    Содержимое читается только у TYMED_HGLOBAL. У TYMED_ISTREAM в
+    ``medium.data`` лежит указатель на интерфейс, и чтение его как памяти
+    отдало бы vtable вместо содержимого файла.
+    """
+    fmt = FORMATETC(cf_format, None, DVASPECT_CONTENT, lindex, tymed)
+    medium = STGMEDIUM()
+    result = _slot(pointer, 3, _GET_DATA)(
+        pointer, ctypes.byref(fmt), ctypes.byref(medium)
+    )
+    payload = b""
+    if medium.tymed == TYMED_HGLOBAL and medium.data:
+        payload = from_hglobal(medium.data)
+    if want_medium:
+        return result, medium.tymed, payload
+    return result, payload
+
+
+#: Сколько FORMATETC просить за один Next. Берётся с запасом: наш
+#: перечислитель короткий, и один вызов обязан вернуть всё сразу вместе с
+#: S_FALSE, иначе цикл ниже не отличить от зацикливания.
+_ENUM_BATCH = 16
+
+
+def call_enum_format_etc(pointer, direction: int) -> tuple[int, list[int]]:
+    """Call IDataObject::EnumFormatEtc through slot 8 and drain the enumerator.
+
+    Возвращает ``(hresult, [cfFormat, ...])``. При отказе список пуст: у
+    перечислителя, которого не выдали, нечего перечислять.
+    """
+    enumerator = ctypes.c_void_p()
+    result = _slot(pointer, 8, _ENUM_FORMAT_ETC)(
+        pointer, direction, ctypes.byref(enumerator)
+    )
+    if result != S_OK or not enumerator:
+        return result, []
+
+    formats: list[int] = []
+    buffer = (FORMATETC * _ENUM_BATCH)()
+    fetched = wintypes.ULONG(0)
+    while True:
+        step = _slot(enumerator, 3, _ENUM_NEXT)(
+            enumerator, _ENUM_BATCH, buffer, ctypes.byref(fetched)
+        )
+        formats.extend(buffer[index].cfFormat for index in range(fetched.value))
+        # S_FALSE означает "больше нет". Выход и по нулю взятых - это защита
+        # от чужого перечислителя, который S_FALSE не возвращает никогда.
+        if step != S_OK or not fetched.value:
+            return result, formats
 
 
 class ComObject:
@@ -582,6 +718,9 @@ _GLOBAL_LOCK.restype = ctypes.c_void_p
 _GLOBAL_UNLOCK = _KERNEL32.GlobalUnlock
 _GLOBAL_UNLOCK.argtypes = [wintypes.HGLOBAL]
 _GLOBAL_UNLOCK.restype = wintypes.BOOL
+_GLOBAL_SIZE = _KERNEL32.GlobalSize
+_GLOBAL_SIZE.argtypes = [wintypes.HGLOBAL]
+_GLOBAL_SIZE.restype = ctypes.c_size_t
 _GLOBAL_FREE = _KERNEL32.GlobalFree
 _GLOBAL_FREE.argtypes = [wintypes.HGLOBAL]
 _GLOBAL_FREE.restype = wintypes.HGLOBAL
@@ -627,6 +766,28 @@ def to_hglobal(payload: bytes) -> int:
     finally:
         _GLOBAL_UNLOCK(handle)
     return int(handle)
+
+
+def from_hglobal(handle) -> bytes:
+    """Скопировать содержимое GMEM_MOVEABLE-блока обратно в bytes.
+
+    Длина берётся у GlobalSize и бывает БОЛЬШЕ запрошенной при выделении:
+    куча округляет размер блока вверх. Поэтому читающий сравнивает префикс
+    или разбирает содержимое по его собственной длине, а не полагается на
+    длину блока как на длину полезной нагрузки.
+
+    Владение не переходит: блок принадлежит тому, кто его выдал.
+    """
+    size = int(_GLOBAL_SIZE(handle))
+    if not size:
+        return b""
+    address = _GLOBAL_LOCK(handle)
+    if not address:
+        raise MemoryError("GlobalLock не заблокировал блок")
+    try:
+        return ctypes.string_at(address, size)
+    finally:
+        _GLOBAL_UNLOCK(handle)
 
 
 # --------------------------------------------------------------------------
