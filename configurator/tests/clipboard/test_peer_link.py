@@ -391,3 +391,70 @@ def test_the_bytes_written_signal_actually_drives_the_congestion_check(
     socket.bytesWritten.emit(0)
 
     assert seen == [True]
+
+
+def test_closing_a_congested_link_emits_the_falling_edge(qapp, tmp_path, monkeypatch):
+    """close() обязано означать "больше не в заторе", а не оставить устаревший True.
+
+    write_congested уже отвечает False сразу после close() - self._socket
+    становится None, а bytes_to_write читает это первым делом. Но
+    _congested хранится отдельно и без явного пересчёта остался бы
+    устаревшим True: следующий _wire_up на новом сокете не заметил бы
+    перехода в False, и подписчик, ждущий его, чтобы возобновить отправку,
+    завис бы навсегда на пустом линке.
+    """
+    identity = load_or_create(tmp_path)
+    link = PeerLink(identity)
+    socket = QSslSocket(link)
+    link._wire_up(socket)
+    monkeypatch.setattr(
+        type(socket), "bytesToWrite", lambda _self: WRITE_HIGH_WATER_BYTES + 1
+    )
+    link._check_congestion()
+    assert link._congested is True  # обстановка, не сама проверка
+
+    seen: list[bool] = []
+    link.congestion_changed.connect(seen.append)
+
+    link.close()
+
+    assert seen == [False], (
+        "close() оставил _congested устаревшим True - переход в False так и "
+        "не был замечен"
+    )
+    assert link._congested is False
+
+
+def test_rewiring_a_congested_link_with_a_fresh_socket_emits_the_falling_edge(
+    qapp, tmp_path, monkeypatch
+):
+    """_wire_up тоже обязан сбрасывать устаревший затор, а не только close().
+
+    Повторное использование одной и той же PeerLink с новым сокетом - без
+    промежуточного close() - воспроизводит тот же дефект: свежий сокет
+    ничего ещё не поставил в очередь, но _congested, унаследованный от
+    прежнего сокета, остался бы True, и падающий фронт был бы потерян.
+    """
+    identity = load_or_create(tmp_path)
+    link = PeerLink(identity)
+    old_socket = QSslSocket(link)
+    link._wire_up(old_socket)
+
+    def bytes_to_write_stub(self):
+        return WRITE_HIGH_WATER_BYTES + 1 if self is old_socket else 0
+
+    monkeypatch.setattr(type(old_socket), "bytesToWrite", bytes_to_write_stub)
+    link._check_congestion()
+    assert link._congested is True  # обстановка, не сама проверка
+
+    seen: list[bool] = []
+    link.congestion_changed.connect(seen.append)
+
+    fresh_socket = QSslSocket(link)
+    link._wire_up(fresh_socket)
+
+    assert seen == [False], (
+        "_wire_up унаследовал устаревший True с прежнего сокета - падающий "
+        "фронт так и не был замечен"
+    )
+    assert link._congested is False

@@ -122,6 +122,14 @@ class PeerLink(QObject):
         if self._socket is not None:
             self._socket.abort()
             self._socket = None
+        # Закрытие обязано означать "не в заторе". Без этой проверки
+        # _congested остался бы устаревшим True (write_congested уже вернул
+        # бы False, потому что self._socket теперь None, но никто об этом не
+        # услышал бы): при повторном _wire_up на новом сокете переход в False
+        # так и не был бы замечен, и подписчик, ждущий его, чтобы возобновить
+        # отправку, завис бы навсегда на пустом линке. Вызов - после сброса
+        # self._socket, иначе write_congested прочитал бы ещё старый сокет.
+        self._check_congestion()
 
     @property
     def bytes_to_write(self) -> int:
@@ -144,12 +152,25 @@ class PeerLink(QObject):
         socket.encrypted.connect(self._on_encrypted)
         socket.readyRead.connect(self._on_ready_read)
         socket.disconnected.connect(lambda: self._fail("соединение закрыто"))
+        # Тот же сброс на входе: если эта PeerLink уже была в заторе на
+        # предыдущем сокете (например, повторно связана без явного close()),
+        # свежий сокет ещё ничего не поставил в очередь, и _congested не
+        # должен нести старое True дальше.
+        self._check_congestion()
 
     def _check_congestion(self) -> None:
         """Сообщать о ПЕРЕХОДАХ, а не о состоянии на каждый записанный байт.
 
         bytesWritten приходит часто; сигнал на каждый его приход превратил бы
         подписчика в получателя потока одинаковых уведомлений.
+
+        Подключён только к bytesWritten - то есть к опустошению очереди, а не
+        к send()/write() - то есть к её росту. Поэтому первый восходящий
+        фронт замечается лишь после того, как Qt что-то слил, а не в момент,
+        когда очередь пересекла отметку: сигнал не синхронен с ростом очереди
+        на стороне записи. Это осознанный выбор брифа, безвредный, пока
+        сигнал никто не потребляет; менять эту синхронность - решение
+        будущего автора throttling-потребителя, а не этой правки.
         """
         congested = self.write_congested
         if congested == self._congested:
