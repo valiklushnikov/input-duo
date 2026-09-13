@@ -57,6 +57,8 @@ class FileTransferService(QObject):
         return CAPABILITY_FILES in self._peer_capabilities
 
     def attach_link(self, link) -> None:
+        self._peer_capabilities = frozenset()
+        self._snapshots.release_all()
         self._link = link
         link.disconnected.connect(
             lambda reason, attached_link=link: self._on_link_lost(attached_link, reason)

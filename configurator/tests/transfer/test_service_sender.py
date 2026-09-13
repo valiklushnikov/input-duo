@@ -260,6 +260,24 @@ def test_a_stale_disconnected_signal_does_not_tear_down_a_reconnected_link(sende
     assert len(_sent(new_link, MessageType.FILE_OFFER)) == 2
 
 
+def test_direct_reattach_starts_a_clean_unauthorized_session(sender, tmp_path):
+    service, _old_link = sender
+    old_source = tmp_path / "old.bin"
+    old_source.write_bytes(b"old")
+    transfer_id = service.offer_local_files([old_source])
+    service.handle_message(_read(transfer_id, length=2))
+    legacy_link = _FakeLink()
+
+    service.attach_link(legacy_link)
+
+    assert service.snapshots.transfer_ids == ()
+    os.remove(old_source)
+    new_source = tmp_path / "new.bin"
+    new_source.write_bytes(b"new")
+    assert service.offer_local_files([new_source]) is None
+    assert legacy_link.sent == []
+
+
 def test_an_unsafe_source_name_is_not_offered_and_is_reported(sender, tmp_path):
     service, link = sender
     source = tmp_path / "nul.txt"
