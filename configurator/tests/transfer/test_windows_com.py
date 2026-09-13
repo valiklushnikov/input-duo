@@ -48,6 +48,7 @@ from duo_input.transfer.windows_com import (
     call_query_interface,
     call_release,
     filetime_from_ns,
+    from_hglobal,
     guid_from_string,
     make_vtable,
     register_clipboard_format,
@@ -448,6 +449,41 @@ def test_a_payload_whose_length_is_not_a_multiple_of_the_word_size_round_trips()
             assert ctypes.string_at(address, 7) == payload
         finally:
             ctypes.windll.kernel32.GlobalUnlock(handle)
+    finally:
+        _GLOBAL_FREE(handle)
+
+
+def test_a_payload_read_back_out_of_global_memory_is_the_one_we_put_there():
+    handle = to_hglobal(b"origin:1")
+
+    try:
+        assert from_hglobal(handle).startswith(b"origin:1")
+    finally:
+        _GLOBAL_FREE(handle)
+
+
+def test_an_empty_block_reads_back_as_no_bytes_rather_than_as_a_failure():
+    # GlobalLock на блоке нулевой длины возвращает NULL (измерено), и без
+    # отдельного условия на размер чтение пустого блока падало бы
+    # MemoryError - то есть законный пустой формат выглядел бы как ошибка
+    # памяти.
+    handle = to_hglobal(b"")
+
+    try:
+        assert from_hglobal(handle) == b""
+    finally:
+        _GLOBAL_FREE(handle)
+
+
+def test_a_failed_lock_on_a_read_is_reported_instead_of_returning_nothing(monkeypatch):
+    # Блок выделяется ДО подмены: to_hglobal берёт тот же самый _GLOBAL_LOCK,
+    # и подмена раньше времени уронила бы подготовку, а не проверяемый код.
+    handle = to_hglobal(b"payload")
+    monkeypatch.setattr(windows_com, "_GLOBAL_LOCK", lambda handle: 0)
+
+    try:
+        with pytest.raises(MemoryError, match="GlobalLock"):
+            from_hglobal(handle)
     finally:
         _GLOBAL_FREE(handle)
 

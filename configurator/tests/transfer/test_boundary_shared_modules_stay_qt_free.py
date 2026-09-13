@@ -37,6 +37,9 @@ SHARED_MODULES = [
     # COM-потоке. Канонический boundary-тест для COM-модулей - задача 2.6;
     # здесь модуль стоит с первого дня, чтобы запрет работал уже сейчас.
     "duo_input.transfer.windows_com",
+    # windows_files - тот же случай: он исполняется в COM-потоке и собирает
+    # и дескрипторы, и IDataObject там же, где Проводник зовёт нас обратно.
+    "duo_input.transfer.windows_files",
 ]
 
 
