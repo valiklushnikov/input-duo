@@ -8,9 +8,14 @@
 пользователь, получивший девять файлов из десяти, об этом не узнает, а честный
 отказ он увидит.
 
-Нормализация Unicode идёт ПЕРЕД остальными проверками, и это не косметика:
-полноширинная точка U+FF0E нормализуется в обычную, и только после этого имя
-оказывается заканчивающимся точкой. Проверка до нормализации пропустила бы его.
+Нормализация Unicode идёт ПЕРЕД остальными проверками, и это не косметика.
+NFC - каноническая форма: она не разворачивает совместимые варианты вроде
+полноширинной точки (для этого нужен NFKC, а не NFC - мы сознательно
+остаёмся на NFC, см. sanitize_relative_path), но она может и УДЛИНИТЬ
+строку в единицах UTF-16. Например, U+0344 (COMBINING GREEK DIALYTIKA
+TONOS) исключён из повторной композиции: после NFC он становится двумя
+отдельными знаками вместо одного. Если бы потолок длины мерили до
+нормализации, такое имя проскочило бы мимо него.
 
 Правила здесь - надмножество и для macOS тоже. Ослаблять их под другую
 платформу незачем: запрет лишнего имени никого не ломает, а разные правила на
@@ -57,13 +62,16 @@ def sanitize_relative_path(raw: str) -> str:
         raise UnsafePath("пустой путь")
 
     # 1. Нормализация Unicode - первым делом, до всех остальных проверок.
+    # Именно NFC, не NFKC: коллизии в манифесте (Task 1.3) определены как
+    # "совпали после NFC", и NFKC складывал бы разные удалённые имена в один
+    # локальный файл сильнее, чем нужно для безопасности.
     text = unicodedata.normalize("NFC", raw)
 
     # 2. Единый разделитель. Проверки ниже смотрят уже на сегменты.
     text = text.replace("\\", "/")
 
     if text.startswith("/"):
-        raise UnsafePath(f"путь абсолютный: {raw!r}")
+        raise UnsafePath("путь абсолютный")
     if _utf16_units(text) > MAX_PATH_UTF16:
         raise UnsafePath(f"путь длиннее {MAX_PATH_UTF16} единиц UTF-16")
 
@@ -72,32 +80,32 @@ def sanitize_relative_path(raw: str) -> str:
         raise UnsafePath(f"вложенность больше {MAX_DEPTH}")
 
     for segment in segments:
-        _check_segment(segment, raw)
+        _check_segment(segment)
 
     return "/".join(segments)
 
 
-def _check_segment(segment: str, raw: str) -> None:
+def _check_segment(segment: str) -> None:
     if not segment:
-        raise UnsafePath(f"пустой сегмент пути: {raw!r}")
+        raise UnsafePath("пустой сегмент пути")
     if segment in {".", ".."}:
-        raise UnsafePath(f"сегмент выхода за корень: {raw!r}")
+        raise UnsafePath("сегмент выхода за корень")
     if ":" in segment:
         # Ловит и "C:\..." и "C:file" и поток NTFS "file:stream" - все три
         # являются способом уйти не туда, куда получатель разрешил.
-        raise UnsafePath(f"двоеточие в имени: {raw!r}")
+        raise UnsafePath("двоеточие в имени")
     if segment[-1] in {".", " "}:
         # Windows отбрасывает завершающую точку и пробел, поэтому "a." и "a"
         # столкнулись бы в одном файле, а "a .exe" перестало бы быть тем,
         # что видел пользователь.
-        raise UnsafePath(f"сегмент заканчивается точкой или пробелом: {raw!r}")
+        raise UnsafePath("сегмент заканчивается точкой или пробелом")
     if any(character in _FORBIDDEN_CHARACTERS for character in segment):
-        raise UnsafePath(f"запрещённый символ в имени: {raw!r}")
+        raise UnsafePath("запрещённый символ в имени")
     if any(ord(character) < 0x20 for character in segment):
-        raise UnsafePath(f"управляющий символ в имени: {raw!r}")
+        raise UnsafePath("управляющий символ в имени")
     stem = segment.split(".", 1)[0].upper()
     if stem in _RESERVED_STEMS:
-        raise UnsafePath(f"зарезервированное имя устройства: {raw!r}")
+        raise UnsafePath("зарезервированное имя устройства")
 
 
 __all__ = ["MAX_DEPTH", "MAX_PATH_UTF16", "UnsafePath", "sanitize_relative_path"]

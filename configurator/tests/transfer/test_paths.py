@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import unicodedata
+
 import pytest
 
 from duo_input.transfer.paths import MAX_PATH_UTF16, UnsafePath, sanitize_relative_path
@@ -138,11 +140,30 @@ def test_unicode_is_normalised_to_nfc_so_two_spellings_become_one_name():
 
 
 def test_normalisation_happens_before_the_other_checks_not_after():
-    # Полноширинная точка нормализуется в обычную, и только ПОСЛЕ этого
-    # сегмент оказывается заканчивающимся точкой. Проверка до нормализации
-    # пропустила бы это имя.
+    # NFC — каноническая форма, а не совместимая: полноширинная точка
+    # U+FF0E НЕ становится обычной точкой под NFC (это работа NFKC, на
+    # который эта функция сознательно не переходит — см. paths.py). Так что
+    # нужен другой пример порядка "нормализация раньше остальных проверок".
+    #
+    # U+0344 (COMBINING GREEK DIALYTIKA TONOS) исключён из повторной
+    # композиции: его каноническое разложение — <0308, 0301> (две отдельные
+    # комбинирующие метки), и Unicode запрещает складывать их обратно в
+    # 0344. Поэтому NFC не укорачивает этот символ, как обычно бывает при
+    # композиции, а УДЛИНЯЕТ его: один символ (1 единица UTF-16)
+    # становится двумя (2 единицы).
+    trigger = "̈́"
+    assert unicodedata.normalize("NFC", trigger) == "̈́"
+
+    # Имя ровно на потолке ДО нормализации — тест на потолок выше уже
+    # показал, что такая длина сама по себе разрешена. Но после NFC оно
+    # длиннее потолка на одну единицу. Значит только порядок "сначала
+    # нормализация" ловит превышение; проверка длины на сыром raw пропустила
+    # бы это имя.
+    raw = "_" * (MAX_PATH_UTF16 - 1) + trigger
+    assert len(raw.encode("utf-16-le")) // 2 == MAX_PATH_UTF16
+
     with pytest.raises(UnsafePath):
-        sanitize_relative_path("name\uff0e")
+        sanitize_relative_path(raw)
 
 
 def test_a_cyrillic_name_is_allowed_because_only_windows_rules_apply():
