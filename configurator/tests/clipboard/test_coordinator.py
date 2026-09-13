@@ -19,6 +19,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
+
 import duo_input.clipboard.coordinator as coordinator_module
 from PySide6.QtCore import QObject, Signal
 
@@ -33,7 +35,15 @@ from duo_input.clipboard.identity import load_or_create
 from duo_input.clipboard.pairing import PairingCandidate
 from duo_input.clipboard.peer import PeerLink
 from duo_input.clipboard.trust import TrustedPeer, TrustStore
-from duo_input.clipboard.wire import PROTOCOL_MAJOR, Message, MessageType
+from duo_input.clipboard.wire import (
+    CAPABILITIES,
+    CAPABILITY_CLIPBOARD,
+    CAPABILITY_FILES,
+    PROTOCOL_MAJOR,
+    PROTOCOL_MINOR,
+    Message,
+    MessageType,
+)
 
 #: Гарантированно больше и гарантированно меньше любого настоящего origin_id
 #: (тот - случайный 32-значный шестнадцатеричный uuid4).
@@ -60,6 +70,10 @@ class _FakeLink(QObject):
 
     def close(self) -> None:
         self.closed = True
+
+    def deliver(self, message: Message) -> None:
+        """Доставить кадр так, как это сделал бы настоящий сокет."""
+        self.message_received.emit(message)
 
 
 class _LateSignal:
@@ -1006,3 +1020,253 @@ def test_setting_a_manual_address_while_connected_closes_the_previous_link(tmp_p
     coordinator.service.offer_ready.emit(_Offer(origin_id="x", seq=1, descriptors=()))
     assert len(second_link.sent) == 1
     coordinator.stop()
+
+
+# ---------------------------------------------------------------------- согласование возможностей (HELLO)
+
+
+@pytest.fixture
+def coordinator_with_link(tmp_path, qapp):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id="b" * 32)
+    link = _FakeLink()
+    coordinator._on_connected(link)
+    yield coordinator, link
+    coordinator.stop()
+
+
+def test_the_minor_version_moved_and_the_major_version_did_not():
+    # Подъём major разорвал бы связь со всеми существующими сборками. Новые
+    # типы сообщений в этом не нуждаются: их закрывает capability.
+    assert (PROTOCOL_MAJOR, PROTOCOL_MINOR) == (1, 1)
+
+
+def test_hello_announces_both_capabilities(coordinator_with_link):
+    coordinator, link = coordinator_with_link
+
+    hello = next(m for m in link.sent if m.type is MessageType.HELLO)
+
+    assert hello.header["capabilities"] == list(CAPABILITIES)
+
+
+def test_a_peer_that_announces_files_is_recorded_as_supporting_them(coordinator_with_link):
+    coordinator, link = coordinator_with_link
+
+    link.deliver(
+        Message(
+            MessageType.HELLO,
+            {
+                "protocol_major": PROTOCOL_MAJOR,
+                "protocol_minor": PROTOCOL_MINOR,
+                "origin_id": "b" * 32,
+                "machine_name": "PC2",
+                "capabilities": [CAPABILITY_CLIPBOARD, CAPABILITY_FILES],
+            },
+            b"",
+        )
+    )
+
+    assert coordinator.peer_supports(CAPABILITY_FILES)
+
+
+def test_a_peer_with_no_capabilities_key_is_treated_as_clipboard_only(coordinator_with_link):
+    # Это и есть совместимость со старым клиентом: он не объявляет ничего,
+    # мы не посылаем ему FILE_*, и его буфер обмена продолжает работать.
+    coordinator, link = coordinator_with_link
+
+    link.deliver(
+        Message(
+            MessageType.HELLO,
+            {
+                "protocol_major": PROTOCOL_MAJOR,
+                "protocol_minor": 0,
+                "origin_id": "b" * 32,
+                "machine_name": "OldPC",
+            },
+            b"",
+        )
+    )
+
+    assert coordinator.peer_supports(CAPABILITY_CLIPBOARD)
+    assert not coordinator.peer_supports(CAPABILITY_FILES)
+
+
+def test_a_capabilities_value_that_is_not_a_list_is_ignored_rather_than_trusted(
+    coordinator_with_link,
+):
+    coordinator, link = coordinator_with_link
+
+    link.deliver(
+        Message(
+            MessageType.HELLO,
+            {
+                "protocol_major": PROTOCOL_MAJOR,
+                "protocol_minor": PROTOCOL_MINOR,
+                "origin_id": "b" * 32,
+                "machine_name": "PC2",
+                "capabilities": "files/1",
+            },
+            b"",
+        )
+    )
+
+    assert not coordinator.peer_supports(CAPABILITY_FILES), (
+        "строка 'files/1' содержит 'files/1' как подстроку - проверка через "
+        "`in` по строке приняла бы её, и мы послали бы FILE_* туда, где их не ждут"
+    )
+
+
+def test_capabilities_are_announced_before_they_are_known(coordinator_with_link):
+    coordinator, _link = coordinator_with_link
+
+    assert coordinator.peer_capabilities == frozenset(), (
+        "до HELLO мы не знаем ничего, и это не то же самое, что знать про clipboard"
+    )
+
+
+def _hello(header_extra: dict | None = None, *, protocol_major: int = PROTOCOL_MAJOR) -> Message:
+    """HELLO от пира, с подменой любого поля заголовка."""
+    header = {
+        "protocol_major": protocol_major,
+        "protocol_minor": PROTOCOL_MINOR,
+        "origin_id": "b" * 32,
+        "machine_name": "PC2",
+    }
+    header.update(header_extra or {})
+    return Message(MessageType.HELLO, header, b"")
+
+
+def test_a_capabilities_value_of_null_is_treated_as_a_legacy_peer(coordinator_with_link):
+    # json.loads возвращает None для `"capabilities": null`. По смыслу это
+    # отсутствие объявления, а не объявление пустоты, и путь должен совпадать
+    # с путём отсутствующего ключа.
+    coordinator, link = coordinator_with_link
+
+    link.deliver(_hello({"capabilities": None}))
+
+    assert coordinator.peer_capabilities == frozenset({CAPABILITY_CLIPBOARD})
+    assert not coordinator.peer_supports(CAPABILITY_FILES)
+
+
+def test_a_capabilities_list_of_non_strings_announces_nothing(coordinator_with_link):
+    # Список - правильного типа, а его содержимое - нет. Ни один элемент не
+    # должен превратиться в объявленную возможность, и ни один не должен
+    # уронить разбор.
+    coordinator, link = coordinator_with_link
+
+    link.deliver(
+        _hello({"capabilities": [7, None, ["files/1"], {"files/1": True}, b"files/1"]})
+    )
+
+    assert coordinator.peer_capabilities == frozenset()
+    assert not coordinator.peer_supports(CAPABILITY_FILES)
+
+
+def test_a_capabilities_mapping_is_ignored_rather_than_iterated_into_keys(coordinator_with_link):
+    # Проверка `isinstance(announced, list)` держится именно на этом случае.
+    # Для строки "files/1" её снятие безвредно по случайности: перебор строки
+    # даёт символы, и "files/1" целиком в набор не попадает. А перебор словаря
+    # даёт ключи - и пир, приславший {"files/1": true}, был бы засчитан как
+    # умеющий файлы. Тест на строке проходит и без проверки; этот - нет.
+    coordinator, link = coordinator_with_link
+
+    link.deliver(_hello({"capabilities": {CAPABILITY_CLIPBOARD: True, CAPABILITY_FILES: True}}))
+
+    assert not coordinator.peer_supports(CAPABILITY_FILES)
+    assert coordinator.peer_capabilities == frozenset({CAPABILITY_CLIPBOARD}), (
+        "объявление неправильной формы - это не объявление; пир считается устаревшим"
+    )
+
+
+def test_a_non_string_does_not_take_the_strings_beside_it_down(coordinator_with_link):
+    coordinator, link = coordinator_with_link
+
+    link.deliver(
+        _hello({"capabilities": [CAPABILITY_CLIPBOARD, 7, CAPABILITY_FILES]})
+    )
+
+    assert coordinator.peer_capabilities == frozenset(
+        {CAPABILITY_CLIPBOARD, CAPABILITY_FILES}
+    )
+
+
+def test_an_empty_capabilities_list_is_not_the_same_as_a_legacy_peer(coordinator_with_link):
+    # Пустой список - это пир, который умеет объявлять и объявил, что не умеет
+    # ничего. Дописывать ему clipboard/1 значило бы объявить за него.
+    coordinator, link = coordinator_with_link
+
+    link.deliver(_hello({"capabilities": []}))
+
+    assert coordinator.peer_capabilities == frozenset()
+    assert not coordinator.peer_supports(CAPABILITY_CLIPBOARD)
+    assert not coordinator.peer_supports(CAPABILITY_FILES)
+
+
+def test_capabilities_known_carries_the_frozenset_the_peer_announced(coordinator_with_link):
+    coordinator, link = coordinator_with_link
+    # PySide6 держит на получателя слабую ссылку: обработчик, которого никто
+    # не держит, молча собирается сборщиком мусора, и сигнал перестаёт
+    # работать без единой ошибки. Владелец здесь - само имя `heard`, живущее
+    # до конца теста.
+    heard: list = []
+    coordinator.capabilities_known.connect(heard.append)
+
+    link.deliver(_hello({"capabilities": [CAPABILITY_CLIPBOARD, CAPABILITY_FILES]}))
+
+    assert heard == [frozenset({CAPABILITY_CLIPBOARD, CAPABILITY_FILES})]
+    assert isinstance(heard[0], frozenset), "получатель не должен уметь править объявление пира"
+
+
+def test_a_hello_on_the_wrong_major_version_never_reaches_the_parser(coordinator_with_link):
+    coordinator, link = coordinator_with_link
+    heard: list = []
+    coordinator.capabilities_known.connect(heard.append)
+
+    link.deliver(_hello({"capabilities": [CAPABILITY_CLIPBOARD]}))
+    assert heard == [frozenset({CAPABILITY_CLIPBOARD})], (
+        "сигнал обязан быть живым до основной проверки, иначе она пройдёт впустую"
+    )
+
+    link.deliver(
+        _hello(
+            {"capabilities": [CAPABILITY_CLIPBOARD, CAPABILITY_FILES]},
+            protocol_major=PROTOCOL_MAJOR + 1,
+        )
+    )
+
+    assert heard == [frozenset({CAPABILITY_CLIPBOARD})], (
+        "связь уже разорвана по расхождению major - объявлениям из того же "
+        "кадра верить нельзя"
+    )
+    assert not coordinator.peer_supports(CAPABILITY_FILES)
+
+
+def test_reconnecting_forgets_what_the_previous_build_of_the_peer_could_do(
+    coordinator_with_link,
+):
+    # Переподключение может прийтись на другую сборку пира. Унести на неё
+    # возможности прежней - это ровно тот способ послать FILE_* туда, где их
+    # не ждут, который вся эта задача и закрывает.
+    coordinator, link = coordinator_with_link
+    link.deliver(_hello({"capabilities": [CAPABILITY_CLIPBOARD, CAPABILITY_FILES]}))
+    assert coordinator.peer_supports(CAPABILITY_FILES)
+
+    second_link = _FakeLink()
+    coordinator._on_connected(second_link)
+
+    assert coordinator.peer_capabilities == frozenset(), (
+        "до HELLO от новой связи мы снова не знаем ничего"
+    )
+
+
+def test_the_live_link_is_reachable_without_reaching_into_a_private_attribute(
+    coordinator_with_link,
+):
+    # Task 4.2 нужна живая связь из другого модуля, а частный атрибут,
+    # пересекающий границу модуля, гниёт первым.
+    coordinator, link = coordinator_with_link
+
+    assert coordinator.link is link
+
+    coordinator._on_disconnected("кабель выдернули")
+
+    assert coordinator.link is None

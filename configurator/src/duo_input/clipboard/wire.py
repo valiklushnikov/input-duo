@@ -17,7 +17,22 @@ from enum import IntEnum
 from .offer import MAX_CONTENT_BYTES
 
 PROTOCOL_MAJOR = 1
-PROTOCOL_MINOR = 0
+#: 1: HELLO несёт capabilities. Major не поднят намеренно - подъём major
+#: разорвал бы связь со всеми существующими сборками, а новые типы сообщений
+#: в этом не нуждаются, потому что их закрывает capability.
+PROTOCOL_MINOR = 1
+
+CAPABILITY_CLIPBOARD = "clipboard/1"
+CAPABILITY_FILES = "files/1"
+
+#: Что умеет ЭТА сборка. Пир узнаёт это из HELLO и наоборот.
+CAPABILITIES = (CAPABILITY_CLIPBOARD, CAPABILITY_FILES)
+
+#: Что умеет пир, не назвавший ничего. Старые сборки не знают про ключ
+#: capabilities вовсе, и считать их умеющими только буфер обмена - это ровно
+#: то, что сохраняет им буфер обмена: FILE_* мы им не пошлём, а значит они не
+#: встретят неизвестный тип и не оборвут соединение (см. wire._decode_payload).
+LEGACY_CAPABILITIES = frozenset({CAPABILITY_CLIPBOARD})
 
 #: Потолок содержимого плюс место под заголовок.
 MAX_FRAME_BYTES = MAX_CONTENT_BYTES + 65_536
@@ -53,8 +68,11 @@ class MessageType(IntEnum):
     # framing к типу сообщения безразличен, о чём сказано в docstring модуля.
     #
     # Старый пир, получив любой из этих типов, бросит WireError и оборвёт
-    # соединение целиком, вместе с буфером обмена. Поэтому они не отправляются
-    # никому, кто не объявил files/1 в HELLO - см. coordinator.CAPABILITIES.
+    # соединение целиком, вместе с буфером обмена. Поэтому их нельзя
+    # отправлять тому, кто не объявил files/1 в HELLO - см. CAPABILITY_FILES
+    # и CAPABILITIES ниже в этом модуле. Кто их не посылает, до кого они не
+    # объявлены, - обязанность coordinator (HELLO/peer_supports) и, для самих
+    # кадров FILE_*, transfer/service.py (Task 1.10).
     FILE_OFFER = 10
     TRANSFER_BEGIN = 11
     FILE_READ = 12
@@ -125,6 +143,10 @@ def _decode_payload(payload: bytes) -> Message:
 
 
 __all__ = [
+    "CAPABILITIES",
+    "CAPABILITY_CLIPBOARD",
+    "CAPABILITY_FILES",
+    "LEGACY_CAPABILITIES",
     "MAX_FILE_CHUNK_BYTES",
     "MAX_FRAME_BYTES",
     "PROTOCOL_MAJOR",

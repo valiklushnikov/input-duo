@@ -42,7 +42,16 @@ from .pairing import PAIRING_WINDOW_MS, PairingCandidate, pairing_code
 from .peer import PeerLink
 from .service import SILENCE_LIMIT_MS, ClipboardService
 from .trust import TrustStore, TrustedPeer
-from .wire import PROTOCOL_MAJOR, PROTOCOL_MINOR, Message, MessageType
+from .wire import (
+    CAPABILITIES,
+    CAPABILITY_CLIPBOARD,
+    CAPABILITY_FILES,
+    LEGACY_CAPABILITIES,
+    PROTOCOL_MAJOR,
+    PROTOCOL_MINOR,
+    Message,
+    MessageType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +91,23 @@ def reconnect_delay_ms(attempt: int) -> int:
     return RECONNECT_DELAYS_MS[min(attempt, len(RECONNECT_DELAYS_MS) - 1)]
 
 
+def _capabilities_from(header: dict) -> frozenset[str]:
+    """Что пир объявил - и ничего, чего он не объявил.
+
+    Проверка типа, а не приведение: строка "files/1" содержит "files/1" как
+    подстроку, поэтому проверка через `in` по строке приняла бы её, и мы
+    послали бы FILE_* туда, где их не ждут. Тот же порядок строгости, что у
+    ClipboardOffer.from_dict.
+    """
+    announced = header.get("capabilities")
+    if announced is None:
+        return LEGACY_CAPABILITIES
+    if not isinstance(announced, list):
+        logger.warning("capabilities пришли не списком - считаем пира устаревшим")
+        return LEGACY_CAPABILITIES
+    return frozenset(item for item in announced if isinstance(item, str))
+
+
 class ClipboardCoordinator(QObject):
     """Владеет связью, обнаружением, доверием и сервисом правил."""
 
@@ -91,6 +117,8 @@ class ClipboardCoordinator(QObject):
     #: Короткая, человекочитаемая строка для журнала и для списка последних
     #: событий на странице - см. §12 спецификации.
     event_logged = Signal(str)
+    #: Пир объявил себя в HELLO. Аргумент - frozenset[str] возможностей.
+    capabilities_known = Signal(object)
 
     def __init__(
         self,
@@ -116,6 +144,7 @@ class ClipboardCoordinator(QObject):
         self._discovery.peer_seen.connect(self._on_peer_seen)
 
         self._link: PeerLink | None = None
+        self._peer_capabilities: frozenset[str] = frozenset()
         self._attempt = 0
         self._manual_address = ""
         self._state = LinkState.UNPAIRED if trust.peer() is None else LinkState.DISCONNECTED
@@ -157,6 +186,20 @@ class ClipboardCoordinator(QObject):
     @property
     def service(self) -> ClipboardService:
         return self._service
+
+    @property
+    def link(self) -> PeerLink | None:
+        """Живая связь, либо None. Нужна передаче файлов - а частный атрибут,
+        пересекающий границу модуля, это та форма, которая гниёт первой."""
+        return self._link
+
+    @property
+    def peer_capabilities(self) -> frozenset[str]:
+        """Что умеет пир. Пустое множество означает "ещё не знаем"."""
+        return self._peer_capabilities
+
+    def peer_supports(self, capability: str) -> bool:
+        return capability in self._peer_capabilities
 
     def _set_state(self, state: LinkState) -> None:
         if state is self._state:
@@ -509,6 +552,9 @@ class ClipboardCoordinator(QObject):
 
     def _on_connected(self, link: PeerLink) -> None:
         self._link = link
+        # Переподключение может привести на другую сборку пира - забыть, что
+        # умел прежний пир, чтобы не унести его возможности на нового.
+        self._peer_capabilities = frozenset()
         self._attempt = 0
         self._retry.stop()
         self._discovery.stop()
@@ -520,6 +566,7 @@ class ClipboardCoordinator(QObject):
                     "protocol_minor": PROTOCOL_MINOR,
                     "origin_id": self._identity.origin_id,
                     "machine_name": self._machine_name,
+                    "capabilities": list(CAPABILITIES),
                 },
                 b"",
             )
@@ -537,6 +584,9 @@ class ClipboardCoordinator(QObject):
                     "вторая машина говорит на другой версии протокола",
                     protocol_mismatch=True,
                 )
+                return
+            self._peer_capabilities = _capabilities_from(message.header)
+            self.capabilities_known.emit(self._peer_capabilities)
 
     def _on_disconnected(self, reason: str) -> None:
         self._drop(reason)
