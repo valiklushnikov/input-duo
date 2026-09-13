@@ -12,6 +12,8 @@ STA, и его насос, и очередь публикаций. Настоя�
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes
+import gc
 import logging
 import os
 import sys
@@ -43,6 +45,7 @@ from duo_input.transfer.windows_com import (
     S_OK,
     TYMED_HGLOBAL,
     TYMED_ISTREAM,
+    call_add_ref,
     call_get_data,
     call_get_data_medium,
     call_query_interface,
@@ -52,6 +55,7 @@ from duo_input.transfer.windows_com import (
     register_clipboard_format,
 )
 from duo_input.transfer.windows_files import (
+    CLIPBRD_E_CANT_OPEN,
     FORMAT_CONTENTS_NAME,
     FORMAT_DESCRIPTOR_NAME,
     WindowsFileClipboardBackend,
@@ -63,8 +67,8 @@ from duo_input.transfer.windows_files import (
 #: не доставит вызов, а переполнится.
 HUGE_OFFSET = 4294705152
 
-#: CLIPBRD_E_CANT_OPEN как знаковое число - именно так его отдаёт ctypes.
-CLIPBRD_E_CANT_OPEN = 0x800401D0 - (1 << 32)
+#: E_OUTOFMEMORY: отказ по существу, а не занятость буфера.
+E_OUTOFMEMORY = 0x8007000E - (1 << 32)
 
 #: Потолок для каждого ожидания в этом файле. Регрессия обязана краснеть, а
 #: не висеть.
@@ -317,6 +321,35 @@ def test_an_offset_above_two_to_the_thirtyone_reaches_the_real_service_intact(qt
     )
 
 
+
+# --------------------------------------------------------------------- насос
+
+
+def test_the_pump_wakes_on_a_message_instead_of_sleeping_out_the_interval(qapp):
+    """Насос обязан просыпаться от сообщения, а не досыпать интервал.
+
+    Сон в 20 мс на пустой очереди означает, что вызов, пришедший через
+    миллисекунду после разбора, ждёт ещё девятнадцать: при
+    последовательных чтениях по 64 КиБ это около 3 МБ/с - на фиче, чей
+    заявленный случай вставка на 20 ГБ. Красным тестом это не всплывает
+    нигде, поэтому тест здесь.
+    """
+    thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+    assert ctypes.windll.user32.PostThreadMessageW(thread_id, 0x0000, 0, 0)
+
+    started_at = time.monotonic()
+    windows_files._wait_for_messages(1000)
+    waited = time.monotonic() - started_at
+
+    message = ctypes.wintypes.MSG()
+    while ctypes.windll.user32.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
+        pass
+    assert waited < 0.2, (
+        f"ждали {waited:.3f} с при сообщении в очереди - насос спит по таймеру, "
+        "а не по событию"
+    )
+
+
 # ------------------------------------------------------------ жизненный цикл потока
 
 
@@ -374,11 +407,17 @@ def test_a_thread_that_will_not_die_is_not_forgotten(backend, qtbot, monkeypatch
     Забыть про живой поток значит, что следующий start() поднимет второй
     OLE-апартамент и второго владельца буфера обмена в одном процессе.
     """
+    monkeypatch.setattr(windows_files, "_ole_set_clipboard", lambda pointer: S_OK)
     monkeypatch.setattr(windows_files, "_TEARDOWN_PUMP_S", 1.0)
     monkeypatch.setattr(windows_files, "_STOP_TIMEOUT_S", 0.05)
+    _Callbacks().install(backend)
     backend.start()
     qtbot.waitUntil(lambda: backend.thread_id is not None, timeout=5000)
     alive = backend.thread_id
+    # Публикация нужна, чтобы гашение апартамента заняло время: без неё
+    # докачивать нечего и поток успевает умереть внутри join.
+    backend.publish(_manifest(), origin_marker=b"origin:1")
+    qtbot.waitUntil(lambda: backend.published_object is not None, timeout=5000)
 
     backend.stop()
 
@@ -486,18 +525,70 @@ def test_the_published_object_is_kept_alive_after_the_clipboard_takes_it(
 def test_a_refusing_olesetclipboard_is_reported_and_the_thread_survives(
     started, qtbot, monkeypatch
 ):
-    # CLIPBRD_E_CANT_OPEN: чужое окно держит буфер. Упасть здесь значило бы
-    # унести поток STA, и следующая публикация не состоялась бы никогда.
-    monkeypatch.setattr(
-        windows_files, "_ole_set_clipboard", lambda pointer: CLIPBRD_E_CANT_OPEN
-    )
+    # E_OUTOFMEMORY - отказ по существу, а не занятость. Упасть здесь
+    # значило бы унести поток STA, и следующая публикация не состоялась бы
+    # никогда; а повторять такой код - тянуть время на ошибке, которая не
+    # пройдёт.
+    attempts: list[int] = []
+
+    def refuse(pointer) -> int:
+        attempts.append(1)
+        return E_OUTOFMEMORY
+
+    monkeypatch.setattr(windows_files, "_ole_set_clipboard", refuse)
     _Callbacks().install(started)
 
     with qtbot.waitSignal(started.publish_failed, timeout=5000) as blocker:
         started.publish(_manifest(), origin_marker=b"origin:1")
 
-    assert "800401D0" in blocker.args[0].upper()
+    assert "8007000E" in blocker.args[0].upper()
+    assert len(attempts) == 1, "отказ по существу повторять незачем"
     assert started.is_running, "поток STA умер вместе с неудачной публикацией"
+    assert started.published_object is None
+
+
+def test_a_busy_clipboard_is_retried_and_then_taken(started, qtbot, monkeypatch):
+    """Занятый буфер - не наша ошибка, и одна попытка её не переживает.
+
+    Измерено на настоящем рабочем столе: 3 отказа CLIPBRD_E_CANT_OPEN из 24
+    публикаций. С одной попытки примерно каждая восьмая вставка не
+    состоялась бы, и пользователь увидел бы отказ без всякой своей вины.
+    """
+    answers = [CLIPBRD_E_CANT_OPEN, CLIPBRD_E_CANT_OPEN, S_OK]
+    attempts: list[int] = []
+
+    def busy_then_free(pointer) -> int:
+        attempts.append(1)
+        return answers[len(attempts) - 1]
+
+    monkeypatch.setattr(windows_files, "_ole_set_clipboard", busy_then_free)
+    _Callbacks().install(started)
+
+    started.publish(_manifest(), origin_marker=b"origin:1")
+    qtbot.waitUntil(lambda: started.published_object is not None, timeout=5000)
+
+    assert len(attempts) == 3
+    assert _origin_of(started.published_object) == b"origin:1"
+
+
+def test_a_clipboard_that_stays_busy_is_reported_after_the_retries(
+    started, qtbot, monkeypatch
+):
+    # Повторы не должны стать молчаливым бесконечным ожиданием.
+    attempts: list[int] = []
+
+    def always_busy(pointer) -> int:
+        attempts.append(1)
+        return CLIPBRD_E_CANT_OPEN
+
+    monkeypatch.setattr(windows_files, "_ole_set_clipboard", always_busy)
+    _Callbacks().install(started)
+
+    with qtbot.waitSignal(started.publish_failed, timeout=5000) as blocker:
+        started.publish(_manifest(), origin_marker=b"origin:1")
+
+    assert len(attempts) == windows_files._CLIPBOARD_RETRIES
+    assert "800401D0" in blocker.args[0].upper()
     assert started.published_object is None
 
 
@@ -598,6 +689,112 @@ def test_nothing_is_handed_back_when_nothing_was_published(backend, qtbot, monke
     assert calls == []
 
 
+def test_a_replaced_publication_is_retired_rather_than_freed(
+    started, qtbot, monkeypatch
+):
+    """Прежнее дерево живо, пока оболочка держит на него ссылку.
+
+    Асинхронный режим объявлен ровно для того, чтобы вставка пережила само
+    копирование: пользователь копирует дерево A, Проводник начинает
+    вставку, пользователь копирует дерево B. Присвоение поверх освободило
+    бы у A и vtable, и колбэки, и память под pointer - и следующий
+    IStream::Read ушёл бы в освобождённое.
+    """
+    monkeypatch.setattr(windows_files, "_ole_set_clipboard", lambda pointer: S_OK)
+    _Callbacks().install(started)
+
+    started.publish(_manifest("t-old"), origin_marker=b"origin:old")
+    qtbot.waitUntil(lambda: started.published_object is not None, timeout=5000)
+    # Ссылка COM - ровно то, что берёт оболочка. Ссылки из Python не
+    # оставляем: с ней утверждение ниже не смогло бы провалиться.
+    old_pointer = ctypes.c_void_p(started.published_object.pointer.value)
+    old_origin_format = started.published_object.cf_origin
+    call_add_ref(old_pointer)
+
+    started.publish(_manifest("t-new"), origin_marker=b"origin:new")
+    qtbot.waitUntil(
+        lambda: started.published_object is not None
+        and _origin_of(started.published_object) == b"origin:new",
+        timeout=5000,
+    )
+    gc.collect()
+
+    result, payload = call_get_data(old_pointer, old_origin_format, -1, TYMED_HGLOBAL)
+    assert (result, payload) == (S_OK, b"origin:old"), (
+        "прежняя публикация освобождена, пока оболочка ещё держала ссылку"
+    )
+    assert started.retired_publications == 1
+    call_release(old_pointer)
+
+
+def test_a_retired_publication_is_let_go_once_the_shell_lets_go(
+    started, qtbot, monkeypatch
+):
+    # Отставка не должна быть вечной: иначе каждое копирование оставляло бы
+    # по объекту с его дескрипторами до конца жизни процесса.
+    monkeypatch.setattr(windows_files, "_ole_set_clipboard", lambda pointer: S_OK)
+    _Callbacks().install(started)
+
+    started.publish(_manifest("t-old"), origin_marker=b"origin:old")
+    qtbot.waitUntil(lambda: started.published_object is not None, timeout=5000)
+    old_pointer = ctypes.c_void_p(started.published_object.pointer.value)
+    call_add_ref(old_pointer)
+    started.publish(_manifest("t-new"), origin_marker=b"origin:new")
+    qtbot.waitUntil(lambda: started.retired_publications == 1, timeout=5000)
+
+    call_release(old_pointer)
+
+    qtbot.waitUntil(lambda: started.retired_publications == 0, timeout=5000)
+
+
+def test_teardown_waits_past_the_floor_while_the_shell_still_holds_on(
+    backend, qtbot, monkeypatch, caplog
+):
+    """Нижняя граница - не потолок: пока ссылку держат, насос крутится.
+
+    Потолок при этом есть, и он пишется в журнал: "константа оказалась
+    мала" обязано выглядеть иначе, чем то же падение, вернувшееся молча.
+    """
+    monkeypatch.setattr(windows_files, "_ole_set_clipboard", lambda pointer: S_OK)
+    monkeypatch.setattr(windows_files, "_TEARDOWN_PUMP_S", 0.05)
+    monkeypatch.setattr(windows_files, "_TEARDOWN_CEILING_S", 0.6)
+    _Callbacks().install(backend)
+    backend.start()
+    qtbot.waitUntil(lambda: backend.thread_id is not None, timeout=5000)
+    backend.publish(_manifest(), origin_marker=b"origin:1")
+    qtbot.waitUntil(lambda: backend.published_object is not None, timeout=5000)
+    held = ctypes.c_void_p(backend.published_object.pointer.value)
+    call_add_ref(held)
+
+    with caplog.at_level(logging.WARNING):
+        started_at = time.monotonic()
+        backend.stop()
+        waited = time.monotonic() - started_at
+
+    assert waited >= 0.5, (
+        f"апартамент погашен через {waited:.3f} с, хотя ссылку снаружи не "
+        "отпустили - нижняя граница используется как потолок"
+    )
+    assert any("незавершёнными вызовами" in record.getMessage() for record in caplog.records)
+    call_release(held)
+
+
+def test_a_backend_that_published_nothing_tears_down_without_waiting(
+    backend, qtbot, monkeypatch
+):
+    # Буфер мы не брали: докачивать нечего, и платить за это четверть
+    # секунды на каждом stop() тоже незачем.
+    monkeypatch.setattr(windows_files, "_TEARDOWN_PUMP_S", 1.0)
+    backend.start()
+    qtbot.waitUntil(lambda: backend.thread_id is not None, timeout=5000)
+
+    started_at = time.monotonic()
+    backend.stop()
+    waited = time.monotonic() - started_at
+
+    assert waited < 0.5, f"остановка без публикации заняла {waited:.3f} с"
+
+
 # ------------------------------------------------------- проводка колбэков
 
 
@@ -672,7 +869,10 @@ def test_the_published_object_advertises_the_async_capability(backend):
     )
 
     assert (result, bool(out.value)) == (S_OK, True)
-    call_release(data_object.pointer)
+    # Отпускаем ТОТ указатель, который нарастил QueryInterface. Что у
+    # ComObject счётчик один на все IID - его внутреннее устройство, а не
+    # то, на чём тесту стоит держаться.
+    call_release(out)
 
 
 def test_building_a_data_object_without_callbacks_is_refused(backend):

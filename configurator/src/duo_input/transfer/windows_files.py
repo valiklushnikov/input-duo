@@ -512,18 +512,46 @@ _PUMP_INTERVAL_MS = 20
 _START_TIMEOUT_S = 5.0
 _STOP_TIMEOUT_S = 5.0
 
-#: Сколько ещё крутить насос ПОСЛЕ отдачи буфера и до гашения апартамента.
-#: STA обязан обслуживать входящие вызовы, пока они есть: чужие апартаменты
-#: этого же процесса (буфер обмена Qt в их числе) держат ссылку на наш объект
-#: и отпускают её своим вызовом Release. Погасить апартамент сразу - значит
-#: оборвать этот вызов на полпути; измеренный симптом - RPC_E_DISCONNECTED, а
-#: следом access violation, уносящий процесс. Измерено чередующимися
-#: прогонами: без паузы 5 падений из 36, с паузой 0 из 36.
+#: Нижняя граница насоса ПОСЛЕ отдачи буфера и до гашения апартамента.
+#: Погасить апартамент сразу означает оборвать на полпути работу, которую
+#: чужие апартаменты этого же процесса (буфер обмена Qt в их числе) ведут с
+#: нашим объектом; симптом - RPC_E_DISCONNECTED, а следом access violation,
+#: уносящий процесс. Измерено чередующимися прогонами: без паузы 5 падений
+#: из 36, с паузой 0 из 36.
+#:
+#: Именно НИЖНЯЯ граница, а не условие: сразу после OleFlushClipboard наш
+#: собственный счётчик ссылок уже равен 1 (измерено), то есть COM с объектом
+#: закончил, - а процесс всё равно падал. Незавершённая работа живёт в слое
+#: RPC, и в refcount её не видно. Условие ниже - сверх этой границы, а не
+#: вместо неё.
 _TEARDOWN_PUMP_S = 0.25
+
+#: Потолок для того, что видно: пока на наши объекты держат ссылки ИЗВНЕ
+#: (refcount > 1), насос крутится дальше. Достигнутый потолок пишется в
+#: журнал - иначе "константа оказалась мала" выглядело бы как то же самое
+#: падение, вернувшееся молча.
+_TEARDOWN_CEILING_S = 2.0
 
 #: PeekMessageW(..., PM_REMOVE): взять сообщение из очереди, а не подсмотреть.
 #: Подсмотренное остаётся в очереди, и внутренний цикл стал бы бесконечным.
 _PM_REMOVE = 1
+
+#: QS_ALLINPUT: проснуться на ЛЮБОМ сообщении, включая присланные из чужого
+#: апартамента, - именно ими приходят вызовы COM.
+_QS_ALLINPUT = 0x04FF
+
+#: CLIPBRD_E_CANT_OPEN как знаковое число - именно так его отдаёт ctypes.
+#: Это "буфер сейчас держит кто-то другой", а не "мы сделали что-то не так":
+#: буфер обмена Windows - общий ресурс на весь рабочий стол.
+CLIPBRD_E_CANT_OPEN = 0x800401D0 - (1 << 32)
+
+#: Сколько раз повторить OleSetClipboard при занятом буфере и сколько ждать
+#: между попытками. Измерено на настоящем рабочем столе: 3 отказа
+#: CLIPBRD_E_CANT_OPEN из 24 публикаций - то есть с одной попытки примерно
+#: каждая восьмая вставка не состоялась бы, и пользователь увидел бы
+#: "буфер обмена не принял файлы" без всякой своей вины.
+_CLIPBOARD_RETRIES = 5
+_CLIPBOARD_RETRY_MS = 50
 
 
 def _ole_initialize() -> None:
@@ -557,6 +585,25 @@ def _ole_set_clipboard(pointer) -> int:
 
 def _ole_flush_clipboard() -> int:
     return ctypes.windll.ole32.OleFlushClipboard()
+
+
+def _wait_for_messages(timeout_ms: int) -> None:
+    """Спать до сообщения, а не до конца интервала.
+
+    sleep(20 мс) на пустой очереди означает, что вызов, пришедший через
+    миллисекунду после разбора очереди, ждёт ещё девятнадцать. При
+    последовательных чтениях по 64 КиБ это около пятидесяти чтений в
+    секунду - примерно три мегабайта в секунду на фиче, чей заявленный
+    случай - вставка на 20 ГБ. И проявилось бы это не красным тестом, а
+    жалобой "вставка почему-то медленная".
+
+    MsgWaitForMultipleObjects возвращается в тот же миг, когда сообщение
+    появилось, и всё равно истекает через timeout_ms - то есть темп проверки
+    "не пора ли остановиться" остаётся прежним.
+    """
+    ctypes.windll.user32.MsgWaitForMultipleObjects(
+        0, None, False, timeout_ms, _QS_ALLINPUT
+    )
 
 
 def _declared_parameter_types(service, slot: str, count: int) -> tuple[str, ...] | None:
@@ -649,6 +696,10 @@ class WindowsFileClipboardBackend(QObject):
         #: устаревшее.
         self._pending: tuple[TransferManifest, bytes] | None = None
         self._published: VirtualFilesDataObject | None = None
+        #: Прежние публикации, которые оболочка ещё может держать. См.
+        #: _retire: выбросить их в момент замены значило бы освободить
+        #: vtable под работающей вставкой.
+        self._retired: list[VirtualFilesDataObject] = []
         self._callbacks: dict[str, Callable] = {}
         self._start_error: BaseException | None = None
 
@@ -672,6 +723,11 @@ class WindowsFileClipboardBackend(QObject):
     def published_object(self) -> VirtualFilesDataObject | None:
         """Объект, лежащий сейчас в буфере, - его держим мы, а не буфер."""
         return self._published
+
+    @property
+    def retired_publications(self) -> int:
+        """Сколько прежних публикаций мы ещё держим ради оболочки."""
+        return len(self._retired)
 
     def set_callbacks(
         self, open_pipe, request_read, close_pipe, on_operation_finished
@@ -698,6 +754,13 @@ class WindowsFileClipboardBackend(QObject):
         self._ready.clear()
         self._start_error = None
         self._thread_id = None
+        # Прошлый stop() мог завершиться по таймауту и оставить эти поля
+        # заполненными. Новый апартамент буфера не брал, и flush по
+        # унаследованному _published отдал бы чужое владение.
+        self._published = None
+        self._retired = []
+        with self._lock:
+            self._pending = None
         thread = threading.Thread(target=self._run, name="duo-input-com-sta", daemon=True)
         self._thread = thread
         thread.start()
@@ -788,7 +851,7 @@ class WindowsFileClipboardBackend(QObject):
             self._pump_until_stopped()
         finally:
             self._release_clipboard()
-            self._pump_for(_TEARDOWN_PUMP_S)
+            self._pump_out_teardown()
             _ole_uninitialize()
 
     def _pump_until_stopped(self) -> None:
@@ -798,16 +861,56 @@ class WindowsFileClipboardBackend(QObject):
             pending = self._take_pending()
             if pending is not None:
                 self._publish_now(*pending)
+            self._prune_retired()
             self._drain_messages(message)
-            self._stopping.wait(_PUMP_INTERVAL_MS / 1000)
+            if self._stopping.is_set():
+                break
+            _wait_for_messages(_PUMP_INTERVAL_MS)
 
-    def _pump_for(self, seconds: float) -> None:
-        """Качать насос ещё немного - см. _TEARDOWN_PUMP_S."""
+    def _pump_out_teardown(self) -> None:
+        """Докачать насос перед гашением апартамента.
+
+        Нижняя граница - _TEARDOWN_PUMP_S, и она измерена (см. константу).
+        Сверх неё крутимся, пока на наши объекты держат ссылки снаружи, и
+        не дольше _TEARDOWN_CEILING_S: достигнутый потолок - это диагноз
+        "константа мала", а не молча вернувшееся падение.
+        """
+        if self._published is None and not self._retired:
+            # Буфер мы не брали - обрывать нечего и ждать нечего.
+            return
         message = wintypes.MSG()
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
+        started = time.monotonic()
+        floor = started + _TEARDOWN_PUMP_S
+        ceiling = started + _TEARDOWN_CEILING_S
+        while True:
             self._drain_messages(message)
-            time.sleep(_PUMP_INTERVAL_MS / 1000)
+            now = time.monotonic()
+            if now >= floor and not self._externally_referenced():
+                return
+            if now >= ceiling:
+                logger.warning(
+                    "через %.2f с после отдачи буфера на наши объекты всё ещё "
+                    "держат ссылки - апартамент гасим с незавершёнными вызовами",
+                    _TEARDOWN_CEILING_S,
+                )
+                return
+            _wait_for_messages(_PUMP_INTERVAL_MS)
+
+    def _held_objects(self) -> list[VirtualFilesDataObject]:
+        published = [] if self._published is None else [self._published]
+        return published + self._retired
+
+    def _externally_referenced(self) -> bool:
+        """Держит ли кто-то, кроме нас, ссылку хоть на один наш объект.
+
+        Счётчик 1 - это наша собственная ссылка от конструктора: всё, что
+        выше, выдано наружу.
+        """
+        return any(obj.refcount > 1 for obj in self._held_objects())
+
+    def _prune_retired(self) -> None:
+        """Отпустить прежние публикации, которые оболочка уже отпустила."""
+        self._retired = [obj for obj in self._retired if obj.refcount > 1]
 
     @staticmethod
     def _drain_messages(message) -> None:
@@ -822,17 +925,56 @@ class WindowsFileClipboardBackend(QObject):
             pending, self._pending = self._pending, None
         return pending
 
+    def _take_the_clipboard(self, pointer) -> int:
+        """OleSetClipboard с повторами, пока буфер занят кем-то другим.
+
+        Насос между попытками крутится: пауза в 50 мс с мёртвой очередью
+        задержала бы входящий COM-вызов ровно на эти 50 мс.
+        """
+        message = wintypes.MSG()
+        result = CLIPBRD_E_CANT_OPEN
+        for attempt in range(_CLIPBOARD_RETRIES):
+            result = _ole_set_clipboard(pointer)
+            if result != CLIPBRD_E_CANT_OPEN:
+                # Любой другой код - это отказ по существу, и повторять его
+                # значило бы тянуть время на ошибке, которая не пройдёт.
+                return result
+            logger.info(
+                "буфер обмена занят, попытка %d из %d", attempt + 1, _CLIPBOARD_RETRIES
+            )
+            self._drain_messages(message)
+            _wait_for_messages(_CLIPBOARD_RETRY_MS)
+        return result
+
     def _publish_now(self, manifest: TransferManifest, origin_marker: bytes) -> None:
         try:
             data_object = self.build_data_object(manifest, origin_marker)
-            result = _ole_set_clipboard(data_object.pointer)
+            result = self._take_the_clipboard(data_object.pointer)
             if result != S_OK:
                 raise OSError(f"OleSetClipboard вернул 0x{result & 0xFFFFFFFF:08X}")
             # Держим объект: буфер обмена хранит только указатель.
+            self._retire(self._published)
             self._published = data_object
         except Exception as error:  # noqa: BLE001 - падение потока STA убило бы фичу молча
             logger.exception("не удалось опубликовать файлы в буфер обмена")
             post_to_service(self, "_report_publish_failure", str(error))
+
+    def _retire(self, previous: VirtualFilesDataObject | None) -> None:
+        """Прежнюю публикацию отправить в отставку, а не выбросить.
+
+        Присвоить self._published новый объект поверх старого значило бы
+        освободить у старого и таблицу, и список колбэков, и саму память,
+        на которую указывает pointer, - потому что ComObject живёт ровно
+        столько, сколько на него есть ссылка из Python, и с COM-счётчиком
+        она никак не связана. А вставка старого дерева к этому моменту
+        вполне может идти: асинхронный режим (ASYNC_CAPABILITY_REQUIRED)
+        для того и объявлен, чтобы она пережила само копирование. Очередной
+        IStream::Read или Release попал бы в освобождённую память - тот же
+        0xC0000005, что и в задаче 2.4, только этажом выше.
+        """
+        if previous is None:
+            return
+        self._retired.append(previous)
 
     def _release_clipboard(self) -> None:
         """Отдать буфер системе, иначе он умрёт вместе с потоком.
