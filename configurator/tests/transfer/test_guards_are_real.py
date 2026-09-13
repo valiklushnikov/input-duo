@@ -75,11 +75,43 @@ def test_without_the_utf16_measure_an_astral_name_would_fit(monkeypatch):
     )
 
 
-def test_without_normalisation_a_fullwidth_dot_would_pass(monkeypatch):
+def test_without_normalisation_two_composition_forms_of_one_name_would_not_collide(monkeypatch):
+    # ИСПРАВЛЕНО после review Task 1.4 (fix round 1): предыдущая версия этого
+    # теста утверждала, что отключённая нормализация пропускает полноширинную
+    # точку "name．". Это неверно и было заявлено как измеренное, не будучи
+    # измеренным - NFC сознательно НЕ разворачивает полноширинную точку (для
+    # этого нужна NFKC, см. докстринг модуля и комментарий в
+    # sanitize_relative_path), так что "name．" отвергается ОДНИМ И ТЕМ ЖЕ
+    # образом что при включённой, что при отключённой нормализации: измерено
+    # напрямую в обе стороны, реального различия между "guard on" и "guard
+    # off" не было ни на одном пути, то есть тест не проверял ничего.
+    #
+    # Настоящая нагрузка NFC-нормализации в этом файле - не разворот
+    # совместимых форм, а СКЛЕЙКА канонически эквивалентных: композиция
+    # "Sánchez.txt" (предсоставленная "á") и разложение
+    # "Sánchez.txt" ("a" + отдельный акут) - разные строки Python, но
+    # один и тот же путь после NFC. Измерено в обе стороны: с настоящей NFC
+    # они сталкиваются в sanitize_manifest (единственный на диске "K.txt"
+    # был бы затёрт вторым, ровно как в комментарии у
+    # _CASEFOLD_OVERRIDES_TO_IDENTITY про ЗНАК КЕЛЬВИНА), а со отключённой -
+    # нет.
     monkeypatch.setattr(paths.unicodedata, "normalize", lambda _form, text: text)
 
-    assert sanitize_relative_path("name．") == "name．", (
-        "нормализация отключена, а полноширинная точка всё равно отвергнута"
+    composed = "Sánchez.txt"  # á одним кодпоинтом
+    decomposed = "Sánchez.txt"  # a + отдельный combining acute (U+0301)
+    manifest = TransferManifest(
+        transfer_id="t",
+        entries=(
+            TransferEntry(path=decomposed, kind=ENTRY_FILE, size=1, mtime_ns=1),
+            TransferEntry(path=composed, kind=ENTRY_FILE, size=2, mtime_ns=2),
+        ),
+    )
+
+    result = sanitize_manifest(manifest)
+
+    assert len(result.entries) == 2, (
+        "нормализация отключена, а две формы одного имени всё равно "
+        "столкнулись как одна запись"
     )
 
 
@@ -525,6 +557,31 @@ def test_without_the_dict_check_a_non_dict_manifest_would_be_accepted(monkeypatc
     assert manifest.transfer_id == "t", "проверка dict снята, а не-dict манифест всё равно отвергнут"
 
 
+# Три теста выше доказывают, что проверка нагружена ВНУТРИ переписанной здесь
+# копии classmethod'а. Это не доказывает, что настоящий, непропатченный
+# model.py её применяет: удали любую из этих трёх проверок прямо в
+# model.py - и весь остальной сюит (246 тестов на момент review) останется
+# зелёным, потому что ни один существующий тест не бьёт по MappingProxyType
+# ни в одном из трёх мест (Task 1.4 review, fix round 1). Три позитивные
+# проверки ниже бьют по настоящим, непропатченным методам и закрывают это по
+# нулевой цене.
+
+
+def test_a_mapping_proxy_is_refused_as_an_entry_by_the_real_method():
+    with pytest.raises(ValueError):
+        TransferEntry.from_dict(MappingProxyType(_entry_raw()))
+
+
+def test_a_mapping_proxy_is_refused_as_a_skipped_entry_by_the_real_method():
+    with pytest.raises(ValueError):
+        SkippedEntry.from_dict(MappingProxyType({"path": "link", "reason": "reparse_point"}))
+
+
+def test_a_mapping_proxy_is_refused_as_a_manifest_by_the_real_method():
+    with pytest.raises(ValueError):
+        TransferManifest.from_dict(MappingProxyType(_manifest_raw()))
+
+
 # --- entries/skipped должны быть list, а не просто перебираемыми ---------
 #
 # Значение для проверки - кортеж настоящих dict-записей, а не dict/строка:
@@ -591,3 +648,148 @@ def test_without_the_skipped_list_check_a_tuple_of_real_entries_would_be_accepte
     )
 
     assert len(manifest.skipped) == 1, "проверка list для skipped снята, а кортеж всё равно отвергнут"
+
+
+# Как и выше: два теста над этой строкой доказывают нагруженность внутри
+# копии, а не в настоящем model.py. Два позитивных теста ниже бьют кортежем
+# по настоящему, непропатченному TransferManifest.from_dict.
+
+
+def test_a_tuple_is_refused_in_place_of_the_entries_list_by_the_real_method():
+    with pytest.raises(ValueError):
+        TransferManifest.from_dict({"transfer_id": "t", "entries": (_entry_raw(),), "skipped": []})
+
+
+def test_a_tuple_is_refused_in_place_of_the_skipped_list_by_the_real_method():
+    with pytest.raises(ValueError):
+        TransferManifest.from_dict(
+            {
+                "transfer_id": "t",
+                "entries": [_entry_raw()],
+                "skipped": ({"path": "link", "reason": "reparse_point"},),
+            }
+        )
+
+
+# ---------------------------------------------------------------------------
+# Верность копий: восемь функций/classmethod'ов выше переписаны вручную и
+# ничем не привязаны к настоящей функции/методу, кроме того, что их сейчас
+# переписали правильно. Ревьюер прогнал дифференциальный фаззинг на 22
+# входах и не нашёл расхождений; проверка ниже - не замена этому фаззингу
+# (у неё нет доступа к прогону ревьюера и корпус здесь меньше), а недорогая
+# защита от будущего дрейфа прямо в этом файле: на обычных, не бьющих ни в
+# один снятый guard входных данных копия обязана вести себя так же, как
+# настоящая функция/метод. Если в paths.py или model.py добавится новая
+# ветка, а сюда её не перенесут, один из следующих тестов покраснеет вместо
+# того, чтобы копия молча продолжила проверять устаревшую версию правила.
+# ---------------------------------------------------------------------------
+
+
+_ORDINARY_SEGMENTS = ["notes.txt", "Photos", "a", "file.name.ext", "under_score", "имя.dat"]
+# Ни один вход здесь не должен бить по "." / ".." / точке-пробелу в конце -
+# это ровно те ветки, которые отдельные копии сознательно опускают, и на них
+# копии ДОЛЖНЫ расходиться с настоящей функцией (это и есть предмет теста
+# выше, test_without_only_the_..._rule...). Здесь - только ветки, общие для
+# всех трёх копий.
+_REJECTED_SEGMENTS = [
+    "",
+    "C:evil.exe",
+    "na*me.txt",
+    "na\x01me.txt",
+    "NUL",
+]
+
+
+def _assert_check_segment_replica_matches_the_real_thing(replica) -> None:
+    for segment in _ORDINARY_SEGMENTS:
+        assert paths._check_segment(segment) == replica(segment) == None  # noqa: E711
+
+    for segment in _REJECTED_SEGMENTS:
+        with pytest.raises(UnsafePath) as real_exc:
+            paths._check_segment(segment)
+        with pytest.raises(UnsafePath) as replica_exc:
+            replica(segment)
+        assert str(real_exc.value) == str(replica_exc.value), (
+            "копия _check_segment разошлась с настоящей функцией на обычном входе"
+        )
+
+
+@pytest.mark.parametrize(
+    "replica",
+    [
+        _check_segment_without_traversal_and_trailing_dot,
+        _check_segment_without_traversal_only,
+        _check_segment_without_trailing_dot_only,
+    ],
+)
+def test_the_check_segment_replicas_agree_with_the_real_function_on_ordinary_input(replica):
+    _assert_check_segment_replica_matches_the_real_thing(replica)
+
+
+_ORDINARY_PATHS = ["Photos/img.jpg", "a", "under_score/name.ext", "notes.txt"]
+_REJECTED_PATHS = ["", "../evil.exe", "C:evil.exe", "NUL", "a" * (paths.MAX_PATH_UTF16 + 1)]
+
+
+def test_the_sanitize_relative_path_replica_agrees_with_the_real_function_on_ordinary_input():
+    for raw in _ORDINARY_PATHS:
+        assert sanitize_relative_path(raw) == _sanitize_relative_path_without_string_check(raw)
+
+    for raw in _REJECTED_PATHS:
+        with pytest.raises(UnsafePath) as real_exc:
+            sanitize_relative_path(raw)
+        with pytest.raises(UnsafePath) as replica_exc:
+            _sanitize_relative_path_without_string_check(raw)
+        assert str(real_exc.value) == str(replica_exc.value), (
+            "копия sanitize_relative_path разошлась с настоящей функцией на обычном входе"
+        )
+
+
+def test_the_dict_check_replicas_agree_with_the_real_methods_on_ordinary_input():
+    good_entry = _entry_raw()
+    assert TransferEntry.from_dict(good_entry) == _entry_from_dict_without_dict_check(
+        TransferEntry, good_entry
+    )
+
+    good_skip = {"path": "link", "reason": "reparse_point"}
+    assert SkippedEntry.from_dict(good_skip) == _skipped_from_dict_without_dict_check(
+        SkippedEntry, good_skip
+    )
+
+    good_manifest = _manifest_raw()
+    assert TransferManifest.from_dict(good_manifest) == _manifest_from_dict_without_dict_check(
+        TransferManifest, good_manifest
+    )
+
+    # И на входе, отвергнутом ДРУГОЙ, не снятой здесь проверкой: обе версии
+    # должны отказать одинаково, а не разойтись из-за того, что копия
+    # переписана в другом порядке или что-то потеряла по дороге.
+    bad_kind = _entry_raw(kind="socket")
+    with pytest.raises(ValueError) as real_exc:
+        TransferEntry.from_dict(bad_kind)
+    with pytest.raises(ValueError) as replica_exc:
+        _entry_from_dict_without_dict_check(TransferEntry, bad_kind)
+    assert str(real_exc.value) == str(replica_exc.value)
+
+
+def test_the_list_check_replicas_agree_with_the_real_method_on_ordinary_input():
+    good_manifest = _manifest_raw()
+    for replica in (
+        _manifest_from_dict_without_entries_list_check,
+        _manifest_from_dict_without_skipped_list_check,
+    ):
+        assert TransferManifest.from_dict(good_manifest) == replica(TransferManifest, good_manifest)
+
+    # И на входе, отвергнутом другой, не снятой в этой копии проверкой.
+    bad_skipped = _manifest_raw(skipped={"not": "a list"})
+    with pytest.raises(ValueError) as real_exc:
+        TransferManifest.from_dict(bad_skipped)
+    with pytest.raises(ValueError) as replica_exc:
+        _manifest_from_dict_without_entries_list_check(TransferManifest, bad_skipped)
+    assert str(real_exc.value) == str(replica_exc.value)
+
+    bad_entries = _manifest_raw(entries={"not": "a list"})
+    with pytest.raises(ValueError) as real_exc:
+        TransferManifest.from_dict(bad_entries)
+    with pytest.raises(ValueError) as replica_exc:
+        _manifest_from_dict_without_skipped_list_check(TransferManifest, bad_entries)
+    assert str(real_exc.value) == str(replica_exc.value)

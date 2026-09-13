@@ -74,8 +74,15 @@ def test_a_missing_transfer_id_is_refused():
 
 
 def test_entries_that_are_not_a_list_are_refused():
+    # Значение здесь должно быть кортежем настоящих записей, а не dict и не
+    # строкой: и по dict, и по строке итерация отдаёт не то, что ожидает
+    # TransferEntry.from_dict (ключи и символы соответственно), так что они
+    # проваливаются на ЕГО собственной проверке "raw должен быть dict" - тест
+    # прошёл бы, даже если бы проверки "entries должна быть list" не было
+    # вовсе (Task 1.4 review, fix round 1). Кортеж из настоящих записей
+    # проходит их проверки без изменений и падает только на типе контейнера.
     raw = _manifest().to_dict()
-    raw["entries"] = {"path": "x"}
+    raw["entries"] = tuple(raw["entries"])
 
     with pytest.raises(ValueError):
         TransferManifest.from_dict(raw)
