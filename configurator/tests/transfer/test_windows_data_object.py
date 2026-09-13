@@ -18,12 +18,16 @@ from duo_input.transfer.windows_com import (
     DROPEFFECT_COPY,
     DV_E_FORMATETC,
     DV_E_TYMED,
+    E_FAIL,
     S_FALSE,
     S_OK,
     TYMED_HGLOBAL,
     TYMED_ISTREAM,
+    call_enum_format_etc_pointer,
     call_get_data,
+    call_get_data_medium,
     call_query_get_data,
+    call_stream_stat,
     register_clipboard_format,
 )
 from duo_input.transfer.windows_files import (
@@ -117,11 +121,22 @@ def _async_pointer(obj):
 
 
 def _enumerator_pointer(obj):
-    """Указатель на перечислитель, выданный через COM, а не собранный вручную."""
-    from duo_input.transfer.windows_com import call_enum_format_etc
+    """Указатель из out-параметра EnumFormatEtc - ровно то, что видит Проводник.
 
-    call_enum_format_etc(obj.pointer, DATADIR_GET)
-    return obj._enumerators[-1].pointer
+    Брать его из obj._enumerators значило бы держать на объект живую ссылку
+    из Python и потом проверять, что он пережил сборку мусора: такая
+    проверка не может провалиться.
+    """
+    _result, pointer = call_enum_format_etc_pointer(obj.pointer, DATADIR_GET)
+    return pointer
+
+
+def _stream_pointer(obj, lindex):
+    """Указатель на IStream из STGMEDIUM - тоже без ссылок из Python."""
+    result, medium = call_get_data_medium(
+        obj.pointer, register_clipboard_format(FORMAT_CONTENTS_NAME), lindex, TYMED_ISTREAM
+    )
+    return result, ctypes.c_void_p(medium.data)
 
 
 def _drain(enum_pointer) -> list[int]:
@@ -254,15 +269,45 @@ def test_a_negative_contents_index_is_refused(data_object):
 def test_the_stream_is_held_so_python_cannot_collect_it_under_explorer(data_object):
     # Собранный сборщиком мусора поток - это переход Проводника по
     # освобождённому адресу: падение без исключения и без записи в журнал.
+    #
+    # Указатель берётся ИЗ STGMEDIUM, как его берёт Проводник: живой ссылки
+    # на объект Python у теста нет, поэтому после gc.collect() он жив только
+    # если его держит сам объект данных. Проверка через obj.streams[1]
+    # держала бы его тем самым обращением, которым проверяет.
     obj, *_ = data_object
-    cf, _lindex, _tymed = _fmt(obj, FORMAT_CONTENTS_NAME)
-    call_get_data(obj.pointer, cf, 1, TYMED_ISTREAM, want_medium=True)
+    result, stream_pointer = _stream_pointer(obj, 1)
+    assert result == S_OK
 
     import gc
 
     gc.collect()
 
-    assert obj.streams[1].pointer.value is not None
+    # Stat по указателю - тот же путь, которым Проводник спрашивает размер.
+    size, answer = call_stream_stat(stream_pointer)
+    assert (answer, size) == (S_OK, 8)
+
+
+def test_a_second_ask_for_the_same_entry_does_not_free_the_first_stream(data_object):
+    # Словарь .streams ключуется по lindex: второй GetData по тому же
+    # индексу (вторая вставка из того же объекта буфера, повтор оболочки)
+    # вытеснил бы из него первый поток, а вместе с ним и единственную
+    # ссылку на его vtable - под указателем, который у Проводника ещё в
+    # руках.
+    obj, *_ = data_object
+    first_result, first_pointer = _stream_pointer(obj, 1)
+    second_result, second_pointer = _stream_pointer(obj, 1)
+
+    assert (first_result, second_result) == (S_OK, S_OK)
+    assert first_pointer.value != second_pointer.value, "второй GetData обязан дать новый поток"
+
+    import gc
+
+    gc.collect()
+
+    assert call_stream_stat(first_pointer) == (8, S_OK)
+    assert call_stream_stat(second_pointer) == (8, S_OK)
+    # .streams остаётся картой "последний поток по индексу".
+    assert obj.streams[1].pointer.value == second_pointer.value
 
 
 def test_releasing_a_stream_tells_the_owner_which_entry_finished(data_object):
@@ -438,6 +483,9 @@ def test_the_enumerator_is_not_cloned_without_somewhere_to_put_it(data_object):
 
 
 def test_the_enumerator_is_held_so_python_cannot_collect_it_under_explorer(data_object):
+    # Как и у потока: указатель получен из out-параметра, ссылки из Python
+    # на перечислитель нет, и уцелеть после сборки он может только потому,
+    # что его держит объект данных.
     obj, *_ = data_object
     enum_pointer = _enumerator_pointer(obj)
 
@@ -446,7 +494,12 @@ def test_the_enumerator_is_held_so_python_cannot_collect_it_under_explorer(data_
     gc.collect()
 
     _slot(enum_pointer, _RESET, _ENUM_RESET)(enum_pointer)
-    assert _drain(enum_pointer) == [cf for cf, _lindex, _tymed in obj._advertised()]
+    assert _drain(enum_pointer) == [
+        register_clipboard_format(FORMAT_DESCRIPTOR_NAME),
+        register_clipboard_format(FORMAT_CONTENTS_NAME),
+        register_clipboard_format(FORMAT_DROP_EFFECT_NAME),
+        register_clipboard_format(FORMAT_ORIGIN_NAME),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -548,11 +601,60 @@ def test_ending_the_operation_hands_the_owner_the_shells_hresult(data_object):
     assert obj.in_operation is False
 
 
+def test_an_owner_whose_open_pipe_fails_is_reported_to_the_shell():
+    # Чужой код зовётся из обратного вызова ctypes: исключение оттуда
+    # печатается в stderr, а COM получает 0, то есть S_OK. Проводник пошёл
+    # бы читать STGMEDIUM, которого никто не заполнил.
+    def open_pipe(_transfer_id, _entry_index):
+        raise RuntimeError("передача уже разобрана")
+
+    obj = VirtualFilesDataObject(
+        _manifest(),
+        open_pipe=open_pipe,
+        request_read=lambda *args: None,
+        close_pipe=lambda *args: None,
+        origin_marker=b"origin:1",
+    )
+
+    result, medium = call_get_data_medium(
+        obj.pointer, register_clipboard_format(FORMAT_CONTENTS_NAME), 1, TYMED_ISTREAM
+    )
+
+    assert result == E_FAIL
+    assert medium.tymed == 0, "отказавший GetData не смеет объявлять носитель"
+    assert obj.streams == {}
+    assert isinstance(obj.last_open_error, RuntimeError)
+
+
+def test_an_owner_whose_completion_hook_fails_does_not_take_the_shell_with_it(data_object):
+    # Та же ловушка с другой стороны: упавший обработчик вернул бы оболочке
+    # 0 (S_OK) и молча потерял бы единственный сигнал о завершении.
+    obj, *_ = data_object
+
+    def boom(_result):
+        raise RuntimeError("владелец упал")
+
+    obj.on_operation_finished = boom
+    _result, pointer = _async_pointer(obj)
+    _slot(pointer, _ASYNC_START, _START_OP)(pointer, None)
+
+    answer = _slot(pointer, _ASYNC_END, _END_OP)(pointer, 0, None, 1)
+
+    assert answer == S_OK
+    assert obj.in_operation is False
+    assert isinstance(obj.last_operation_error, RuntimeError)
+
+
 def test_ending_the_operation_without_an_owner_hook_is_not_a_crash():
     # Вызов делается напрямую, а не через vtable: исключение из обратного
-    # вызова ctypes печатается в stderr, а COM всё равно получает 0, то есть
-    # S_OK. Проверка через vtable осталась бы зелёной с удалённой защитой и
-    # не проверяла бы ничего.
+    # вызова ctypes печатается в stderr, а COM получает неопределённое
+    # значение (наблюдалось положительное, то есть успех по правилу
+    # SUCCEEDED). Проверка через vtable осталась бы зелёной с удалённой
+    # защитой и не проверяла бы ничего.
     obj, *_ = _make()
 
     assert obj._end_operation(None, 0, None, 1) == S_OK
+    # И это НЕ ошибка владельца: обработчика просто нет. Без проверки на
+    # None его отсутствие попало бы в поле ошибок как TypeError - владелец
+    # увидел бы отказ там, где ничего не случилось.
+    assert obj.last_operation_error is None

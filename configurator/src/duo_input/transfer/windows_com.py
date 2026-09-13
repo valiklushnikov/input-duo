@@ -380,10 +380,28 @@ def call_query_get_data(pointer, cf_format: int, lindex: int, tymed: int) -> int
     return _slot(pointer, 5, _QUERY_GET_DATA)(pointer, ctypes.byref(fmt))
 
 
+def call_get_data_medium(
+    pointer, cf_format: int, lindex: int, tymed: int
+) -> tuple[int, STGMEDIUM]:
+    """Call IDataObject::GetData through vtable slot 3, returning the medium.
+
+    Сам STGMEDIUM нужен тому, кто получает интерфейс: у TYMED_ISTREAM в
+    ``medium.data`` лежит указатель на IStream, и держать его в руках -
+    единственный способ проверить, что отданный объект ещё жив. Копия байтов
+    из HGLOBAL для этого не годится: она переживает свой источник.
+    """
+    fmt = FORMATETC(cf_format, None, DVASPECT_CONTENT, lindex, tymed)
+    medium = STGMEDIUM()
+    result = _slot(pointer, 3, _GET_DATA)(
+        pointer, ctypes.byref(fmt), ctypes.byref(medium)
+    )
+    return result, medium
+
+
 def call_get_data(
     pointer, cf_format: int, lindex: int, tymed: int, want_medium: bool = False
 ):
-    """Call IDataObject::GetData through vtable slot 3.
+    """Call IDataObject::GetData and read an HGLOBAL medium back.
 
     Возвращает ``(hresult, payload)``, а при ``want_medium`` -
     ``(hresult, medium.tymed, payload)``.
@@ -392,11 +410,7 @@ def call_get_data(
     ``medium.data`` лежит указатель на интерфейс, и чтение его как памяти
     отдало бы vtable вместо содержимого файла.
     """
-    fmt = FORMATETC(cf_format, None, DVASPECT_CONTENT, lindex, tymed)
-    medium = STGMEDIUM()
-    result = _slot(pointer, 3, _GET_DATA)(
-        pointer, ctypes.byref(fmt), ctypes.byref(medium)
-    )
+    result, medium = call_get_data_medium(pointer, cf_format, lindex, tymed)
     payload = b""
     if medium.tymed == TYMED_HGLOBAL and medium.data:
         payload = from_hglobal(medium.data)
@@ -411,16 +425,30 @@ def call_get_data(
 _ENUM_BATCH = 16
 
 
-def call_enum_format_etc(pointer, direction: int) -> tuple[int, list[int]]:
-    """Call IDataObject::EnumFormatEtc through slot 8 and drain the enumerator.
+def call_enum_format_etc_pointer(
+    pointer, direction: int
+) -> tuple[int, ctypes.c_void_p]:
+    """Call IDataObject::EnumFormatEtc through slot 8 and keep the enumerator.
 
-    Возвращает ``(hresult, [cfFormat, ...])``. При отказе список пуст: у
-    перечислителя, которого не выдали, нечего перечислять.
+    Указатель из out-параметра - это ровно то, что получает Проводник, и
+    единственный способ говорить с перечислителем, не держа на него ссылки
+    из Python. Тот, кто достаёт объект из списка его владельца, проверяет
+    список, а не время жизни.
     """
     enumerator = ctypes.c_void_p()
     result = _slot(pointer, 8, _ENUM_FORMAT_ETC)(
         pointer, direction, ctypes.byref(enumerator)
     )
+    return result, enumerator
+
+
+def call_enum_format_etc(pointer, direction: int) -> tuple[int, list[int]]:
+    """Call IDataObject::EnumFormatEtc and drain the enumerator it returns.
+
+    Возвращает ``(hresult, [cfFormat, ...])``. При отказе список пуст: у
+    перечислителя, которого не выдали, нечего перечислять.
+    """
+    result, enumerator = call_enum_format_etc_pointer(pointer, direction)
     if result != S_OK or not enumerator:
         return result, []
 

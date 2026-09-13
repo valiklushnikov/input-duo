@@ -15,6 +15,7 @@ Manifest paths use ``/`` on the wire.  Windows Explorer expects ``\\`` in
 from __future__ import annotations
 
 import ctypes
+import logging
 from collections.abc import Callable
 from ctypes import wintypes
 
@@ -50,6 +51,7 @@ from .windows_com import (
     DV_E_FORMATETC,
     DV_E_TYMED,
     DVASPECT_CONTENT,
+    E_FAIL,
     E_NOTIMPL,
     E_POINTER,
     FD_ATTRIBUTES,
@@ -78,6 +80,8 @@ from .windows_com import (
     same_guid,
     to_hglobal,
 )
+
+logger = logging.getLogger(__name__)
 
 _FILE_ATTRIBUTE_NORMAL = 0x80
 
@@ -238,9 +242,13 @@ class VirtualFilesDataObject(ComObject):
         self.in_operation = False
         #: Владелец подставляет сюда свой обработчик завершения сессии.
         self.on_operation_finished: Callable[[int], None] | None = None
-        #: lindex -> PipeStream. Держит поток живым: собранный сборщиком мусора
-        #: поток - это переход Проводника по освобождённому адресу.
+        #: lindex -> последний выданный по этому индексу PipeStream.
         self.streams: dict[int, PipeStream] = {}
+        #: ВСЕ выданные потоки, по порядку. Словарь выше хранит по одному на
+        #: индекс, и второй GetData по тому же lindex вытеснил бы из него
+        #: предыдущий поток - то есть освободил бы его, пока указатель на
+        #: него ещё у Проводника. Здесь не вытесняется ничего.
+        self._retained_streams: list[PipeStream] = []
         #: Для диагностики: что и в каком порядке спросил Проводник.
         self.get_data_calls: list[tuple[int, int]] = []
         self._enumerators: list[FormatEnumerator] = []
@@ -248,6 +256,11 @@ class VirtualFilesDataObject(ComObject):
         #: (ReleaseStgMedium освободит их), поэтому список - это запись о
         #: выданном для диагностики, а не право что-то из него освободить.
         self._handles: list[int] = []
+        #: Исключение из open_pipe, для владельца: GetData возвращает HRESULT,
+        #: а не поднимает его.
+        self.last_open_error: BaseException | None = None
+        #: То же для on_operation_finished - как last_release_error в базе.
+        self.last_operation_error: BaseException | None = None
         self._async: _AsyncCapability | None = None
         self._async_iid = None
 
@@ -362,7 +375,20 @@ class VirtualFilesDataObject(ComObject):
         entry = descriptor_entries(self._manifest)[index]
 
         transfer_id = self._manifest.transfer_id
-        pipe = self._open_pipe(transfer_id, index)
+        try:
+            # Чужой код в обратном вызове ctypes: исключение отсюда было бы
+            # напечатано в stderr, а COM получил бы неопределённое значение -
+            # измерено положительное, то есть успех по правилу SUCCEEDED, -
+            # и Проводник пошёл бы читать STGMEDIUM, который никто не
+            # заполнял. Владелец узнаёт причину из last_open_error,
+            # оболочка - из HRESULT.
+            pipe = self._open_pipe(transfer_id, index)
+        except BaseException as error:  # noqa: BLE001 - см. ComObject._release
+            self.last_open_error = error
+            logger.warning(
+                "open_pipe отказал для записи %d: %s", index, type(error).__name__
+            )
+            return E_FAIL
         stream = PipeStream(
             pipe,
             size=entry.size,
@@ -372,6 +398,7 @@ class VirtualFilesDataObject(ComObject):
             on_release=lambda i=index: self._close_pipe(transfer_id, i, None),
         )
         self.streams[index] = stream
+        self._retained_streams.append(stream)
         medium.tymed = TYMED_ISTREAM
         medium.data = stream.pointer
         return S_OK
@@ -442,9 +469,19 @@ class VirtualFilesDataObject(ComObject):
     def _end_operation(self, _this, result, _reserved, _effects) -> int:
         self.in_operation = False
         if self.on_operation_finished is not None:
-            # Источник истины о завершении сессии - тот, что записал спайк 1
-            # (спека §9). НЕ переопределяйте его из этого плана.
-            self.on_operation_finished(int(result))
+            try:
+                # Источник истины о завершении сессии - тот, что записал спайк 1
+                # (спека §9). НЕ переопределяйте его из этого плана.
+                self.on_operation_finished(int(result))
+            except BaseException as error:  # noqa: BLE001 - см. ComObject._release
+                # Ровно как у хука последнего Release: чужая ошибка не
+                # выходит через ctypes (там она стала бы неопределённым
+                # кодом возврата, измеренно положительным - успехом), а
+                # достаётся владельцу из поля.
+                self.last_operation_error = error
+                logger.warning(
+                    "обработчик завершения операции упал: %s", type(error).__name__
+                )
         return S_OK
 
 
