@@ -32,6 +32,11 @@ SHARED_MODULES = [
     "duo_input.transfer.paths",
     "duo_input.transfer.pipe",
     "duo_input.transfer.scanner",
+    # windows_com живёт не по обе стороны барьера, а прямо на COM-стороне, и
+    # запрет на Qt для него не мягче, а строже: его код исполняется В
+    # COM-потоке. Канонический boundary-тест для COM-модулей - задача 2.6;
+    # здесь модуль стоит с первого дня, чтобы запрет работал уже сейчас.
+    "duo_input.transfer.windows_com",
 ]
 
 
