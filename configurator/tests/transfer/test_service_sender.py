@@ -200,8 +200,15 @@ def test_a_second_copy_gets_its_own_transfer_id(sender, tmp_path):
     assert first != second
 
 
-def test_a_transfer_end_releases_the_snapshot_and_its_descriptor(sender, tmp_path):
-    service, _link = sender
+def test_a_transfer_end_closes_descriptors_but_keeps_the_snapshot_for_a_repeat_paste(sender, tmp_path):
+    """Спека §1016-1018 (сценарий 3), §537, §1013: повторный Ctrl+V - не новая
+    передача, а новые чтения ТОГО ЖЕ манифеста; отдельного отказа
+    "дублирующийся transfer_id" не существует. TRANSFER_END поэтому обязан
+    закрыть дескрипторы (снять блокировку на удаление, спека §15) и НЕ
+    трогать сам снимок - иначе вторая сессия того же transfer_id получила бы
+    "снимок неизвестен" вместо новых чтений.
+    """
+    service, link = sender
     source = tmp_path / "a.bin"
     source.write_bytes(b"0123456789")
     transfer_id = service.offer_local_files([source])
@@ -211,8 +218,26 @@ def test_a_transfer_end_releases_the_snapshot_and_its_descriptor(sender, tmp_pat
         Message(MessageType.TRANSFER_END, {"transfer_id": transfer_id, "session_id": "s-1", "status": "completed"}, b"")
     )
 
-    assert transfer_id not in service.snapshots.transfer_ids
-    os.remove(source)
+    # Дескриптор закрыт - никто больше не "обслуживает" эту запись...
+    assert service.snapshots.serving == frozenset()
+    # ...но снимок остаётся в реестре, а не удалён вместе с манифестом.
+    assert transfer_id in service.snapshots.transfer_ids
+
+    # Вторая сессия того же transfer_id - настоящий повторный Ctrl+V - обязана
+    # снова читать, а не получать отказ.
+    service.handle_message(_read(transfer_id, offset=0, length=2))
+    chunks = _sent(link, MessageType.FILE_CHUNK)
+    assert chunks[-1].blob == b"01"
+    assert not _sent(link, MessageType.FILE_ERROR)
+
+    # Вторая сессия тоже заканчивается своим TRANSFER_END (у каждой вставки -
+    # свой EndOperation), и это тоже обязано закрыть дескриптор, а не оставить
+    # файл заблокированным до конца жизни процесса.
+    service.handle_message(
+        Message(MessageType.TRANSFER_END, {"transfer_id": transfer_id, "session_id": "s-2", "status": "completed"}, b"")
+    )
+    assert service.snapshots.serving == frozenset()
+    os.remove(source)  # не бросает: обе сессии закрыли свои дескрипторы
 
 
 def test_a_copy_during_an_active_transfer_does_not_release_the_earlier_snapshot(sender, tmp_path):

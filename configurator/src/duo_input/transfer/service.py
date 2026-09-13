@@ -218,9 +218,20 @@ class FileTransferService(QObject):
         )
 
     def _on_transfer_end(self, message: Message) -> None:
+        """Сессия закончена, но не обязательно предложение.
+
+        release() удалил бы весь снимок - манифест и всё - что противоречит
+        сценарию 3 спеки (§1016-1018): повторный Ctrl+V - не новая передача,
+        а новые чтения того же манифеста, и никакого отказа
+        "дублирующийся transfer_id" быть не должно. close_descriptors()
+        отпускает файловые дескрипторы (снимая блокировку на удаление,
+        спека §15), не трогая сам снимок - следующее чтение того же
+        transfer_id откроет его заново лениво и застанет либо тот же файл,
+        либо SourceChanged, если он успел измениться.
+        """
         transfer_id = message.header.get("transfer_id")
         if isinstance(transfer_id, str):
-            self._snapshots.release(transfer_id)
+            self._snapshots.close_descriptors(transfer_id)
 
     @property
     def state(self) -> TransferState:
