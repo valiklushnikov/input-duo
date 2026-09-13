@@ -9,12 +9,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from unittest.mock import MagicMock
 
 import pytest
-from PySide6.QtCore import QMimeData, QObject, QUrl, Signal
+from PySide6.QtCore import QByteArray, QMimeData, QObject, QUrl, Signal
 
 from duo_input.clipboard.backend import ORIGIN_MIME, ClipboardSnapshot
 from duo_input.clipboard.offer import MAX_CONTENT_BYTES, ClipboardOffer, ContentDescriptor
 from duo_input.clipboard.windows_backend import (
     DEBOUNCE_MS,
+    PRIVATE_MARKERS,
     RETRY_LIMIT,
     WindowsClipboardBackend,
     is_private,
@@ -393,3 +394,51 @@ class TestWindowsClipboardBackendIdempotence:
         backend.start()
         backend.stop()
         backend.stop()  # Не должно быть ошибки
+
+
+def test_a_file_only_copy_produces_a_snapshot_carrying_the_paths(qapp, tmp_path):
+    source = tmp_path / "notes.txt"
+    source.write_bytes(b"x")
+    mime_data = QMimeData()
+    mime_data.setUrls([QUrl.fromLocalFile(str(source))])
+
+    snapshot = snapshot_from(mime_data)
+
+    assert snapshot.payloads == {}
+    assert snapshot.file_paths == (str(source),)
+
+
+def test_a_file_only_copy_is_emitted_rather_than_retried_into_silence(qapp, tmp_path):
+    # До этой правки _take_snapshot возвращался на `not snapshot.payloads`,
+    # трижды пробовал заново и замолкал: копирование файла не порождало
+    # ни одного события.
+    source = tmp_path / "notes.txt"
+    source.write_bytes(b"x")
+    clipboard = qapp.clipboard()
+    mime_data = QMimeData()
+    mime_data.setUrls([QUrl.fromLocalFile(str(source))])
+    clipboard.setMimeData(mime_data)
+    backend = WindowsClipboardBackend(clipboard)
+    taken: list[object] = []
+    backend.snapshot_taken.connect(taken.append)
+
+    backend._take_snapshot()
+
+    assert taken, "снимок с файлами и без payload не был объявлен вовсе"
+    assert taken[0].file_paths == (str(source),)
+
+
+def test_a_private_clipboard_reports_neither_payloads_nor_paths(qapp, tmp_path):
+    source = tmp_path / "secret.txt"
+    source.write_bytes(b"x")
+    mime_data = QMimeData()
+    mime_data.setUrls([QUrl.fromLocalFile(str(source))])
+    mime_data.setData(PRIVATE_MARKERS[0], QByteArray(b"0"))
+
+    snapshot = snapshot_from(mime_data)
+
+    assert snapshot.payloads == {}
+    assert snapshot.file_paths == (), (
+        "маркер приватности обошёл путь файлов - менеджер паролей, "
+        "копирующий файл, отправил бы его"
+    )

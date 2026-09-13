@@ -10,6 +10,7 @@ uri-list, - наружу уходит канонический вид: PNG дл�
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QIODevice, QMimeData
 from PySide6.QtGui import QImage, QPixmap
@@ -36,6 +37,40 @@ def web_uri_list(mime_data: QMimeData) -> bytes | None:
     if not urls:
         return None
     return b"\r\n".join(bytes(url.toEncoded()) for url in urls) + b"\r\n"
+
+
+def local_file_paths(mime_data: QMimeData) -> tuple[str, ...]:
+    """Локальные пути скопированного, отдельным каналом от синхронизируемых форматов.
+
+    Отдельным - и это не мелочь. web_uri_list() вырезает file:// намеренно и
+    должен продолжать: путь, приехавший с другой машины, здесь указывал бы в
+    пустоту. Поэтому пути идут своим каналом, а не возвращаются в
+    text/uri-list.
+
+    Порядок сохраняется тот, в котором их дал Проводник: пользователь выделял
+    файлы в каком-то порядке, и менять его без причины незачем.
+
+    Путь пропускается через ``str(Path(...))``, а не отдаётся как вернул Qt.
+    ``toLocalFile()`` всегда пишет "/", тогда как весь остальной код этого
+    репозитория говорит на pathlib/os.path и пишет "\\". Не мелочь: одна и
+    та же папка, дошедшая сюда и куда-то ещё в двух разных написаниях, потом
+    сравнивается как два разных пути - тот же класс дефекта, что коллизии
+    NFC/NFD Юникода в задачах 1.2 и 1.3, только на уровне разделителя, а не
+    кодировки символа.
+
+    ``url.toLocalFile()`` может вернуть пустую строку, даже когда
+    ``isLocalFile()`` истинно - так ведёт себя вырожденный
+    ``QUrl("file://")``. Без явной проверки на пустоту ``str(Path(""))``
+    тихо подставил бы "." - текущий рабочий каталог процесса, который потом
+    ушёл бы дальше как путь пользователя, в сканер дерева файлов.
+    """
+    if not mime_data.hasUrls():
+        return ()
+    return tuple(
+        str(Path(local_path))
+        for url in mime_data.urls()
+        if url.isLocalFile() and (local_path := url.toLocalFile())
+    )
 
 
 def png_bytes(mime_data: QMimeData) -> bytes | None:
@@ -102,6 +137,7 @@ def collect_payloads(mime_data: QMimeData) -> dict[str, bytes]:
 __all__ = [
     "SYNCED_MIMES",
     "collect_payloads",
+    "local_file_paths",
     "normalized_payload",
     "png_bytes",
     "web_uri_list",

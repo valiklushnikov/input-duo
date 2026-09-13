@@ -38,13 +38,27 @@ def base_mime(mime_type: str) -> str:
 
 
 class ClipboardSnapshot:
-    """Локальный снимок буфера: что скопировали на этой машине."""
+    """Локальный снимок буфера: что скопировали на этой машине.
 
-    def __init__(self, payloads: dict[str, bytes]) -> None:
+    ``file_paths`` пуст почти всегда - он непуст ровно тогда, когда
+    скопировали файлы в Проводнике. Снимок может нести пути и НЕ нести ни
+    одного payload: копирование файла не даёт синхронизируемых форматов
+    вовсе, потому что file:// из text/uri-list вырезается намеренно.
+    """
+
+    def __init__(
+        self, payloads: dict[str, bytes], file_paths: tuple[str, ...] = ()
+    ) -> None:
         self.payloads = dict(payloads)
+        self.file_paths = tuple(file_paths)
 
     def payload(self, mime: str) -> bytes | None:
         return self.payloads.get(mime)
+
+    @property
+    def is_empty(self) -> bool:
+        """Нечего ни объявлять, ни передавать."""
+        return not self.payloads and not self.file_paths
 
 
 class RemoteMimeData(QMimeData):

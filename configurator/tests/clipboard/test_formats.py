@@ -11,6 +11,7 @@ from PySide6.QtGui import QImage
 
 from duo_input.clipboard.formats import (
     collect_payloads,
+    local_file_paths,
     normalized_payload,
     png_bytes,
     web_uri_list,
@@ -104,3 +105,53 @@ def test_collect_payloads_enforces_the_ceiling_after_normalisation():
     data.setData("text/plain", b"x" * (MAX_CONTENT_BYTES + 1))
 
     assert collect_payloads(data) == {}
+
+
+def test_local_files_are_reported_separately_from_web_links(qapp, tmp_path):
+    source = tmp_path / "notes.txt"
+    source.write_bytes(b"x")
+    mime_data = QMimeData()
+    mime_data.setUrls([QUrl.fromLocalFile(str(source)), QUrl("https://example.com/a")])
+
+    assert local_file_paths(mime_data) == (str(source),)
+
+
+def test_web_links_still_exclude_local_files_from_the_synced_uri_list(qapp, tmp_path):
+    # formats.py:35 вырезает file:// намеренно, и должен продолжать: путь с
+    # другой машины здесь был бы несуществующим.
+    source = tmp_path / "notes.txt"
+    source.write_bytes(b"x")
+    mime_data = QMimeData()
+    mime_data.setUrls([QUrl.fromLocalFile(str(source)), QUrl("https://example.com/a")])
+
+    assert collect_payloads(mime_data)["text/uri-list"] == b"https://example.com/a\r\n"
+
+
+def test_a_clipboard_with_only_local_files_syncs_no_payload_at_all(qapp, tmp_path):
+    source = tmp_path / "notes.txt"
+    source.write_bytes(b"x")
+    mime_data = QMimeData()
+    mime_data.setUrls([QUrl.fromLocalFile(str(source))])
+
+    assert collect_payloads(mime_data) == {}
+    assert local_file_paths(mime_data) == (str(source),)
+
+
+def test_no_urls_means_no_local_files(qapp):
+    mime_data = QMimeData()
+    mime_data.setText("plain")
+
+    assert local_file_paths(mime_data) == ()
+
+
+def test_a_degenerate_file_url_with_no_path_contributes_nothing(qapp, tmp_path):
+    # QUrl("file://") сообщает isLocalFile() == True, но toLocalFile() == "".
+    # Без отдельной проверки на пустоту str(Path("")) тихо подставил бы "." -
+    # рабочий каталог процесса - и он ушёл бы в сканер дерева файлов как путь
+    # пользователя.
+    source = tmp_path / "notes.txt"
+    source.write_bytes(b"x")
+    mime_data = QMimeData()
+    mime_data.setUrls([QUrl("file://"), QUrl.fromLocalFile(str(source))])
+
+    assert local_file_paths(mime_data) == (str(source),)

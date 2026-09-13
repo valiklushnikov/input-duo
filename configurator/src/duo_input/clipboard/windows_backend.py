@@ -20,7 +20,7 @@ import logging
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from .backend import ORIGIN_MIME, ClipboardSnapshot, ContentFetcher, RemoteMimeData
-from .formats import SYNCED_MIMES, collect_payloads
+from .formats import SYNCED_MIMES, collect_payloads, local_file_paths
 from .offer import ClipboardOffer
 
 logger = logging.getLogger(__name__)
@@ -46,10 +46,14 @@ def is_private(formats: list[str]) -> bool:
 
 
 def snapshot_from(mime_data) -> ClipboardSnapshot:
-    """Взять из буфера то, что мы умеем синхронизировать, и ничего сверх."""
+    """Взять из буфера то, что мы умеем синхронизировать и передавать.
+
+    Маркер приватности гасит и payload, и пути: менеджер паролей, положивший
+    в буфер файл, не должен отправить его на вторую машину.
+    """
     if is_private(list(mime_data.formats())):
         return ClipboardSnapshot({})
-    return ClipboardSnapshot(collect_payloads(mime_data))
+    return ClipboardSnapshot(collect_payloads(mime_data), local_file_paths(mime_data))
 
 
 class WindowsClipboardBackend(QObject):
@@ -108,11 +112,15 @@ class WindowsClipboardBackend(QObject):
 
     def _take_snapshot(self) -> None:
         snapshot = snapshot_from(self._clipboard.mimeData())
-        if not snapshot.payloads and self._attempts < RETRY_LIMIT:
+        # is_empty, а не `not payloads`: копирование файлов в Проводнике не
+        # даёт ни одного синхронизируемого формата, поэтому прежнее условие
+        # трижды перечитывало буфер и замолкало - копирование файла не
+        # порождало ни одного события вовсе.
+        if snapshot.is_empty and self._attempts < RETRY_LIMIT:
             self._attempts += 1
             self._debounce.start()
             return
-        if not snapshot.payloads:
+        if snapshot.is_empty:
             return
         self._local = snapshot
         self.snapshot_taken.emit(snapshot)
