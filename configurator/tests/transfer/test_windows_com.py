@@ -106,6 +106,34 @@ def test_the_last_release_fires_the_hook_exactly_once():
 
     call_release(obj.pointer)
     assert released == [1], "хук сработал повторно на уже освобождённом объекте"
+    assert obj.last_release_error is None
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, SystemExit])
+def test_a_raising_release_hook_reports_its_error_without_escaping_ctypes(error_type, monkeypatch):
+    # Removing the catch must fail even if ctypes happens to return zero:
+    # any exception crossing the callback boundary reaches unraisablehook.
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    obj = ComObject([IID_IUNKNOWN])
+    error = error_type("cleanup failed")
+    attempts = []
+
+    def hook():
+        attempts.append(1)
+        raise error
+
+    obj.on_last_release = hook
+
+    result = call_release(obj.pointer)
+
+    assert unraisable == []
+    assert result == 0
+    assert obj.refcount == 0
+    assert obj.last_release_error is error
+    assert call_release(obj.pointer) == 0
+    assert attempts == [1]
+    assert obj.last_release_error is error
 
 
 def test_guid_parses_from_its_braced_string_form():
@@ -143,11 +171,10 @@ def test_a_modification_time_round_trips_into_a_filetime():
     assert combined == (1_577_836_800 + 11_644_473_600) * 10_000_000
 
 
-def test_a_zero_modification_time_does_not_become_a_negative_filetime():
+def test_a_zero_modification_time_has_the_exact_unix_epoch_filetime():
     filetime = filetime_from_ns(0)
 
-    assert filetime.dwHighDateTime >= 0
-    assert filetime.dwLowDateTime >= 0
+    assert (filetime.dwHighDateTime << 32) | filetime.dwLowDateTime == 116_444_736_000_000_000
 
 
 def test_registering_the_same_clipboard_format_twice_returns_the_same_id():

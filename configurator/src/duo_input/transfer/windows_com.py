@@ -261,6 +261,11 @@ class ComObject:
     приложения, и звать чужой код с захваченным замком - это готовый
     взаимоблок.
 
+    Ошибка хука сохраняется в .last_release_error: владелец проверяет её
+    после завершения хука. Даже BaseException не выходит через ctypes:
+    Release обязан вернуть снимок счётчика, а не неопределённый ULONG.
+    Ошибка не повторяет хук; успешный хук оставляет это поле равным None.
+
     Публичный .refcount читается без замка. Это снимок для утверждения в
     тесте или для журнала, а не средство синхронизации.
     """
@@ -272,6 +277,8 @@ class ComObject:
         self._released = False
         #: Вызывается ровно один раз, когда счётчик впервые достигает нуля.
         self.on_last_release = None
+        #: Ошибка очистки для владельца; COM Release не возвращает HRESULT.
+        self.last_release_error: BaseException | None = None
 
         self._callbacks: list = [
             _QUERY_INTERFACE(self._query_interface),
@@ -329,7 +336,10 @@ class ComObject:
             if last:
                 self._released = True
         if last and self.on_last_release is not None:
-            self.on_last_release()
+            try:
+                self.on_last_release()
+            except BaseException as error:
+                self.last_release_error = error
         return remaining
 
 
