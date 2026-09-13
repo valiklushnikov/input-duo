@@ -30,6 +30,39 @@ def deterministic_bytes(size: int, seed: int = 0) -> bytes:
     return bytes((seed + index * 131) & 0xFF for index in range(size))
 
 
+#: Размер одного запроса в drain() (65536). Генератор для стомегабайтного
+#: теста опирается на это же число, чтобы каждый сгенерированный блок
+#: совпадал ровно с одним чанком провода - иначе уникальность блоков ничего
+#: не доказывала бы про перестановку чанков на проводе.
+WIRE_CHUNK_BYTES = 65536
+
+
+def unique_wire_chunk(seed: int, chunk_index: int, length: int = WIRE_CHUNK_BYTES) -> bytes:
+    """`length` детерминированных байт, УНИКАЛЬНЫХ для каждого chunk_index.
+
+    deterministic_bytes(n)[i] = (seed + i*131) & 0xFF имеет период 256, а
+    65536 - точное кратное 256. Значит внутри одного мегабайтного блока все
+    16 чанков по 64 КиБ побайтово совпадают, и то же верно между блоками,
+    если блок просто повторить: перестановка или дублирование чанков на
+    проводе не меняет ни побайтового сравнения, ни sha256 всего файла -
+    измерено на обзоре (задача 1.13, важная находка 1): своп чанка 0 с
+    чанком 500 и полный shuffle всех 1600 чанков дают тот же дигест.
+
+    Линейная формула по модулю 256 не чинится добавкой смещения: 65536 и
+    1048576 сами кратны 256, так что любая аддитивная поправка от
+    chunk_index даёт не больше 256 различимых классов на 1600 чанков -
+    совпадения гарантированы (голубиный принцип). Поэтому здесь не формула,
+    а sha256(seed:chunk_index), растянутый на length байт: разные
+    chunk_index почти наверняка дают разные 32 байта дайджеста (лавинный
+    эффект хэша, а не выравнивание степеней двойки), и это единственное
+    свойство, которое нужно - не криптостойкость, а взаимная
+    неразличимость 1600 конкретных блоков.
+    """
+    digest = hashlib.sha256(f"{seed}:{chunk_index}".encode("ascii")).digest()
+    repeats = -(-length // len(digest))  # ceil без импорта math
+    return (digest * repeats)[:length]
+
+
 @pytest.fixture
 def linked_pair(qtbot, tmp_path):
     """Два сервиса на настоящем TLS-соединении через loopback."""
@@ -136,12 +169,15 @@ def test_a_hundred_megabyte_file_arrives_with_the_digest_it_promised(
 ):
     sender, receiver = linked_pair
     size = 100 * 1024 * 1024
+    chunk_count = size // WIRE_CHUNK_BYTES
     source = tmp_path / "big.bin"
-    block = deterministic_bytes(1024 * 1024)
+    hasher = hashlib.sha256()
     with open(source, "wb") as handle:
-        for _ in range(size // len(block)):
+        for chunk_index in range(chunk_count):
+            block = unique_wire_chunk(0, chunk_index)
             handle.write(block)
-    expected = hashlib.sha256(block * (size // len(block))).hexdigest()
+            hasher.update(block)
+    expected = hasher.hexdigest()
 
     transfer_id = sender.offer_local_files([source])
     qtbot.waitUntil(lambda: receiver.offered_manifest is not None, timeout=5000)
@@ -211,6 +247,10 @@ def test_a_disconnect_midway_wakes_the_blocked_reader(qtbot, linked_pair, tmp_pa
     # Настоящий разрыв, а не вызов приватного обработчика: закрываем сам
     # сокет получателя. attach_link уже подключил его disconnected к
     # _on_link_lost, поэтому это проходит по-настоящему боевой путь.
+    # ._link - приватное поле FileTransferService, и обращение к нему здесь
+    # намеренное: публичного доступа к присоединённой связи сервис не даёт,
+    # а под проверкой находится именно настоящий путь разрыва, а не то, что
+    # у сервиса случайно нашёлся способ до него дотянуться.
     receiver._link.close()
     qtbot.waitUntil(lambda: receiver.state is TransferState.DISCONNECTED, timeout=5000)
 

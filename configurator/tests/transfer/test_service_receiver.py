@@ -16,7 +16,7 @@ from duo_input.clipboard.wire import (
     MessageType,
 )
 from duo_input.transfer.model import ENTRY_DIRECTORY, ENTRY_FILE, TransferEntry, TransferManifest
-from duo_input.transfer.pipe import PipeClosed
+from duo_input.transfer.pipe import PipeClosed, PipeOverflow
 from duo_input.transfer.service import FileTransferService, TransferState
 
 
@@ -112,6 +112,29 @@ def test_opening_a_pipe_moves_to_transferring_and_announces_the_session(receiver
     assert started[0].transfer_id == "t-1"
     [begin] = _sent(link, MessageType.TRANSFER_BEGIN)
     assert begin.header["transfer_id"] == "t-1"
+
+
+def test_the_pipe_open_pipe_returns_refuses_a_second_queued_chunk(receiver):
+    """Пин литерала ChunkPipe(capacity_chunks=1) в open_pipe через поведение.
+
+    test_pipe.py уже доказывает, что ChunkPipe сам отказывает сверх своей
+    настроенной ёмкости (test_pushing_above_capacity_is_refused_rather_
+    than_buffered) - это механизм. Но какую именно ёмкость выбирает СЕРВИС
+    на месте вызова open_pipe, до этого теста не проверял никто: подняв
+    capacity_chunks с 1 до 2 там, весь набор configurator/tests/transfer
+    проходит целиком (измерено при разборе фазы 1.13).
+
+    Тест намеренно трогает только то, что open_pipe уже возвращает и делает,
+    а не переустраивает производственный код ради тестируемости.
+    """
+    service, _link = receiver
+    _deliver_offer(service, _offer())
+    pipe = service.open_pipe("t-1", 1)
+
+    pipe.push(b"first")
+
+    with pytest.raises(PipeOverflow):
+        pipe.push(b"second")
 
 
 def test_requesting_a_read_sends_exactly_one_file_read(receiver):
