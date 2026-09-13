@@ -210,9 +210,9 @@ def test_a_parent_relative_import_climbs_exactly_one_package():
     )
 
 
-def test_an_absolute_import_is_left_exactly_as_written():
-    # Плюс уточнённое имя: `from PySide6.QtWidgets import QWidget` в AST
-    # неотличим от импорта подмодуля, и обе формы попадают в набор.
+def test_an_absolute_import_is_recorded_plain_and_qualified():
+    # `from PySide6.QtWidgets import QWidget` в AST неотличим от импорта
+    # подмодуля, поэтому в набор попадают обе формы имени.
     imported = _imported_modules(FIXTURES / "qt_sibling.py")
 
     assert imported == {"PySide6.QtWidgets", "PySide6.QtWidgets.QWidget"}
@@ -263,15 +263,23 @@ def _transfer_modules() -> list[Path]:
 
 
 def test_the_transfer_package_never_imports_qtwidgets():
-    offenders = {
-        path.name
-        for path in _transfer_modules()
-        if any(name.startswith("PySide6.QtWidgets") for name in _imported_modules(path))
-    }
+    # Обход транзитивный: утверждение здесь - про весь граф, который
+    # вытянет за собой импорт любого модуля transfer/, а не про первую
+    # строку каждого файла. Поэтому в отчёт идёт и сам нарушитель, и то,
+    # через что он до QtWidgets дотянулся.
+    offenders = {}
+    for path in _transfer_modules():
+        reached = sorted(
+            name
+            for name in _transitive_imports(path, SRC_ROOT, "duo_input")
+            if name.startswith("PySide6.QtWidgets")
+        )
+        if reached:
+            offenders[path.name] = reached
 
-    assert offenders == set(), (
+    assert offenders == {}, (
         "transfer/ должен зависеть только от QtCore, иначе его нельзя будет "
-        "вынести в отдельный процесс"
+        f"вынести в отдельный процесс: {offenders}"
     )
 
 
@@ -287,6 +295,10 @@ def test_only_the_windows_adapters_touch_ctypes():
         "ctypes разрешён только в windows_com.py и windows_files.py — вся "
         "нативная грязь должна быть в одном месте"
     )
+    # Проверка намеренно на один уровень: утверждение здесь - "в ЭТОМ файле
+    # нет нативного кода", а не "этот файл ничего нативного не тянет".
+    # Транзитивная версия запретила бы platform_files.py импортировать
+    # windows_files.py, то есть ровно то, ради чего он написан.
 
 
 def test_the_com_module_never_imports_pyside():
