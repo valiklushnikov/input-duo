@@ -234,6 +234,110 @@ def test_progress_counts_the_bytes_that_actually_arrived(receiver):
     assert seen == [(4, 10)]
 
 
+def test_a_chunk_larger_than_the_requested_length_is_discarded(receiver):
+    # Проверка отправителя (service.py:176-177) работает на ЕГО стороне
+    # провода и получателю не гарантия: чужой или неисправный отправитель
+    # мог бы прислать больше, чем мы попросили.
+    service, link = receiver
+    _deliver_offer(service, _offer())
+    pipe = service.open_pipe("t-1", 1)
+    progress: list[tuple[int, int]] = []
+    service.transfer_progress.connect(lambda done, total: progress.append((done, total)))
+    failures: list[str] = []
+    service.transfer_failed.connect(failures.append)
+    service.request_read("t-1", 1, 0, 4)
+
+    service.handle_message(
+        Message(
+            MessageType.FILE_CHUNK,
+            {"transfer_id": "t-1", "entry_index": 1, "offset": 0},
+            b"abcde",
+        )
+    )
+
+    assert service.state is TransferState.TRANSFERRING
+    assert pipe.take(10) == b"", "ответ крупнее запроса дошёл до очереди"
+    assert progress == []
+    assert failures == []
+    # Слот чтения не освобождён: второй request_read всё ещё отклоняется,
+    # как и до повреждённого ответа.
+    service.request_read("t-1", 1, 0, 4)
+    assert len(_sent(link, MessageType.FILE_READ)) == 1
+    # ...а настоящий ответ на тот же запрос по-прежнему его разрешает.
+    service.handle_message(
+        Message(
+            MessageType.FILE_CHUNK,
+            {"transfer_id": "t-1", "entry_index": 1, "offset": 0},
+            b"abcd",
+        )
+    )
+    assert pipe.take(4) == b"abcd"
+    assert progress == [(4, 10)], "отброшенный ответ должен был не прибавить ни байта"
+
+
+def test_a_chunk_past_the_max_chunk_ceiling_is_discarded_and_does_not_inflate_progress(receiver):
+    service, link = receiver
+    _deliver_offer(service, _offer(size=MAX_FILE_CHUNK_BYTES * 2))
+    pipe = service.open_pipe("t-1", 1)
+    progress: list[tuple[int, int]] = []
+    service.transfer_progress.connect(lambda done, total: progress.append((done, total)))
+    failures: list[str] = []
+    service.transfer_failed.connect(failures.append)
+    # На проводе уйдёт не больше MAX_FILE_CHUNK_BYTES - это и есть потолок,
+    # который отправитель обязан соблюдать (request_read кэпает length).
+    service.request_read("t-1", 1, 0, MAX_FILE_CHUNK_BYTES + 1000)
+    [read] = _sent(link, MessageType.FILE_READ)
+    assert read.header["length"] == MAX_FILE_CHUNK_BYTES
+
+    oversized = bytes(MAX_FILE_CHUNK_BYTES + 1)
+    service.handle_message(
+        Message(
+            MessageType.FILE_CHUNK,
+            {"transfer_id": "t-1", "entry_index": 1, "offset": 0},
+            oversized,
+        )
+    )
+
+    assert service.state is TransferState.TRANSFERRING
+    assert pipe.take(len(oversized)) == b""
+    assert progress == []
+    assert failures == []
+    service.request_read("t-1", 1, 0, MAX_FILE_CHUNK_BYTES + 1000)
+    assert len(_sent(link, MessageType.FILE_READ)) == 1
+    service.handle_message(
+        Message(
+            MessageType.FILE_CHUNK,
+            {"transfer_id": "t-1", "entry_index": 1, "offset": 0},
+            b"abcd",
+        )
+    )
+    assert pipe.take(4) == b"abcd"
+    assert progress == [(4, MAX_FILE_CHUNK_BYTES * 2)], "отброшенный чанк раздул прогресс"
+
+
+def test_a_chunk_shorter_than_the_requested_length_is_accepted_as_a_file_tail(receiver):
+    # Короткий непустой ответ - законный хвост файла (последние N < length
+    # байт перед EOF). Пустой блоб - отдельный путь и уже означает EOF; это
+    # не повод сузить правило до того, которое протокол не может выполнить.
+    service, _link = receiver
+    _deliver_offer(service, _offer(size=10))
+    pipe = service.open_pipe("t-1", 1)
+    progress: list[tuple[int, int]] = []
+    service.transfer_progress.connect(lambda done, total: progress.append((done, total)))
+    service.request_read("t-1", 1, 7, 8)
+
+    service.handle_message(
+        Message(
+            MessageType.FILE_CHUNK,
+            {"transfer_id": "t-1", "entry_index": 1, "offset": 7},
+            b"xyz",
+        )
+    )
+
+    assert pipe.take(10) == b"xyz"
+    assert progress == [(3, 10)]
+
+
 def test_a_file_error_fails_the_session_and_closes_the_pipe(receiver):
     service, _link = receiver
     _deliver_offer(service, _offer())
@@ -259,6 +363,31 @@ def test_a_file_error_fails_the_session_and_closes_the_pipe(receiver):
     assert failures == ["source_changed"]
     with pytest.raises(PipeClosed):
         pipe.take(4)
+
+
+@pytest.mark.parametrize("reason", [None, 12, {}, [], ""])
+def test_a_file_error_with_a_malformed_reason_does_not_end_the_session(receiver, reason):
+    # entry_index/offset уже проходят через _index; reason - единственное
+    # поле FILE_ERROR, которое не проверено так же, и чужой тип не должен
+    # завершать сессию строкой "None"/"12"/"{}"/"" в интерфейсе Проводника.
+    service, link = receiver
+    _deliver_offer(service, _offer())
+    pipe = service.open_pipe("t-1", 1)
+    service.request_read("t-1", 1, 0, 4)
+    failures: list[str] = []
+    service.transfer_failed.connect(failures.append)
+
+    service.handle_message(_reply(MessageType.FILE_ERROR, reason=reason))
+
+    assert service.state is TransferState.TRANSFERRING
+    assert failures == []
+    assert _sent(link, MessageType.TRANSFER_END) == []
+    assert pipe.closed_reason is None
+    # Слот чтения не тронут: тот же самый запрос всё ещё разрешается.
+    service.request_read("t-1", 1, 0, 4)
+    assert len(_sent(link, MessageType.FILE_READ)) == 1
+    service.handle_message(_reply())
+    assert pipe.take(4) == b"abcd"
 
 
 def test_losing_the_link_moves_to_disconnected_and_wakes_every_pipe(receiver):

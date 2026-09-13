@@ -75,7 +75,11 @@ class FileTransferService(QObject):
         self._active_transfer_id: str | None = None
         self._active_manifest: TransferManifest | None = None
         self._pipes: dict[tuple[str, int], ChunkPipe] = {}
-        self._in_flight: dict[tuple[str, int], int] = {}
+        #: (transfer_id, entry_index) -> (offset, effective length actually
+        #: sent on the wire in FILE_READ). The length is kept alongside the
+        #: offset so a reply can be checked against what we asked for, not
+        #: just against where it claims to start.
+        self._in_flight: dict[tuple[str, int], tuple[int, int]] = {}
         self._received_bytes = 0
 
     @property
@@ -300,7 +304,8 @@ class FileTransferService(QObject):
             # ней Seek потребовал бы инвалидации устаревших чанков - пласт
             # состояния, который фаза 1 не заводит (спека §8).
             return
-        self._in_flight[key] = offset
+        effective_length = min(length, MAX_FILE_CHUNK_BYTES)
+        self._in_flight[key] = (offset, effective_length)
         self._send(
             Message(
                 MessageType.FILE_READ,
@@ -308,7 +313,7 @@ class FileTransferService(QObject):
                     "transfer_id": transfer_id,
                     "entry_index": entry_index,
                     "offset": offset,
-                    "length": min(length, MAX_FILE_CHUNK_BYTES),
+                    "length": effective_length,
                 },
                 b"",
             )
@@ -331,10 +336,25 @@ class FileTransferService(QObject):
         pipe = self._pipes.get(key)
         if pipe is None:
             return
-        if self._in_flight.get(key) != offset:
+        pending = self._in_flight.get(key)
+        if pending is None or pending[0] != offset:
             # Чанк, которого мы не просили (или просили и передумали после
             # Seek). Отдать его Проводнику значило бы записать байты не туда.
             logger.debug("чанк на смещение %r отброшен как неожидаемый", offset)
+            return
+        _, requested_length = pending
+        if len(message.blob) > requested_length:
+            # Проверка отправителя на MAX_FILE_CHUNK_BYTES (см. _answer_read)
+            # работает на ЕГО стороне провода и нам не гарантия. Слот
+            # чтения остаётся занятым - не освобождён и не удалён - поэтому
+            # настоящий ответ, таймаут потребителя или разрыв связи всё ещё
+            # разрешат этот запрос; освобождать слот здесь означало бы
+            # застрять навсегда, потому что верного ответа больше не ждут.
+            logger.warning(
+                "чанк на %d байт крупнее запрошенных %d - отброшен",
+                len(message.blob),
+                requested_length,
+            )
             return
         del self._in_flight[key]
 
@@ -363,10 +383,18 @@ class FileTransferService(QObject):
             return
         if not isinstance(transfer_id, str):
             return
-        key = (transfer_id, entry_index)
-        if key not in self._pipes or offset != self._in_flight.get(key):
+        reason = message.header.get("reason")
+        if not isinstance(reason, str) or not reason:
+            # entry_index/offset проходят через _index; reason - единственное
+            # поле FILE_ERROR, которое не проверено так же, и чужой тип
+            # (None/число/словарь) или пустая строка не должны заканчивать
+            # сессию текстом "None"/"12"/"{}"/"" в интерфейсе Проводника.
+            logger.debug("ошибка отброшена: reason не непустая строка")
             return
-        reason = str(message.header.get("reason", "unknown"))
+        key = (transfer_id, entry_index)
+        pending = self._in_flight.get(key)
+        if key not in self._pipes or pending is None or offset != pending[0]:
+            return
         self._close_all_pipes(reason)
         self._state = TransferState.FAILED
         self._send_transfer_end("failed")
