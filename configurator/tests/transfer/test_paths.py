@@ -123,6 +123,56 @@ def test_a_trailing_dot_or_space_in_a_segment_is_refused(raw):
         sanitize_relative_path(raw)
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "NUL .txt",
+        "CON .txt",
+        "con .txt",
+        "CONOUT$ .txt",
+        "COM1 .txt",
+        "COM¹ .txt",
+        "LPT³ .txt",
+        "PRN .jpg",
+        "AUX .bin",
+        "NUL   .a",
+        "NUL  ..txt",
+        "NUL . txt",
+        "x/NUL .txt",
+    ],
+)
+def test_a_reserved_device_name_with_a_trailing_space_before_the_extension_is_refused(raw):
+    # segment.split(".", 1)[0] оставляет пробел перед точкой ("NUL " не
+    # равно "NUL"), а проверка "точка/пробел в конце" смотрит только на
+    # segment[-1], то есть на последний символ РАСШИРЕНИЯ - здесь это "t", а
+    # не пробел. Без .rstrip(" ") в сравнении со списком устройств оба
+    # правила проходят мимо. Измерено GetFullPathNameW: "NUL .txt" и все
+    # варианты ниже разбираются как "\\.\NUL" (или соответствующее
+    # устройство) - Windows сам отбрасывает пробел перед расширением при
+    # разборе DOS-имени (см. §11 спецификации и task-1.2-report.md).
+    with pytest.raises(UnsafePath):
+        sanitize_relative_path(raw)
+
+
+def test_a_trailing_space_before_the_extension_is_an_ordinary_filename_form():
+    # Контроль к предыдущему тесту: пробел перед расширением - легитимная
+    # форма имени файла сама по себе, и её нельзя случайно задеть, ужесточая
+    # проверку зарезервированных имён. Измерено GetFullPathNameW и реальным
+    # open(): "ordinary .txt" - обычный путь, не устройство.
+    raw = "ordinary .txt"
+    assert sanitize_relative_path(raw) == raw
+
+
+def test_a_non_breaking_space_before_the_extension_is_not_stripped_and_passes():
+    # .rstrip(" ") должен снимать только ASCII-пробел (U+0020), а не NBSP
+    # (U+00A0): NBSP - обычная буква с точки зрения разбора DOS-имени, а не
+    # часть синтаксиса устройства. Измерено GetFullPathNameW и реальным
+    # open(): "NUL\u00a0.txt" - обычный путь, а не "\\.\NUL". Если бы
+    # .rstrip() снимал NBSP тоже, это имя стало бы ложно отклоняться.
+    raw = "NUL\u00a0.txt"
+    assert sanitize_relative_path(raw) == raw
+
+
 @pytest.mark.parametrize("bad", ["<", ">", ":", '"', "|", "?", "*"])
 def test_characters_windows_forbids_in_a_name_are_refused(bad):
     with pytest.raises(UnsafePath):
@@ -140,13 +190,13 @@ def test_a_null_byte_is_refused():
 
 
 def test_a_lone_surrogate_is_refused_not_raised_as_a_codec_error():
-    # json.loads('{"path": "a\\ud800b"}') hands back a real lone surrogate:
-    # the escape is plain ASCII in the byte stream, so strict UTF-8 decoding
-    # never sees it (see clipboard/wire.py). encode("utf-16-le") then raises
-    # UnicodeEncodeError, not UnsafePath - a caller written as
-    # "except UnsafePath: reject()" would not fail closed on it. The
-    # contract is "canonical form or UnsafePath", so this must be UnsafePath
-    # too, never an uncaught codec error.
+    # json.loads('{"path": "a\\ud800b"}') отдаёт настоящий одинокий суррогат:
+    # экранирование - обычный ASCII в байтовом потоке, и строгое
+    # UTF-8-декодирование его не видит (см. clipboard/wire.py). Дальше
+    # encode("utf-16-le") бросает UnicodeEncodeError, а не UnsafePath - и
+    # вызывающий код вида "except UnsafePath: reject()" не отказал бы
+    # закрыто. Контракт функции - "каноническая форма или UnsafePath", а не
+    # необработанное исключение кодека.
     with pytest.raises(UnsafePath):
         sanitize_relative_path("Photos/a\ud800b.jpg")
 
@@ -228,11 +278,11 @@ def test_a_cyrillic_name_is_allowed_because_only_windows_rules_apply():
     ],
 )
 def test_bidi_overrides_and_isolates_are_refused(bad):
-    # The classic "invoice" + RLO + "gpj.exe" trick: Explorer renders the
-    # name reversed ("invoiceexe.jpg") while the bytes on disk stay exactly
-    # what the sender sent. Measured with a real open() on this machine: the
-    # file is created without error, so nothing else in this module catches
-    # it (see task-1.2-report.md).
+    # Классический трюк "invoice" + RLO + "gpj.exe": Проводник рисует имя
+    # перевёрнутым ("invoiceexe.jpg"), а байты на диске остаются ровно
+    # такими, какими их прислал отправитель. Измерено реальным open() на
+    # этой машине: файл создаётся без ошибки, то есть ничего другого в этом
+    # модуле его не ловит (см. task-1.2-report.md).
     with pytest.raises(UnsafePath):
         sanitize_relative_path(f"invoice{bad}gpj.exe")
 
@@ -242,16 +292,14 @@ def test_bidi_overrides_and_isolates_are_refused(bad):
     [
         "­",  # SOFT HYPHEN
         "​",  # ZERO WIDTH SPACE
-        "‌",  # ZERO WIDTH NON-JOINER
-        "‍",  # ZERO WIDTH JOINER
         "⁠",  # WORD JOINER
         "﻿",  # ZERO WIDTH NO-BREAK SPACE / BOM
     ],
 )
 def test_invisible_characters_are_refused(bad):
-    # Measured with a real open() on this machine: "photo<invisible>.jpg" is
-    # created as an ordinary file - nothing renders differently, but it is a
-    # distinct directory entry from "photo.jpg" (see task-1.2-report.md).
+    # Измерено реальным open() на этой машине: "photo<invisible>.jpg"
+    # создаётся как обычный файл - визуально ничего не меняется, но на
+    # диске это отдельная от "photo.jpg" запись.
     with pytest.raises(UnsafePath):
         sanitize_relative_path(f"photo{bad}.jpg")
 
@@ -259,12 +307,12 @@ def test_invisible_characters_are_refused(bad):
 @pytest.mark.parametrize(
     "bad",
     [
-        "﷐",  # first Arabic Presentation Forms-A noncharacter
-        "﷯",  # last Arabic Presentation Forms-A noncharacter
-        "￾",  # BMP noncharacter
-        "￿",  # BMP noncharacter
-        "\U0001ffff",  # supplementary-plane noncharacter
-        "\U0010ffff",  # last noncharacter of the last plane
+        "﷐",  # первый нехарактер Arabic Presentation Forms-A
+        "﷯",  # последний нехарактер Arabic Presentation Forms-A
+        "￾",  # нехарактер BMP
+        "￿",  # нехарактер BMP
+        "\U0001ffff",  # нехарактер дополнительной плоскости
+        "\U0010ffff",  # последний нехарактер последней плоскости
     ],
 )
 def test_unicode_noncharacters_are_refused(bad):
@@ -273,13 +321,31 @@ def test_unicode_noncharacters_are_refused(bad):
 
 
 def test_an_ordinary_arabic_or_hebrew_name_is_allowed():
-    # The guard against over-blocking matters as much as the ones that
-    # reject: this feature carries filenames from real people, and ordinary
-    # right-to-left letters are not bidi control characters. Measured with a
-    # real open()/remove() round-trip on this machine: both names are
-    # created and removed as ordinary files, same as any ASCII name.
+    # Защита от чрезмерной блокировки важна не меньше отказов: этой функцией
+    # пользуются настоящие люди с настоящими именами файлов, а обычные
+    # право-налево-буквы - не управляющие знаки направления. Измерено
+    # циклом open()/remove() на этой машине: оба имени создаются и
+    # удаляются как обычный файл, как и любое ASCII-имя.
     arabic = "مرحبا.txt"
     hebrew = "שלום.txt"
 
     assert sanitize_relative_path(arabic) == arabic
     assert sanitize_relative_path(hebrew) == hebrew
+
+
+def test_zero_width_joiner_and_non_joiner_are_allowed_because_they_change_shaping():
+    # U+200C (ZWNJ) и U+200D (ZWJ) сознательно исключены из
+    # _INVISIBLE_CHARACTERS (см. paths.py): в отличие от ZWSP/WJ/BOM/SHY они
+    # меняют форму соседних символов, а не только зазор между ними, и это и
+    # есть причина, по которой их печатают. Измерено реальным open() на этой
+    # машине: оба имени создаются как обычный файл.
+    #
+    # ZWJ склеивает составные эмодзи - без него "👨‍👩‍👧.jpg" распался бы на
+    # три отдельных эмодзи вместо одного семейного.
+    family_emoji = "👨‍👩‍👧.jpg"
+    assert sanitize_relative_path(family_emoji) == family_emoji
+
+    # ZWNJ обязателен в персидской орфографии, а не декоративен: "می‌روم"
+    # ("я иду") без ZWNJ читается и пишется иначе.
+    persian = "می‌روم.txt"
+    assert sanitize_relative_path(persian) == persian
