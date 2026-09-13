@@ -756,6 +756,10 @@ RELEASED                   дескрипторы закрыты
 - **изменение той же длины с восстановленным `mtime`** (некоторые инструменты
   так делают намеренно) не обнаруживается. Остаточный риск, названный явно —
   §21, R10.
+- **a same-length write inside one filesystem timestamp tick is undetectable by
+  this chosen `fstat(size, mtime_ns)` design.** Its size and `mtime_ns` can both
+  equal the manifest baseline even though its bytes changed; this is a further
+  honest limitation of change detection, not an immutable-byte guarantee.
 
 ### Отклонённая альтернатива: `FILE_SHARE_READ` без `FILE_SHARE_WRITE`
 
