@@ -7,17 +7,27 @@ the origin marker, and one pipe-backed ``IStream`` per file.
 Manifest paths use ``/`` on the wire.  Windows Explorer expects ``\\`` in
 ``FILEDESCRIPTORW.cFileName``; this module is the single conversion point.
 
-Как и windows_com, этот модуль исполняется В COM-потоке и поэтому не смеет
-видеть Qt - ни прямо, ни через чужой импорт. Правило проверяется
-``test_boundary_shared_modules_stay_qt_free.py``, а не обещано в прозе.
+Здесь же живёт поток STA, который владеет буфером обмена, и
+``post_to_service`` - единственная дорога с него обратно в Qt.
+
+Именно поэтому этот модуль - в отличие от ``windows_com`` - Qt видеть ВПРАВЕ:
+``WindowsFileClipboardBackend`` сам QObject. Настоящий инвариант не "модуль не
+импортирует Qt", а "код, исполняемый в COM-потоке, не трогает Qt напрямую", и
+держит его одна функция: всё, что COM-поток говорит сервису, проходит через
+``post_to_service`` очередью Qt. Прямое обращение к слоту отсюда тронуло бы
+QSslSocket из чужого потока, и дефект проявлялся бы раз в сто запусков.
 """
 
 from __future__ import annotations
 
 import ctypes
 import logging
+import threading
+import time
 from collections.abc import Callable
 from ctypes import wintypes
+
+from PySide6.QtCore import Q_ARG, QMetaObject, QObject, Qt, Signal, Slot
 
 from .model import ENTRY_DIRECTORY, ENTRY_FILE, TransferEntry, TransferManifest
 
@@ -485,13 +495,372 @@ class VirtualFilesDataObject(ComObject):
         return S_OK
 
 
+# ===================================================== поток STA и дорога в Qt
+
+#: Требуется ли IDataObjectAsyncCapability. Значение поставлено по записи
+#: спайка 1 (records/2026-09-12-explorer-virtual-files-spike.md), а не по
+#: теории: EndOperation - единственный явный сигнал о завершении И об отмене,
+#: и без объявленной способности он не приходит вовсе.
+ASYNC_CAPABILITY_REQUIRED = True
+
+#: Как часто поток STA проверяет, не пора ли остановиться и не ждёт ли
+#: публикация. Между проверками он крутит насос сообщений.
+_PUMP_INTERVAL_MS = 20
+
+#: Сколько ждать, что поток доложит о поднятом апартаменте, и сколько - что
+#: он завершился. Ожидание без потолка превратило бы регрессию в зависание.
+_START_TIMEOUT_S = 5.0
+_STOP_TIMEOUT_S = 5.0
+
+#: Сколько ещё крутить насос ПОСЛЕ отдачи буфера и до гашения апартамента.
+#: STA обязан обслуживать входящие вызовы, пока они есть: чужие апартаменты
+#: этого же процесса (буфер обмена Qt в их числе) держат ссылку на наш объект
+#: и отпускают её своим вызовом Release. Погасить апартамент сразу - значит
+#: оборвать этот вызов на полпути; измеренный симптом - RPC_E_DISCONNECTED, а
+#: следом access violation, уносящий процесс. Измерено чередующимися
+#: прогонами: без паузы 5 падений из 36, с паузой 0 из 36.
+_TEARDOWN_PUMP_S = 0.25
+
+#: PeekMessageW(..., PM_REMOVE): взять сообщение из очереди, а не подсмотреть.
+#: Подсмотренное остаётся в очереди, и внутренний цикл стал бы бесконечным.
+_PM_REMOVE = 1
+
+
+def _ole_initialize() -> None:
+    """OleInitialize на ЭТОМ потоке.
+
+    Не CoInitializeEx: OleSetClipboard требует именно инициализации OLE.
+    OleInitialize делает CoInitializeEx(COINIT_APARTMENTTHREADED) и сверх
+    того поднимает буфер обмена, drag-drop и скрытое окно апартамента - то,
+    на что приходят входящие вызовы Проводника.
+
+    oledll, а не windll: отказ обязан стать исключением, а не HRESULT,
+    который никто не прочитал.
+    """
+    ctypes.oledll.ole32.OleInitialize(None)
+
+
+def _ole_uninitialize() -> None:
+    ctypes.windll.ole32.OleUninitialize()
+
+
+def _ole_set_clipboard(pointer) -> int:
+    """Один именованный шов вокруг OleSetClipboard.
+
+    Функция, а не вызов по месту: так весь путь публикации - очередь, поток
+    STA, удержание объекта, отчёт об отказе - проверяется без настоящего
+    рабочего стола, а утверждение "буфер берётся с потока STA и только с
+    него" вообще перестаёт зависеть от сессии.
+    """
+    return ctypes.windll.ole32.OleSetClipboard(pointer)
+
+
+def _ole_flush_clipboard() -> int:
+    return ctypes.windll.ole32.OleFlushClipboard()
+
+
+def _declared_parameter_types(service, slot: str, count: int) -> tuple[str, ...] | None:
+    """Объявленные типы слота - из метаобъекта получателя, а не из значений.
+
+    Единственный источник истины о подписи - сам получатель. Разбор по
+    isinstance её знать не может: у FileTransferService.request_read
+    смещение объявлено ``qlonglong``, а Q_ARG(int, ...) - это 32-битный C++
+    int. Совпадением это не становится даже на маленьком смещении -
+    invokeMethod просто возвращает False, - а на 4 ГиБ значение ещё и не
+    помещается. Ни то, ни другое не поднимает исключения в COM-потоке:
+    чтение не выходит на провод, и единственный симптом - таймаут
+    IStream::Read через тридцать секунд.
+    """
+    meta = service.metaObject()
+    for index in range(meta.methodCount()):
+        method = meta.method(index)
+        if bytes(method.name()).decode("ascii", "replace") != slot:
+            continue
+        types = tuple(
+            bytes(name).decode("ascii", "replace") for name in method.parameterTypes()
+        )
+        # Перегрузки различаются ариностью: берём ту, которой этот вызов
+        # соответствует, а не первую попавшуюся.
+        if len(types) == count:
+            return types
+    return None
+
+
+def post_to_service(service, slot: str, *args) -> None:
+    """ЕДИНСТВЕННАЯ дорога из COM-потока обратно в Qt.
+
+    Одна функция, а не invokeMethod по месту, - чтобы границу можно было
+    проверить чтением одной функции вместо ревизии каждой точки вызова.
+
+    Ничего отсюда не вылетает: зовут её из обратного вызова ctypes, где
+    исключение Python не становится ошибкой, а оставляет COM неопределённое
+    возвращаемое значение - измеренно положительное, то есть успех по
+    правилу SUCCEEDED.
+    """
+    try:
+        types = _declared_parameter_types(service, slot, len(args))
+        if types is None:
+            # Молча потерянный вызов означал бы навсегда заблокированный Read.
+            logger.error(
+                "у получателя нет слота %s с %d аргументами - вызов не доставлен",
+                slot,
+                len(args),
+            )
+            return
+        delivered = QMetaObject.invokeMethod(
+            service,
+            slot,
+            Qt.ConnectionType.QueuedConnection,
+            *[Q_ARG(declared, value) for declared, value in zip(types, args)],
+        )
+    except Exception:  # noqa: BLE001 - см. docstring: отсюда не вылетает ничего
+        logger.exception("вызов %s не удалось передать в Qt-поток", slot)
+        return
+    if not delivered:
+        logger.error("не удалось доставить %s в Qt-поток", slot)
+
+
+class WindowsFileClipboardBackend(QObject):
+    """Поток STA, владеющий буфером обмена и всеми COM-объектами.
+
+    Выделенный поток, а не GUI-поток, по построению: STA сериализует входящие
+    COM-вызовы через свой насос сообщений, поэтому наши объекты не обязаны
+    быть потокобезопасными, а GUI-поток не блокируется на чтении - не как
+    следствие тонкости маршалинга, а потому что COM-вызовы до него не доходят.
+
+    Порядок вызовов задан и проверен: ``stop()`` до ``start()`` и второй
+    ``stop()`` безвредны, второй ``start()`` не заводит второго апартамента,
+    а ``publish()`` до ``start()`` отвергается ВСЛУХ - очередь без потока
+    либо потеряла бы дерево совсем, либо выложила бы устаревшее при
+    следующем старте, и оба исхода молчаливы.
+    """
+
+    publish_failed = Signal(str)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._thread: threading.Thread | None = None
+        self._stopping = threading.Event()
+        self._ready = threading.Event()
+        self._thread_id: int | None = None
+        self._lock = threading.Lock()
+        #: Ровно одна отложенная публикация: в буфере обмена лежит одно, и
+        #: список здесь означал бы, что следом за свежим деревом ляжет
+        #: устаревшее.
+        self._pending: tuple[TransferManifest, bytes] | None = None
+        self._published: VirtualFilesDataObject | None = None
+        self._callbacks: dict[str, Callable] = {}
+        self._start_error: BaseException | None = None
+
+    # ------------------------------------------------------------------ свойства
+
+    @property
+    def thread_id(self) -> int | None:
+        """Идентификатор потока STA - или None, пока апартамент не поднят."""
+        return self._thread_id
+
+    @property
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def pending_publications(self) -> int:
+        with self._lock:
+            return 0 if self._pending is None else 1
+
+    @property
+    def published_object(self) -> VirtualFilesDataObject | None:
+        """Объект, лежащий сейчас в буфере, - его держим мы, а не буфер."""
+        return self._published
+
+    def set_callbacks(
+        self, open_pipe, request_read, close_pipe, on_operation_finished
+    ) -> None:
+        """Колбэки, через которые COM-объекты достигают сервиса.
+
+        Зовут их ИЗ COM-потока, поэтому всё, что они делают с Qt, обязано
+        идти через post_to_service. Бэкенд их не оборачивает: подменить
+        чужой колбэк своим значило бы спрятать эту обязанность.
+        """
+        self._callbacks = {
+            "open_pipe": open_pipe,
+            "request_read": request_read,
+            "close_pipe": close_pipe,
+            "on_operation_finished": on_operation_finished,
+        }
+
+    # -------------------------------------------------------------- запуск/останов
+
+    def start(self) -> None:
+        if self.is_running:
+            return
+        self._stopping.clear()
+        self._ready.clear()
+        self._start_error = None
+        self._thread_id = None
+        thread = threading.Thread(target=self._run, name="duo-input-com-sta", daemon=True)
+        self._thread = thread
+        thread.start()
+        if not self._ready.wait(timeout=_START_TIMEOUT_S):
+            logger.error("поток STA не доложил о готовности за %.0f с", _START_TIMEOUT_S)
+        elif self._start_error is not None:
+            logger.error("апартамент STA не поднялся: %s", self._start_error)
+
+    def stop(self) -> None:
+        thread = self._thread
+        if thread is None:
+            return
+        self._stopping.set()
+        thread.join(timeout=_STOP_TIMEOUT_S)
+        if thread.is_alive():
+            # Забыть про живой поток значило бы, что следующий start()
+            # заведёт ВТОРОЙ апартамент и второго владельца буфера.
+            logger.error(
+                "поток STA не завершился за %.0f с - второй апартамент не заводим",
+                _STOP_TIMEOUT_S,
+            )
+            return
+        self._thread = None
+        self._thread_id = None
+        self._published = None
+        with self._lock:
+            self._pending = None
+
+    # ------------------------------------------------------------------ публикация
+
+    def publish(self, manifest: TransferManifest, origin_marker: bytes) -> None:
+        """Поставить дерево в очередь на публикацию из потока STA.
+
+        Не публикуем отсюда: OleSetClipboard обязан быть вызван на том
+        потоке, который потом отвечает на GetData. Вызов с GUI-потока
+        сделал бы владельцем буфера его, и все чтения пришли бы туда.
+        """
+        if not self.is_running:
+            self._refuse("поток STA не запущен - публиковать некому")
+            return
+        if not self._callbacks:
+            self._refuse("колбэки не установлены - Проводнику нечем отвечать")
+            return
+        with self._lock:
+            self._pending = (manifest, origin_marker)
+
+    def build_data_object(
+        self, manifest: TransferManifest, origin_marker: bytes
+    ) -> VirtualFilesDataObject:
+        """Собрать объект с нашими колбэками - без буфера обмена.
+
+        Отдельно от публикации, потому что проводка колбэков проверяется так
+        без рабочего стола, а _publish_now зовёт ровно это.
+        """
+        if not self._callbacks:
+            raise RuntimeError("колбэки не установлены")
+        data_object = VirtualFilesDataObject(
+            manifest,
+            open_pipe=self._callbacks["open_pipe"],
+            request_read=self._callbacks["request_read"],
+            close_pipe=self._callbacks["close_pipe"],
+            origin_marker=origin_marker,
+            async_capability=ASYNC_CAPABILITY_REQUIRED,
+        )
+        data_object.on_operation_finished = self._callbacks["on_operation_finished"]
+        return data_object
+
+    def _refuse(self, reason: str) -> None:
+        """Отказ на стороне Qt: и логом, и сигналом, чтобы его было видно в UI."""
+        logger.error("публикация отклонена: %s", reason)
+        self.publish_failed.emit(reason)
+
+    # ------------------------------------------------------------------ поток STA
+
+    def _run(self) -> None:
+        try:
+            _ole_initialize()
+        except OSError as error:
+            # Без апартамента публиковать нечем. Молчание здесь оставило бы
+            # start() ждать пять секунд и вернуться как ни в чём не бывало.
+            self._start_error = error
+            logger.exception("OleInitialize отказал - буфер обмена недоступен")
+            self._ready.set()
+            return
+        self._thread_id = threading.get_ident()
+        self._ready.set()
+        try:
+            self._pump_until_stopped()
+        finally:
+            self._release_clipboard()
+            self._pump_for(_TEARDOWN_PUMP_S)
+            _ole_uninitialize()
+
+    def _pump_until_stopped(self) -> None:
+        """Насос сообщений апартамента. Без него объект в буфере вешает оболочку."""
+        message = wintypes.MSG()
+        while not self._stopping.is_set():
+            pending = self._take_pending()
+            if pending is not None:
+                self._publish_now(*pending)
+            self._drain_messages(message)
+            self._stopping.wait(_PUMP_INTERVAL_MS / 1000)
+
+    def _pump_for(self, seconds: float) -> None:
+        """Качать насос ещё немного - см. _TEARDOWN_PUMP_S."""
+        message = wintypes.MSG()
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            self._drain_messages(message)
+            time.sleep(_PUMP_INTERVAL_MS / 1000)
+
+    @staticmethod
+    def _drain_messages(message) -> None:
+        while ctypes.windll.user32.PeekMessageW(
+            ctypes.byref(message), None, 0, 0, _PM_REMOVE
+        ):
+            ctypes.windll.user32.TranslateMessage(ctypes.byref(message))
+            ctypes.windll.user32.DispatchMessageW(ctypes.byref(message))
+
+    def _take_pending(self) -> tuple[TransferManifest, bytes] | None:
+        with self._lock:
+            pending, self._pending = self._pending, None
+        return pending
+
+    def _publish_now(self, manifest: TransferManifest, origin_marker: bytes) -> None:
+        try:
+            data_object = self.build_data_object(manifest, origin_marker)
+            result = _ole_set_clipboard(data_object.pointer)
+            if result != S_OK:
+                raise OSError(f"OleSetClipboard вернул 0x{result & 0xFFFFFFFF:08X}")
+            # Держим объект: буфер обмена хранит только указатель.
+            self._published = data_object
+        except Exception as error:  # noqa: BLE001 - падение потока STA убило бы фичу молча
+            logger.exception("не удалось опубликовать файлы в буфер обмена")
+            post_to_service(self, "_report_publish_failure", str(error))
+
+    def _release_clipboard(self) -> None:
+        """Отдать буфер системе, иначе он умрёт вместе с потоком.
+
+        Без этого вставка после выхода отдала бы пустоту. Если мы ничего не
+        публиковали, звать нечего.
+        """
+        if self._published is None:
+            return
+        result = _ole_flush_clipboard()
+        if result != S_OK:
+            logger.warning("OleFlushClipboard вернул 0x%08X", result & 0xFFFFFFFF)
+
+    @Slot(str)
+    def _report_publish_failure(self, reason: str) -> None:
+        self.publish_failed.emit(reason)
+
+
 __all__ = [
+    "ASYNC_CAPABILITY_REQUIRED",
     "FORMAT_CONTENTS_NAME",
     "FORMAT_DESCRIPTOR_NAME",
     "FORMAT_DROP_EFFECT_NAME",
     "FORMAT_ORIGIN_NAME",
     "FormatEnumerator",
     "VirtualFilesDataObject",
+    "WindowsFileClipboardBackend",
     "descriptor_entries",
     "group_descriptor_bytes",
+    "post_to_service",
 ]
