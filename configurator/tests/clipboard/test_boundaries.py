@@ -245,3 +245,81 @@ def test_the_transitive_sweep_survives_a_cycle():
     )
 
     assert "boundary_fixtures.cycle_b" in reachable
+
+
+# ==================================================== границы подсистемы передачи
+
+SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
+TRANSFER_PACKAGE = SRC_ROOT / "duo_input" / "transfer"
+
+_PURE_MODULES = ("model.py", "paths.py", "pipe.py", "scanner.py")
+_CTYPES_ALLOWED = ("windows_com.py", "windows_files.py")
+
+
+def _transfer_modules() -> list[Path]:
+    modules = sorted(TRANSFER_PACKAGE.glob("*.py"))
+    assert modules, f"no modules found under {TRANSFER_PACKAGE}"
+    return modules
+
+
+def test_the_transfer_package_never_imports_qtwidgets():
+    offenders = {
+        path.name
+        for path in _transfer_modules()
+        if any(name.startswith("PySide6.QtWidgets") for name in _imported_modules(path))
+    }
+
+    assert offenders == set(), (
+        "transfer/ должен зависеть только от QtCore, иначе его нельзя будет "
+        "вынести в отдельный процесс"
+    )
+
+
+def test_only_the_windows_adapters_touch_ctypes():
+    offenders = {
+        path.name
+        for path in _transfer_modules()
+        if path.name not in _CTYPES_ALLOWED
+        and any(name.split(".")[0] == "ctypes" for name in _imported_modules(path))
+    }
+
+    assert offenders == set(), (
+        "ctypes разрешён только в windows_com.py и windows_files.py — вся "
+        "нативная грязь должна быть в одном месте"
+    )
+
+
+def test_the_com_module_never_imports_pyside():
+    # Буквальная граница "COM-поток не трогает Qt". Без неё однажды кто-нибудь
+    # дёрнет QSslSocket из COM-потока, потому что так короче.
+    #
+    # Обход транзитивный: правило на один уровень было бы зелено ровно
+    # потому, что сегодняшний .pipe сам по себе чист, а не потому, что
+    # windows_com не видит Qt. Дорога через соседа - самая короткая из
+    # возможных, и закрывать её надо целиком.
+    imported = _transitive_imports(
+        TRANSFER_PACKAGE / "windows_com.py", SRC_ROOT, "duo_input"
+    )
+
+    assert not any(name.startswith("PySide6") for name in imported), (
+        "windows_com.py исполняется на COM-потоке и не имеет права видеть Qt — "
+        "ни напрямую, ни через модуль duo_input, который он импортирует"
+    )
+
+
+def test_the_pure_core_modules_see_neither_qt_nor_the_windows_adapters():
+    offenders = {}
+    for name in _PURE_MODULES:
+        imported = _transitive_imports(TRANSFER_PACKAGE / name, SRC_ROOT, "duo_input")
+        bad = {
+            candidate
+            for candidate in imported
+            if candidate.startswith("PySide6") or "windows_" in candidate
+        }
+        if bad:
+            offenders[name] = bad
+
+    assert offenders == {}, (
+        "ядро (model/paths/pipe/scanner) должно оставаться проверяемым без Qt "
+        f"и без Windows, а эти модули это нарушают: {offenders}"
+    )
