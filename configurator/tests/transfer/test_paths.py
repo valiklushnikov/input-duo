@@ -455,3 +455,130 @@ def test_skipped_entry_paths_are_sanitised_too_because_they_reach_the_screen():
 
     with pytest.raises(UnsafePath):
         sanitize_manifest(manifest)
+
+
+def test_skipped_entries_count_toward_the_entry_ceiling_too():
+    # MAX_ENTRIES считает entries и skipped ВМЕСТЕ (round 1 ревью): без этого
+    # манифест с одной настоящей записью и неограниченным skipped обошёл бы
+    # потолок, который существует именно для ограничения работы над
+    # недоверенным вводом.
+    manifest = TransferManifest(
+        transfer_id="t",
+        entries=(TransferEntry(path="a.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),),
+        skipped=tuple(
+            SkippedEntry(path=f"s{index}", reason="reparse_point")
+            for index in range(MAX_ENTRIES)
+        ),
+    )
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+# --- casefold() расходится с регистронезависимостью Windows --------------
+#
+# Каждая пара измерена реальным open() на этой машине (round 1 ревью,
+# task-1.3-report.md), а не выведена из документации Unicode.
+
+
+def test_sharp_s_and_ss_are_not_treated_as_a_collision():
+    # "ß.txt" и "SS.txt" - два РАЗНЫХ файла на этой машине. casefold()
+    # разворачивает "ß" в "ss" и свёл бы их в один; upper() делает то же
+    # самое в другую сторону ("ß" -> "SS"). Оба неверны здесь.
+    manifest = _with([
+        TransferEntry(path="ß.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="SS.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
+
+    result = sanitize_manifest(manifest)
+
+    assert len(result.entries) == 2
+
+
+def test_the_collision_key_alone_does_not_fold_kelvin_sign_onto_ascii_k():
+    # _collision_key() сам по себе не путает их (см. _CASEFOLD_OVERRIDES_TO_
+    # IDENTITY в paths.py): casefold() иначе свёл бы оба в обычную "k".
+    # Но см. следующий тест - раньше по конвейеру их уже развело NFC, так
+    # что до _collision_key дело в sanitize_manifest не доходит вовсе.
+    from duo_input.transfer.paths import _collision_key
+
+    ascii_k = "K"
+    kelvin_k = "K"
+
+    assert _collision_key(ascii_k) != _collision_key(kelvin_k)
+
+
+def test_kelvin_sign_and_ascii_k_are_refused_by_nfc_before_casefold_even_runs():
+    # ИЗМЕРЕНО реальным open() на этой машине (round 1 ревью): "K.txt"
+    # (ASCII) и "K.txt" (ЗНАК КЕЛЬВИНА, U+212A) - два РАЗНЫХ файла на диске.
+    # Ожидалось бы, что sanitize_manifest их тоже различит - но не
+    # различает, и не может: у ЗНАКА КЕЛЬВИНА КАНОНИЧЕСКОЕ (не
+    # совместимое) разложение в ASCII "K"
+    # (unicodedata.decomposition("K") == "004B", без тега <...> -
+    # тег означает "совместимое", отсутствие тега значит
+    # "каноническое"). NFC в sanitize_relative_path (Task 1.2, здесь
+    # не меняется) поэтому превращает "K.txt" в "K.txt" ЕЩЁ ДО того,
+    # как _collision_key вообще видит строку - обе записи приходят в
+    # sanitize_manifest уже побитово одинаковыми, и никакой выбор
+    # функции свёртки регистра это не восстановит.
+    #
+    # Это расхождение с реальным поведением Windows задокументировано, а
+    # не исправлено: править пришлось бы NFC-шаг в
+    # sanitize_relative_path (Task 1.2, вне периметра этой задачи), а не свёртку
+    # регистра здесь.
+    manifest = _with([
+        TransferEntry(path="K.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="K.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+def test_greek_sigma_and_final_sigma_are_refused_as_a_collision():
+    # Строчная сигма "σ" и конечная сигма "ς" - ОДИН файл на этой машине:
+    # NTFS сворачивает их в один регистронезависимый ключ.
+    manifest = _with([
+        TransferEntry(path="σ.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="ς.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+def test_greek_capital_sigma_and_final_sigma_are_refused_as_a_collision():
+    manifest = _with([
+        TransferEntry(path="Σ.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="ς.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
+
+    with pytest.raises(UnsafePath):
+        sanitize_manifest(manifest)
+
+
+def test_dotless_i_and_ascii_capital_i_are_not_treated_as_a_collision():
+    # Турецкая раздельная "ı" (без точки) и ASCII "I" - два РАЗНЫХ файла на
+    # этой машине. Уже верно под обычным casefold(); тест защищает от
+    # регресса при будущей правке _collision_key.
+    manifest = _with([
+        TransferEntry(path="ı.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="I.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
+
+    result = sanitize_manifest(manifest)
+
+    assert len(result.entries) == 2
+
+
+def test_ascii_i_and_dotted_capital_i_are_not_treated_as_a_collision():
+    # ASCII "i" и турецкая "İ" (с точкой) - два РАЗНЫХ файла на этой машине.
+    # Тоже уже верно под обычным casefold(); тот же регрессионный смысл.
+    manifest = _with([
+        TransferEntry(path="i.txt", kind=ENTRY_FILE, size=1, mtime_ns=1),
+        TransferEntry(path="İ.txt", kind=ENTRY_FILE, size=2, mtime_ns=2),
+    ])
+
+    result = sanitize_manifest(manifest)
+
+    assert len(result.entries) == 2

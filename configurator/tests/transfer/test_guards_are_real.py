@@ -107,25 +107,19 @@ def test_the_whole_manifest_is_refused_not_merely_the_bad_entry():
 
 
 def test_without_the_casefold_collision_check_two_names_would_share_one_file(monkeypatch):
-    # monkeypatch.setattr(str, "casefold", ...) бросает TypeError: CPython не
-    # даёт патчить неизменяемые встроенные типы (проверено напрямую - см.
-    # task-1.4-report.md). Извлекать _collision_key в paths.py тоже нельзя:
-    # эта задача не добавляет продакшн-код и не трогает paths.py, пока его
-    # диф читает второй ревьюер. Вместо этого подменяем
-    # sanitize_relative_path так, чтобы он оборачивал результат в подкласс
-    # str с casefold() как тождеством - это выключает именно
-    # регистронезависимое сравнение в sanitize_manifest, не трогая ни файл на
-    # диске, ни остальные проверки пути.
-    original = paths.sanitize_relative_path
-
-    class _NoCasefold(str):
-        def casefold(self) -> str:  # noqa: D401 - тождество вместо настоящего фолда
-            return str(self)
-
-    def sanitize_without_casefold(raw: str) -> str:
-        return _NoCasefold(original(raw))
-
-    monkeypatch.setattr(paths, "sanitize_relative_path", sanitize_without_casefold)
+    # ИЗМЕНЕНО в round 1 правок Task 1.3 (task-1.3-report.md): раньше здесь
+    # стоял подкласс str с casefold()-как-тождеством поверх
+    # sanitize_relative_path, потому что на тот момент свёртка регистра была
+    # инлайном (path.casefold()) и не имела отдельного патчимого имени, а
+    # monkeypatch.setattr(str, "casefold", ...) бросает TypeError - CPython
+    # не даёт патчить неизменяемые встроенные типы (проверено напрямую - см.
+    # task-1.4-report.md). Тот подкласс всё равно перестал бы работать: Task
+    # 1.3 заменила path.casefold() на _collision_key(path), а она читает
+    # path посимвольно (for character in path), и итератор str.__iter__
+    # отдаёт обычные str, а не экземпляры подкласса - .casefold() подкласса
+    # ни разу не вызвался бы. Теперь _collision_key - обычное имя в paths.py,
+    # и его можно подменить впрямую, без обёрток.
+    monkeypatch.setattr(paths, "_collision_key", lambda path: path)
 
     manifest = TransferManifest(
         transfer_id="t",
