@@ -34,10 +34,53 @@ MAX_DEPTH = 32
 
 _FORBIDDEN_CHARACTERS = frozenset('<>:"|?*')
 
+#: Зарезервированные имена устройств Windows. Помимо классических CON/PRN/
+#: AUX/NUL/COMn/LPTn сюда входят:
+#: - CONIN$/CONOUT$ - открываются как консольные буферы ввода/вывода, а не
+#:   как файлы: запись в "CONOUT$" ничего не создаёт на диске (проверено
+#:   через open() - см. §11 спецификации и task-1.2-report.md), и получатель
+#:   увидит "успешную" передачу с пропавшим файлом.
+#: - COM¹/COM²/COM³/LPT¹/LPT²/LPT³ (надстрочные цифры U+00B9/U+00B2/U+00B3) -
+#:   парсер DOS-имён устройств в Windows приравнивает их к COM1/COM2/COM3/
+#:   LPT1/LPT2/LPT3. .upper() эти символы не трогает (это не буквы), поэтому
+#:   их нужно перечислить отдельно, а не полагаться на регистронезависимость.
 _RESERVED_STEMS = frozenset(
-    {"CON", "PRN", "AUX", "NUL"}
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
     | {f"COM{digit}" for digit in "123456789"}
     | {f"LPT{digit}" for digit in "123456789"}
+    | {"COM¹", "COM²", "COM³", "LPT¹", "LPT²", "LPT³"}
+)
+
+#: Управление направлением текста (bidi overrides/isolates, U+202A-U+202E и
+#: U+2066-U+2069). Они не появляются в обычном тексте ни на одном языке -
+#: направление арабского или иврита несёт сам алфавит, а не эти управляющие
+#: знаки - зато ими собирают классический троян "invoice" + RLO + "gpj.exe",
+#: который Проводник рисует как "invoiceexe.jpg" (см. §11 спецификации,
+#: измерено через open() в task-1.2-report.md). Диапазон, а не одиночные
+#: символы, и НЕ "весь non-ASCII": блокировать обычные буквы недопустимо,
+#: этой функцией пользуются настоящие люди.
+_BIDI_CONTROL_CHARACTERS = frozenset(
+    chr(codepoint) for codepoint in (*range(0x202A, 0x202F), *range(0x2066, 0x206A))
+)
+
+#: Невидимые знаки: мягкий перенос (U+00AD), нулевая ширина - пробел
+#: (U+200B), несоединитель (U+200C), соединитель (U+200D), word joiner
+#: (U+2060) - и метка порядка байт (U+FEFF). Ничего не показывают, но
+#: остаются в имени: "photo.jpg" и "photo<ZWSP>.jpg" выглядят одинаково, а
+#: на диске это две разные записи.
+_INVISIBLE_CHARACTERS = frozenset("\u00ad\u200b\u200c\u200d\u2060\ufeff")
+
+#: "Нехарактеры" Unicode (U+FDD0-U+FDEF и последние две позиции каждой из 17
+#: плоскостей): зарезервированы стандартом именно как непредставимые, ни одно
+#: приложение не обязано их где-либо отображать.
+_NONCHARACTERS = frozenset(
+    chr(codepoint) for codepoint in range(0xFDD0, 0xFDF0)
+) | frozenset(
+    chr(plane * 0x10000 + offset) for plane in range(0x11) for offset in (0xFFFE, 0xFFFF)
+)
+
+_FORBIDDEN_FORMATTING_CHARACTERS = (
+    _BIDI_CONTROL_CHARACTERS | _INVISIBLE_CHARACTERS | _NONCHARACTERS
 )
 
 
@@ -51,7 +94,16 @@ def _utf16_units(text: str) -> int:
     Символ вне BMP занимает две единицы, а поле cFileName считает именно их.
     len() здесь соврал бы вдвое в пользу злоумышленника.
     """
-    return len(text.encode("utf-16-le")) // 2
+    try:
+        return len(text.encode("utf-16-le")) // 2
+    except UnicodeEncodeError as exc:
+        # Одинокий суррогат (например, из json.loads() над испорченным
+        # экранированием вида "\ud800" без парной половины - см.
+        # clipboard/wire.py) не кодируется в UTF-16 вообще: это не вопрос
+        # длины, символа физически не существует. Контракт этой функции -
+        # "каноническая форма или UnsafePath", а не необработанное
+        # исключение кодека, поэтому дефект превращается в тот же UnsafePath.
+        raise UnsafePath("одинокий суррогат в имени") from exc
 
 
 def sanitize_relative_path(raw: str) -> str:
@@ -59,6 +111,10 @@ def sanitize_relative_path(raw: str) -> str:
     if not isinstance(raw, str):
         raise UnsafePath("путь должен быть str")
     if not raw:
+        # NB (Task 1.4): эта проверка перекрыта проверкой пустого сегмента в
+        # _check_segment. "".split("/") даёт [""], то есть один пустой
+        # сегмент, и он ловится там же, где и "Photos//img.jpg". Удалить
+        # нужно ОБА места, иначе тест на пустой путь останется зелёным.
         raise UnsafePath("пустой путь")
 
     # 1. Нормализация Unicode - первым делом, до всех остальных проверок.
@@ -71,6 +127,9 @@ def sanitize_relative_path(raw: str) -> str:
     text = text.replace("\\", "/")
 
     if text.startswith("/"):
+        # NB (Task 1.4): тоже перекрыта - см. комментарий в _check_segment
+        # про пустой сегмент. "/foo".split("/") == ["", "foo"]; ведущий "/"
+        # всегда даёт пустой первый сегмент, и он ловится тем же местом.
         raise UnsafePath("путь абсолютный")
     if _utf16_units(text) > MAX_PATH_UTF16:
         raise UnsafePath(f"путь длиннее {MAX_PATH_UTF16} единиц UTF-16")
@@ -87,22 +146,45 @@ def sanitize_relative_path(raw: str) -> str:
 
 def _check_segment(segment: str) -> None:
     if not segment:
+        # Ловит "Photos//img.jpg" (двойной разделитель), а заодно, из-за
+        # "".split("/") == [""], и пустой raw целиком, и путь с ведущим "/" -
+        # см. пометки Task 1.4 у обеих тех проверок выше по файлу.
         raise UnsafePath("пустой сегмент пути")
     if segment in {".", ".."}:
+        # NB (Task 1.4): эта проверка - главное правило против выхода за
+        # корень, но при текущем наборе тестов она ПЕРЕКРЫТА проверкой
+        # "точка/пробел в конце" ниже: и "." и ".." заканчиваются точкой, так
+        # что удаление ОДНОЙ этой строки оставляет сюит зелёным. Мутационный
+        # тест обязан удалять обе - иначе он проверяет не то правило, что
+        # заявлено. Отдельного теста, различающего эти два правила, при
+        # нынешнем наборе не существует.
         raise UnsafePath("сегмент выхода за корень")
     if ":" in segment:
-        # Ловит и "C:\..." и "C:file" и поток NTFS "file:stream" - все три
-        # являются способом уйти не туда, куда получатель разрешил.
+        # NB (Task 1.4): перекрыта - ":" входит и в _FORBIDDEN_CHARACTERS
+        # ниже, так что при текущих тестах проверка ниже ловит то же самое
+        # значение. Удаление этой строки в одиночку не окрашивает сюит: и
+        # "C:evil.exe", и "C:\...", и "file:stream" всё равно падают на
+        # forbidden-characters. Ловит и "C:\..." и "C:file" и поток NTFS
+        # "file:stream" - все три являются способом уйти не туда, куда
+        # получатель разрешил, отдельное сообщение оставлено ради
+        # диагностики, а не ради уникальности покрытия.
         raise UnsafePath("двоеточие в имени")
     if segment[-1] in {".", " "}:
         # Windows отбрасывает завершающую точку и пробел, поэтому "a." и "a"
         # столкнулись бы в одном файле, а "a .exe" перестало бы быть тем,
         # что видел пользователь.
+        #
+        # NB (Task 1.4): эта проверка ПЕРЕКРЫВАЕТ проверку "." / ".." выше -
+        # см. её комментарий. Мутационный тест на выход за корень обязан
+        # удалить обе, иначе увидит зелёный сюит и решит, что правило
+        # отсутствует, хотя на самом деле оно просто заслонено.
         raise UnsafePath("сегмент заканчивается точкой или пробелом")
     if any(character in _FORBIDDEN_CHARACTERS for character in segment):
         raise UnsafePath("запрещённый символ в имени")
     if any(ord(character) < 0x20 for character in segment):
         raise UnsafePath("управляющий символ в имени")
+    if any(character in _FORBIDDEN_FORMATTING_CHARACTERS for character in segment):
+        raise UnsafePath("управляющий или невидимый символ форматирования текста")
     stem = segment.split(".", 1)[0].upper()
     if stem in _RESERVED_STEMS:
         raise UnsafePath("зарезервированное имя устройства")
