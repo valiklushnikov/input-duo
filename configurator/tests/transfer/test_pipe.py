@@ -74,9 +74,10 @@ def test_wait_returns_false_on_timeout_instead_of_hanging_for_ever():
 def test_a_blocked_waiter_wakes_when_a_chunk_arrives():
     pipe = ChunkPipe()
     woke = threading.Event()
+    result: list[bool] = []
 
     def consumer() -> None:
-        pipe.wait(timeout=5.0)
+        result.append(pipe.wait(timeout=5.0))
         woke.set()
 
     thread = threading.Thread(target=consumer, daemon=True)
@@ -86,6 +87,28 @@ def test_a_blocked_waiter_wakes_when_a_chunk_arrives():
 
     assert woke.wait(timeout=2.0), "push не разбудил ожидающего"
     thread.join(timeout=2.0)
+    assert result == [True], "wait проснулся, но не сказал, что есть данные"
+
+
+def test_a_blocked_waiter_wakes_when_the_stream_finishes():
+    # finish() тоже обязан вызывать notify_all: это единственное пробуждение,
+    # которое происходит при КАЖДОЙ успешной передаче, и без него
+    # заблокированный потребитель узнал бы о конце потока только по таймауту.
+    pipe = ChunkPipe()
+    result: list[bool] = []
+
+    def consumer() -> None:
+        result.append(pipe.wait(timeout=5.0))
+
+    thread = threading.Thread(target=consumer, daemon=True)
+    thread.start()
+    time.sleep(0.05)
+    started = time.perf_counter()
+    pipe.finish()
+    thread.join(timeout=2.0)
+
+    assert result == [True], "finish не разбудил ожидающего"
+    assert time.perf_counter() - started < 1.0, "finish ждал таймаута вместо notify_all"
 
 
 def test_a_blocked_waiter_wakes_immediately_when_the_pipe_is_closed():
@@ -165,6 +188,55 @@ def test_pushing_after_finish_is_refused():
 
     with pytest.raises(PipeClosed):
         pipe.push(b"late")
+
+
+def test_close_after_finish_does_not_discard_the_completed_stream():
+    # Сеть отдала хвост и сказала finish - передача содержимого завершена.
+    # Если сокет потом рвётся и приходит close, это уже не имеет отношения к
+    # доставленным байтам: отменять нечего, поток уже полностью пришёл.
+    pipe = ChunkPipe(capacity_chunks=2)
+    pipe.push(b"tail")
+    pipe.finish()
+
+    pipe.close("link lost")
+
+    assert pipe.take(10) == b"tail"
+    assert pipe.take(10) == b""
+    assert pipe.finished is True
+    assert pipe.closed_reason is None, (
+        "close после finish переписал состояние завершённого потока"
+    )
+
+
+def test_finish_after_close_does_not_claim_a_normal_end():
+    # close пришёл посреди передачи - это отмена. Если finish всё равно
+    # приходит следом (гонка на стороне отправителя), нормальным концом это
+    # не становится: буфер содержит только часть файла, и отдавать её
+    # потребителю как завершённый поток значило бы подсунуть Explorer
+    # усечённый файл, который выглядит целым.
+    pipe = ChunkPipe()
+    pipe.push(b"partial")
+
+    pipe.close("link lost")
+    pipe.finish()
+
+    assert pipe.finished is False, "finish после close выдал отменённый поток за успешный"
+    with pytest.raises(PipeClosed):
+        pipe.take(10)
+
+
+def test_take_rejects_a_negative_request_instead_of_corrupting_the_offset():
+    # take(-2) с срезом head[offset:offset-2] использует отрицательный индекс
+    # Python как "от конца", а не как арифметику - оно тихо возвращает байты
+    # и оставляет _offset отрицательным, после чего следующий take() читает
+    # не оттуда, откуда должен.
+    pipe = ChunkPipe()
+    pipe.push(b"abcdef")
+
+    with pytest.raises(ValueError):
+        pipe.take(-2)
+
+    assert pipe.take(10) == b"abcdef", "негативный запрос сдвинул offset"
 
 
 def test_closing_twice_keeps_the_first_reason():
