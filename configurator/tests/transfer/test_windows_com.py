@@ -15,6 +15,7 @@ from __future__ import annotations
 import ctypes
 import gc
 import sys
+import threading
 import weakref
 from ctypes import wintypes
 
@@ -456,3 +457,158 @@ def test_a_clipboard_format_windows_refuses_is_not_returned_as_zero():
     # Формат 0 в FORMATETC - это объект, который молча ничего не отдаёт.
     with pytest.raises(OSError):
         register_clipboard_format("")
+
+
+# --------------------------------------------------------------------------
+# Замок на счётчике ссылок (fix round 1).
+#
+# AddRef и Release приходят из потоков Проводника. Гонку на CPython 3.12
+# воспроизвести не удалось (см. task-2.1-report.md: между LOAD_ATTR и
+# STORE_ATTR интерпретатор не проверяет eval breaker, то есть сам он поток
+# там не переключит), поэтому наличие и МЕСТО замка проверяются детерминированно:
+# замок захватывается извне, и вызов обязан его дождаться.
+# --------------------------------------------------------------------------
+
+#: Сколько ждать, чтобы считать вызов заблокированным. Не измерение
+#: производительности: цена ошибки здесь - ложное "заблокирован".
+_BLOCKED_WINDOW_SECONDS = 0.25
+#: Потолок ожидания того, что должно произойти. Если не произошло - это
+#: взаимоблок, и он обязан стать красным тестом, а не висящим прогоном.
+_DEADLINE_SECONDS = 5.0
+
+
+def _iunknown_calls():
+    """Три способа тронуть счётчик - ровно те, что идут через vtable."""
+    return {
+        "add_ref": lambda obj: call_add_ref(obj.pointer),
+        "release": lambda obj: call_release(obj.pointer),
+        "query_interface": lambda obj: call_query_interface(
+            obj.pointer, guid_from_string(IID_IDATAOBJECT), ctypes.c_void_p()
+        ),
+    }
+
+
+@pytest.mark.parametrize("call_name", sorted(_iunknown_calls()))
+def test_each_iunknown_body_waits_for_the_lock(call_name):
+    call = _iunknown_calls()[call_name]
+    obj = ComObject([IID_IUNKNOWN, IID_IDATAOBJECT])
+    started = threading.Event()
+    finished = threading.Event()
+
+    def worker() -> None:
+        started.set()
+        call(obj)
+        finished.set()
+
+    obj._lock.acquire()
+    thread = threading.Thread(target=worker, daemon=True)
+    try:
+        thread.start()
+        assert started.wait(_DEADLINE_SECONDS), "поток не запустился"
+        blocked = not finished.wait(_BLOCKED_WINDOW_SECONDS)
+    finally:
+        obj._lock.release()
+
+    assert blocked, f"{call_name} тронул счётчик, не дожидаясь замка"
+    assert finished.wait(_DEADLINE_SECONDS), f"{call_name} не завершился и после освобождения замка"
+    thread.join(_DEADLINE_SECONDS)
+
+
+def test_the_release_hook_runs_with_the_lock_free():
+    # Хук - чужой код; в поздних задачах он уходит в приложение. Звать его
+    # с захваченным замком - это заготовка взаимоблока.
+    obj = ComObject([IID_IUNKNOWN])
+    observed: list[bool] = []
+    counted = threading.Event()
+
+    def hook() -> None:
+        # 1. Замок свободен прямо сейчас.
+        acquired = obj._lock.acquire(blocking=False)
+        observed.append(acquired)
+        if acquired:
+            obj._lock.release()
+        # 2. И другой поток может пройти через vtable, пока хук ещё работает.
+        helper = threading.Thread(target=lambda: (call_add_ref(obj.pointer), counted.set()), daemon=True)
+        helper.start()
+        counted.wait(_DEADLINE_SECONDS)
+        helper.join(_DEADLINE_SECONDS)
+
+    obj.on_last_release = hook
+    call_release(obj.pointer)
+
+    assert observed == [True], "хук вызван с захваченным замком"
+    assert counted.is_set(), "пока хук работал, другой поток не смог тронуть счётчик"
+
+
+def test_a_hook_that_calls_back_into_the_object_does_not_deadlock():
+    # Реентрантность по-настоящему: замок не рекурсивный, и хук, дёрнувший
+    # AddRef на том же объекте из того же потока, повесил бы поток намертво.
+    obj = ComObject([IID_IUNKNOWN])
+    seen: list[int] = []
+    done = threading.Event()
+
+    obj.on_last_release = lambda: seen.append(call_add_ref(obj.pointer))
+
+    def scenario() -> None:
+        call_release(obj.pointer)
+        done.set()
+
+    # Сценарий живёт в отдельном потоке: регресс здесь - это вечное
+    # ожидание, и оно обязано стать красным тестом, а не висящим прогоном.
+    thread = threading.Thread(target=scenario, daemon=True)
+    thread.start()
+
+    assert done.wait(_DEADLINE_SECONDS), "хук с обратным вызовом заблокировал сам себя"
+    assert seen == [1]
+
+
+def test_the_count_survives_many_threads_racing_add_ref_and_release():
+    # Сеть, а не доказательство: на CPython 3.12 этот тест проходит и без
+    # замка (измерено). Он поймает free-threading-сборку и любое будущее
+    # изменение точек проверки eval breaker.
+    threads, iterations = 12, 3000
+    obj = ComObject([IID_IUNKNOWN])
+    fired: list[int] = []
+    obj.on_last_release = lambda: fired.append(1)
+    barrier = threading.Barrier(threads)
+
+    def worker() -> None:
+        barrier.wait()
+        for _ in range(iterations):
+            call_add_ref(obj.pointer)
+            call_release(obj.pointer)
+
+    workers = [threading.Thread(target=worker, daemon=True) for _ in range(threads)]
+    for thread in workers:
+        thread.start()
+    for thread in workers:
+        thread.join(_DEADLINE_SECONDS * 12)
+
+    assert obj.refcount == 1, f"{threads} потоков потеряли обновления счётчика: {obj.refcount}"
+    assert fired == [], "хук сработал, пока объект ещё держали"
+
+
+def test_threads_racing_the_last_release_fire_the_hook_once():
+    # Та же сеть для check-then-set: восемь потоков делят последний Release.
+    trials, threads = 50, 8
+    firings = []
+    for _ in range(trials):
+        obj = ComObject([IID_IUNKNOWN])
+        fired: list[int] = []
+        obj.on_last_release = lambda captured=fired: captured.append(1)
+        for _ in range(threads - 1):
+            call_add_ref(obj.pointer)
+        barrier = threading.Barrier(threads)
+
+        def worker(target=obj, gate=barrier) -> None:
+            gate.wait()
+            call_release(target.pointer)
+
+        workers = [threading.Thread(target=worker, daemon=True) for _ in range(threads)]
+        for thread in workers:
+            thread.start()
+        for thread in workers:
+            thread.join(_DEADLINE_SECONDS)
+        firings.append(len(fired))
+
+    assert set(firings) == {1}, f"распределение срабатываний хука по {trials} попыткам: {firings}"

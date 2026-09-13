@@ -18,6 +18,7 @@ IStream, IDataObjectAsyncCapability. Ни typelib, ни кодогенераци
 from __future__ import annotations
 
 import ctypes
+import threading
 from ctypes import wintypes
 
 # --------------------------------------------------------------------------
@@ -249,10 +250,24 @@ class ComObject:
     Хук - не удобство. Release на IStream - это то, чем Проводник сообщает
     "с этим файлом всё"; спайк давал счётчику уйти в ноль и не делал ничего,
     а production обязан узнать (спека §9).
+
+    Счётчик живёт под замком. AddRef и Release приходят из потоков
+    Проводника, а "self.refcount += 1" - это три байт-кода с переключением
+    потока между ними: без замка два одновременных последних Release оба
+    видят ноль, оба ставят флаг и оба зовут хук. GIL делает это редким, а не
+    невозможным (измерено, см. task-2.1-report.md).
+
+    Хук вызывается ВНЕ замка: он чужой, в поздних задачах он уходит в код
+    приложения, и звать чужой код с захваченным замком - это готовый
+    взаимоблок.
+
+    Публичный .refcount читается без замка. Это снимок для утверждения в
+    тесте или для журнала, а не средство синхронизации.
     """
 
     def __init__(self, supported_iids: list[str]) -> None:
         self._supported = [guid_from_string(iid) for iid in supported_iids]
+        self._lock = threading.Lock()
         self.refcount = 1
         self._released = False
         #: Вызывается ровно один раз, когда счётчик впервые достигает нуля.
@@ -291,22 +306,31 @@ class ComObject:
         requested = ctypes.cast(riid, ctypes.POINTER(GUID)).contents
         if any(same_guid(requested, supported) for supported in self._supported):
             out[0] = self.pointer
-            self.refcount += 1
+            with self._lock:
+                self.refcount += 1
             return S_OK
         out[0] = None
         return E_NOINTERFACE
 
     def _add_ref(self, _this) -> int:
-        self.refcount += 1
-        return self.refcount
+        with self._lock:
+            self.refcount += 1
+            # Возвращается снимок, сделанный под замком: повторное чтение
+            # self.refcount отдало бы значение, уже изменённое чужим потоком.
+            return self.refcount
 
     def _release(self, _this) -> int:
-        self.refcount -= 1
-        if self.refcount <= 0 and not self._released:
-            self._released = True
-            if self.on_last_release is not None:
-                self.on_last_release()
-        return max(self.refcount, 0)
+        with self._lock:
+            self.refcount -= 1
+            remaining = max(self.refcount, 0)
+            # Решение "этот вызов - последний" принимается под замком, а
+            # действие по нему - снаружи.
+            last = self.refcount <= 0 and not self._released
+            if last:
+                self._released = True
+        if last and self.on_last_release is not None:
+            self.on_last_release()
+        return remaining
 
 
 # --------------------------------------------------------------------------
