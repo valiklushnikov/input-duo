@@ -357,3 +357,37 @@ def test_the_congestion_signal_fires_only_when_the_state_actually_changes(
         "сигнал повторился при неизменившемся состоянии - подписчик получал бы "
         "поток одинаковых уведомлений вместо двух переходов"
     )
+
+
+def test_the_bytes_written_signal_actually_drives_the_congestion_check(
+    qapp, tmp_path, monkeypatch
+):
+    """Пин на само подключение bytesWritten, а не только на _check_congestion.
+
+    Все тесты выше зовут _check_congestion() напрямую или читают
+    write_congested - ни один не проходит через настоящий сигнал Qt.
+    Удаление строки `socket.bytesWritten.connect(...)` из _wire_up не
+    роняло бы ни один из них: только этот тест эмитирует bytesWritten
+    по-настоящему и проверяет, что на него кто-то подписан.
+
+    Настоящая запись через настоящий сокет здесь не годится: при потолке
+    в 4 МиБ, чанках по мегабайту и одном запросе в полёте затор в
+    сквозной передаче не наступает никогда, и тест, гоняющий настоящий
+    трафик, прошёл бы одинаково что с подключением, что без него - это и
+    есть та самая дыра, которую он должен закрывать. Синтетическая
+    эмиссия доказывает, что подключение существует; момент, когда Qt сам
+    решит вызвать bytesWritten, - забота Qt, а не наша.
+    """
+    identity = load_or_create(tmp_path)
+    link = PeerLink(identity)
+    socket = QSslSocket(link)
+    link._wire_up(socket)
+    monkeypatch.setattr(
+        type(socket), "bytesToWrite", lambda _self: WRITE_HIGH_WATER_BYTES + 1
+    )
+    seen: list[bool] = []
+    link.congestion_changed.connect(seen.append)
+
+    socket.bytesWritten.emit(0)
+
+    assert seen == [True]
