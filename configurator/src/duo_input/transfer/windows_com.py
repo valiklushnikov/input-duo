@@ -18,8 +18,14 @@ IStream, IDataObjectAsyncCapability. Ни typelib, ни кодогенераци
 from __future__ import annotations
 
 import ctypes
+import logging
 import threading
 from ctypes import wintypes
+
+from .pipe import ChunkPipe, PipeClosed
+
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # Коды возврата
@@ -206,6 +212,34 @@ _QUERY_INTERFACE = ctypes.WINFUNCTYPE(
     ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
 )
 _REF_COUNT = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)
+_STREAM_READ = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p
+)
+_STREAM_SEEK = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_longlong, wintypes.DWORD, ctypes.c_void_p
+)
+_STREAM_SETSIZE = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_longlong)
+_STREAM_COPYTO = ctypes.WINFUNCTYPE(
+    ctypes.c_long,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.c_longlong,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+)
+_STREAM_COMMIT = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, wintypes.DWORD)
+_STREAM_REVERT = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
+_STREAM_LOCK = ctypes.WINFUNCTYPE(
+    ctypes.c_long,
+    ctypes.c_void_p,
+    ctypes.c_longlong,
+    ctypes.c_longlong,
+    wintypes.DWORD,
+)
+_STREAM_STAT = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD
+)
+_STREAM_CLONE = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)
 
 
 def make_vtable(*callbacks) -> ctypes.Array:
@@ -242,6 +276,30 @@ def call_add_ref(pointer) -> int:
 def call_release(pointer) -> int:
     """IUnknown::Release через vtable."""
     return _slot(pointer, 2, _REF_COUNT)(pointer)
+
+
+def call_stream_read(pointer, count: int) -> tuple[bytes, int]:
+    """Call IStream::Read through vtable slot 3 and return bytes plus HRESULT."""
+    buffer = (ctypes.c_char * count)()
+    read = wintypes.ULONG(0)
+    result = _slot(pointer, 3, _STREAM_READ)(pointer, buffer, count, ctypes.byref(read))
+    return bytes(buffer[: read.value]), result
+
+
+def call_stream_seek(pointer, offset: int, origin: int) -> tuple[int, int]:
+    """Call IStream::Seek through vtable slot 5 and return position plus HRESULT."""
+    position = ctypes.c_ulonglong(0)
+    result = _slot(pointer, 5, _STREAM_SEEK)(
+        pointer, offset, origin, ctypes.byref(position)
+    )
+    return position.value, result
+
+
+def call_stream_stat(pointer) -> tuple[int, int]:
+    """Call IStream::Stat through vtable slot 12 and return size plus HRESULT."""
+    stat = STATSTG()
+    result = _slot(pointer, 12, _STREAM_STAT)(pointer, ctypes.byref(stat), 0)
+    return stat.cbSize, result
 
 
 class ComObject:
@@ -341,6 +399,156 @@ class ComObject:
             except BaseException as error:
                 self.last_release_error = error
         return remaining
+
+
+# --------------------------------------------------------------------------
+# IStream -> ChunkPipe
+# --------------------------------------------------------------------------
+
+#: Сколько ждать один чанк, прежде чем признать чтение неудавшимся.
+#:
+#: Windows даёт отложенной отрисовке порядка 30 секунд, и вставляющее
+#: приложение всё равно ждёт. Меньше - и медленная сеть выглядела бы как
+#: ошибка; больше - и зависший пир вешал бы Проводник без объяснения.
+READ_TIMEOUT_SECONDS = 30.0
+
+
+class PipeStream(ComObject):
+    """IStream, читающий из ChunkPipe и запрашивающий через колбэк.
+
+    ЭТО МОСТ, и на нём держится вся архитектура. Правила, каждое из которых
+    проверяется тестом:
+
+    - request() зовётся ПЕРЕД блокировкой, никогда после. Заблокироваться до
+      запроса означало бы повиснуть навсегда: никто не пришлёт данные, которых
+      не просили.
+    - блокировка происходит на pipe.wait(), никогда на сокете. Сокет
+      принадлежит GUI-потоку Qt, а этот код исполняется на COM-потоке.
+    - request - непрозрачный колбэк, переданный снаружи. Этот класс не знает
+      ни про Qt, ни про PeerLink, ни про invokeMethod.
+    - PipeClosed превращается в HRESULT. Исключение Python, вылетевшее в COM,
+      - это неопределённое поведение на стороне Проводника.
+    """
+
+    def __init__(
+        self,
+        pipe,
+        size: int,
+        request,
+        on_release=None,
+        timeout: float = READ_TIMEOUT_SECONDS,
+    ) -> None:
+        super().__init__([IID_IUNKNOWN, IID_ISTREAM])
+        self._pipe = pipe
+        self._size = size
+        self._request = request
+        self._timeout = timeout
+        self.position = 0
+        self.requested: list[tuple[int, int]] = []
+        self.on_last_release = on_release
+
+        self.extend_vtable(
+            [
+                _STREAM_READ(self._read),
+                _STREAM_READ(self._write),
+                _STREAM_SEEK(self._seek),
+                _STREAM_SETSIZE(self._set_size),
+                _STREAM_COPYTO(self._copy_to),
+                _STREAM_COMMIT(self._commit),
+                _STREAM_REVERT(self._revert),
+                _STREAM_LOCK(self._lock_region),
+                _STREAM_LOCK(self._unlock_region),
+                _STREAM_STAT(self._stat),
+                _STREAM_CLONE(self._clone),
+            ]
+        )
+
+    # ------------------------------------------------------------------ IStream
+
+    def _read(self, _this, pv, cb, pcb_read) -> int:
+        remaining = max(0, self._size - self.position)
+        want = min(int(cb), remaining)
+        if want == 0:
+            # Конец файла. Запрашивать нечего - отправитель ответил бы пустотой.
+            if pcb_read:
+                ctypes.cast(pcb_read, ctypes.POINTER(wintypes.ULONG))[0] = 0
+            return S_OK
+
+        try:
+            payload = self._pipe.take(want)
+            if not payload:
+                # Запрос ПЕРЕД блокировкой. Обратный порядок повис бы навсегда.
+                requested = (self.position, want)
+                self.requested.append(requested)
+                self._request(*requested)
+                if not self._pipe.wait(self._timeout):
+                    logger.warning("чанк не пришёл за %.0f с", self._timeout)
+                    return STG_E_READFAULT
+                payload = self._pipe.take(want)
+        except PipeClosed as error:
+            # Отмена, разрыв или ошибка. В COM уходит HRESULT, не исключение.
+            logger.info("поток закрыт: %s", error.reason)
+            if pcb_read:
+                ctypes.cast(pcb_read, ctypes.POINTER(wintypes.ULONG))[0] = 0
+            return STG_E_READFAULT
+
+        if payload:
+            ctypes.memmove(pv, payload, len(payload))
+        self.position += len(payload)
+        if pcb_read:
+            ctypes.cast(pcb_read, ctypes.POINTER(wintypes.ULONG))[0] = len(payload)
+        # S_OK и при частичном чтении. S_FALSE означает конец потока, и
+        # Проводник вправе трактовать его посреди файла как ошибку.
+        return S_OK
+
+    def _seek(self, _this, offset, origin, new_position) -> int:
+        if origin == STREAM_SEEK_SET:
+            target = int(offset)
+        elif origin == STREAM_SEEK_CUR:
+            target = self.position + int(offset)
+        elif origin == STREAM_SEEK_END:
+            target = self._size + int(offset)
+        else:
+            return STG_E_INVALIDFUNCTION
+        if target < 0:
+            return STG_E_INVALIDFUNCTION
+        self.position = target
+        if new_position:
+            ctypes.cast(new_position, ctypes.POINTER(ctypes.c_ulonglong))[0] = target
+        return S_OK
+
+    def _stat(self, _this, pstatstg, _flags) -> int:
+        if not pstatstg:
+            return E_POINTER
+        stat = ctypes.cast(pstatstg, ctypes.POINTER(STATSTG)).contents
+        ctypes.memset(ctypes.byref(stat), 0, ctypes.sizeof(STATSTG))
+        stat.type = 2  # STGTY_STREAM
+        stat.cbSize = self._size
+        return S_OK
+
+    def _write(self, _this, _pv, _cb, _written) -> int:
+        return STG_E_INVALIDFUNCTION
+
+    def _set_size(self, _this, _size) -> int:
+        return STG_E_INVALIDFUNCTION
+
+    def _copy_to(self, _this, _dest, _cb, _read, _written) -> int:
+        return E_NOTIMPL
+
+    def _commit(self, _this, _flags) -> int:
+        return S_OK
+
+    def _revert(self, _this) -> int:
+        return S_OK
+
+    def _lock_region(self, _this, _offset, _cb, _type) -> int:
+        return E_NOTIMPL
+
+    def _unlock_region(self, _this, _offset, _cb, _type) -> int:
+        return E_NOTIMPL
+
+    def _clone(self, _this, _out) -> int:
+        return E_NOTIMPL
 
 
 # --------------------------------------------------------------------------
