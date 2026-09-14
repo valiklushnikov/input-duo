@@ -199,6 +199,15 @@ success" property described next.
   empty `intervals` list can only mean the Qt event loop itself never ran
   during the whole transfer, which is exactly the failure mode worth
   surfacing loudly rather than reporting as `0.0/0.0`.
+  **Benign case that looks identical to the busy-spin defect fixed in this
+  round**: `_percentile()` returns the *maximum* of the sample list for any
+  `n <= 100` (`index = int(len(ordered) * 0.99)` rounds down to the last
+  index whenever there are 100 or fewer samples), so `gui_tick_p99_ms ==
+  gui_tick_max_ms` reappears on any run shorter than roughly 1.6 s at
+  `TICK_MS = 16` — for an entirely ordinary reason, not because the pump is
+  busy-spinning again. Task 3.2's runs are multi-hundred-MiB and won't hit
+  this, but a quick smoke run might, and identical rows there are not
+  evidence of a regression of Important 6.
 
 - **`socket_bytes_to_write_max`.** A `0` here is a completely legitimate
   reading (a one-chunk-in-flight window on a fast loopback link drains
@@ -338,8 +347,11 @@ success" property described next.
 
 - **`bypassed_transport_mib_s`.** A separate pass, run *after* the main
   transfer (and after `finish_session`/`call_release` cleanup), covering
-  only sending `size // READ_CHUNK_BYTES` back-to-back `FILE_CHUNK` frames
-  and waiting for the receiving `PeerLink` to have assembled them all. This
+  only sending `ceil(size / READ_CHUNK_BYTES)` back-to-back `FILE_CHUNK`
+  frames — at least `size` bytes, rounded up to a whole frame (fixed from
+  the floor-rounded `size // READ_CHUNK_BYTES` in the quality-review round,
+  so this pass never covers fewer bytes than the main transfer) — and
+  waiting for the receiving `PeerLink` to have assembled them all. This
   interval touches TLS/socket/`FrameAssembler` only — no `IStream`, no
   `ChunkPipe`, no `FileTransferService` pipe bookkeeping, no disk. It is
   not measuring "the same bytes again" in the sense of re-sending the
@@ -354,13 +366,23 @@ success" property described next.
   the whole process's memory use, not an isolated delta for this transfer
   alone.
 
-- **`peak_python_bytes`.** Scoped more tightly than RSS: `tracemalloc.start()`
-  runs at the very top of `measure()` (before identities are loaded,
-  sockets opened, or the file generated), so this peak covers the entire
-  `measure()` call — setup, the transfer, and the bypass pass — not the
-  transfer alone. It is read before the bypass pass's own small buffer is
-  allocated, so that allocation is included in the peak but does not
-  dominate it (one `READ_CHUNK_BYTES`-sized buffer, reused for every frame).
+- **`peak_python_bytes`.** Scoped more tightly than RSS, and — after the
+  quality-review round's Critical 2 fix — more tightly than an earlier
+  version of this same paragraph claimed. `tracemalloc.start()` runs at the
+  very top of `measure()` (before identities are loaded, sockets opened, or
+  the file generated), but the *read* (`tracemalloc.get_traced_memory()[1]`)
+  now happens immediately after `instrument.stop()`, strictly before
+  `_measure_bypassed_transport` is even called. So this peak covers setup
+  plus the main transfer only — process entry into `measure()` through the
+  end of the IStream read loop — and it **excludes the bypass pass
+  entirely**, including that pass's own repeated `READ_CHUNK_BYTES` buffer.
+  A bypass pass with an unusually large allocation of its own would not be
+  visible in this figure at all. (An earlier revision of this paragraph said
+  the peak covered "the entire `measure()` call... setup, the transfer, and
+  the bypass pass" and that the bypass buffer's allocation "is included in
+  the peak" — both true of the code as it stood before Critical 2's fix
+  moved the read earlier, false afterward. Task 3.2 should read this
+  figure as transfer-plus-setup memory only.)
 
 ## Files changed
 
@@ -790,3 +812,113 @@ touched the six `as_table()`/property lines those mutations target
 only `as_table()` line changed this round is the heartbeat row, which
 wasn't part of that table). The 8/8 pass above is direct evidence those six
 guards are still intact.
+
+---
+
+## Fix report (quality re-review round 2)
+
+Re-review confirmed all 10 round-1 findings addressed, including the four
+(`Important 5`, `Critical 1`, `Important 6`, `Important 10`) that were fixed
+by reasoning rather than live reproduction — the re-review traced each one
+through the actual call chain and the reasoning held. One new Important was
+raised, introduced by round 1's own fix appendix, and it is
+documentation-only: no code changed this round.
+
+### IMPORTANT (new) — `peak_python_bytes` scope description left false in the opposite direction
+
+Round 1's Important-9 fix corrected the claim that `peak_python_bytes` "is
+read before the bypass pass's own buffer is allocated" — true after moving
+the read earlier in `_run`. But the *scope* sentence two paragraphs later,
+in "What each measured interval actually covers," was never revisited: it
+still said the peak "covers the entire `measure()` call — setup, the
+transfer, and the bypass pass" and that the bypass buffer's allocation "is
+included in the peak." Both were accurate before Critical 2's fix and both
+became false the moment that fix moved the read to immediately after
+`instrument.stop()` — the bypass pass, and its buffer, now happen strictly
+*after* the value being reported was already captured.
+
+Fixed by rewriting that paragraph (see "What each measured interval
+actually covers" above) to state the corrected scope: setup plus the main
+transfer only, excluding the bypass pass entirely, with the prior wording
+quoted and marked as describing pre-fix behaviour rather than silently
+replaced. This is the same class of defect as round 1's Important 9 — a
+report claim contradicting the code — recurring in the very bullet that
+finding's fix touched, because that fix corrected the adjacent sentence
+about ordering without re-reading the scope sentence it logically
+implies. No code changed; this is the report bringing itself back into
+agreement with `spike_measure_bridge.py:672-683` and `:785` as they
+actually stand.
+
+### Smaller staleness folded in
+
+`bypassed_transport_mib_s`'s interval description still said the bypass
+pass sends `size // READ_CHUNK_BYTES` frames (floor), which became `ceil`
+(`-(-total_bytes // chunk_bytes)`) as part of round 1's Minor fix for
+`chunk_count` rounding. Corrected to describe the ceiling and note why (so
+the pass never covers fewer bytes than the main transfer).
+
+### Benign-lookalike recorded, not fixed
+
+Per the re-review's request: added a note to the "GUI tick p99/max" bullet
+that `_percentile()` returns the sample maximum for any `n <= 100`, so
+`gui_tick_p99_ms == gui_tick_max_ms` will reappear on any run shorter than
+~1.6 s at `TICK_MS = 16` — the exact signature this task used to diagnose
+Important 6's busy-spin defect, but here for an entirely ordinary reason
+(too few samples for the 99th percentile to land anywhere but the last
+one). Task 3.2's multi-hundred-MiB runs won't hit this; a quick smoke run
+might, and the note exists so nobody re-opens a closed finding over it.
+
+### Deferred observations, recorded for later — not fixed this round
+
+Both raised by the re-review as things to know rather than things to fix
+now; neither was a genuine one-liner on inspection, so neither was folded
+in:
+
+- **`link_dropped_during_sampling`'s raise leaks the IStream.** The check
+  at `spike_measure_bridge.py:687-692` (`if link_dropped_during_sampling:
+  raise RuntimeError(...)`) sits *before* the `try:` at `:696` that this
+  same round's fix wrapped around the digest check, `finish_session`, and
+  the cancel-completeness check — with `call_release(stream_holder[0])` in
+  that block's `finally`. So a link drop caught by the new guard skips
+  cleanup and leaks the real COM `IStream`, on exactly the error path the
+  new guard exists to catch. The pre-existing `emulator_error` raise at
+  `:684-685` has the same problem and always has, predating this round
+  entirely. Moving both raises inside the `try` (or moving the `try` to
+  start earlier) would close both at once. Not done this round because it
+  touches control flow adjacent to code just stabilized by two rounds of
+  review, and the leak's only observed consequence — stale COM state
+  visible to a *later* `measure()` call in the same process — was already
+  flagged as a known limitation in this report's original self-review, so
+  recording it here rather than reopening that code seemed the smaller
+  risk for a documentation-only round.
+- **An exception from inside the `_pump` checker `QTimer` would hit
+  PySide6's slot excepthook, not `measure()`'s caller.** `condition()` for
+  the main transfer loop is `_condition`, which calls `_maybe_cancel()`,
+  which can call `finish_session("cancelled")` — all now invoked from
+  inside a `QTimer.timeout` slot rather than a plain Python loop. This is
+  the exact hazard `_sample()`'s comment already names for the same reason
+  `link_dropped_during_sampling` exists instead of raising directly. The
+  re-review checked today's actual call chain and found no live exception
+  source (`PeerLink.close`/`peer.py:116-119` returns early rather than
+  raising; `finish_session` only touches dicts, pipes, and signal emission)
+  — so this is a structural fragility to keep in mind if `_maybe_cancel` or
+  anything it calls ever gains a new raise, not a present defect.
+
+### Files changed (this round)
+
+- `.superpowers/sdd/2026-09-12-file-transfer-implementation/task-3.1-report.md`
+  only — no source file changed.
+
+### Verification run (this round)
+
+```
+$ .venv/Scripts/python.exe -m pytest configurator/tests/transfer/test_spike_measure_bridge.py -v
+8 passed
+
+$ .venv/Scripts/python.exe -m pytest configurator/tests -q
+1922 passed, 8 skipped
+```
+
+Unchanged from round 1's numbers, as expected for a documentation-only
+round: no source file was touched, so re-running the covering tests is a
+confirmation that this round's edits are indeed confined to the report.
