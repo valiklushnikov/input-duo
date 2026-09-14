@@ -28,6 +28,23 @@ def test_entry_point_target_is_the_main_callable():
     assert callable(main)
 
 
+def test_file_self_check_invokes_the_com_vtable_before_starting_qt(capsys, monkeypatch):
+    from duo_input import app
+
+    def qt_must_not_start(*_args, **_kwargs):
+        raise AssertionError("the file self-check must remain windowless")
+
+    with monkeypatch.context() as context:
+        context.setattr(app.QApplication, "instance", qt_must_not_start)
+        result = main(["DuoInput.exe", "--self-check-files"])
+
+    output = capsys.readouterr().out.lower()
+    assert result == 0
+    assert "files: ok" in output
+    assert "callback: addref 2, release 1" in output
+    assert "descriptor: 592" in output
+
+
 def test_build_main_window_produces_a_wired_shell(qtbot):
     service = DeviceService(timeout_ms=5000)
 

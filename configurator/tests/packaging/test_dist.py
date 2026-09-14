@@ -257,3 +257,36 @@ def test_the_built_program_can_actually_open_a_tls_connection(dist: Path):
     )
 
     assert "tls: ok" in result.stdout.lower(), result.stdout + result.stderr
+
+
+def test_the_packaged_build_can_actually_invoke_a_com_vtable_callback(dist: Path):
+    executable = dist / "DuoInput.exe"
+    result = subprocess.run(
+        [str(executable), "--self-check-files"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "files: ok" in result.stdout.lower(), result.stdout + result.stderr
+    assert "callback: addref 2, release 1" in result.stdout.lower(), (
+        "the packaged program did not prove that its generated ctypes COM callback "
+        f"is invocable: {result.stdout}{result.stderr}"
+    )
+
+
+def test_the_packaged_build_reports_its_descriptor_size(dist: Path):
+    executable = dist / "DuoInput.exe"
+    result = subprocess.run(
+        [str(executable), "--self-check-files"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "descriptor: 592" in result.stdout.lower(), (
+        "FILEDESCRIPTORW has the wrong packaged layout; Explorer would read its fields "
+        f"at the wrong offsets: {result.stdout}{result.stderr}"
+    )

@@ -574,6 +574,65 @@ def main(argv: list[str] | None = None) -> int:
         print(f"backend: {QSslSocket.activeBackend()}")
         return 0
 
+    if "--self-check-files" in arguments:
+        # This runs before QApplication so the packaged executable can prove
+        # its ctypes COM boundary without opening a window. Keep the Windows
+        # imports inside this branch: other platforms and ordinary startup do
+        # not need to load the native file-transfer implementation.
+        import ctypes
+
+        from duo_input.transfer.model import ENTRY_FILE, TransferEntry, TransferManifest
+        from duo_input.transfer.pipe import ChunkPipe
+        from duo_input.transfer.windows_com import (
+            FILEDESCRIPTORW,
+            call_add_ref,
+            call_release,
+        )
+        from duo_input.transfer.windows_files import (
+            VirtualFilesDataObject,
+            group_descriptor_bytes,
+        )
+
+        manifest = TransferManifest(
+            transfer_id="self-check",
+            entries=(
+                TransferEntry(
+                    path="a.bin",
+                    kind=ENTRY_FILE,
+                    size=4,
+                    mtime_ns=1,
+                ),
+            ),
+        )
+        try:
+            descriptor_size = ctypes.sizeof(FILEDESCRIPTORW)
+            blob = group_descriptor_bytes(manifest)
+            data_object = VirtualFilesDataObject(
+                manifest,
+                open_pipe=lambda *_: ChunkPipe(),
+                request_read=lambda *_: None,
+                close_pipe=lambda *_: None,
+                origin_marker=b"self-check",
+            )
+            added = call_add_ref(data_object.pointer)
+            released = call_release(data_object.pointer)
+            usable = (
+                data_object.pointer.value is not None
+                and len(blob) == 4 + descriptor_size
+                and descriptor_size == 592
+                and added == 2
+                and released == 1
+                and data_object.refcount == 1
+            )
+        except Exception as error:  # noqa: BLE001 - this is a diagnostic boundary
+            print(f"files: missing ({error})")
+            return 1
+
+        print(f"files: {'ok' if usable else 'missing'}")
+        print(f"callback: addref {added}, release {released}")
+        print(f"descriptor: {descriptor_size}")
+        return 0 if usable else 1
+
     application = QApplication.instance() or QApplication(arguments)
     application.setApplicationName(APPLICATION_NAME)
     application.setApplicationVersion(__version__)
