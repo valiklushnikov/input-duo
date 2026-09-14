@@ -5,6 +5,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 # Anchored to this file, not to the working directory. Relative to the cwd it
 # resolved only when pytest was run from inside configurator/: from the
 # repository root - which is how the release build and the full gate run it -
@@ -67,7 +69,16 @@ def _imported_modules(path: Path) -> set[str]:
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 # level=1 - текущий пакет, level=2 - на один выше, и так далее.
-                base = package[: len(package) - (node.level - 1)]
+                # Выше корня пакета подниматься некуда: Python такой модуль
+                # импортировать не смог бы, а срез без пола ушёл бы в минус
+                # и вернул правдоподобное, но неверное имя - то есть ровно
+                # тот молчаливый промах, ради которого этот разборщик и
+                # переписан.
+                assert node.level <= len(package), (
+                    f"{path}: относительный импорт уровня {node.level} выходит "
+                    f"за корень пакета {'.'.join(package) or '<вне пакета>'}"
+                )
+                base = package[: max(0, len(package) - (node.level - 1))]
             else:
                 base = []
             target = [*base, node.module] if node.module else base
@@ -235,6 +246,14 @@ def test_the_transitive_sweep_sees_qt_reached_through_a_sibling():
         "обход не пошёл по относительному импорту - правило для COM-модуля "
         "проверяет только первый уровень и молчит про остальные"
     )
+
+
+def test_a_relative_import_above_the_package_root_fails_loudly():
+    # Срез без пола ушёл бы в минус и вернул имя, которое выглядит
+    # настоящим. Молчаливое неверное имя здесь хуже падения: правило
+    # проверило бы не тот модуль и осталось зелёным.
+    with pytest.raises(AssertionError, match="выходит за корень пакета"):
+        _imported_modules(FIXTURES / "over_root.py")
 
 
 def test_the_transitive_sweep_survives_a_cycle():

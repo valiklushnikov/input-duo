@@ -767,7 +767,13 @@ class WindowsFileClipboardBackend(QObject):
         if not self._ready.wait(timeout=_START_TIMEOUT_S):
             logger.error("поток STA не доложил о готовности за %.0f с", _START_TIMEOUT_S)
         elif self._start_error is not None:
-            logger.error("апартамент STA не поднялся: %s", self._start_error)
+            # Тип, а не текст - ровно как в open_pipe выше. Сообщение
+            # приходит из чужого кода и вполне может нести путь, а §15
+            # запрещает путям попадать в журнал. Две соседние записи,
+            # расходящиеся в этом, - это приглашение скопировать не ту.
+            logger.error(
+                "апартамент STA не поднялся: %s", type(self._start_error).__name__
+            )
 
     def stop(self) -> None:
         thread = self._thread

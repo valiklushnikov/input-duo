@@ -64,7 +64,16 @@ def _imported_names_from_source(
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            base = parts[: len(parts) - (node.level - 1)] if node.level else []
+            if node.level:
+                # Выше корня пакета подниматься некуда, а срез без пола
+                # ушёл бы в минус и вернул правдоподобное, но неверное имя.
+                assert node.level <= len(parts), (
+                    f"{filename}: относительный импорт уровня {node.level} "
+                    f"выходит за корень пакета {package or '<вне пакета>'}"
+                )
+                base = parts[: max(0, len(parts) - (node.level - 1))]
+            else:
+                base = []
             target = [*base, node.module] if node.module else base
             if target:
                 names.add(".".join(target))
@@ -142,3 +151,12 @@ def test_a_relative_import_of_the_windows_transport_crosses_the_boundary():
     assert sorted(name for name in names if _crosses_the_boundary(name)) == [
         "duo_input.transfer.windows_files"
     ], "самая короткая дорога из общего модуля в Qt-обвязку осталась незамеченной"
+
+
+def test_a_relative_import_above_the_package_root_fails_loudly():
+    # Не достижимо из импортируемого исходника, но разрешать такой импорт в
+    # правдоподобное неверное имя значит проверить правилом не тот модуль и
+    # остаться зелёным - ровно тот молчаливый промах, который эта функция и
+    # существует, чтобы убрать.
+    with pytest.raises(AssertionError, match="выходит за корень пакета"):
+        _imported_names_from_source("from ... import x", "duo_input.transfer")

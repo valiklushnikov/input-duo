@@ -442,7 +442,13 @@ def test_a_failing_apartment_leaves_the_backend_visibly_unstarted(
         qtbot.waitUntil(lambda: not backend.is_running, timeout=5000)
 
     assert backend.thread_id is None
-    assert any("apartment refused" in record.getMessage() for record in caplog.records)
+    # Тип отказа, а не его текст: §15 запрещает тексту чужого исключения
+    # попадать в журнал (см. test_privacy.py). Видимость отказа этим не
+    # страдает - запись уровня ERROR есть, и в ней названа причина.
+    assert any(
+        "апартамент STA не поднялся: OSError" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 # ----------------------------------------------------------------- публикация

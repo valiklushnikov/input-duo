@@ -386,3 +386,43 @@ def test_a_failing_publication_logs_the_hresult_not_the_tree(
     )
     assert SECRET_NAME not in logged
     assert "SUPER-SECRET" not in logged
+
+
+@WINDOWS_ONLY
+def test_a_failing_apartment_is_logged_by_type_not_by_message(
+    caplog, qapp, qtbot, monkeypatch, tmp_path
+):
+    # Пара к open_pipe выше, и по той же причине: причина отказа приходит
+    # из чужого кода, а в журнал идёт её тип. Две соседние записи, одна из
+    # которых печатает тип, а другая текст, - это приглашение скопировать
+    # не ту.
+    #
+    # Проверяются сообщения записей, без трассировок: рядом стоит
+    # logger.exception("OleInitialize отказал..."), и трассировка в нём -
+    # сознательная диагностика отказа апартамента. Текст в ней пишет
+    # Windows (OleInitialize отдаёт HRESULT), а ни дерева, ни пути в
+    # области видимости того except нет вовсе.
+    from duo_input.transfer import windows_files
+    from duo_input.transfer.windows_files import WindowsFileClipboardBackend
+
+    caplog.set_level(logging.ERROR)
+    secret_path = tmp_path / SECRET_NAME
+
+    def refuse() -> None:
+        raise OSError("апартамент занят " + str(secret_path))
+
+    monkeypatch.setattr(windows_files, "_ole_initialize", refuse)
+    backend = WindowsFileClipboardBackend()
+    try:
+        backend.start()
+        qtbot.waitUntil(lambda: not backend.is_running, timeout=5000)
+    finally:
+        backend.stop()
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "апартамент STA не поднялся: OSError" in messages, (
+        "неподнявшийся апартамент обязан оставить запись с типом отказа - "
+        "иначе проверки ниже смотрят на чужую запись"
+    )
+    assert SECRET_NAME not in messages
+    assert str(tmp_path) not in messages
