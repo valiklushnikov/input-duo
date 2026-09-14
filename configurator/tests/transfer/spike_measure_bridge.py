@@ -44,7 +44,13 @@ from duo_input.clipboard.identity import load_or_create
 from duo_input.clipboard.listener import PeerListener
 from duo_input.clipboard.peer import PeerLink
 from duo_input.clipboard.service import HEARTBEAT_MS
-from duo_input.clipboard.wire import CAPABILITY_CLIPBOARD, CAPABILITY_FILES, Message, MessageType
+from duo_input.clipboard.wire import (
+    CAPABILITY_CLIPBOARD,
+    CAPABILITY_FILES,
+    MAX_FILE_CHUNK_BYTES,
+    Message,
+    MessageType,
+)
 from duo_input.transfer.service import FileTransferService
 from duo_input.transfer.windows_com import (
     S_OK,
@@ -135,6 +141,18 @@ class Measurement:
     #: которая эти поля не перечисляет, продолжала строить Measurement.
     heartbeat_sent: int = 0
     heartbeat_received: int = 0
+    #: Размер одного запроса IStream::Read, которым шёл этот прогон, - он же
+    #: размер чанка на проводе (PipeStream._read: want = min(cb, remaining),
+    #: и ровно это want уходит в request_read). Печатается в таблице не для
+    #: полноты: без него из отчёта невозможно понять, при каком чанке взяты
+    #: RTT и пропускная способность, а гейт задачи 3.2 сравнивает
+    #: bytes_per_chunk / RTT с пропускной способностью - обе части
+    #: масштабируются с чанком, и сравнение при чужом чанке не отвечает на
+    #: вопрос гейта ни в какую сторону. Первый прогон этого спайка был снят
+    #: при 65536 - четверти настоящего cb Проводника (262144, спайк 1), - и
+    #: эта строка существует, чтобы такое расхождение больше не было
+    #: невидимым в выводе.
+    read_chunk_bytes: int = READ_CHUNK_BYTES
 
     @property
     def throughput_mib_s(self) -> float:
@@ -170,6 +188,7 @@ class Measurement:
                 "| величина | значение |",
                 "|---|---|",
                 f"| передано | {self.bytes_transferred / MIB:.0f} МиБ |",
+                f"| размер чанка (IStream::Read cb) | {self.read_chunk_bytes} Б |",
                 f"| время | {self.elapsed_seconds:.1f} с |",
                 f"| пропускная способность | {self.throughput_mib_s:.1f} МиБ/с |",
                 f"| пик RSS | {self.peak_rss_bytes / MIB:.0f} МиБ |",
@@ -293,6 +312,12 @@ def _write_generated_file(path: Path, size: int, seed: int = 0) -> str:
     index = 0
     with open(path, "wb") as handle:
         while remaining > 0:
+            # Намеренно НЕ read_chunk_bytes: это размер блока, которым файл
+            # пишется на диск, и он не обязан совпадать с размером чтения.
+            # Дайджест считается по всему потоку байт, а не по блокам, так
+            # что при любом размере чтения обе стороны сходятся на одном
+            # значении - подтверждено прогонами при 262144, где генерация
+            # шла блоками 65536 и проверка дайджеста прошла.
             take = min(READ_CHUNK_BYTES, remaining)
             digest = hashlib.sha256(f"{seed}:{index}".encode("ascii")).digest()
             repeats = -(-take // len(digest))  # ceil без импорта math
@@ -315,10 +340,20 @@ def _percentile(samples_ms: list[float], fraction: float) -> float:
 # ============================================================== измерение
 
 
-def measure(size: int, cancel_after_bytes: int | None = None) -> Measurement:
+def measure(
+    size: int,
+    cancel_after_bytes: int | None = None,
+    read_chunk_bytes: int = READ_CHUNK_BYTES,
+) -> Measurement:
     """Провести один прогон моста и вернуть его показания.
 
     ``size`` - размер единственного файла в передаче, в байтах.
+    ``read_chunk_bytes`` - размер одного IStream::Read, он же размер чанка на
+    проводе. По умолчанию READ_CHUNK_BYTES (65536), но настоящий Проводник
+    читает по 262144 (спайк 1, все 17 зафиксированных чтений), и гейт задачи
+    3.2 обязан применяться при ЕГО чанке, а не при нашем: сравнение
+    bytes_per_chunk / RTT с пропускной способностью масштабируется с чанком в
+    обеих частях.
     ``cancel_after_bytes`` - если задан, после того как имитатор Проводника
     прочтёт столько байт, вызывается настоящая отмена сессии, и измеряется,
     сколько блокированный IStream::Read после этого ждал. Значение обязано
@@ -331,6 +366,19 @@ def measure(size: int, cancel_after_bytes: int | None = None) -> Measurement:
             "size обязан быть положительным - нулевая передача не касается ни "
             "IStream::Read, ни FILE_READ, ни SnapshotRegistry.read, и это "
             "измерение не сообщило бы ни о чём из того, что оно должно"
+        )
+    if read_chunk_bytes <= 0:
+        raise ValueError(
+            "read_chunk_bytes обязан быть положительным - нулевой запрос не "
+            "прочитал бы ни одного байта"
+        )
+    if read_chunk_bytes > MAX_FILE_CHUNK_BYTES:
+        raise ValueError(
+            f"read_chunk_bytes={read_chunk_bytes} больше потолка кадра "
+            f"MAX_FILE_CHUNK_BYTES={MAX_FILE_CHUNK_BYTES}: request_read "
+            "молча урезал бы длину до потолка (service.py: effective_length "
+            "= min(length, MAX_FILE_CHUNK_BYTES)), и измерение сообщило бы о "
+            "чанке, которого на проводе не было"
         )
     if cancel_after_bytes is not None:
         if cancel_after_bytes < 0:
@@ -348,7 +396,7 @@ def measure(size: int, cancel_after_bytes: int | None = None) -> Measurement:
     tracemalloc.start()
     work_dir = Path(tempfile.mkdtemp(prefix="duo-input-bridge-measure-"))
     try:
-        return _measure(app, work_dir, size, cancel_after_bytes)
+        return _measure(app, work_dir, size, cancel_after_bytes, read_chunk_bytes)
     finally:
         # rmtree, а не TemporaryDirectory: на Windows каталог с открытыми
         # сертификатами identity иногда отпускается на тик позже, чем нужно
@@ -368,7 +416,11 @@ def measure(size: int, cancel_after_bytes: int | None = None) -> Measurement:
 
 
 def _measure(
-    app: QApplication, work_dir: Path, size: int, cancel_after_bytes: int | None
+    app: QApplication,
+    work_dir: Path,
+    size: int,
+    cancel_after_bytes: int | None,
+    read_chunk_bytes: int,
 ) -> Measurement:
     sender_identity = load_or_create(work_dir / "sender")
     receiver_identity = load_or_create(work_dir / "receiver")
@@ -401,7 +453,7 @@ def _measure(
         backend = WindowsFileClipboardBackend()
         try:
             return _run(
-                app, work_dir, size, cancel_after_bytes,
+                app, work_dir, size, cancel_after_bytes, read_chunk_bytes,
                 sender, receiver, outgoing, incoming_link, backend,
             )
         finally:
@@ -416,6 +468,7 @@ def _run(
     work_dir: Path,
     size: int,
     cancel_after_bytes: int | None,
+    read_chunk_bytes: int,
     sender: FileTransferService,
     receiver: FileTransferService,
     outgoing: PeerLink,
@@ -596,7 +649,7 @@ def _run(
             hasher = hashlib.sha256()
             position = 0
             while position < size:
-                payload, hresult = call_stream_read(stream_pointer, READ_CHUNK_BYTES)
+                payload, hresult = call_stream_read(stream_pointer, read_chunk_bytes)
                 if hresult != S_OK:
                     # PipeStream._read возвращает тот же STG_E_READFAULT и на
                     # закрытие пира по отмене, и на СВОЙ тридцатисекундный
@@ -790,7 +843,12 @@ def _run(
             "heartbeat голодает, а не просто короткий прогон"
         )
 
-    bypassed_transport_mib_s = _measure_bypassed_transport(app, outgoing, incoming_link, size)
+    # Тем же чанком, что и основная передача: гейт шага 3 сравнивает
+    # bytes_per_chunk / RTT с пропускной способностью И с этим числом, а
+    # проход при другом размере кадра сравнивать было бы не с чем.
+    bypassed_transport_mib_s = _measure_bypassed_transport(
+        app, outgoing, incoming_link, size, read_chunk_bytes
+    )
 
     return Measurement(
         bytes_transferred=delivered,
@@ -812,6 +870,7 @@ def _run(
         heartbeat_gaps_seconds=heartbeat_gaps,
         heartbeat_sent=heartbeat_sent,
         heartbeat_received=heartbeat_received,
+        read_chunk_bytes=read_chunk_bytes,
     )
 
 
@@ -826,7 +885,11 @@ def receiver_origin_marker(receiver: FileTransferService) -> bytes:
 
 
 def _measure_bypassed_transport(
-    app: QApplication, outgoing: PeerLink, incoming_link: PeerLink, total_bytes: int
+    app: QApplication,
+    outgoing: PeerLink,
+    incoming_link: PeerLink,
+    total_bytes: int,
+    chunk_bytes: int,
 ) -> float:
     """Тот же провод, без IStream, без ChunkPipe и без FileTransferService.
 
@@ -840,9 +903,8 @@ def _measure_bypassed_transport(
     if total_bytes <= 0:
         return 0.0
     marker = "bridge-measure-bypass"
-    chunk_bytes = READ_CHUNK_BYTES
     payload = bytes((index * 131 + 7) & 0xFF for index in range(chunk_bytes))
-    # Ceil, не floor: payload - фиксированный буфер в READ_CHUNK_BYTES, и
+    # Ceil, не floor: payload - фиксированный буфер в chunk_bytes, и
     # последний кадр шлётся полным независимо от округления, так что деление
     # вниз просто недосылало бы объём и занижало бы охват этого прохода
     # относительно size основной передачи, а не экономило бы кадр.
@@ -902,6 +964,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="отменить сессию после стольки МиБ и измерить задержку отмены",
     )
+    parser.add_argument(
+        "--read-chunk-bytes",
+        type=int,
+        default=READ_CHUNK_BYTES,
+        help=(
+            "размер одного IStream::Read, он же размер чанка на проводе. "
+            f"По умолчанию {READ_CHUNK_BYTES}; настоящий Проводник читает по "
+            "262144 (спайк 1), и гейт задачи 3.2 применяется при нём"
+        ),
+    )
     return parser
 
 
@@ -910,7 +982,11 @@ def main() -> int:
     cancel_after_bytes = (
         None if args.cancel_after_mib is None else args.cancel_after_mib * MIB
     )
-    measurement = measure(args.size_mib * MIB, cancel_after_bytes=cancel_after_bytes)
+    measurement = measure(
+        args.size_mib * MIB,
+        cancel_after_bytes=cancel_after_bytes,
+        read_chunk_bytes=args.read_chunk_bytes,
+    )
     print(measurement.as_table())
     return 0
 
