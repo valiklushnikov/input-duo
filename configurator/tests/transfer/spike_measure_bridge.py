@@ -77,9 +77,22 @@ PUBLISH_TIMEOUT_S = 10.0
 #: "мост завис". На 2048 МиБ и разумной сети это на два порядка больше нужного.
 TRANSFER_CEILING_S = 1800.0
 
-#: Сколько ждём приёма кадров пропуска-моста, прежде чем признать этот проход
-#: зависшим, а не медленным.
-BYPASS_CEILING_S = 60.0
+#: Нижняя граница пропускной способности, ниже которой проход без моста
+#: считается зависшим, а не просто медленным на большом файле. 1 МиБ/с - уже
+#: "что-то серьёзно не так", а не медленная сеть: фиксированные 60 с раньше
+#: обрывали проход на честном крупном --size-mib ПОСЛЕ того, как настоящая
+#: передача уже отняла полчаса, выбрасывая всё измерение.
+BYPASS_MIN_MIB_S = 1.0
+
+#: Пол потолка ожидания - для маленьких прогонов, где total_bytes /
+#: BYPASS_MIN_MIB_S дал бы неоправданно короткий срок.
+BYPASS_CEILING_FLOOR_S = 30.0
+
+#: Сколько кадров FILE_CHUNK отправить подряд, прежде чем отдать цикл
+#: событий Qt. Без этого весь проход ушёл бы в очередь записи QSslSocket
+#: одним махом (PeerLink.send пишет без обратного давления) прежде чем
+#: первый байт попал бы на провод.
+_BYPASS_PUMP_EVERY = 4
 
 #: Пауза после публикации, прежде чем поток-имитатор возьмёт поток. Спайк 1
 #: измерил: в первые ~100 мс после OleSetClipboard систему трогает не
@@ -114,6 +127,14 @@ class Measurement:
     #: FILE_CHUNK подряд, без IStream и без очереди.
     bypassed_transport_mib_s: float
     heartbeat_gaps_seconds: list[float] = field(default_factory=list)
+    #: Сколько PING отправлено и сколько пришло. Без этой пары
+    #: "не измерялись" покрывало и короткий прогон, и голодающий heartbeat -
+    #: разные диагнозы, неразличимые по одному только списку промежутков.
+    #: Значения по умолчанию - не для настоящих прогонов (measure() всегда
+    #: передаёт оба явно), а чтобы фикстура test_spike_measure_bridge.py,
+    #: которая эти поля не перечисляет, продолжала строить Measurement.
+    heartbeat_sent: int = 0
+    heartbeat_received: int = 0
 
     @property
     def throughput_mib_s(self) -> float:
@@ -138,10 +159,11 @@ class Measurement:
             if self.cancel_latency_seconds is None
             else f"{self.cancel_latency_seconds * 1000:.0f} мс"
         )
+        heartbeat_counts = f"отправлено {self.heartbeat_sent}, пришло {self.heartbeat_received}"
         gaps = (
-            f"{max(self.heartbeat_gaps_seconds):.1f} с"
+            f"{heartbeat_counts}, наибольший промежуток {max(self.heartbeat_gaps_seconds):.1f} с"
             if self.heartbeat_gaps_seconds
-            else "не измерялись"
+            else f"{heartbeat_counts}, не измерялись"
         )
         return "\n".join(
             [
@@ -221,17 +243,38 @@ def _peak_rss_bytes() -> int:
 
 
 def _pump(app: QApplication, condition, timeout_s: float, interval_ms: int = 20) -> bool:
-    """Прокачать насос Qt, пока не сбудется ``condition()`` или не выйдет срок.
+    """Дождаться ``condition()`` на настоящем блокирующем цикле событий Qt.
 
     Замена qtbot.waitUntil: measure() - не тест, у него нет фикстуры qtbot,
     а насос всё равно обязан крутиться, пока идёт передача - иначе ни
     QSslSocket, ни QueuedConnection-вызовы из потока-имитатора не продвинутся.
+
+    НЕ ``while ...: app.processEvents(flags, interval_ms)``: такой цикл не
+    блокируется в ожидании ОС между проверками - как только очередь пуста,
+    processEvents возвращается немедленно, и Python в холостом цикле держит
+    GIL, с которым конкурирует поток-имитатор. Измерено ревью: это придавливало
+    throughput_mib_s через конкуренцию за GIL - то есть искажало саму величину,
+    на которой стоит решение задачи 3.2, - а gui_tick p99/max совпадали с
+    интервалом опроса вместо того, чтобы отражать систему. QEventLoop.exec()
+    ниже - тот же вызов, что использует production (``app.exec()``): он
+    засыпает в ожидании ОС и просыпается на любом событии, а не только на
+    QTimer.
     """
-    deadline = time.perf_counter() + timeout_s
-    while time.perf_counter() < deadline:
-        app.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, interval_ms)
-        if condition():
-            return True
+    if condition():
+        return True
+    loop = QEventLoop()
+    checker = QTimer()
+    checker.setInterval(interval_ms)
+    checker.timeout.connect(lambda: condition() and loop.quit())
+    checker.start()
+    ceiling = QTimer()
+    ceiling.setSingleShot(True)
+    ceiling.setInterval(max(1, int(timeout_s * 1000)))
+    ceiling.timeout.connect(loop.quit)
+    ceiling.start()
+    loop.exec()
+    checker.stop()
+    ceiling.stop()
     return bool(condition())
 
 
@@ -394,15 +437,23 @@ def _run(
 
     # ---------------------------------------------------------- heartbeat/PING
     heartbeat_arrivals: list[float] = []
+    #: Сколько PING отправлено. Без этого счётчика "ни один PING не пришёл"
+    #: неотличимо от "PING ни разу не отправлялся" - а различие между ними
+    #: это и есть разница между коротким прогоном и голодающим heartbeat.
+    heartbeat_sent_count = {"count": 0}
 
     def _on_message_for_heartbeat(message: Message) -> None:
         if message.type is MessageType.PING:
             heartbeat_arrivals.append(time.perf_counter())
 
+    def _send_heartbeat() -> None:
+        heartbeat_sent_count["count"] += 1
+        outgoing.send(Message(MessageType.PING, {}, b""))
+
     incoming_link.message_received.connect(_on_message_for_heartbeat)
     heartbeat_timer = QTimer()
     heartbeat_timer.setInterval(HEARTBEAT_MS)
-    heartbeat_timer.timeout.connect(lambda: outgoing.send(Message(MessageType.PING, {}, b"")))
+    heartbeat_timer.timeout.connect(_send_heartbeat)
     heartbeat_timer.start()
 
     # ---------------------------------------------------------- файл-источник
@@ -494,9 +545,19 @@ def _run(
     #: объекта. bytesToWrite() у QSslSocket своего максимума не помнит -
     #: единственный способ узнать пик, а не последнее значение, это опрос.
     socket_bytes_to_write_max = 0
+    #: PeerLink.bytes_to_write возвращает 0 и на "очередь пуста", и на
+    #: "сокета больше нет" (_socket is None). Не поднимаем исключение прямо
+    #: в слоте таймера - PySide6 обрывает процесс на необработанном
+    #: исключении из Qt-колбэка вместо того, чтобы дать RuntimeError дойти
+    #: до вызывающего measure() - копим факт и проверяем его явно после
+    #: sampler.stop(), тем же приёмом, что и emulator_error ниже.
+    link_dropped_during_sampling: list[bool] = []
 
     def _sample() -> None:
         nonlocal socket_bytes_to_write_max
+        if not outgoing.is_open:
+            link_dropped_during_sampling.append(True)
+            return
         socket_bytes_to_write_max = max(socket_bytes_to_write_max, outgoing.bytes_to_write)
 
     sampler = QTimer()
@@ -537,7 +598,18 @@ def _run(
             while position < size:
                 payload, hresult = call_stream_read(stream_pointer, READ_CHUNK_BYTES)
                 if hresult != S_OK:
-                    if cancel_state["requested_at"] is not None:
+                    # PipeStream._read возвращает тот же STG_E_READFAULT и на
+                    # закрытие пира по отмене, и на СВОЙ тридцатисекундный
+                    # READ_TIMEOUT_SECONDS (windows_com.py). requested_at не
+                    # доказывает, что заблокированный Read проснулся ИМЕННО
+                    # от отмены - только что отмена была запрошена когда-то
+                    # раньше. closed_reason == "cancelled" - это то, что
+                    # реально поставил pipe.close("cancelled") внутри
+                    # finish_session; без этой проверки собственный таймаут
+                    # чтения, случившийся после отмены по совпадению, читался
+                    # бы как "отмена сработала за 30000 мс".
+                    cancelled_pipe = bool(held_pipe) and held_pipe[0].closed_reason == "cancelled"
+                    if cancel_state["requested_at"] is not None and cancelled_pipe:
                         cancel_state["latency"] = (
                             time.perf_counter() - cancel_state["requested_at"]
                         )
@@ -545,6 +617,14 @@ def _run(
                     raise RuntimeError(
                         f"IStream::Read отказал неожиданно: "
                         f"HRESULT=0x{hresult & 0xFFFFFFFF:08X}"
+                        + (
+                            " (после запроса отмены, но pipe.closed_reason "
+                            f"!= 'cancelled' - похоже на собственный "
+                            "тридцатисекундный таймаут чтения, а не на нашу "
+                            "отмену)"
+                            if cancel_state["requested_at"] is not None
+                            else ""
+                        )
                     )
                 if not payload:
                     return  # EOF раньше срока - тоже конец потока
@@ -569,8 +649,17 @@ def _run(
             receiver.finish_session("cancelled")
 
     def _condition() -> bool:
-        _maybe_cancel()
-        return not emulator.is_alive()
+        # _maybe_cancel читается ТОЛЬКО пока имитатор ещё жив: иначе на
+        # итерации, где файл уже дочитан целиком, порог всё ещё "достигнут"
+        # (progress["bytes"] не убывает), и отмена, запрошенная гонке, которую
+        # передача уже выиграла, ставит requested_at без единого блокированного
+        # Read, который на неё отреагирует - cancel_state["latency"] остаётся
+        # None, и передача, у которой отмена просто не успела сработать,
+        # выглядела бы как "путь отмены сломан".
+        alive = emulator.is_alive()
+        if alive:
+            _maybe_cancel()
+        return not alive
 
     if not _pump(app, _condition, TRANSFER_CEILING_S):
         raise RuntimeError(
@@ -583,35 +672,75 @@ def _run(
     sampler.stop()
     instrument.stop()
 
+    # Читаются ЗДЕСЬ, а не в конце функции: проход без моста ниже
+    # (_measure_bypassed_transport) сам ставит нагрузку на сеть и на очередь
+    # записи сокета, и чтение этих величин после него приписало бы пик
+    # инструменту измерения, а не мосту. На --size-mib 2048 без построчного
+    # прокачивания это оказалось разницей примерно в весь размер файла -
+    # мост выглядел бы буферизующим содержимое целиком, хотя это делала
+    # сама вторая, посторонняя часть измерения.
+    peak_rss_bytes = _peak_rss_bytes()
+    peak_python_bytes = tracemalloc.get_traced_memory()[1]
+
     if emulator_error:
         raise emulator_error[0]
+    if link_dropped_during_sampling:
+        raise RuntimeError(
+            "исходящая связь закрылась во время передачи - "
+            "socket_bytes_to_write_max прочитал бы 0 от отсутствующего "
+            "сокета, а не от пустой очереди записи"
+        )
 
     delivered = progress["bytes"]
     cancelled = cancel_state["requested_at"] is not None
-    # ChunkPipe копит свой максимум сам (см. комментарий у сэмплера выше);
-    # читаем его после того, как поток-имитатор точно закончил класть в
-    # него запросы, - раньше этого момента число ещё могло вырасти.
-    pipe_high_water = held_pipe[0].high_water if held_pipe else 0
 
-    if not cancelled:
-        if emulator_digest and emulator_digest[0] != expected_digest:
-            raise RuntimeError(
-                "содержимое, дошедшее через мост, не совпало с исходным sha256 - "
-                "измерение недействительно, мост что-то потерял или переставил"
-            )
-        receiver.finish_session("completed")
-
-    if stream_holder:
-        call_release(stream_holder[0])
-
-    if cancel_after_bytes is not None and cancel_state["latency"] is None:
-        # Отмена была запрошена явно (проверено в measure()), но путь
-        # отмены ни разу не сработал - молчаливый None здесь означал бы
-        # "отмена мгновенна", а не "отмену не удалось провести".
-        raise RuntimeError(
-            "cancel_after_bytes был задан, но отмена не сработала - "
-            "cancel_latency_seconds не может остаться неопределённой"
+    try:
+        # Раньше здесь стоял тихий откат к 0 "если held_pipe пуст" - число,
+        # неотличимое от честного "очередь ни разу не заполнилась". Это была
+        # та же форма дефекта, что и GetAsyncMode из фазы 0: правдоподобный
+        # ответ вместо объявленного отказа.
+        assert held_pipe, (
+            "open_pipe не был вызван - pipe_high_water измерил бы отсутствие "
+            "pipe, а не глубину очереди"
         )
+        # ChunkPipe копит свой максимум сам (см. комментарий у сэмплера
+        # выше); читаем его после того, как поток-имитатор точно закончил
+        # класть в него запросы, - раньше этого момента число ещё могло
+        # вырасти.
+        pipe_high_water = held_pipe[0].high_water
+
+        if not cancelled:
+            if not emulator_digest:
+                # ChunkPipe.wait() возвращает True и на finished без единого
+                # чанка в очереди, take() отдаёт b"", и PipeStream._read
+                # падает в S_OK с pcbRead=0 - то есть pipe, законченный
+                # раньше срока (ровно симптом моста, потерявшего хвост
+                # файла), выглядит для цикла имитатора как чистый EOF.
+                raise RuntimeError(
+                    f"поток кончился на {delivered} из {size} Б - мост потерял хвост"
+                )
+            if emulator_digest[0] != expected_digest:
+                raise RuntimeError(
+                    "содержимое, дошедшее через мост, не совпало с исходным sha256 - "
+                    "измерение недействительно, мост что-то потерял или переставил"
+                )
+            receiver.finish_session("completed")
+
+        if cancel_after_bytes is not None and cancel_state["latency"] is None:
+            # Отмена была запрошена явно (проверено в measure()), но путь
+            # отмены ни разу не сработал - молчаливый None здесь означал бы
+            # "отмена мгновенна", а не "отмену не удалось провести".
+            raise RuntimeError(
+                "cancel_after_bytes был задан, но отмена не сработала - "
+                "cancel_latency_seconds не может остаться неопределённой"
+            )
+    finally:
+        # В finally, а не после всех проверок: падение любой из них раньше
+        # оставляло бы настоящий COM IStream неотпущенным - утечка, которая
+        # проявляется не в этом прогоне, а в следующем measure() того же
+        # процесса (см. отчёт: два прогона подряд уже проверены).
+        if stream_holder:
+            call_release(stream_holder[0])
 
     incoming_link.message_received.disconnect(_on_message_for_rtt)
     incoming_link.message_received.disconnect(_on_message_for_heartbeat)
@@ -648,6 +777,18 @@ def _run(
         later - earlier
         for earlier, later in zip(heartbeat_arrivals, heartbeat_arrivals[1:])
     ]
+    heartbeat_sent = heartbeat_sent_count["count"]
+    heartbeat_received = len(heartbeat_arrivals)
+    if heartbeat_sent > 1 and heartbeat_received == 0:
+        # "не измерялись" покрывало три разных положения дел: прогон короче
+        # HEARTBEAT_MS, пришёл ровно один PING, и КАЖДЫЙ отправленный PING
+        # был потерян или заголодал - последнее само по себе находка ценой
+        # в весь прогон. Один PING не считается голоданием - таймер мог
+        # просто не успеть выстрелить дважды за короткий прогон.
+        raise RuntimeError(
+            f"PING отправлялся {heartbeat_sent} раз(а), но не пришёл ни один - "
+            "heartbeat голодает, а не просто короткий прогон"
+        )
 
     bypassed_transport_mib_s = _measure_bypassed_transport(app, outgoing, incoming_link, size)
 
@@ -656,8 +797,8 @@ def _run(
         elapsed_seconds=(
             (cancel_state["requested_at"] - started_at) if cancelled else (ended_at - started_at)
         ),
-        peak_rss_bytes=_peak_rss_bytes(),
-        peak_python_bytes=tracemalloc.get_traced_memory()[1],
+        peak_rss_bytes=peak_rss_bytes,
+        peak_python_bytes=peak_python_bytes,
         pipe_high_water=pipe_high_water,
         cancel_latency_seconds=cancel_state["latency"],
         gui_tick_p99_ms=_percentile(tick_samples_ms, 0.99),
@@ -669,6 +810,8 @@ def _run(
         disk_read_p99_ms=_percentile(disk_read_samples_ms, 0.99),
         bypassed_transport_mib_s=bypassed_transport_mib_s,
         heartbeat_gaps_seconds=heartbeat_gaps,
+        heartbeat_sent=heartbeat_sent,
+        heartbeat_received=heartbeat_received,
     )
 
 
@@ -699,7 +842,11 @@ def _measure_bypassed_transport(
     marker = "bridge-measure-bypass"
     chunk_bytes = READ_CHUNK_BYTES
     payload = bytes((index * 131 + 7) & 0xFF for index in range(chunk_bytes))
-    chunk_count = max(1, total_bytes // chunk_bytes)
+    # Ceil, не floor: payload - фиксированный буфер в READ_CHUNK_BYTES, и
+    # последний кадр шлётся полным независимо от округления, так что деление
+    # вниз просто недосылало бы объём и занижало бы охват этого прохода
+    # относительно size основной передачи, а не экономило бы кадр.
+    chunk_count = -(-total_bytes // chunk_bytes)  # ceil без импорта math
 
     received = {"bytes": 0}
 
@@ -718,8 +865,19 @@ def _measure_bypassed_transport(
                     payload,
                 )
             )
-        expected = chunk_count * chunk_bytes
-        if not _pump(app, lambda: received["bytes"] >= expected, BYPASS_CEILING_S):
+            if index % _BYPASS_PUMP_EVERY == _BYPASS_PUMP_EVERY - 1:
+                # Отдать циклу событий каждые несколько кадров, чтобы Qt
+                # реально слил записанное на сокет - иначе этот проход сам
+                # ставит --size-mib байт в очередь записи разом, и именно
+                # это раньше искажало бы peak_rss_bytes, будь оно прочитано
+                # после этого прохода (см. комментарий у peak_rss_bytes в
+                # _run: поэтому оно читается ДО, а не после).
+                app.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 0)
+        # Потолок пропорционален объёму, а не фиксирован: на реальном LAN
+        # это раньше обрывало проход ПОСЛЕ того, как настоящая передача уже
+        # отняла получас, выбрасывая всё измерение целиком.
+        ceiling_s = max(BYPASS_CEILING_FLOOR_S, (total_bytes / MIB) / BYPASS_MIN_MIB_S)
+        if not _pump(app, lambda: received["bytes"] >= total_bytes, ceiling_s):
             raise RuntimeError(
                 "проход без моста не завершился за отведённое время - "
                 "транспорт сам по себе завис"
