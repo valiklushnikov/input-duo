@@ -24,6 +24,7 @@ import ctypes
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from ctypes import wintypes
 
@@ -667,6 +668,127 @@ def post_to_service(service, slot: str, *args) -> None:
         logger.error("не удалось доставить %s в Qt-поток", slot)
 
 
+class _ServiceInvocation:
+    """One service call waiting at the sole COM-to-Qt boundary."""
+
+    def __init__(self, method: str, args: tuple, *, blocking: bool) -> None:
+        self.method = method
+        self.args = args
+        self.done = threading.Event() if blocking else None
+        self.result = None
+        self.error: BaseException | None = None
+
+
+class ServiceCallbackGateway(QObject):
+    """Turn the Windows backend's STA callbacks into Qt-thread service calls.
+
+    ``open_pipe`` is the only blocking callback because Explorer needs its returned
+    pipe before it can build the stream. The other callbacks only enqueue work.
+    Calling ``open_pipe`` from this object's owning thread is deliberately direct,
+    avoiding a self-deadlock. ``invalidate`` wakes any blocked caller and makes
+    callbacks retained by old COM data objects harmless before their service dies.
+
+    All cross-thread delivery still goes through :func:`post_to_service`; this class
+    is the one auditable place that decides which service operation is dispatched.
+    """
+
+    def __init__(self, service: QObject) -> None:
+        super().__init__(service)
+        self._service: QObject | None = service
+        self._owner_thread_id = threading.get_ident()
+        self._lock = threading.Lock()
+        self._pending: deque[_ServiceInvocation] = deque()
+
+    def open_pipe(self, transfer_id: str, entry_index: int):
+        if threading.get_ident() == self._owner_thread_id:
+            service = self._active_service()
+            return service.open_pipe(transfer_id, entry_index)
+
+        invocation = self._enqueue(
+            "open_pipe", (transfer_id, entry_index), blocking=True
+        )
+        if invocation is None:
+            raise RuntimeError("file transfer service is no longer available")
+        invocation.done.wait()
+        if invocation.error is not None:
+            raise invocation.error
+        return invocation.result
+
+    def request_read(
+        self, transfer_id: str, entry_index: int, offset: int, length: int
+    ) -> None:
+        self._enqueue(
+            "request_read", (transfer_id, entry_index, offset, length), blocking=False
+        )
+
+    def close_pipe(
+        self, transfer_id: str, entry_index: int, reason: str | None = None
+    ) -> None:
+        self._enqueue(
+            "close_pipe", (transfer_id, entry_index, reason), blocking=False
+        )
+
+    def on_operation_finished(self, result: int) -> None:
+        status = "completed" if result == 0 else "failed"
+        self._enqueue("finish_session", (status,), blocking=False)
+
+    def invalidate(self) -> None:
+        """Detach the target and release synchronous callers before shutdown."""
+        with self._lock:
+            self._service = None
+            pending = tuple(self._pending)
+            self._pending.clear()
+        for invocation in pending:
+            if invocation.done is not None:
+                invocation.error = RuntimeError(
+                    "file transfer service is no longer available"
+                )
+                invocation.done.set()
+
+    def _active_service(self):
+        with self._lock:
+            service = self._service
+        if service is None:
+            raise RuntimeError("file transfer service is no longer available")
+        return service
+
+    def _enqueue(
+        self, method: str, args: tuple, *, blocking: bool
+    ) -> _ServiceInvocation | None:
+        invocation = _ServiceInvocation(method, args, blocking=blocking)
+        with self._lock:
+            if self._service is None:
+                return None
+            self._pending.append(invocation)
+        post_to_service(self, "_dispatch_next")
+        return invocation
+
+    @Slot()
+    def _dispatch_next(self) -> None:
+        with self._lock:
+            if not self._pending:
+                return
+            invocation = self._pending.popleft()
+            service = self._service
+        if service is None:
+            if invocation.done is not None:
+                invocation.error = RuntimeError(
+                    "file transfer service is no longer available"
+                )
+                invocation.done.set()
+            return
+        try:
+            invocation.result = getattr(service, invocation.method)(*invocation.args)
+        except BaseException as error:  # callbacks must not escape a Qt event
+            if invocation.done is not None:
+                invocation.error = error
+            else:
+                logger.exception("file callback %s failed", invocation.method)
+        finally:
+            if invocation.done is not None:
+                invocation.done.set()
+
+
 class WindowsFileClipboardBackend(QObject):
     """Поток STA, владеющий буфером обмена и всеми COM-объектами.
 
@@ -1006,6 +1128,7 @@ __all__ = [
     "FORMAT_DROP_EFFECT_NAME",
     "FORMAT_ORIGIN_NAME",
     "FormatEnumerator",
+    "ServiceCallbackGateway",
     "VirtualFilesDataObject",
     "WindowsFileClipboardBackend",
     "descriptor_entries",

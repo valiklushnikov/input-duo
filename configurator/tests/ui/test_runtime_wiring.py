@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, QSettings, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QSettings, Qt, Signal, Slot
 from PySide6.QtWidgets import QMessageBox
 
 from duo_input import app as app_module
 from duo_input.app import build_main_window, configure_runtime, single_instance_lock
+from duo_input.clipboard.identity import load_or_create
 from duo_input.clipboard.pairing import PairingCandidate
+from duo_input.clipboard.peer import PeerLink
 from duo_input.clipboard.wire import (
     CAPABILITY_CLIPBOARD,
     CAPABILITY_FILES,
@@ -22,7 +25,9 @@ from duo_input.clipboard.wire import (
 )
 from duo_input.i18n import TranslationManager
 from duo_input.transfer.model import ENTRY_FILE, TransferEntry, TransferManifest
-from duo_input.transfer.service import TransferState
+from duo_input.transfer.pipe import ChunkPipe
+from duo_input.transfer.platform_files import UnsupportedPlatformError
+from duo_input.transfer.service import FileTransferService, TransferState
 
 
 def _settings(tmp_path, values: bool | dict[str, object]) -> QSettings:
@@ -56,6 +61,7 @@ class _FileBackend(QObject):
         self.starts = 0
         self.stops = 0
         self.is_running = False
+        self.stop_hook = None
 
     def set_callbacks(
         self, open_pipe, request_read, close_pipe, on_operation_finished
@@ -76,8 +82,10 @@ class _FileBackend(QObject):
     def stop(self) -> None:
         if not self.is_running:
             return
-        self.is_running = False
         self.stops += 1
+        if self.stop_hook is not None:
+            self.stop_hook()
+        self.is_running = False
 
     def publish(self, manifest: TransferManifest, origin_marker: bytes) -> None:
         self.publications.append((manifest, origin_marker))
@@ -101,6 +109,11 @@ def _configure_file_runtime(qapp, qtbot, tmp_path, monkeypatch, values):
 
 
 def _activate_transfer(transfer, transfer_id: str) -> None:
+    _offer_transfer(transfer, transfer_id)
+    transfer.open_pipe(transfer_id, 0)
+
+
+def _offer_transfer(transfer, transfer_id: str) -> None:
     manifest = TransferManifest(
         transfer_id=transfer_id,
         entries=(
@@ -110,7 +123,76 @@ def _activate_transfer(transfer, transfer_id: str) -> None:
         ),
     )
     transfer.handle_message(Message(MessageType.FILE_OFFER, manifest.to_dict(), b""))
-    transfer.open_pipe(transfer_id, 0)
+
+
+class _ThreadRecordingTransfer(FileTransferService):
+    """The real service with diagnostic observations at its thread boundary."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.operation_threads: list[tuple[str, int]] = []
+        self.lifecycle_events: list[str] = []
+
+    def open_pipe(self, transfer_id: str, entry_index: int) -> ChunkPipe:
+        self.operation_threads.append(("open_pipe", threading.get_ident()))
+        return super().open_pipe(transfer_id, entry_index)
+
+    @Slot(str, int, "qlonglong", int)
+    def request_read(
+        self, transfer_id: str, entry_index: int, offset: int, length: int
+    ) -> None:
+        self.operation_threads.append(("request_read", threading.get_ident()))
+        super().request_read(transfer_id, entry_index, offset, length)
+
+    def close_pipe(
+        self, transfer_id: str, entry_index: int, reason: str | None = None
+    ) -> None:
+        self.operation_threads.append(("close_pipe", threading.get_ident()))
+        super().close_pipe(transfer_id, entry_index, reason)
+
+    def finish_session(self, status: str) -> None:
+        self.operation_threads.append(("finish_session", threading.get_ident()))
+        super().finish_session(status)
+
+    def detach_link(self) -> None:
+        self.lifecycle_events.append("service-detach")
+        super().detach_link()
+
+
+def _run_in_worker(callback):
+    done = threading.Event()
+    result: list[object] = []
+    errors: list[BaseException] = []
+    worker_ids: list[int] = []
+
+    def invoke() -> None:
+        worker_ids.append(threading.get_ident())
+        try:
+            result.append(callback())
+        except BaseException as error:  # the assertion reports the callback error
+            errors.append(error)
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=invoke, name="runtime-file-callback-test")
+    worker.start()
+    return worker, done, result, errors, worker_ids
+
+
+class _FileSnapshot:
+    """Complete clipboard snapshot carrying one local file path."""
+
+    payloads: dict[str, bytes] = {}
+
+    def __init__(self, path: Path) -> None:
+        self.file_paths = (str(path),)
+
+    @property
+    def is_empty(self) -> bool:
+        return False
+
+    def payload(self, _mime: str) -> bytes | None:
+        return None
 
 
 class _CountingEmptySnapshot:
@@ -1120,3 +1202,316 @@ def test_importing_app_does_not_eagerly_import_the_windows_file_backend():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_open_pipe_callback_returns_the_real_pipe_after_running_on_qt_thread(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    """Mutation: binding open_pipe directly executes service state on COM's STA."""
+    monkeypatch.setattr(app_module, "FileTransferService", _ThreadRecordingTransfer)
+    _settings_, _window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        transfer = runtime.transfer
+        _offer_transfer(transfer, "thread-open")
+        transfer.operation_threads.clear()
+        worker, done, result, errors, worker_ids = _run_in_worker(
+            lambda: runtime.file_backend.callbacks["open_pipe"]("thread-open", 0)
+        )
+
+        qtbot.waitUntil(done.is_set, timeout=5000)
+        worker.join(timeout=1.0)
+
+        assert errors == []
+        assert len(result) == 1 and isinstance(result[0], ChunkPipe)
+        assert transfer.state is TransferState.TRANSFERRING
+        assert result[0] is transfer._pipes[("thread-open", 0)]
+        assert worker_ids[0] != threading.get_ident()
+        assert transfer.operation_threads
+        assert all(
+            operation_thread == threading.get_ident()
+            for _operation, operation_thread in transfer.operation_threads
+        )
+    finally:
+        runtime.stop()
+
+
+def test_one_way_backend_callbacks_reach_real_service_and_page_on_qt_thread(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    """Mutation: direct request/close/finish delivery mutates Qt state on COM's STA."""
+    monkeypatch.setattr(app_module, "FileTransferService", _ThreadRecordingTransfer)
+    _settings_, window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        transfer = runtime.transfer
+        _activate_transfer(transfer, "thread-one-way")
+        pipe = transfer._pipes[("thread-one-way", 0)]
+        transfer.operation_threads.clear()
+
+        worker, _done, _result, errors, _worker_ids = _run_in_worker(
+            lambda: runtime.file_backend.callbacks["request_read"](
+                "thread-one-way", 0, 0, 10
+            )
+        )
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert errors == []
+        qtbot.waitUntil(
+            lambda: transfer._in_flight.get(("thread-one-way", 0)) == (0, 10),
+            timeout=5000,
+        )
+
+        worker, _done, _result, errors, _worker_ids = _run_in_worker(
+            lambda: runtime.file_backend.callbacks["close_pipe"](
+                "thread-one-way", 0
+            )
+        )
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert errors == []
+        qtbot.waitUntil(lambda: pipe.finished, timeout=5000)
+        assert ("thread-one-way", 0) not in transfer._pipes
+
+        transfer.transfer_progress.emit(1, 10)
+        assert window.clipboard_page.transfer_label.text()
+        worker, _done, _result, errors, _worker_ids = _run_in_worker(
+            lambda: runtime.file_backend.callbacks["on_operation_finished"](0)
+        )
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert errors == []
+        qtbot.waitUntil(
+            lambda: transfer.state is TransferState.COMPLETED, timeout=5000
+        )
+        qtbot.waitUntil(
+            lambda: window.clipboard_page.transfer_label.text() == "", timeout=5000
+        )
+
+        assert window.clipboard_page.transfer_label.text() == ""
+        assert [name for name, _thread in transfer.operation_threads] == [
+            "request_read",
+            "close_pipe",
+            "finish_session",
+        ]
+        assert all(
+            operation_thread == threading.get_ident()
+            for _operation, operation_thread in transfer.operation_threads
+        )
+    finally:
+        runtime.stop()
+
+
+def test_open_pipe_callback_called_on_qt_thread_does_not_deadlock(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    """Mutation: an unconditional blocking queued call deadlocks its owning thread."""
+    monkeypatch.setattr(app_module, "FileTransferService", _ThreadRecordingTransfer)
+    _settings_, _window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        _offer_transfer(runtime.transfer, "same-thread")
+
+        pipe = runtime.file_backend.callbacks["open_pipe"]("same-thread", 0)
+
+        assert isinstance(pipe, ChunkPipe)
+        assert runtime.transfer.operation_threads[0] == (
+            "open_pipe",
+            threading.get_ident(),
+        )
+    finally:
+        runtime.stop()
+
+
+def test_file_shutdown_invalidates_callbacks_and_stops_backend_before_detach(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    """Mutation: detaching first lets a racing or retained COM callback touch service."""
+    monkeypatch.setattr(app_module, "FileTransferService", _ThreadRecordingTransfer)
+    _settings_, window, runtime, made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    old_transfer = runtime.transfer
+    old_backend = made[0]
+    callbacks = dict(old_backend.callbacks)
+    _activate_transfer(old_transfer, "shutdown")
+    old_transfer.operation_threads.clear()
+    old_transfer.lifecycle_events.clear()
+
+    def callback_while_stopping() -> None:
+        old_transfer.lifecycle_events.append("backend-stop")
+        worker, _done, _result, _errors, _worker_ids = _run_in_worker(
+            lambda: callbacks["on_operation_finished"](0)
+        )
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+
+    old_backend.stop_hook = callback_while_stopping
+    try:
+        window.clipboard_page.files_checkbox.setChecked(False)
+
+        assert old_transfer.lifecycle_events == ["backend-stop", "service-detach"]
+        assert old_transfer.operation_threads == []
+
+        worker, _done, _result, errors, _worker_ids = _run_in_worker(
+            lambda: callbacks["on_operation_finished"](0)
+        )
+        worker.join(timeout=1.0)
+        assert not worker.is_alive()
+        assert errors == []
+        QCoreApplication.processEvents()
+        assert old_transfer.operation_threads == []
+    finally:
+        runtime.stop()
+
+
+def test_nonempty_local_snapshot_creates_a_real_service_offer(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    """Mutation: dropping the snapshot subscription leaves local files unoffered."""
+    _settings_, _window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    source = tmp_path / "offered.txt"
+    source.write_bytes(b"real offer")
+    link = PeerLink(load_or_create(tmp_path))
+    offers: list[str] = []
+    try:
+        runtime._attach_file_link(runtime.transfer, link)
+        runtime.transfer.set_peer_capabilities(frozenset({CAPABILITY_FILES}))
+        runtime.transfer.offer_sent.connect(offers.append)
+
+        runtime._backend.snapshot_taken.emit(_FileSnapshot(source))
+
+        assert len(offers) == 1
+        assert runtime.transfer.snapshots.transfer_ids == (offers[0],)
+    finally:
+        link.close()
+        runtime.stop()
+
+
+def test_remote_offer_is_published_and_publish_failure_reaches_page(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    """Mutation: omitting either backend publication or page failure routing is silent."""
+    _settings_, window, runtime, made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        _offer_transfer(runtime.transfer, "remote-publish")
+
+        assert runtime.transfer.state is TransferState.OFFERED
+        assert len(made[0].publications) == 1
+        manifest, marker = made[0].publications[0]
+        assert manifest.transfer_id == "remote-publish"
+        assert marker == b"remote-publish"
+
+        before = window.clipboard_page.events_list.count()
+        made[0].publish_failed.emit("clipboard busy")
+
+        assert window.clipboard_page.events_list.count() == before + 1
+        assert "clipboard busy" in window.clipboard_page.events_list.item(0).text()
+    finally:
+        runtime.stop()
+
+
+def test_unsupported_backend_after_user_toggle_rolls_back_setting_and_controls(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    """Mutation: returning early without rollback leaves a saved, checked false promise."""
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+
+    def unsupported(_parent=None):
+        raise UnsupportedPlatformError("test platform")
+
+    monkeypatch.setattr(app_module, "create_file_backend", unsupported)
+    settings = _settings(
+        tmp_path,
+        {"clipboard/enabled": True, "clipboard/files_enabled": False},
+    )
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+    configure_runtime(qapp, window, settings)
+    runtime = _runtime_of(qapp)
+    try:
+        window.clipboard_page.files_checkbox.click()
+
+        assert settings.value("clipboard/files_enabled", type=bool) is False
+        assert not window.clipboard_page.files_checkbox.isChecked()
+        assert not runtime.tray.files_action.isChecked()
+        assert runtime.transfer is None
+        assert runtime.file_backend is None
+    finally:
+        runtime.stop()
+
+
+def test_repeated_enable_disable_keeps_only_current_callback_delivery(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    """Mutation: retaining old gateways or duplicating callbacks delivers twice."""
+    monkeypatch.setattr(app_module, "FileTransferService", _ThreadRecordingTransfer)
+    _settings_, window, runtime, made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    old_transfer = runtime.transfer
+    old_callback = made[0].callbacks["on_operation_finished"]
+    try:
+        window.clipboard_page.files_checkbox.setChecked(False)
+        window.clipboard_page.files_checkbox.setChecked(True)
+        current_transfer = runtime.transfer
+        _activate_transfer(current_transfer, "current")
+        old_transfer.operation_threads.clear()
+        current_transfer.operation_threads.clear()
+
+        workers = [
+            _run_in_worker(lambda: old_callback(0))[0],
+            _run_in_worker(
+                lambda: runtime.file_backend.callbacks["on_operation_finished"](0)
+            )[0],
+        ]
+        for worker in workers:
+            worker.join(timeout=1.0)
+            assert not worker.is_alive()
+        qtbot.waitUntil(
+            lambda: current_transfer.state is TransferState.COMPLETED, timeout=5000
+        )
+
+        assert old_transfer.operation_threads == []
+        assert [
+            operation
+            for operation, _thread in current_transfer.operation_threads
+            if operation == "finish_session"
+        ] == ["finish_session"]
+    finally:
+        runtime.stop()

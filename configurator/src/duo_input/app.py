@@ -218,6 +218,7 @@ class _ClipboardRuntime(QObject):
         self.coordinator: ClipboardCoordinator | None = None
         self.transfer: FileTransferService | None = None
         self.file_backend: QObject | None = None
+        self._file_callback_gateway = None
         self._file_cancel_slot = None
         self._file_capabilities_slot = None
         self._file_capabilities_source: ClipboardCoordinator | None = None
@@ -375,9 +376,10 @@ class _ClipboardRuntime(QObject):
 
         # The only implementation currently selected by create_file_backend is
         # Windows-specific. Keep its COM module out of every other runtime graph.
-        from duo_input.transfer.windows_files import post_to_service
+        from duo_input.transfer.windows_files import ServiceCallbackGateway
 
         transfer = FileTransferService(coordinator)
+        callback_gateway = ServiceCallbackGateway(transfer)
         page = self._window.clipboard_page
         transfer.transfer_progress.connect(page.set_transfer_progress)
         transfer.transfer_completed.connect(page.clear_transfer)
@@ -394,14 +396,10 @@ class _ClipboardRuntime(QObject):
         page.cancel_requested.connect(cancel_slot)
 
         backend.set_callbacks(
-            open_pipe=transfer.open_pipe,
-            request_read=lambda *args: post_to_service(
-                transfer, "request_read", *args
-            ),
-            close_pipe=transfer.close_pipe,
-            on_operation_finished=lambda result: transfer.finish_session(
-                "completed" if result == 0 else "failed"
-            ),
+            open_pipe=callback_gateway.open_pipe,
+            request_read=callback_gateway.request_read,
+            close_pipe=callback_gateway.close_pipe,
+            on_operation_finished=callback_gateway.on_operation_finished,
         )
         transfer.offer_received.connect(
             lambda manifest: backend.publish(
@@ -430,6 +428,7 @@ class _ClipboardRuntime(QObject):
 
         self.transfer = transfer
         self.file_backend = backend
+        self._file_callback_gateway = callback_gateway
         self._file_cancel_slot = cancel_slot
         self._file_capabilities_slot = apply_capabilities
         self._file_capabilities_source = coordinator
@@ -457,6 +456,7 @@ class _ClipboardRuntime(QObject):
 
     def _stop_files(self) -> None:
         transfer, backend = self.transfer, self.file_backend
+        callback_gateway = self._file_callback_gateway
         cancel_slot = self._file_cancel_slot
         capabilities_slot = self._file_capabilities_slot
         capabilities_source = self._file_capabilities_source
@@ -465,6 +465,7 @@ class _ClipboardRuntime(QObject):
 
         self.transfer = None
         self.file_backend = None
+        self._file_callback_gateway = None
         self._file_cancel_slot = None
         self._file_capabilities_slot = None
         self._file_capabilities_source = None
@@ -493,12 +494,14 @@ class _ClipboardRuntime(QObject):
                 pass
 
         self._window.clipboard_page.clear_transfer()
-        if transfer is not None:
-            transfer.detach_link()
-            transfer.deleteLater()
+        if callback_gateway is not None:
+            callback_gateway.invalidate()
         if backend is not None:
             backend.stop()
             backend.deleteLater()
+        if transfer is not None:
+            transfer.detach_link()
+            transfer.deleteLater()
 
 
 def configure_runtime(
@@ -537,10 +540,6 @@ def configure_runtime(
     runtime.tray.set_files_checked(files_enabled)
     if enabled:
         runtime.set_enabled(True)
-        if files_enabled and bool(
-            settings.value("clipboard/files_enabled", False, type=bool)
-        ):
-            runtime.set_files_enabled(True)
     return runtime.coordinator
 
 
