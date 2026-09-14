@@ -35,6 +35,7 @@ class TrayIcon(QSystemTrayIcon):
     open_requested = Signal()
     quit_requested = Signal()
     sharing_toggled = Signal(bool)
+    files_toggled = Signal(bool)
 
     def __init__(self, icon: QIcon | None = None, parent=None) -> None:
         super().__init__(parent)
@@ -60,7 +61,7 @@ class TrayIcon(QSystemTrayIcon):
 
         self.files_action = QAction(self.tr("Передача файлов"), self._menu)
         self.files_action.setCheckable(True)
-        self.files_action.setEnabled(False)
+        self.files_action.triggered.connect(self.files_toggled)
         self._menu.addAction(self.files_action)
 
         self._menu.addSeparator()
@@ -85,6 +86,11 @@ class TrayIcon(QSystemTrayIcon):
         self.sharing_action.blockSignals(True)
         self.sharing_action.setChecked(enabled)
         self.sharing_action.blockSignals(False)
+
+    def set_files_checked(self, enabled: bool) -> None:
+        self.files_action.blockSignals(True)
+        self.files_action.setChecked(enabled)
+        self.files_action.blockSignals(False)
 
     def _on_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:

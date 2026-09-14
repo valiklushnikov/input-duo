@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSettings
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QIcon
 
 from duo_input.app import build_main_window
 from duo_input.ui.tray import TrayIcon
@@ -86,3 +86,24 @@ def test_the_tray_toggle_emits_the_new_value(qtbot):
     tray.sharing_action.triggered[bool].emit(True)
 
     assert values == [True]
+
+
+def test_the_files_action_is_a_working_toggle_not_a_disabled_placeholder(qtbot):
+    tray = TrayIcon(QIcon(), None)
+
+    assert tray.files_action.isEnabled()
+
+    with qtbot.waitSignal(tray.files_toggled, timeout=1000) as blocker:
+        tray.files_action.trigger()
+
+    assert blocker.args == [True]
+
+
+def test_setting_the_tray_files_check_programmatically_does_not_echo(qtbot):
+    tray = TrayIcon(QIcon(), None)
+    seen: list[bool] = []
+    tray.files_toggled.connect(seen.append)
+
+    tray.set_files_checked(True)
+
+    assert seen == []

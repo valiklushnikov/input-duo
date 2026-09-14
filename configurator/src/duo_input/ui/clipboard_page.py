@@ -27,14 +27,27 @@ from duo_input.ui.tray import STATE_LABELS
 EVENTS_LIMIT = 20
 
 
+def human_bytes(value: int) -> str:
+    """Format a byte count with readable binary units."""
+    if value < 1024:
+        return f"{value} \u0411"
+    for unit in ("\u041a\u0411", "\u041c\u0411", "\u0413\u0411", "\u0422\u0411"):
+        value /= 1024
+        if value < 1024:
+            return f"{value:.1f} {unit}"
+    return f"{value:.1f} \u041f\u0411"
+
+
 class ClipboardPage(QWidget):
     """Всё, что оператор делает с общим буфером, кроме самого копирования."""
 
     sharing_toggled = Signal(bool)
+    files_toggled = Signal(bool)
     autostart_toggled = Signal(bool)
     pair_requested = Signal()
     forget_requested = Signal()
     address_changed = Signal(str)
+    cancel_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -54,8 +67,16 @@ class ClipboardPage(QWidget):
         self.sharing_checkbox = QCheckBox(self.tr("Общий буфер обмена"), self)
         self.sharing_checkbox.toggled.connect(self.sharing_toggled)
 
+        self.files_checkbox = QCheckBox(self.tr("\u041f\u0435\u0440\u0435\u0434\u0430\u0447\u0430 \u0444\u0430\u0439\u043b\u043e\u0432"), self)
+        self.files_checkbox.toggled.connect(self.files_toggled)
+
         self.autostart_checkbox = QCheckBox(self.tr("Запускать вместе с Windows"), self)
         self.autostart_checkbox.toggled.connect(self.autostart_toggled)
+
+        self.transfer_label = QLabel(self)
+        self.cancel_button = QPushButton(self.tr("\u041e\u0442\u043c\u0435\u043d\u0438\u0442\u044c"), self)
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel_requested)
 
         self.address_field = QLineEdit(self)
         self.address_field.setPlaceholderText(self.tr("Адрес второго компьютера, если поиск не нашёл"))
@@ -86,6 +107,11 @@ class ClipboardPage(QWidget):
         layout = QVBoxLayout(self)
         layout.addWidget(peer_box)
         layout.addWidget(self.sharing_checkbox)
+        layout.addWidget(self.files_checkbox)
+        transfer_layout = QHBoxLayout()
+        transfer_layout.addWidget(self.transfer_label)
+        transfer_layout.addWidget(self.cancel_button)
+        layout.addLayout(transfer_layout)
         layout.addWidget(self.autostart_checkbox)
         layout.addWidget(events_box)
         layout.addStretch(1)
@@ -110,6 +136,23 @@ class ClipboardPage(QWidget):
         self.autostart_checkbox.setChecked(enabled)
         self.autostart_checkbox.blockSignals(False)
 
+    def set_transfer_progress(self, done: int, total: int) -> None:
+        self.transfer_label.setText(
+            self.tr("\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u0435 {0} / {1}").format(
+                human_bytes(done), human_bytes(total)
+            )
+        )
+        self.cancel_button.setEnabled(True)
+
+    def clear_transfer(self) -> None:
+        self.transfer_label.setText("")
+        self.cancel_button.setEnabled(False)
+
+    def set_files_checked(self, checked: bool) -> None:
+        self.files_checkbox.blockSignals(True)
+        self.files_checkbox.setChecked(checked)
+        self.files_checkbox.blockSignals(False)
+
     def add_event(self, text: str) -> None:
         """Добавить строку в список последних событий (§12), самый новый - сверху."""
         self.events_list.insertItem(0, text)
@@ -127,4 +170,4 @@ class ClipboardPage(QWidget):
         self.forget_button.setEnabled(True)
 
 
-__all__ = ["ClipboardPage"]
+__all__ = ["ClipboardPage", "human_bytes"]

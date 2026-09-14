@@ -296,50 +296,65 @@
 <context>
     <name>ClipboardPage</name>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="43" />
-        <location filename="../../ui/clipboard_page.py" line="121" />
+        <location filename="../../ui/clipboard_page.py" line="56" />
+        <location filename="../../ui/clipboard_page.py" line="164" />
         <source>Компьютер не выбран</source>
         <extracomment>Сколько последних событий держим на экране - не журнал целиком, а то, что помогает понять, что произошло только что (§12).</extracomment>
         <translation>No computer selected</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="47" />
+        <location filename="../../ui/clipboard_page.py" line="60" />
         <source>Связать компьютеры</source>
         <translation>Pair computers</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="50" />
+        <location filename="../../ui/clipboard_page.py" line="63" />
         <source>Забыть компьютер</source>
         <translation>Forget computer</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="54" />
+        <location filename="../../ui/clipboard_page.py" line="67" />
         <source>Общий буфер обмена</source>
         <translation>Shared clipboard</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="57" />
+        <location filename="../../ui/clipboard_page.py" line="70" />
+        <source>Передача файлов</source>
+        <translation>File transfer</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="73" />
         <source>Запускать вместе с Windows</source>
         <translation>Start with Windows</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="61" />
+        <location filename="../../ui/clipboard_page.py" line="77" />
+        <source>Отменить</source>
+        <translation>Cancel</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="82" />
         <source>Адрес второго компьютера, если поиск не нашёл</source>
         <translation>The other computer's address, if search could not find it</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="74" />
+        <location filename="../../ui/clipboard_page.py" line="95" />
         <source>Второй компьютер</source>
         <translation>Second computer</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="126" />
+        <location filename="../../ui/clipboard_page.py" line="141" />
+        <source>Получение {0} / {1}</source>
+        <translation>Receiving {0} / {1}</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="169" />
         <source>Отпечаток: {0}</source>
         <translation>Fingerprint: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="68" />
-        <location filename="../../ui/clipboard_page.py" line="70" />
+        <location filename="../../ui/clipboard_page.py" line="89" />
+        <location filename="../../ui/clipboard_page.py" line="91" />
         <source>Последние события</source>
         <translation>Recent events</translation>
     </message>
@@ -1605,99 +1620,99 @@ Code: {1}</translation>
 <context>
     <name>ProfilesPage</name>
     <message>
-        <location filename="../../ui/profiles.py" line="76" />
+        <location filename="../../ui/profiles.py" line="77" />
         <source>Profiles</source>
         <extracomment>Side of the square that shows a profile's colour, in logical pixels. Longest profile name the binary format accepts, mirrored from validation. Item data role carrying the profile ID of a slot row.</extracomment>
         <translation>Profiles</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="78" />
+        <location filename="../../ui/profiles.py" line="79" />
         <source>Eight slots the device switches between. One of them is the one it starts in.</source>
         <translation>Eight slots the device switches between. One of them is the one it starts in.</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="91" />
+        <location filename="../../ui/profiles.py" line="92" />
         <source>Profile slots</source>
         <translation>Profile slots</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="109" />
+        <location filename="../../ui/profiles.py" line="110" />
         <source>Profile</source>
         <translation>Profile</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="118" />
+        <location filename="../../ui/profiles.py" line="119" />
         <source>Profile name</source>
         <translation>Profile name</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="121" />
+        <location filename="../../ui/profiles.py" line="122" />
         <source>Name:</source>
         <translation>Name:</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="124" />
-        <location filename="../../ui/profiles.py" line="308" />
+        <location filename="../../ui/profiles.py" line="125" />
+        <location filename="../../ui/profiles.py" line="316" />
         <source>Profile colour</source>
         <translation>Profile colour</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="128" />
+        <location filename="../../ui/profiles.py" line="129" />
         <source>Colour:</source>
         <translation>Colour:</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="131" />
+        <location filename="../../ui/profiles.py" line="132" />
         <source>Profile routes</source>
         <translation>Profile routes</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="134" />
+        <location filename="../../ui/profiles.py" line="135" />
         <source>Routes:</source>
         <translation>Routes:</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="140" />
+        <location filename="../../ui/profiles.py" line="141" />
         <source>Copy destination</source>
         <translation>Copy destination</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="141" />
+        <location filename="../../ui/profiles.py" line="142" />
         <source>Copy into</source>
         <translation>Copy into</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="142" />
+        <location filename="../../ui/profiles.py" line="143" />
         <source>Copy this profile into another slot</source>
         <translation>Copy this profile into another slot</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="150" />
+        <location filename="../../ui/profiles.py" line="151" />
         <source>Make active</source>
         <translation>Make active</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="151" />
+        <location filename="../../ui/profiles.py" line="152" />
         <source>Start the device in this profile</source>
         <translation>Start the device in this profile</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="153" />
+        <location filename="../../ui/profiles.py" line="154" />
         <source>Clear</source>
         <translation>Clear</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="154" />
+        <location filename="../../ui/profiles.py" line="155" />
         <source>Reset this profile slot</source>
         <translation>Reset this profile slot</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="241" />
+        <location filename="../../ui/profiles.py" line="242" />
         <source>{0} - {1} ({2} bindings, {3} macros){4}</source>
         <translation>{0} - {1} ({2} bindings, {3} macros){4}</translation>
     </message>
     <message>
-        <location filename="../../ui/profiles.py" line="261" />
+        <location filename="../../ui/profiles.py" line="269" />
         <source>{0} — brought together on activation</source>
         <translation>{0} — brought together on activation</translation>
     </message>
@@ -1908,22 +1923,22 @@ Code: {1}</translation>
         <translation>Update the other computer - protocol versions differ</translation>
     </message>
     <message>
-        <location filename="../../ui/tray.py" line="46" />
+        <location filename="../../ui/tray.py" line="47" />
         <source>Открыть Duo Input</source>
         <translation>Open Duo Input</translation>
     </message>
     <message>
-        <location filename="../../ui/tray.py" line="56" />
+        <location filename="../../ui/tray.py" line="57" />
         <source>Общий буфер обмена</source>
         <translation>Shared clipboard</translation>
     </message>
     <message>
-        <location filename="../../ui/tray.py" line="61" />
+        <location filename="../../ui/tray.py" line="62" />
         <source>Передача файлов</source>
         <translation>File transfer</translation>
     </message>
     <message>
-        <location filename="../../ui/tray.py" line="68" />
+        <location filename="../../ui/tray.py" line="69" />
         <source>Выход</source>
         <translation>Exit</translation>
     </message>
