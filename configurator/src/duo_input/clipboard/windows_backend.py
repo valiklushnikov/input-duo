@@ -38,9 +38,22 @@ DEBOUNCE_MS = 200
 RETRY_LIMIT = 3
 
 
+def wrapped_windows_mime(name: str) -> str:
+    """Как Qt показывает незарегистрированный у себя нативный формат буфера.
+
+    Наш маркер происхождения объявляется через RegisterClipboardFormatW под
+    собственным именем, а Qt не знает такого MIME и заворачивает его вот так.
+    Точное сравнение с ORIGIN_MIME не срабатывало здесь НИКОГДА - и это не
+    теория: до этой правки наша собственная публикация виртуальных файлов
+    вернулась бы в тот же процесс как обычное локальное копирование,
+    объявилась бы второму компьютеру и закрыла бы петлю (спека §14).
+    """
+    return f'application/x-qt-windows-mime;value="{name}"'
+
+
 def is_private(formats: list[str]) -> bool:
     """Просило ли содержимое, чтобы его не запоминали и не пересылали."""
-    if ORIGIN_MIME in formats:
+    if ORIGIN_MIME in formats or wrapped_windows_mime(ORIGIN_MIME) in formats:
         return True
     return any(marker in formats for marker in PRIVATE_MARKERS)
 
@@ -134,4 +147,5 @@ __all__ = [
     "WindowsClipboardBackend",
     "is_private",
     "snapshot_from",
+    "wrapped_windows_mime",
 ]

@@ -20,6 +20,7 @@ from duo_input.clipboard.windows_backend import (
     WindowsClipboardBackend,
     is_private,
     snapshot_from,
+    wrapped_windows_mime,
 )
 
 
@@ -442,3 +443,36 @@ def test_a_private_clipboard_reports_neither_payloads_nor_paths(qapp, tmp_path):
         "маркер приватности обошёл путь файлов - менеджер паролей, "
         "копирующий файл, отправил бы его"
     )
+
+
+def test_the_bare_origin_marker_is_still_recognised():
+    assert is_private([ORIGIN_MIME])
+
+
+def test_the_qt_wrapped_origin_marker_is_recognised_too():
+    # Qt показывает незнакомый нативный формат так, и точное сравнение строк
+    # с ORIGIN_MIME здесь не срабатывало никогда.
+    assert is_private([wrapped_windows_mime(ORIGIN_MIME)])
+
+
+def test_the_wrapped_spelling_is_exactly_what_qt_produces():
+    assert wrapped_windows_mime(ORIGIN_MIME) == (
+        'application/x-qt-windows-mime;value="application/x-duo-input-origin"'
+    )
+
+
+def test_an_unrelated_wrapped_format_is_not_treated_as_ours():
+    assert not is_private([wrapped_windows_mime("SomeOtherApplicationFormat")])
+
+
+def test_our_own_virtual_file_publication_is_not_taken_for_a_local_copy(qapp):
+    # Конец петли: буфер, несущий наш маркер и наши форматы виртуальных
+    # файлов, не порождает ни payload, ни путей.
+    from duo_input.transfer.windows_files import FORMAT_ORIGIN_NAME
+
+    mime_data = QMimeData()
+    mime_data.setData(wrapped_windows_mime(FORMAT_ORIGIN_NAME), QByteArray(b"origin:1"))
+
+    snapshot = snapshot_from(mime_data)
+
+    assert snapshot.is_empty

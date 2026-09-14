@@ -793,3 +793,18 @@ def test_the_list_check_replicas_agree_with_the_real_method_on_ordinary_input():
     with pytest.raises(ValueError) as replica_exc:
         _manifest_from_dict_without_skipped_list_check(TransferManifest, bad_entries)
     assert str(real_exc.value) == str(replica_exc.value)
+
+
+def test_without_the_wrapped_spelling_our_own_publication_would_loop(monkeypatch):
+    """Спека §14: обе половины обязаны работать, и это проверяется снятием одной."""
+    from duo_input.clipboard import windows_backend
+    from duo_input.clipboard.backend import ORIGIN_MIME
+
+    monkeypatch.setattr(windows_backend, "wrapped_windows_mime", lambda name: name)
+
+    assert not windows_backend.is_private(
+        ['application/x-qt-windows-mime;value="application/x-duo-input-origin"']
+    ), (
+        "обёрнутое написание снято, а маркер всё равно узнан - значит "
+        "проверка петли смотрит не на то написание, которое даёт Qt"
+    )
