@@ -426,3 +426,230 @@ question open".
    before the `try:` whose `finally` calls `call_release`, so those error paths
    leak the COM `IStream`. Out of scope here and it never fired in these runs
    (all four exited 0), but it is still there.
+
+---
+
+## Fix report (quality review round 1)
+
+3 Critical and 3 Important, all of them claims in the record or spec that said
+more than the measurement supports. All six fixed. Four of the seven deferred
+Minors folded in, plus the reviewer's invariance finding. No measurement was
+re-run to change a number: every headline figure stands as committed, and the
+reviewer independently recomputed all of them plus verified the intervals via
+`PINGs == ceil(elapsed/10)` at `HEARTBEAT_MS = 10_000` in all four runs.
+
+**On §22 q2 I was wrong about the brief, and the reviewer is right.** I reported
+that I had "adapted prescribed wording" because the brief told me to close the
+question. It does not: it says "Remove §22 question 2 **if it closed**", and
+that instruction sits under the >=70% branch, which never fired. So nothing was
+overridden and no adaptation was needed — keeping the question open was simply
+following the brief. I misread it in my own favour, which is the more
+uncomfortable direction to get wrong, and the claim of an adaptation is
+withdrawn. The other two adaptations I reported (the commit message, and the
+three stale adjacent clauses) were real.
+
+### CRITICAL 1 — spec asserted the decision rests on evidence; the record says the opposite
+
+`spec:577-580` read "окно остаётся не-инвариантом, и **теперь по evidence, а не
+по осторожности**", while `spec:592-593` says the threshold was never applied
+and `record:507-513` says the decision rests on the gate's missing denominator
+and §8's rule. The overclaim sat in the lead paragraph of §8's flow section —
+the sentence a later reader quotes — and in the document that survives, denied
+only in the one that expires.
+
+Fixed with the reviewer's wording: the window stays a non-invariant, "теперь
+измерено, **что́ именно** ограничивает передачу, но **порог §8 остался
+неприменим**", with the basis stated explicitly as §8's rule and the absent
+number, "**а не** на измеренную достаточность".
+
+### CRITICAL 2 — the §7 closure rested on page-cache reads
+
+The disk figures are 0.16 / 0.29 ms. The 2048 MiB file was written by the same
+process seconds earlier on a 15.9 GB machine, so it was largely still in the
+Windows page cache, and **`262144 B / 0.16 ms` = 1.6 GB/s is a cache speed, not
+a disk one** — no medium in this machine delivers that. So
+`SnapshotRegistry.read` barely touched the device.
+
+**The controller has stated this was its error, and I am recording that, but
+the part I own is that I wrote it into the spec.** The instruction was "Step 4
+closes COMPLETELY on loopback, and loopback is the pessimistic case". That is
+true for the **GUI ticks** — higher loopback throughput means more work per
+second on the Qt thread, so acceptable ticks there imply acceptable ticks on a
+slower link — and that half stands unchanged. It is **false for the disk figure
+itself**, where a warm cache makes loopback optimistic. The generalisation from
+one half to the whole gate came from the instruction; I did not catch it, and
+"закрыт полностью" was mine.
+
+Fixed in three places, numbers untouched:
+- **spec §7** gains a clause: medium and cache state were not varied; the
+  closure covers a locally generated, cache-warm file on this machine's
+  storage; an external drive, network share or cold spindle costs tens of ms
+  for a 256 KiB read and is "ровно тот случай, для которого запасной выход и
+  назван". The hatch is now "не задействован **на этом классе источников**".
+- **record** — the step 4 heading changed from "закрыт полностью" to "с
+  названной областью", with a subsection carrying the 1.6 GB/s arithmetic, and
+  a new limits item 8.
+- **record conclusion table** — step 4's row now separates the tick half
+  (holds firmly) from the disk figure (cache-warm, medium not varied).
+
+### CRITICAL 3 — model residuals stated in the spec as measured percentages
+
+`spec:600-603` gave "транспорт 58.9%, постоянные накладные круга 16.7%, диск
+3.5%, остаток 21.0%" with neither "модель" nor "проекция" anywhere in §8. Only
+`RTT`, `transport` and `disk` are measured; **16.7% and 21.0% are residuals of
+an assumption**, and a reader designing the window task would have cited
+"накладные круга 16.7%" as a measured fact.
+
+Fixed by prefixing with the reviewer's clause — "по модели
+`RTT = fixed + transport(cb) + disk`, где `transport` взят из обойдённого
+прохода" — and adding that `fixed` "является её **остатком**, а не измеренной
+величиной", with the two residual shares named explicitly as "residuals модели,
+не наблюдения".
+
+### IMPORTANT 1 — the central verification was the one thing uncommitted
+
+The proof that `--read-chunk-bytes` reaches the wire lived only in a session
+transcript, in a record whose own thesis is that an instrument must be shown to
+be reading the system. The reviewer's point is sharp: the log's chunk-size row
+is **a print of the CLI argument, not an observation**.
+
+Took the better of the two options offered and committed it:
+`configurator/tests/transfer/spike_measure_checks.py --verify-chunk-size`, with
+output in `measure-chunk-size-verify.log`. It intercepts
+`FileTransferService.request_read`, records the actual lengths, and **raises if
+the observed set differs from the expected one** rather than printing it
+quietly. Observed `{262144: 16}` on 4 MiB, and `{65536: 64}`. The record now
+also names the independent corroboration — the
+`windows_com.py:642 -> :657 -> service.py:318` forwarding chain and the
+three-field behavioural shift — so the claim does not rest on the interception
+alone.
+
+**Guard mutation-verified**, per this project's standing lesson: with the
+expectation deliberately set to 17 reads instead of 16, the strict-equality
+check fires (`observed {262144: 16} != expected {262144: 17}`). The guard is not
+vacuous.
+
+### IMPORTANT 2 — I called a denominator impossible that this laptop can produce
+
+`record:368-370` said "Проверить это без второй машины нельзя". True of the
+gigabit comparison; **false of the narrower question my own record raises twice
+and then drops** — whether 91.9 MiB/s is our TLS-and-framing ceiling or the
+local transport's. Step 2 says "any plain TCP throughput check", and loopback
+needs no second machine.
+
+Measured it: `spike_measure_checks.py --plain-tcp`, both ends in one process on
+two threads — deliberately the same topology as the bypassed pass, so the
+difference isolates TLS and framing rather than process layout.
+
+| chunk | plain TCP on 127.0.0.1 (median of 3) | ours | share |
+|---|---|---|---|
+| 65536 | 2534.1 MiB/s | 84.3 MiB/s | 3.3% |
+| 262144 | **2026.6 MiB/s** | 91.9 MiB/s | **4.5%** |
+
+**The answer is unambiguous: 91.9 MiB/s is our own TLS-and-framing ceiling, not
+a transport limit.** The local socket has ~22x headroom. For a future window
+task this is the decision the reviewer said it would be: there *is* room to
+chase above 92 MiB/s, and what binds is our Python framing and encryption path.
+
+It also upgrades the gigabit remark from conjecture to inference: our software
+ceiling (91.9) sits below a gigabit wire ceiling (~112), and 2026.6 proves the
+medium is not what binds. Added to spec §8 and to the record, with the
+"нельзя" sentence quoted and corrected rather than silently replaced.
+
+**Guarded against the obvious misuse**, since a 2026.6 MiB/s number next to a
+70% gate invites it: the Step 2 table marks the row "*(взамен)*... не знаменатель
+для порога §8 — петля не сеть", and limits item 1 says it "знаменателем для
+порога **не является** и подставляться в отношение не должен". The LAN rows stay
+**НЕ ИЗМЕРЕНО — требует второй машины**.
+
+**One weakness found in my own new script while mutation-testing it**: the
+short-delivery guard fires only after `receiver_done.wait(300.0)` expires, so a
+wedged pass takes 300 s to report rather than failing fast. It does correctly
+raise rather than return a flattering number (verified by truncating `sendall`
+after 3 writes: `RuntimeError: получатель не досчитал за 300 с`). Measured runs
+complete in 0.8-1.0 s, three orders of magnitude inside the ceiling, so this is
+recorded rather than fixed — the same judgement the 3.1 report made about
+`TRANSFER_CEILING_S`.
+
+### IMPORTANT 3 — one arithmetic fact presented as two corroborations
+
+Both halves of `record:344-348` were wrong, and I had inherited the error into
+`record:511`:
+
+- **"предсказание RTT при 256 KiB *только* из прогона 64 KiB" is false.** Of
+  `0.7186 + 2.7203 + 0.16`, the `2.7203` is the **256 KiB** bypassed pass and
+  `0.16` is the **256 KiB** disk median. Only `fixed` comes from the 64 KiB run.
+  It is a substitution of two 256 KiB measurements plus one carried constant,
+  not a one-point prediction.
+- **"ошибка 1.4%" is not a second check.** The 0.051 ms residual is **by
+  construction** the difference of the two `fixed` estimates
+  (0.7697 - 0.7186 = 0.0511); divided by 3.65 that is 1.4%. So "error 1.4%" is
+  "agreement 7%" in a different normalisation.
+
+Both corrected in place, with the old text quoted and the mechanism spelled
+out, and the conclusion restated: the model is verified **in one respect, not
+two** — the same number in two normalisations.
+
+Also added the model's unstated assumption as limits item 9:
+`transport(cb) = cb/91.9` converts a **back-to-back streaming** throughput into
+a **serial** per-chunk latency, so if the bypassed pass overlapped any send with
+receive, 2.72 ms is a lower bound on transport and `fixed = 0.77` ms an upper
+bound. Noted that the bias runs **against** adding machinery — real fixed
+overhead would be smaller, and so would a window's payoff — so nothing is
+inflated in the dangerous direction.
+
+### Minors folded in (4 of 7, plus the reviewer's invariance finding)
+
+- **"примерно в семь раз" -> six.** 89.4 / 14.46 = **6.2**. Verified.
+- **The model's asymptote is 86.8 MiB/s, not 91.9.** As `cb -> inf`,
+  `1000 / (1000/91.9 + 0.64) = 86.80`, because the model's own disk term
+  (0.64 ms/MiB) stays in the denominator. The earlier text took the bypassed
+  transport figure itself as the asymptote and ignored that term. Corrected in
+  the record's projection table, and the window ceiling updated to **~86.8
+  MiB/s / ~1.60x** in both documents. The two derivations now agree exactly:
+  `86.8 / 54.1 = 1.604` and `4.621 / 2.880 = 1.605`. **1.70x** is retained
+  where it appears, explicitly as the looser upper bound it is.
+- **"сокет никогда не был узким местом" -> "не был устойчивым узким местом".**
+  A 50 ms sampler over ~758 ticks cannot see every moment of 8192 chunks.
+- **Two line-number citations corrected**, both verified against the committed
+  base: the identities are at `:373-374` (not `:371-372` — I copied that from
+  the brief), and the `link_dropped_during_sampling` raise is at `:740-741`
+  (not `:734`).
+
+**The invariance finding, added because it strengthens the case.** The 79%
+ratio was computed only at 256 KiB. Across all four runs it is
+**78.8 / 78.7 / 79.0 / 79.3 percent** — a ±0.3 pp band over a **4x chunk range**
+and two transfer lengths. I reproduced the reviewer's mechanism exactly:
+`ours / rtt_bound = RTT / cycle`, so invariance needs `residual / RTT` stable
+(26.95% vs 26.60%), and that holds because decomposing the residual as
+`a + b*(cb/MiB)` gives `a = 0.219` ms, `b = 3.008` ms/MiB — a fixed share of
+**22.6%** against RTT's **21.1%**. Two independent splits nearly coincide, so
+both scale with the chunk almost identically and the quotient survives. Recorded
+with the reviewer's caveat: demonstrated over 4x and dependent on that
+coincidence, so **evidence, not a law**.
+
+Three Minors remain deferred to the whole-branch review as instructed.
+
+### Files changed (this round)
+
+- `docs/superpowers/specs/2026-09-12-file-transfer-design.md` (§7, §8, §22)
+- `docs/superpowers/records/2026-09-12-file-transfer-bridge-measurement.md`
+- `configurator/tests/transfer/spike_measure_checks.py` (new)
+- `configurator/tests/transfer/measure-plain-tcp.log` (new)
+- `configurator/tests/transfer/measure-chunk-size-verify.log` (new)
+- `configurator/tests/transfer/spike_measure_bridge.py` — **unchanged this round**
+- `configurator/tests/transfer/test_spike_measure_bridge.py` — **unchanged**
+
+No production code changed in this round either.
+
+### Verification run (this round)
+
+```
+$ .venv/Scripts/python.exe -m pytest configurator/tests -q
+1922 passed, 8 skipped in 84.02s
+```
+
+Unchanged from the baseline, as expected: this round touched two documents and
+added one spike file with no test surface.
+
+Commit: `3bc0546` "Narrow the measurement's claims to what it measured".
