@@ -28,6 +28,8 @@ from duo_input.device.service import DeviceService
 from duo_input.i18n import TranslationManager
 from duo_input.persistence import autostart
 from duo_input.persistence.locations import application_directory, configure_logging
+from duo_input.transfer.platform_files import UnsupportedPlatformError, create_file_backend
+from duo_input.transfer.service import FileTransferService
 from duo_input.ui.main_window import APPLICATION_NAME, MainWindow
 from duo_input.ui.models.project_session import ProjectSession
 from duo_input.ui.theme import apply_theme
@@ -214,6 +216,13 @@ class _ClipboardRuntime(QObject):
         self._window = window
         self._settings = settings
         self.coordinator: ClipboardCoordinator | None = None
+        self.transfer: FileTransferService | None = None
+        self.file_backend: QObject | None = None
+        self._file_cancel_slot = None
+        self._file_capabilities_slot = None
+        self._file_capabilities_source: ClipboardCoordinator | None = None
+        self._file_snapshot_source = None
+        self._file_link = None
         from duo_input.clipboard.backend import ClipboardBackend
 
         self._backend: ClipboardBackend | None = None
@@ -221,6 +230,7 @@ class _ClipboardRuntime(QObject):
         self.tray.open_requested.connect(window.showNormal)
         self.tray.quit_requested.connect(application.quit)
         self.tray.sharing_toggled.connect(self.set_enabled)
+        self.tray.files_toggled.connect(self.set_files_enabled)
         self.tray.show()
 
     def set_enabled(self, enabled: bool) -> None:
@@ -230,8 +240,23 @@ class _ClipboardRuntime(QObject):
         self.tray.set_sharing_checked(enabled)
         if enabled:
             self._start()
+            files_enabled = bool(
+                self._settings.value("clipboard/files_enabled", False, type=bool)
+            )
+            if self.coordinator is not None and files_enabled:
+                self._start_files()
         else:
             self._stop()
+
+    def set_files_enabled(self, enabled: bool) -> None:
+        """Apply either file-transfer toggle and persist their shared state."""
+        self._settings.setValue("clipboard/files_enabled", enabled)
+        self._window.clipboard_page.set_files_checked(enabled)
+        self.tray.set_files_checked(enabled)
+        if enabled and self.coordinator is not None:
+            self._start_files()
+        else:
+            self._stop_files()
 
     def set_autostart(self, enabled: bool) -> None:
         self._settings.setValue("clipboard/autostart", enabled)
@@ -306,6 +331,7 @@ class _ClipboardRuntime(QObject):
         self._backend = backend
 
     def _stop(self) -> None:
+        self._stop_files()
         coordinator = self.coordinator
         if coordinator is None:
             return
@@ -331,6 +357,149 @@ class _ClipboardRuntime(QObject):
 
         self._application.setQuitOnLastWindowClosed(True)
 
+    def _start_files(self) -> None:
+        if self.transfer is not None:
+            return
+        coordinator = self.coordinator
+        clipboard_backend = self._backend
+        if coordinator is None or clipboard_backend is None:
+            return
+        try:
+            backend = create_file_backend(coordinator)
+        except UnsupportedPlatformError:
+            logger.info("file transfer is not supported on this platform")
+            self._settings.setValue("clipboard/files_enabled", False)
+            self._window.clipboard_page.set_files_checked(False)
+            self.tray.set_files_checked(False)
+            return
+
+        # The only implementation currently selected by create_file_backend is
+        # Windows-specific. Keep its COM module out of every other runtime graph.
+        from duo_input.transfer.windows_files import post_to_service
+
+        transfer = FileTransferService(coordinator)
+        page = self._window.clipboard_page
+        transfer.transfer_progress.connect(page.set_transfer_progress)
+        transfer.transfer_completed.connect(page.clear_transfer)
+        transfer.transfer_cancelled.connect(page.clear_transfer)
+        transfer.transfer_failed.connect(lambda _reason: page.clear_transfer())
+        transfer.transfer_failed.connect(
+            lambda reason: page.add_event(f"передача файлов не удалась: {reason}")
+        )
+        transfer.send_failed.connect(
+            lambda reason: page.add_event(f"файлы не объявлены: {reason}")
+        )
+
+        cancel_slot = lambda transfer=transfer: transfer.finish_session("cancelled")
+        page.cancel_requested.connect(cancel_slot)
+
+        backend.set_callbacks(
+            open_pipe=transfer.open_pipe,
+            request_read=lambda *args: post_to_service(
+                transfer, "request_read", *args
+            ),
+            close_pipe=transfer.close_pipe,
+            on_operation_finished=lambda result: transfer.finish_session(
+                "completed" if result == 0 else "failed"
+            ),
+        )
+        transfer.offer_received.connect(
+            lambda manifest: backend.publish(
+                manifest, origin_marker=manifest.transfer_id.encode("ascii")
+            )
+        )
+        backend.publish_failed.connect(
+            lambda reason: page.add_event(
+                f"буфер обмена не принял файлы: {reason}"
+            )
+        )
+
+        link = coordinator.link
+        if link is not None:
+            self._attach_file_link(transfer, link)
+        transfer.set_peer_capabilities(coordinator.peer_capabilities)
+
+        def apply_capabilities(capabilities) -> None:
+            current_link = coordinator.link
+            if current_link is not None and current_link is not self._file_link:
+                self._attach_file_link(transfer, current_link)
+            transfer.set_peer_capabilities(capabilities)
+
+        coordinator.capabilities_known.connect(apply_capabilities)
+        clipboard_backend.snapshot_taken.connect(self._offer_files_from)
+
+        self.transfer = transfer
+        self.file_backend = backend
+        self._file_cancel_slot = cancel_slot
+        self._file_capabilities_slot = apply_capabilities
+        self._file_capabilities_source = coordinator
+        self._file_snapshot_source = clipboard_backend
+        backend.start()
+
+    def _attach_file_link(self, transfer: FileTransferService, link) -> None:
+        old_link = self._file_link
+        if old_link is link:
+            return
+        if old_link is not None:
+            try:
+                old_link.message_received.disconnect(transfer.handle_message)
+            except (RuntimeError, TypeError):
+                pass
+        transfer.attach_link(link)
+        link.message_received.connect(transfer.handle_message)
+        self._file_link = link
+
+    def _offer_files_from(self, snapshot) -> None:
+        transfer = self.transfer
+        if transfer is None or not snapshot.file_paths:
+            return
+        transfer.offer_local_files([Path(path) for path in snapshot.file_paths])
+
+    def _stop_files(self) -> None:
+        transfer, backend = self.transfer, self.file_backend
+        cancel_slot = self._file_cancel_slot
+        capabilities_slot = self._file_capabilities_slot
+        capabilities_source = self._file_capabilities_source
+        snapshot_source = self._file_snapshot_source
+        link = self._file_link
+
+        self.transfer = None
+        self.file_backend = None
+        self._file_cancel_slot = None
+        self._file_capabilities_slot = None
+        self._file_capabilities_source = None
+        self._file_snapshot_source = None
+        self._file_link = None
+
+        if cancel_slot is not None:
+            try:
+                self._window.clipboard_page.cancel_requested.disconnect(cancel_slot)
+            except (RuntimeError, TypeError):
+                pass
+        if capabilities_source is not None and capabilities_slot is not None:
+            try:
+                capabilities_source.capabilities_known.disconnect(capabilities_slot)
+            except (RuntimeError, TypeError):
+                pass
+        if snapshot_source is not None:
+            try:
+                snapshot_source.snapshot_taken.disconnect(self._offer_files_from)
+            except (RuntimeError, TypeError):
+                pass
+        if link is not None and transfer is not None:
+            try:
+                link.message_received.disconnect(transfer.handle_message)
+            except (RuntimeError, TypeError):
+                pass
+
+        self._window.clipboard_page.clear_transfer()
+        if transfer is not None:
+            transfer.detach_link()
+            transfer.deleteLater()
+        if backend is not None:
+            backend.stop()
+            backend.deleteLater()
+
 
 def configure_runtime(
     application: QApplication, window: MainWindow, settings: QSettings
@@ -346,6 +515,7 @@ def configure_runtime(
     """
     runtime = _ClipboardRuntime(application, window, settings)
     window.clipboard_page.sharing_toggled.connect(runtime.set_enabled)
+    window.clipboard_page.files_toggled.connect(runtime.set_files_enabled)
     window.clipboard_page.autostart_toggled.connect(runtime.set_autostart)
     application.aboutToQuit.connect(runtime.stop)
 
@@ -356,12 +526,21 @@ def configure_runtime(
     # так что этот вызов - единственное место, где его галочка узнаёт о
     # реальном сохранённом состоянии на старте.
     enabled = bool(settings.value("clipboard/enabled", False, type=bool))
+    files_enabled = bool(
+        settings.value("clipboard/files_enabled", False, type=bool)
+    )
     autostart_enabled = bool(settings.value("clipboard/autostart", False, type=bool))
     window.clipboard_page.set_sharing_checked(enabled)
+    window.clipboard_page.set_files_checked(files_enabled)
     window.clipboard_page.set_autostart_checked(autostart_enabled)
     runtime.tray.set_sharing_checked(enabled)
+    runtime.tray.set_files_checked(files_enabled)
     if enabled:
         runtime.set_enabled(True)
+        if files_enabled and bool(
+            settings.value("clipboard/files_enabled", False, type=bool)
+        ):
+            runtime.set_files_enabled(True)
     return runtime.coordinator
 
 

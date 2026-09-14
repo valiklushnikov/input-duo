@@ -2,20 +2,136 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, QSettings, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QSettings, Qt, Signal
 from PySide6.QtWidgets import QMessageBox
 
 from duo_input import app as app_module
 from duo_input.app import build_main_window, configure_runtime, single_instance_lock
 from duo_input.clipboard.pairing import PairingCandidate
+from duo_input.clipboard.wire import (
+    CAPABILITY_CLIPBOARD,
+    CAPABILITY_FILES,
+    Message,
+    MessageType,
+    PROTOCOL_MAJOR,
+)
 from duo_input.i18n import TranslationManager
+from duo_input.transfer.model import ENTRY_FILE, TransferEntry, TransferManifest
+from duo_input.transfer.service import TransferState
 
 
-def _settings(tmp_path, enabled: bool) -> QSettings:
+def _settings(tmp_path, values: bool | dict[str, object]) -> QSettings:
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
-    settings.setValue("clipboard/enabled", enabled)
+    if isinstance(values, bool):
+        settings.setValue("clipboard/enabled", values)
+    else:
+        for key, value in values.items():
+            settings.setValue(key, value)
     return settings
+
+
+def _runtime_of(application):
+    from duo_input.app import _ClipboardRuntime
+
+    for child in reversed(application.children()):
+        if isinstance(child, _ClipboardRuntime):
+            return child
+    raise AssertionError("_ClipboardRuntime was not created")
+
+
+class _FileBackend(QObject):
+    """The external COM boundary, with the real backend's lifecycle contract."""
+
+    publish_failed = Signal(str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.callbacks: dict[str, object] = {}
+        self.publications: list[tuple[TransferManifest, bytes]] = []
+        self.starts = 0
+        self.stops = 0
+        self.is_running = False
+
+    def set_callbacks(
+        self, open_pipe, request_read, close_pipe, on_operation_finished
+    ) -> None:
+        self.callbacks = {
+            "open_pipe": open_pipe,
+            "request_read": request_read,
+            "close_pipe": close_pipe,
+            "on_operation_finished": on_operation_finished,
+        }
+
+    def start(self) -> None:
+        if self.is_running:
+            return
+        self.is_running = True
+        self.starts += 1
+
+    def stop(self) -> None:
+        if not self.is_running:
+            return
+        self.is_running = False
+        self.stops += 1
+
+    def publish(self, manifest: TransferManifest, origin_marker: bytes) -> None:
+        self.publications.append((manifest, origin_marker))
+
+
+def _configure_file_runtime(qapp, qtbot, tmp_path, monkeypatch, values):
+    made: list[_FileBackend] = []
+
+    def create(parent=None):
+        backend = _FileBackend(parent)
+        made.append(backend)
+        return backend
+
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(app_module, "create_file_backend", create, raising=False)
+    settings = _settings(tmp_path, values)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+    configure_runtime(qapp, window, settings)
+    return settings, window, _runtime_of(qapp), made
+
+
+def _activate_transfer(transfer, transfer_id: str) -> None:
+    manifest = TransferManifest(
+        transfer_id=transfer_id,
+        entries=(
+            TransferEntry(
+                path="payload.bin", kind=ENTRY_FILE, size=10, mtime_ns=1
+            ),
+        ),
+    )
+    transfer.handle_message(Message(MessageType.FILE_OFFER, manifest.to_dict(), b""))
+    transfer.open_pipe(transfer_id, 0)
+
+
+class _CountingEmptySnapshot:
+    """A complete empty clipboard snapshot that counts file consumers."""
+
+    payloads: dict[str, bytes] = {}
+
+    def __init__(self) -> None:
+        self.file_path_reads = 0
+
+    @property
+    def file_paths(self) -> tuple[str, ...]:
+        self.file_path_reads += 1
+        return ()
+
+    @property
+    def is_empty(self) -> bool:
+        return True
+
+    def payload(self, _mime: str) -> bytes | None:
+        return None
 
 
 def _candidate(
@@ -612,3 +728,395 @@ def test_main_survives_an_unexpected_configure_runtime_failure(qapp, monkeypatch
     result = app_module.main([])
 
     assert result == 0
+
+
+def test_with_files_enabled_the_transfer_service_is_actually_created(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, _window, runtime, made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        assert runtime.transfer is not None
+        assert made == [runtime.file_backend]
+        assert made[0].starts == 1
+    finally:
+        runtime.stop()
+
+
+def test_with_files_disabled_no_transfer_service_exists(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, _window, runtime, made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": False},
+    )
+    try:
+        assert runtime.transfer is None
+        assert made == []
+    finally:
+        runtime.stop()
+
+
+def test_the_tray_toggle_starts_the_subsystem_through_the_real_menu_item(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    settings, _window, runtime, made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": False},
+    )
+    try:
+        runtime.tray.files_action.trigger()
+
+        assert runtime.transfer is not None
+        assert made == [runtime.file_backend]
+        assert settings.value("clipboard/files_enabled", type=bool) is True
+    finally:
+        runtime.stop()
+
+
+def test_the_page_toggle_stops_the_subsystem_through_the_real_checkbox(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, window, runtime, made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        window.clipboard_page.files_checkbox.setChecked(False)
+
+        assert runtime.transfer is None
+        assert runtime.file_backend is None
+        assert made[0].stops == 1
+    finally:
+        runtime.stop()
+
+
+def test_both_toggles_show_the_same_saved_state_at_startup(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        assert window.clipboard_page.files_checkbox.isChecked()
+        assert runtime.tray.files_action.isChecked()
+    finally:
+        runtime.stop()
+
+
+def test_files_cannot_be_enabled_while_the_clipboard_itself_is_off(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, _window, runtime, made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": False, "clipboard/files_enabled": True},
+    )
+    try:
+        assert runtime.transfer is None
+        assert made == []
+    finally:
+        runtime.stop()
+
+
+def test_saved_files_start_when_the_clipboard_is_enabled_later(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, window, runtime, made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": False, "clipboard/files_enabled": True},
+    )
+    try:
+        window.clipboard_page.sharing_checkbox.setChecked(True)
+
+        assert runtime.transfer is not None
+        assert made == [runtime.file_backend]
+    finally:
+        runtime.stop()
+
+
+def test_progress_from_the_service_reaches_the_page(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        runtime.transfer.transfer_progress.emit(1_500_000_000, 8_800_000_000)
+
+        assert "1.4 \u0413\u0411" in window.clipboard_page.transfer_label.text()
+    finally:
+        runtime.stop()
+
+
+def test_cancelling_from_the_page_reaches_the_service(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        _activate_transfer(runtime.transfer, "cancel-me")
+        runtime.transfer.transfer_progress.emit(1, 100)
+
+        window.clipboard_page.cancel_button.click()
+
+        assert runtime.transfer.state is TransferState.CANCELLED
+    finally:
+        runtime.stop()
+
+
+def test_the_peers_capabilities_reach_the_transfer_service(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, _window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        runtime.coordinator.capabilities_known.emit(
+            frozenset({CAPABILITY_CLIPBOARD, CAPABILITY_FILES})
+        )
+
+        assert runtime.transfer.peer_supports_files
+    finally:
+        runtime.stop()
+
+
+def test_a_new_transfer_is_seeded_from_capabilities_already_known(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": False},
+    )
+    try:
+        runtime.coordinator._on_message(
+            Message(
+                MessageType.HELLO,
+                {
+                    "protocol_major": PROTOCOL_MAJOR,
+                    "capabilities": [CAPABILITY_CLIPBOARD, CAPABILITY_FILES],
+                },
+                b"",
+            )
+        )
+
+        window.clipboard_page.files_checkbox.setChecked(True)
+
+        assert runtime.coordinator.peer_capabilities == frozenset(
+            {CAPABILITY_CLIPBOARD, CAPABILITY_FILES}
+        )
+        assert runtime.transfer.peer_supports_files
+    finally:
+        runtime.stop()
+
+
+def test_with_files_disabled_no_com_object_is_registered_on_the_clipboard(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    constructions: list[object] = []
+
+    def forbidden_backend(parent=None):
+        constructions.append(parent)
+        raise AssertionError("disabled file transfer constructed its COM backend")
+
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(
+        app_module, "create_file_backend", forbidden_backend, raising=False
+    )
+    settings = _settings(
+        tmp_path,
+        {"clipboard/enabled": True, "clipboard/files_enabled": False},
+    )
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+    configure_runtime(qapp, window, settings)
+    runtime = _runtime_of(qapp)
+    try:
+        assert runtime.transfer is None
+        assert runtime.file_backend is None
+        assert constructions == []
+    finally:
+        runtime.stop()
+
+
+def test_disabling_and_reenabling_files_disconnects_the_old_cancel_slot(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        old_transfer = runtime.transfer
+        _activate_transfer(old_transfer, "old")
+
+        window.clipboard_page.files_checkbox.setChecked(False)
+        window.clipboard_page.files_checkbox.setChecked(True)
+        new_transfer = runtime.transfer
+        _activate_transfer(new_transfer, "new")
+        new_transfer.transfer_progress.emit(1, 10)
+
+        window.clipboard_page.cancel_button.click()
+
+        assert old_transfer.state is TransferState.TRANSFERRING
+        assert new_transfer.state is TransferState.CANCELLED
+    finally:
+        runtime.stop()
+
+
+def test_disabling_and_reenabling_files_disconnects_old_capability_updates(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        old_transfer = runtime.transfer
+        window.clipboard_page.files_checkbox.setChecked(False)
+        window.clipboard_page.files_checkbox.setChecked(True)
+        new_transfer = runtime.transfer
+
+        runtime.coordinator.capabilities_known.emit(
+            frozenset({CAPABILITY_CLIPBOARD, CAPABILITY_FILES})
+        )
+
+        assert not old_transfer.peer_supports_files
+        assert new_transfer.peer_supports_files
+    finally:
+        runtime.stop()
+
+
+def test_disabling_and_reenabling_files_keeps_one_snapshot_subscription(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        for _ in range(2):
+            window.clipboard_page.files_checkbox.setChecked(False)
+            window.clipboard_page.files_checkbox.setChecked(True)
+
+        snapshot = _CountingEmptySnapshot()
+        runtime._backend.snapshot_taken.emit(snapshot)
+
+        assert snapshot.file_path_reads == 1
+    finally:
+        runtime.stop()
+
+
+def test_disabling_and_reenabling_clipboard_restarts_saved_file_transfer(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    settings, window, runtime, made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        old_transfer = runtime.transfer
+        old_backend = runtime.file_backend
+
+        window.clipboard_page.sharing_checkbox.setChecked(False)
+        assert runtime.transfer is None
+        assert old_backend.stops == 1
+
+        window.clipboard_page.sharing_checkbox.setChecked(True)
+
+        assert runtime.transfer is not old_transfer
+        assert runtime.file_backend is made[1]
+        assert settings.value("clipboard/files_enabled", type=bool) is True
+    finally:
+        runtime.stop()
+
+
+def test_stopped_clipboard_snapshot_does_not_reach_the_restarted_transfer(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        assert runtime.transfer is not None
+        old_clipboard_backend = runtime._backend
+        window.clipboard_page.sharing_checkbox.setChecked(False)
+        window.clipboard_page.sharing_checkbox.setChecked(True)
+
+        snapshot = _CountingEmptySnapshot()
+        old_clipboard_backend.snapshot_taken.emit(snapshot)
+
+        assert snapshot.file_path_reads == 0
+    finally:
+        runtime.stop()
+
+
+def test_importing_app_does_not_eagerly_import_the_windows_file_backend():
+    source_root = Path(__file__).resolve().parents[2] / "src"
+    code = (
+        "import sys; "
+        f"sys.path.insert(0, {str(source_root)!r}); "
+        "import duo_input.app; "
+        "assert 'duo_input.transfer.windows_files' not in sys.modules"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=30
+    )
+
+    assert result.returncode == 0, result.stderr
