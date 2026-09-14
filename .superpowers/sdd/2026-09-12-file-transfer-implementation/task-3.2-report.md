@@ -319,16 +319,20 @@ window decision, and "Что этот прогон не может сказат�
 - **§22 question 2** — **kept open**, narrowed, with the two-machine run named
   as the closer.
 
-**Where I adapted prescribed wording, and why.** Three places:
+**Where I adapted prescribed wording, and why.** Three places — **but item 1
+below is WITHDRAWN; see the fix report's opening. It was not an adaptation,
+because the brief never told me to close §22 q2 unconditionally. Left in place
+rather than rewritten, so the withdrawal has something to point at.**
 
-1. **The brief's Step 6 told me to close §22 question 2** and "replace
-   'гипотеза' with the number". The number the gate asks for does not exist. I
-   replaced the hypothesis with what *was* established and kept the question
-   **open**, naming what closes it. Deleting an open question is progress only
-   when it actually closed; deleting this one would have been the overclaim the
-   whole task guards against. The brief's verification grep now returns one hit
-   that reads as settled-with-a-named-gap, satisfying "hits that now read as
-   settled rather than open".
+1. ~~**The brief's Step 6 told me to close §22 question 2**~~ — **withdrawn.**
+   The brief says "Remove §22 question 2 **if it closed**", under the ≥70%
+   branch that never fired, so keeping it open was plain compliance and no
+   adaptation was involved. I misread the instruction in my own favour. What
+   remains true is the substance: the number the gate asks for does not exist,
+   so I replaced the hypothesis with what *was* established and kept the
+   question **open**, naming what closes it. The brief's verification grep
+   returns one hit that reads as settled-with-a-named-gap, satisfying "hits
+   that now read as settled rather than open".
 2. **The brief's commit message** says "Measured over the real LAN rather than
    loopback". That is false for this run, so I wrote my own message saying
    loopback on one machine, why, and that the threshold was not applied. A
@@ -653,3 +657,174 @@ Unchanged from the baseline, as expected: this round touched two documents and
 added one spike file with no test surface.
 
 Commit: `3bc0546` "Narrow the measurement's claims to what it measured".
+
+---
+
+## Fix report (quality re-review round 2)
+
+Re-review confirmed all six round-1 findings addressed, and found three that
+round 1 introduced: 2 Critical and 1 Important. All three fixed. Four of the
+five deferred observations folded in, since they sat in text being edited
+anyway. The fifth (the 300 s short-delivery timeout) is recorded and not fixed.
+
+All three new findings are the same defect as round 1's, one round later: a
+correction that landed next to a claim it invalidated. Twice now in this task.
+The lesson this project already carries — check the clauses either side of a
+claim — was applied to the *record* in round 1 and not to the *fix* in round 1.
+
+### IMPORTANT C — the plain-TCP figure is not reproducible at the quoted precision
+
+Taken first, because the two Criticals lean on it.
+
+An independent re-run of the committed script got **2956.1 / 4174.2 MiB/s**
+where this branch recorded **2534.1 / 2026.6** — a factor of **2.06×** at the
+production chunk, between two invocations each already a median of three. And
+the chunk ordering **inverts**, so the two-row table was presenting run-to-run
+noise as a chunk effect.
+
+**I characterised the variance instead of just requoting.** Fifteen repetitions
+per chunk:
+
+| chunk | min | median | max | max/min |
+|---|---|---|---|---|
+| 65536 | 2530.9 | 2851.4 | 3025.8 | 1.20× |
+| 262144 | **2025.2** | 4336.9 | 4449.3 | **2.20×** |
+
+The mechanism is warm-up: at 262144 the ordered samples are
+`2025, 2351, 3995, 4216, …` — the first two or three sit systematically low,
+then it settles around 4300. **So a median of three on a cold start lands near
+the minimum of the distribution, not its middle**, which is exactly how 2026.6
+got committed. A later warm run of the fixed script gave 2486/2923/3030 and
+4181/4383/4513, reproducing the reviewer's ordering.
+
+So `spike_measure_checks.py:176-177`'s justification for median-of-three —
+"один прогон на этой машине гуляет на единицы процентов" — was false as
+written. Fixed:
+
+- `PLAIN_TCP_REPEATS = 15`, and the script now prints **min / median / max plus
+  the spread ratio**, never a lone number;
+- the comment now records what was actually observed (2.2× spread, warm-up,
+  and why a median-of-three sits near the minimum);
+- the script **refuses the per-chunk comparison in its own output**: "разброс
+  здесь того же порядка, что и разница между чанками, поэтому сравнивать чанки
+  по этим числам НЕЛЬЗЯ… это шум, а не эффект размера кадра";
+- the share is printed as a **range**, not a percentage, because the divisor
+  moves by 2×.
+
+Requoted in both documents as **"единицы процентов"** and **"запас десятки
+раз"** — dropping `4.5%` (`spec:618-620`, `spec:1448`) and "примерно
+двадцатидвухкратный запас" (`record:490-493`). The old figures are quoted and
+marked wrong rather than silently replaced. The record's Step 2 row and limits
+item 1 now read "порядка 2000–4500 МиБ/с, разброс до 2.2x между запусками".
+
+**The load-bearing conclusion is untouched and I checked that explicitly:** the
+gap is an order to two orders of magnitude, and no plausible variance
+correction closes it. 91.9 MiB/s is our software ceiling, not the local
+transport's. The error direction was conservative — real headroom is larger —
+but the spec is the surviving document and it carried 4.5% as a measured
+quantity, which is the part that needed fixing.
+
+### CRITICAL A — gigabit upgraded to "measured" while the same document denied it three times
+
+`record:495-499` read "делает его измеренным, а не предположительным … Значит
+на гигабите связывающим ограничением был бы наш софт", with the previous
+hedge ("скорее всего … Проверить это без второй машины нельзя") removed. The
+same document denies it in three places: `record:509` flags 112 MiB/s as
+"(НЕ ИЗМЕРЕН — нет второй машины)", `record:474` says the gigabit comparison
+needs the second machine, and limits item 3 says our 91.9 is **probably an
+underestimate** for a two-machine run because encryption and decryption would
+not share a core.
+
+That last one is the sharp end, and the reviewer is right that it can **flip
+the conclusion outright**: if our per-machine ceiling rises above 112 MiB/s,
+the network becomes the binding constraint, not our software. Loopback TCP at
+2000–4500 MiB/s says nothing about a path through a NIC.
+
+Fixed: the hedge is restored ("оказался бы, **скорее всего**, наш софт — но
+проверить это без второй машины нельзя"), the previous overclaim is quoted and
+marked as wrong, and the inference is stated as **conditional on two unmeasured
+quantities** — the ≈112 MiB/s environment ceiling (an estimate, not a
+measurement) and our own per-machine ceiling, with the flip named explicitly.
+The same conditionality was added to spec §8.
+
+**Re-read the clauses either side, as instructed.** All eight gigabit mentions
+in the record now agree: 474 (needs the second machine), 525–534 (the hedged
+correction), 537 (not a §8 denominator), 546 (112 marked НЕ ИЗМЕРЕН), 663
+(loopback is not a denominator). No surviving contradiction.
+
+### CRITICAL B — the gap attributed to TLS and framing on a topology parity that does not exist
+
+`record:479-481` and `spike_measure_checks.py:17-19` claimed both ends were
+"в одном процессе на двух потоках — та же топология, что у прохода с
+обойдённым мостом, чтобы разница была именно TLS и кадрирование".
+
+**Verified against the code: false.** `_measure_bypassed_transport` sends in a
+main-thread loop pumped by `processEvents` and observes via
+`message_received` on that same thread (`spike_measure_bridge.py:428-451`,
+`:915-952`), so encryption, decryption and `FrameAssembler` all serialize on
+**one** thread — which my own limits item 3 already said. The plain-TCP check
+runs `sendall`/`recv_into` on **two** threads that release the GIL inside the
+syscalls. So part of the gap is one core versus two.
+
+Fixed in both the record and the script docstring, with the contributors named
+as the reviewer asked and explicitly marked **inseparable by this
+measurement**: single-thread serialization vs two, Qt event dispatch, per-frame
+`Message` construction, and TLS with framing. Spec §8 gained the same caveat,
+and the §22 row now says "ограничивает нас **наш софт**" rather than "TLS с
+кадрированием", with a sentence saying the decomposition is not available.
+
+**The load-bearing conclusion again survives and the reviewer does not dispute
+it**: 91.9 MiB/s is our own software ceiling by an order of magnitude. What was
+withdrawn is only the claim that the comparison *isolates* TLS and framing.
+
+### Deferred observations folded in (4 of 5)
+
+- **`record:608`'s "≈92 МиБ/с" asymptote** — three lines after round 1
+  corrected it to 86.8. Now reads "одну и ту же асимптоту модели ≈86.8 МиБ/с
+  (не 91.9 — … диск в модели тоже пропорционален чанку)". This is the same
+  class as the Criticals above: round 1 fixed the asymptote in one place and
+  left it stale three lines later.
+- **`spec:638-640`'s "исключены измерением"** now carries the "(на **горячем
+  кэше**, см. §7)" annotation that only the §22 row got in round 1.
+- **`spec:500`'s §7 lead** read "Измерено, шлагбаум закрыт" unqualified,
+  sixteen lines ahead of the narrowing — the same quote-the-lead exposure
+  Critical 1 was about. Now "закрыт — **на измеренном классе источников** …
+  файл читался из горячего кэша".
+- **The report body's withdrawn §22 adaptation** (`:322-333`) is now struck
+  through and annotated in place, pointing at the withdrawal, rather than left
+  to contradict it. Left visible rather than rewritten so the withdrawal has
+  something to point at. Confirmed again that nothing leaked into the record or
+  spec: both correctly treat §22 q2 as open by plain compliance.
+
+**Not fixed, recorded:** `spike_measure_checks.py:126-132`'s short-delivery
+guard still reports only after `receiver_done.wait(300.0)` expires, so a wedged
+pass takes five minutes to fail a one-second run. It does raise rather than
+return a flattering number (mutation-verified in round 1). Measured runs finish
+in under two seconds, three orders of magnitude inside the ceiling, so this is
+latent; noted here rather than changed, because tightening it would mean
+re-running the measurement to be sure the new ceiling never trips a legitimate
+slow pass.
+
+### Files changed (this round)
+
+- `docs/superpowers/specs/2026-09-12-file-transfer-design.md` (§7, §8, §22)
+- `docs/superpowers/records/2026-09-12-file-transfer-bridge-measurement.md`
+- `configurator/tests/transfer/spike_measure_checks.py`
+- `configurator/tests/transfer/measure-plain-tcp.log` (regenerated, n=15)
+- `configurator/tests/transfer/measure-chunk-size-verify.log` (regenerated)
+- `.superpowers/sdd/.../task-3.2-report.md` (in-place annotation at :322-333)
+- `configurator/tests/transfer/spike_measure_bridge.py` — **unchanged**
+- `configurator/tests/transfer/test_spike_measure_bridge.py` — **unchanged**
+
+No production code changed in this round either. No headline measurement from
+the bridge runs changed: this round corrected a supporting measurement's
+precision and three statements about what the measurements mean.
+
+### Verification run (this round)
+
+```
+$ .venv/Scripts/python.exe -m pytest configurator/tests -q
+1922 passed, 8 skipped in 83.14s
+```
+
+Commit: `95f9ca6` "Requote the loopback TCP ceiling at the precision it has".
