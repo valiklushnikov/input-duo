@@ -107,3 +107,9 @@ def test_setting_the_tray_files_check_programmatically_does_not_echo(qtbot):
     tray.set_files_checked(True)
 
     assert seen == []
+    assert tray.files_action.isChecked() is True
+
+    with qtbot.waitSignal(tray.files_toggled, timeout=1000) as blocker:
+        tray.files_action.trigger()
+
+    assert blocker.args == [False]

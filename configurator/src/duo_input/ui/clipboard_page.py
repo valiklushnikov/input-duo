@@ -35,6 +35,7 @@ def human_bytes(value: int) -> str:
         value /= 1024
         if value < 1024:
             return f"{value:.1f} {unit}"
+    value /= 1024
     return f"{value:.1f} \u041f\u0411"
 
 

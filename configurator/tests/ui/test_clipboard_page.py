@@ -52,6 +52,7 @@ def test_bytes_are_shown_in_units_a_person_reads():
     assert human_bytes(999) == "999 \u0411"
     assert human_bytes(1024) == "1.0 \u041a\u0411"
     assert human_bytes(1_500_000_000) == "1.4 \u0413\u0411"
+    assert human_bytes(1024**5) == "1.0 \u041f\u0411"
 
 
 def test_progress_reads_as_received_out_of_total(qtbot):
@@ -67,7 +68,7 @@ def test_the_cancel_button_is_hidden_until_a_transfer_starts(qtbot):
     page = ClipboardPage()
     qtbot.addWidget(page)
 
-    assert not page.cancel_button.isVisible() or not page.cancel_button.isEnabled()
+    assert page.cancel_button.isEnabled() is False
 
 
 def test_progress_shows_the_cancel_button(qtbot):
@@ -119,3 +120,9 @@ def test_setting_the_files_checkbox_programmatically_does_not_echo_a_signal(qtbo
     page.set_files_checked(True)
 
     assert seen == []
+    assert page.files_checkbox.isChecked() is True
+
+    with qtbot.waitSignal(page.files_toggled, timeout=1000) as blocker:
+        page.files_checkbox.click()
+
+    assert blocker.args == [False]
