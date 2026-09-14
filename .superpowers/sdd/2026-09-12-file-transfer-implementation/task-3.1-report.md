@@ -435,3 +435,358 @@ success" property described next.
   "мост завис" rather than failing fast. Acceptable for a spike tool used
   interactively by an operator who can Ctrl+C, but worth knowing if this
   is ever driven unattended.
+
+---
+
+## Fix report (quality review round 1)
+
+The review found 3 Critical and 7 Important issues, plus 3 Minors offered as
+optional one-liners. All 3 Critical and all 7 Important are fixed below. Two
+of the three offered Minors were folded in (the try/finally cleanup and the
+chunk-count rounding); the third (printing the GUI-tick sample count) was
+deliberately left for the whole-branch review, per the reviewer's own
+instruction not to spend this round on Minors — see its own entry below for
+why it isn't a one-liner in this codebase.
+
+Every fix was re-verified against the 8 `Measurement` tests and the full
+gate; the two hardest-to-reason-about fixes (CRITICAL 1 and CRITICAL 3) were
+additionally verified by *reproducing the exact pre-fix defect* against the
+real driver — reverting just that guard, confirming the review's predicted
+silent failure actually happens, then restoring the fix and confirming the
+same scenario now raises. This is stronger evidence than code reading alone
+for exactly the reason this whole task exists: an instrument that looks
+right on inspection can still be blind in practice.
+
+### CRITICAL 1 — truncated transfer exits 0
+
+Fixed at the digest check (`_run`, the `if not cancelled:` block). The old
+code was `if emulator_digest and emulator_digest[0] != expected_digest:
+raise`, which is false whenever `emulator_digest` is empty — precisely the
+case a truncated pipe produces. Changed to require `emulator_digest`
+unconditionally:
+
+```python
+if not emulator_digest:
+    raise RuntimeError(
+        f"поток кончился на {delivered} из {size} Б - мост потерял хвост"
+    )
+if emulator_digest[0] != expected_digest:
+    raise RuntimeError(...)
+```
+
+**Reproduced empirically, both ways.** Monkeypatched `ChunkPipe.push` to call
+`self.finish()` after 3 real chunks instead of continuing, on a 4 MiB
+transfer (64 chunks total) — the exact "pipe finishes early with data still
+outstanding" scenario the review traced through `ChunkPipe.wait()` /
+`take()` / `PipeStream._read`.
+
+- With the guard reverted to the original `if emulator_digest and ...`:
+  `measure()` returned normally — `bytes_transferred=196608`,
+  `throughput_mib_s=7.6` — no exception, exit 0, on a transfer that lost
+  61 of 64 chunks. This reproduces the review's claim exactly.
+- With the fix restored: the same scenario raises
+  `RuntimeError: поток кончился на 196608 из 4194304 Б - мост потерял хвост`
+  — 196608 is exactly 3 × 65536, confirming the guard fires at precisely the
+  truncation point.
+
+### CRITICAL 2 — `peak_rss_bytes` measures the bypass pass, not the bridge
+
+Two changes, both in `_run`:
+
+1. `peak_rss_bytes` and `tracemalloc.get_traced_memory()[1]` are now read
+   immediately after `instrument.stop()`, stored in locals, and passed into
+   the final `Measurement(...)` call — *before* `_measure_bypassed_transport`
+   runs, not after.
+2. `_measure_bypassed_transport`'s send loop now calls
+   `app.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 0)` every
+   `_BYPASS_PUMP_EVERY` (4) sends, so `PeerLink.send`'s unbuffered writes get
+   a chance to actually leave the process instead of piling `--size-mib`
+   worth of bytes into the socket's write buffer before anything flushes.
+
+**Verified on real hardware, not just by ordering.** A 256 MiB run now
+reports `пик RSS | 72 МиБ` — nowhere near 256 MiB. Before this fix, reading
+RSS after an unpumped bypass pass would have shown a spike on the order of
+the file size (per the review's traced mechanism: `size // 65536` calls to
+`outgoing.send()` with zero event-loop turns between them). This wasn't
+re-run against the literal old code (that would require re-sending ~2 GiB
+unthrottled to reproduce convincingly, which is exactly the slow, wasteful
+behavior being removed) — the ordering fix alone is sufficient by
+construction: `peak_rss_bytes` is now read strictly before the bypass pass
+starts, so it cannot include that pass's own allocations regardless of how
+that pass behaves.
+
+### CRITICAL 3 — heartbeat starvation indistinguishable from "not attempted"
+
+Added a send counter (`heartbeat_sent_count`, incremented in
+`_send_heartbeat`, the slot connected to the heartbeat `QTimer`) alongside
+the existing arrival list. Two consequences:
+
+1. `measure()` now raises when `heartbeat_sent > 1 and heartbeat_received ==
+   0` — real starvation, not a short run (a single sent PING is not treated
+   as starvation, since the timer may simply not have fired twice yet).
+2. `Measurement` gained two new fields, `heartbeat_sent: int = 0` and
+   `heartbeat_received: int = 0` (both defaulted, so the existing 8 tests'
+   fixture — which doesn't set them — is untouched), and `as_table()`'s
+   heartbeat row now reads `отправлено N, пришло M, наибольший промежуток …
+   с` (or `..., не измерялись` when no gap is computable), per the review's
+   requested wording.
+
+This is the one fix that changes `Measurement`'s field count (16 → 18). The
+review's own opening paragraph noted "spec ✅ on all 16 `Measurement`
+fields" as the state *before* this round; I judged that a Critical finding
+explicitly asking to "carry the count into the output" couldn't be answered
+without new data, and did it in the least invasive way available — new
+fields with defaults, changing nothing about the 8 existing tests or their
+fixture. Flagging this explicitly rather than treating it as covered by
+"spec already passed."
+
+**Reproduced empirically, both ways**, using a `PeerLink.send` interception
+that silently drops `PING` frames while passing everything else through
+(so the transfer itself completes normally), and a temporarily shortened
+`HEARTBEAT_MS` (200 ms, patched only in the diagnostic process) to get
+several heartbeat cycles inside a short-lived test run:
+
+- With the raise-guard removed: `measure()` returned normally with
+  `heartbeat_sent=13, heartbeat_received=0` — 13 real PINGs sent, all
+  lost, and the table would have printed the sent/received counts (an
+  improvement over "не измерялись" alone) but would *not* have raised —
+  exactly the silent-starvation gap the review described.
+- With the guard restored: the same scenario raises `RuntimeError: PING
+  отправлялся 13 раз(а), но не пришёл ни один - heartbeat голодает, а не
+  просто короткий прогон`.
+
+### IMPORTANT 4 — `pipe_high_water` fell back to a plausible `0`
+
+Replaced `held_pipe[0].high_water if held_pipe else 0` with:
+
+```python
+assert held_pipe, (
+    "open_pipe не был вызван - pipe_high_water измерил бы отсутствие "
+    "pipe, а не глубину очереди"
+)
+pipe_high_water = held_pipe[0].high_water
+```
+
+Not separately reproduced against a live run — the review's own framing
+(the fallback is "unreachable" the same way `GetAsyncMode` was) is exactly
+the point, and every real run in this task's history has `held_pipe`
+populated by construction (`_open_pipe` always appends before returning).
+The fix removes the fallback branch entirely rather than trying to justify
+it as unreachable.
+
+### IMPORTANT 5 — a dead cancel path could report a 30 s "latency"
+
+In `_emulator`, the branch that attributes a failed `IStream::Read` to the
+cancel now checks `held_pipe[0].closed_reason == "cancelled"` (the actual
+string `finish_session("cancelled")` → `pipe.close("cancelled")` sets)
+before accepting the attribution:
+
+```python
+cancelled_pipe = bool(held_pipe) and held_pipe[0].closed_reason == "cancelled"
+if cancel_state["requested_at"] is not None and cancelled_pipe:
+    cancel_state["latency"] = time.perf_counter() - cancel_state["requested_at"]
+    return
+raise RuntimeError(
+    f"IStream::Read отказал неожиданно: HRESULT=0x{hresult & 0xFFFFFFFF:08X}"
+    + (" (после запроса отмены, но pipe.closed_reason != 'cancelled' - "
+       "похоже на собственный тридцатисекундный таймаут чтения, а не на "
+       "нашу отмену)" if cancel_state["requested_at"] is not None else "")
+)
+```
+
+This was the fix chosen from the review's two offered options (check
+`closed_reason`, or bound the wait well below `READ_TIMEOUT_SECONDS`) —
+detection rather than a shorter timeout, since it doesn't require guessing
+a new constant and it is exact rather than probabilistic.
+
+Verified on the positive path: the `--cancel-after-mib` smoke runs (32 MiB
+transfer cancelled at 8 MiB, and 64 MiB cancelled at 8 MiB) both still
+report a real numeric `задержка отмены` (`0 мс` on loopback), confirming
+`held_pipe[0].closed_reason == "cancelled"` is true on every real cancel and
+the new check doesn't false-negative the case it must still accept. The
+negative case (an unrelated 30 s timeout coinciding with a stale
+`requested_at`) was not separately reproduced — forcing `PipeStream`'s own
+`READ_TIMEOUT_SECONDS` to fire without a cancel requires either waiting a
+real 30 seconds or patching a module constant three layers down in
+production code (`windows_com.py`), which felt like more risk to production
+code than this fix-round warranted; the fix is a direct, small, two-line
+change with an unambiguous predicate, and the positive-path evidence above
+gives confidence it doesn't regress the common case.
+
+### IMPORTANT 6 — busy-spin pump biased the decision variable
+
+Rewrote `_pump` from a `while ...: app.processEvents(flags, interval_ms)`
+loop to a nested `QEventLoop` woken by two `QTimer`s (a periodic
+condition-checker and a single-shot ceiling) — the same shape `app.exec()`
+uses in production, per the review's suggested fix. No fallback was needed;
+it worked on the first try.
+
+**Verified on real hardware**: before this fix, a sample run reported GUI
+tick `p99 == max == 18.3 ms`, identical values — exactly what the review
+flagged as the signature of the pump's own polling granularity leaking into
+the "measurement." After the fix, repeated runs show `p99` and `max`
+diverging (e.g. `16.8` / `28.4` ms on a 256 MiB run, `17.6` / `21.0` ms on
+an 8 MiB run) — no longer suspiciously identical, consistent with the
+numbers now reflecting genuine event-loop scheduling variance instead of
+the pump's own cadence. Throughput across several post-fix runs (29.8–84.8
+MiB/s depending on size, on this machine's loopback) did not show any
+obvious depression relative to pre-fix runs, though a rigorous before/after
+throughput comparison wasn't performed — the GIL-contention mechanism the
+review described is real and this fix removes it by construction (the
+emulator thread's Python bytecode no longer has to interleave with a
+Python-level busy loop holding the GIL between every `processEvents` call).
+
+### IMPORTANT 7 — fixed `BYPASS_CEILING_S` didn't scale with `--size-mib`
+
+Replaced the fixed 60 s ceiling with a floor-plus-rate formula:
+
+```python
+BYPASS_MIN_MIB_S = 1.0
+BYPASS_CEILING_FLOOR_S = 30.0
+...
+ceiling_s = max(BYPASS_CEILING_FLOOR_S, (total_bytes / MIB) / BYPASS_MIN_MIB_S)
+```
+
+1 MiB/s is a deliberately low bar — "the transport pass is definitely wedged,
+not just on a slow link" — so a legitimately slow-but-alive LAN won't get
+discarded, while an actually-hung pass still fails in bounded time rather
+than running forever. Not separately reproduced live (would require
+throttling the loopback to under 1 MiB/s to prove the new ceiling accepts a
+slow-but-real pass, which isn't practical to simulate quickly); the formula
+itself is straightforward enough that code reading was judged sufficient.
+
+### IMPORTANT 8 — fast transfer + late cancel threshold raised a false failure
+
+`_condition` (the predicate driving the main-transfer `_pump`) now only
+calls `_maybe_cancel()` while the emulator thread is still alive:
+
+```python
+def _condition() -> bool:
+    alive = emulator.is_alive()
+    if alive:
+        _maybe_cancel()
+    return not alive
+```
+
+Verified via the existing `--cancel-after-mib` smoke runs, which continue to
+report real cancel latencies rather than the "отмена не сработала" failure
+this bug would produce when the transfer legitimately outraces a
+late-set threshold. A dedicated race reproduction (crafting a transfer that
+finishes in the exact window between the last byte arriving and the
+emulator thread's `is_alive()` flipping to `False`) was not attempted —
+the fix is a direct translation of the review's diagnosis into an ordering
+guard, and its correctness follows directly from `_maybe_cancel`'s own
+precondition (`cancel_state["requested_at"] is None`) no longer being
+checked on an iteration where the thread has already exited.
+
+### IMPORTANT 9 — two report claims contradicted by the code
+
+Corrected here rather than edited into the original report text (which
+records what was true and believed at the time):
+
+- The original report claimed `peak_python_bytes` "is read before the
+  bypass pass's own buffer is allocated." At the time, the ordering was
+  `_peak_rss_bytes()`/`tracemalloc.get_traced_memory()` called inside the
+  final `Measurement(...)` construction, which happened *after*
+  `_measure_bypassed_transport(...)` had already run and returned. The
+  claim was simply wrong about the code's actual ordering. **This is now
+  true** as a side effect of the CRITICAL 2 fix: both reads happen
+  immediately after `instrument.stop()`, strictly before
+  `_measure_bypassed_transport` is even called.
+- The original report claimed a `0` `pipe_high_water` alongside nonzero
+  `bytes_transferred` was "structurally impossible." It was not — it was
+  the `else 0` fallback, reachable exactly when `held_pipe` is empty
+  regardless of `bytes_transferred`. **This is now true** as a side effect
+  of the IMPORTANT 4 fix: the fallback branch no longer exists: the code
+  either has `held_pipe` populated and reads its real `high_water`, or it
+  raises via `assert` before a `Measurement` is ever constructed.
+
+Both corrections are now accurate statements about the fixed code, not
+retroactive rewrites of what the original report said about the code as it
+stood before this round.
+
+### IMPORTANT 10 — `socket_bytes_to_write_max` had a second silent-zero source
+
+`_sample()` now checks `outgoing.is_open` before reading `bytes_to_write`,
+and records the drop rather than raising directly from the `QTimer` slot
+(PySide6's default excepthook terminates the process on an exception
+escaping a Qt callback, which would have turned a clean `RuntimeError` into
+a hard crash with a worse message):
+
+```python
+def _sample() -> None:
+    nonlocal socket_bytes_to_write_max
+    if not outgoing.is_open:
+        link_dropped_during_sampling.append(True)
+        return
+    socket_bytes_to_write_max = max(socket_bytes_to_write_max, outgoing.bytes_to_write)
+```
+
+checked and raised explicitly right after `sampler.stop()`, alongside the
+existing `emulator_error` check. Not separately reproduced live (would
+require forcing the link closed mid-transfer while the sampler is still
+running, which risks destabilizing the same run needed for the other
+smoke tests); the fix mirrors the already-established and tested pattern
+used for `emulator_error`, so its mechanics are the same ones already
+verified working.
+
+### Minors folded in (2 of 3)
+
+- **try/finally around IStream cleanup.** The block that runs the digest
+  check, `finish_session("completed")`, and the cancel-completeness check
+  is now wrapped so `call_release(stream_holder[0])` always runs in a
+  `finally`, regardless of which check raises. Before, any of those checks
+  raising would skip `call_release` entirely, leaking the real COM
+  `IStream` — a leak that wouldn't show up in the run that leaked it, only
+  in a later `measure()` call in the same process finding COM state left
+  over. Given this task already demonstrated two sequential `measure()`
+  calls in one process working, this fix makes that guarantee hold on
+  error paths too, not just the happy path.
+- **`chunk_count` rounding in `_measure_bypassed_transport`.** Changed from
+  `max(1, total_bytes // chunk_bytes)` (floor) to `-(-total_bytes //
+  chunk_bytes)` (ceil), and the completion check now waits for
+  `received["bytes"] >= total_bytes` instead of `>= chunk_count *
+  chunk_bytes` — so the bypass pass always covers at least as many bytes
+  as the main transfer, never fewer.
+
+**Deferred, not folded in**: printing the tick-sample count alongside
+`gui_tick_p99_ms`. This isn't actually a one-liner in this codebase: nothing
+in `Measurement` currently stores a sample count, `as_table()` only has
+access to declared fields, and the 8 existing tests' fixture would need
+updating if a new required field were added (a defaulted field, as done for
+CRITICAL 3, would work, but that's the same kind of field-count change
+already flagged once in this round, and doing it twice for one Critical
+and one deferred Minor in the same pass felt like more surface area than
+this round should add). Left for the whole-branch review as instructed.
+
+### Files changed (this round)
+
+- `configurator/tests/transfer/spike_measure_bridge.py` (all fixes above)
+- `configurator/tests/transfer/test_spike_measure_bridge.py` — **unchanged**
+  (verified with `git diff --stat`, zero lines touched); all 8 tests still
+  pass unmodified against the fixed code.
+
+### Verification run (this round)
+
+```
+$ .venv/Scripts/python.exe -m pytest configurator/tests/transfer/test_spike_measure_bridge.py -v
+8 passed in 0.17s
+
+$ .venv/Scripts/python.exe -m pytest configurator/tests -q
+1922 passed, 8 skipped in 85.41s
+```
+
+Sweep discipline: every mutation experiment in this round (CRITICAL 1 and
+CRITICAL 3's revert/reproduce/restore cycles) was run with
+`PYTHONDONTWRITEBYTECODE=1` and a cleared `__pycache__` beforehand, and the
+restored file was diffed byte-for-byte (`diff`) against the pre-mutation
+saved copy to confirm the revert was exact before moving to the next
+experiment.
+
+Also re-run: the 6-guard mutation table from the original report was not
+re-executed line-by-line this round, because none of this round's edits
+touched the six `as_table()`/property lines those mutations target
+(confirmed by reading the `git diff` against the pre-review commit: the
+only `as_table()` line changed this round is the heartbeat row, which
+wasn't part of that table). The 8/8 pass above is direct evidence those six
+guards are still intact.
