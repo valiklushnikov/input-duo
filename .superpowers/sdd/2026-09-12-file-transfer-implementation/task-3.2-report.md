@@ -828,3 +828,112 @@ $ .venv/Scripts/python.exe -m pytest configurator/tests -q
 ```
 
 Commit: `95f9ca6` "Requote the loopback TCP ceiling at the precision it has".
+
+---
+
+## Fix report (quality re-review round 3)
+
+**Status: DONE_WITH_CONCERNS.** Fixed only the two remaining findings C and B
+assigned for round 3. No executable behavior, measurement results, or production
+code changed. The two out-of-scope reviewer observations remain deferred to
+final review as instructed.
+
+### Changes and rationale
+
+- `docs/superpowers/records/2026-09-12-file-transfer-bridge-measurement.md`:
+  removed the parenthetical claiming observed headroom of approximately
+  29x–49x. The adjacent production-chunk observation, 2025.2 MiB/s, divided by
+  91.9 MiB/s is **22.04x**, outside that interval. Retained the supported
+  coarser statements "единицы процентов" and "десятки раз". Changed the
+  section lead from "потолком нашего TLS с кадрированием" to "потолком нашего
+  софта", so the question posed by the lead matches the qualified answer.
+- `configurator/tests/transfer/spike_measure_checks.py`: changed the module
+  lead to the same software-ceiling wording. Replaced the function docstring's
+  false two-thread topology-parity claim with the actual distinction: plain
+  TCP sends and receives on two threads; the bypass sends and observes receipt
+  on one Qt thread. Explicitly stated that the comparison cannot separate
+  that difference from TLS, framing, Qt dispatch, or per-frame Message
+  construction. Also restored the missing space in the adjacent contributor
+  list. All Python edits are within docstrings.
+
+### Neighborhood audit
+
+Re-read the script's full module lead and contributor list, the function
+docstring and implementation, the repeat-count comments, CLI description, and
+printed comparison. Checked `_measure_bypassed_transport` and its caller:
+the observed topology agrees with the replacement text. Existing quotations
+of the old parity assertion are explicitly identified as false.
+
+Re-read the record's surrounding model paragraph, section lead, variance
+discussion, software-ceiling conclusion, topology explanation, inseparable
+contributor list, gigabit caveat, Step 2 table, final gate table, and limitation
+list. Audited spec section 8's leads and comparison and section 22's lead and
+question 2 row. For the two assigned findings these now agree: the comparison
+supports a software ceiling below local transport, not attribution to TLS and
+framing; headroom is stated coarsely across the observed dispersion. The
+committed log's 29–36x and 45–49x are invocation-specific rows, not a claim
+about all observations. No spec or measurement-log changes were needed.
+
+### Focused verification
+
+`git diff --check` and `git diff --cached --check`: exit 0, no whitespace
+errors. Git emitted only its normal LF-to-CRLF working-copy notices.
+
+Executed this PowerShell check against the pre-fix HEAD before committing:
+
+```powershell
+@'
+import ast
+import pathlib
+import subprocess
+
+path = 'configurator/tests/transfer/spike_measure_checks.py'
+before = ast.parse(subprocess.check_output(['git', 'show', 'HEAD:' + path]).decode('utf-8'))
+after = ast.parse(pathlib.Path(path).read_text(encoding='utf-8'))
+
+class StripDocstrings(ast.NodeTransformer):
+    def visit_Expr(self, node):
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            return None
+        return self.generic_visit(node)
+
+strip = StripDocstrings()
+assert ast.dump(strip.visit(before)) == ast.dump(strip.visit(after)), 'Executable AST changed'
+print('PASS: Python parses; executable AST unchanged after stripping docstrings')
+print('Observed production-chunk minimum headroom: %.2fx' % (2025.2 / 91.9))
+'@ | .venv/Scripts/python.exe -
+```
+
+Output (exit 0):
+
+```text
+PASS: Python parses; executable AST unchanged after stripping docstrings
+Observed production-chunk minimum headroom: 22.04x
+```
+
+An initial attempt to pass this check using `python -c` failed with a
+PowerShell quoting SyntaxError before running the check. The stdin form above
+resolved that invocation issue. This was not a source-file syntax failure.
+
+Targeted audit command (the three paths are the script, record, and spec named
+above):
+
+```powershell
+rg -n 'потолком нашего TLS|потолок НАШЕГО TLS|~29×|как в проходе с' $taskClaimFiles
+```
+
+No matches (`rg` exit 1); the wrapper reported
+`PASS: no surviving targeted overclaims` and exited 0. No heavy test suites or
+measurements were repeated because executable behavior is unchanged.
+
+### Commit and concerns
+
+Commit: `21d1cbe9877d594d4e00a50001cf112ae62bc0fa`
+"Correct remaining loopback comparison overclaims".
+
+Only the two requested source/docs files are committed. This report is tracked
+in the current checkout (`git check-ignore -v` has no match), so this appended
+artifact section is left uncommitted to keep the fixes commit scoped as
+requested. The two out-of-scope observations are unchanged and remain for
+final review. No new implementation concerns were introduced; the LAN gate
+still requires the separate two-machine measurement.
