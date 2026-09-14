@@ -634,7 +634,7 @@ def _declared_parameter_types(service, slot: str, count: int) -> tuple[str, ...]
     return None
 
 
-def post_to_service(service, slot: str, *args) -> None:
+def post_to_service(service, slot: str, *args) -> bool:
     """ЕДИНСТВЕННАЯ дорога из COM-потока обратно в Qt.
 
     Одна функция, а не invokeMethod по месту, - чтобы границу можно было
@@ -644,6 +644,9 @@ def post_to_service(service, slot: str, *args) -> None:
     исключение Python не становится ошибкой, а оставляет COM неопределённое
     возвращаемое значение - измеренно положительное, то есть успех по
     правилу SUCCEEDED.
+
+    Returns ``True`` only when Qt accepted the queued notification. Logging is
+    preserved for COM diagnostics, while callers can now fail closed as well.
     """
     try:
         types = _declared_parameter_types(service, slot, len(args))
@@ -654,7 +657,7 @@ def post_to_service(service, slot: str, *args) -> None:
                 slot,
                 len(args),
             )
-            return
+            return False
         delivered = QMetaObject.invokeMethod(
             service,
             slot,
@@ -663,9 +666,11 @@ def post_to_service(service, slot: str, *args) -> None:
         )
     except Exception:  # noqa: BLE001 - см. docstring: отсюда не вылетает ничего
         logger.exception("вызов %s не удалось передать в Qt-поток", slot)
-        return
+        return False
     if not delivered:
         logger.error("не удалось доставить %s в Qt-поток", slot)
+        return False
+    return True
 
 
 class _ServiceInvocation:
@@ -738,12 +743,12 @@ class ServiceCallbackGateway(QObject):
             self._service = None
             pending = tuple(self._pending)
             self._pending.clear()
-        for invocation in pending:
-            if invocation.done is not None:
-                invocation.error = RuntimeError(
-                    "file transfer service is no longer available"
-                )
-                invocation.done.set()
+            for invocation in pending:
+                if invocation.done is not None:
+                    invocation.error = RuntimeError(
+                        "file transfer service is no longer available"
+                    )
+                    invocation.done.set()
 
     def _active_service(self):
         with self._lock:
@@ -760,7 +765,20 @@ class ServiceCallbackGateway(QObject):
             if self._service is None:
                 return None
             self._pending.append(invocation)
-        post_to_service(self, "_dispatch_next")
+        if not post_to_service(self, "_dispatch_next"):
+            with self._lock:
+                try:
+                    self._pending.remove(invocation)
+                except ValueError:
+                    # Invalidation won the race and already completed a blocking
+                    # invocation with its more specific shutdown failure.
+                    pass
+                else:
+                    if invocation.done is not None:
+                        invocation.error = RuntimeError(
+                            "could not notify the Qt service thread"
+                        )
+                        invocation.done.set()
         return invocation
 
     @Slot()

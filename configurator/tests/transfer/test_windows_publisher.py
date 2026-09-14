@@ -58,6 +58,7 @@ from duo_input.transfer.windows_files import (
     CLIPBRD_E_CANT_OPEN,
     FORMAT_CONTENTS_NAME,
     FORMAT_DESCRIPTOR_NAME,
+    ServiceCallbackGateway,
     WindowsFileClipboardBackend,
     post_to_service,
 )
@@ -192,14 +193,75 @@ def _origin_of(data_object) -> bytes:
 # --------------------------------------------------------------- post_to_service
 
 
+def test_open_pipe_fails_promptly_when_qt_rejects_gateway_notification(
+    qapp, monkeypatch
+):
+    """Mutation: ignoring failed notification leaves the COM caller waiting forever."""
+    service = FileTransferService()
+    gateway = ServiceCallbackGateway(service)
+    errors: list[BaseException] = []
+
+    class RejectingMetaObject:
+        @staticmethod
+        def invokeMethod(*_args, **_kwargs) -> bool:
+            return False
+
+    monkeypatch.setattr(windows_files, "QMetaObject", RejectingMetaObject)
+
+    def worker() -> None:
+        try:
+            gateway.open_pipe("notification-rejected", 0)
+        except BaseException as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=worker, name="rejected-gateway-notification")
+    thread.start()
+    thread.join(timeout=1.0)
+    blocked = thread.is_alive()
+    if blocked:
+        # Cleanup only after recording the defect, so rejected delivery — not
+        # invalidation — is what the assertion requires to terminate the call.
+        gateway.invalidate()
+        thread.join(timeout=DEADLINE_S)
+
+    assert not blocked, "rejected Qt notification stranded the open_pipe caller"
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert str(errors[0]) == "could not notify the Qt service thread"
+
+
+def test_post_to_service_reports_missing_slot_and_invoke_exception(
+    qapp, monkeypatch
+):
+    """Mutation: returning no status makes every delivery failure look successful."""
+    recorder = _Recorder()
+
+    assert post_to_service(recorder, "missing_slot") is False
+
+    class RaisingMetaObject:
+        @staticmethod
+        def invokeMethod(*_args, **_kwargs):
+            raise RuntimeError("rejected")
+
+    monkeypatch.setattr(windows_files, "QMetaObject", RaisingMetaObject)
+
+    assert (
+        post_to_service(recorder, "request_read", "t-1", 0, 4096, 65536)
+        is False
+    )
+
+
 def test_a_post_from_another_thread_arrives_on_the_qt_thread(qtbot):
     # Это и есть инвариант "COM-поток не трогает Qt напрямую": вызов
     # пересекает границу через очередь Qt, а не прямым обращением.
     recorder = _Recorder()
     qt_thread = threading.get_ident()
+    deliveries: list[bool] = []
 
     def worker() -> None:
-        post_to_service(recorder, "request_read", "t-1", 0, 4096, 65536)
+        deliveries.append(
+            post_to_service(recorder, "request_read", "t-1", 0, 4096, 65536)
+        )
 
     with qtbot.waitSignal(recorder.got, timeout=5000):
         thread = threading.Thread(target=worker, daemon=True)
@@ -207,6 +269,7 @@ def test_a_post_from_another_thread_arrives_on_the_qt_thread(qtbot):
         thread.join(timeout=2.0)
 
     assert recorder.calls == [("t-1", 0, 4096, 65536)]
+    assert deliveries == [True]
     assert recorder.thread_ids == [qt_thread], (
         "слот исполнился НЕ на Qt-потоке - queued connection не сработал, "
         "и следующий шаг тронул бы QSslSocket из чужого потока"
