@@ -91,10 +91,13 @@ def test_without_normalisation_two_composition_forms_of_one_name_would_not_colli
     # "Sánchez.txt" (предсоставленная "á") и разложение
     # "Sánchez.txt" ("a" + отдельный акут) - разные строки Python, но
     # один и тот же путь после NFC. Измерено в обе стороны: с настоящей NFC
-    # они сталкиваются в sanitize_manifest (единственный на диске "K.txt"
-    # был бы затёрт вторым, ровно как в комментарии у
-    # _CASEFOLD_OVERRIDES_TO_IDENTITY про ЗНАК КЕЛЬВИНА), а со отключённой -
-    # нет.
+    # они сталкиваются в sanitize_manifest (единственный файл на диске
+    # был бы затёрт вторым) - тот же механизм склейки через каноническое
+    # разложение, что и у ЗНАКА КЕЛЬВИНА против ASCII "K": NFC сворачивает
+    # обе записи в одну и ту же строку до того, как сравнение вообще их
+    # видит (см. докстринг _collision_key в paths.py и
+    # test_kelvin_sign_and_ascii_k_are_correctly_refused_as_the_same_wire_path
+    # в test_paths.py) - а со отключённой нормализацией такой склейки нет.
     monkeypatch.setattr(paths.unicodedata, "normalize", lambda _form, text: text)
 
     composed = "Sánchez.txt"  # á одним кодпоинтом

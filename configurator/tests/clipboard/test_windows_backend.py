@@ -470,6 +470,12 @@ def test_our_own_virtual_file_publication_is_not_taken_for_a_local_copy(qapp):
     # файлов, не порождает ни payload, ни путей.
     from duo_input.transfer.windows_files import FORMAT_ORIGIN_NAME
 
+    assert FORMAT_ORIGIN_NAME == ORIGIN_MIME, (
+        "две записи одного и того же маркера происхождения разошлись - "
+        "windows_files.py и clipboard/backend.py больше не пишут одну "
+        "строку"
+    )
+
     mime_data = QMimeData()
     mime_data.setData(wrapped_windows_mime(FORMAT_ORIGIN_NAME), QByteArray(b"origin:1"))
 
