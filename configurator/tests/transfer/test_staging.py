@@ -21,6 +21,38 @@ def test_finish_marks_ready_and_returns_roots(tmp_path):
     assert (tmp_path / "t1" / "dir" / "a.txt").read_bytes() == b"hello"
     assert not (tmp_path / "t1" / ".incomplete").exists()
 
+def test_multi_chunk_write_does_not_truncate(tmp_path):
+    area = StagingArea(tmp_path)
+    s = area.begin("t1", _entries())
+    # первый чанк с offset 0 создаёт файл
+    s.write(2, 0, b"abc")
+    # второй чанк с offset>0 к уже существующему файлу — не должен обрезать
+    s.write(2, 3, b"def")
+    assert (tmp_path / "t1" / "b.txt").read_bytes() == b"abcdef"
+
+def test_chunk_at_offset_zero_after_file_exists_does_not_truncate(tmp_path):
+    area = StagingArea(tmp_path)
+    s = area.begin("t1", _entries())
+    s.write(2, 0, b"abc")
+    s.write(2, 3, b"def")
+    # повторная запись offset 0 не должна усечь хвост файла
+    s.write(2, 0, b"AB")
+    assert (tmp_path / "t1" / "b.txt").read_bytes() == b"ABcdef"
+
+def test_path_traversal_entry_is_refused(tmp_path):
+    import pytest
+    area = StagingArea(tmp_path)
+    escaping = [TransferEntry(path="../evil.txt", kind=ENTRY_FILE, size=1, mtime_ns=0)]
+    with pytest.raises(ValueError):
+        area.begin("t1", escaping)
+
+def test_absolute_path_entry_is_refused(tmp_path):
+    import pytest
+    area = StagingArea(tmp_path)
+    absolute = [TransferEntry(path="/etc/evil.txt", kind=ENTRY_FILE, size=1, mtime_ns=0)]
+    with pytest.raises(ValueError):
+        area.begin("t1", absolute)
+
 def test_abort_removes_tree(tmp_path):
     area = StagingArea(tmp_path)
     s = area.begin("t1", _entries())

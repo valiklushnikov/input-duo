@@ -25,11 +25,20 @@ class StagingSession:
         self._entries = list(entries)
         # создать всё дерево каталогов заранее; файлы пишутся по мере скачивания
         for entry in self._entries:
-            target = self._dir / Path(entry.path)
+            target = self._contained(entry.path)
             if entry.kind == ENTRY_FILE:
                 target.parent.mkdir(parents=True, exist_ok=True)
             else:
                 target.mkdir(parents=True, exist_ok=True)
+
+    def _contained(self, rel_path: str) -> Path:
+        # defense-in-depth: staging — сырой write-примитив; никогда не писать вне _dir
+        target = self._dir / Path(rel_path)
+        base = self._dir.resolve()
+        resolved = target.resolve()
+        if base != resolved and base not in resolved.parents:
+            raise ValueError(f"entry path escapes staging directory: {rel_path!r}")
+        return target
 
     @property
     def directory(self) -> Path:
@@ -37,8 +46,8 @@ class StagingSession:
 
     def write(self, entry_index: int, offset: int, data: bytes) -> None:
         entry = self._entries[entry_index]
-        target = self._dir / Path(entry.path)
-        with open(target, "r+b" if target.exists() and offset else "wb") as fh:
+        target = self._contained(entry.path)
+        with open(target, "r+b" if target.exists() else "wb") as fh:
             fh.seek(offset)
             fh.write(data)
 
@@ -118,7 +127,14 @@ class StagingArea:
                 survivors.append(child)
         # 2) disk budget — вытеснять самые старые READY (LRU/age)
         def size_of(path: Path) -> int:
-            return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+            total_size = 0
+            for f in path.rglob("*"):
+                try:
+                    if f.is_file():
+                        total_size += f.stat().st_size
+                except OSError:
+                    continue  # файл исчез посреди скана — best-effort, не падать
+            return total_size
 
         survivors.sort(key=lambda c: c.stat().st_mtime)  # старые первыми
         total = sum(size_of(c) for c in survivors)
