@@ -44,6 +44,7 @@ class ClipboardPage(QWidget):
 
     sharing_toggled = Signal(bool)
     files_toggled = Signal(bool)
+    auto_incoming_toggled = Signal(bool)
     autostart_toggled = Signal(bool)
     pair_requested = Signal()
     forget_requested = Signal()
@@ -70,6 +71,15 @@ class ClipboardPage(QWidget):
 
         self.files_checkbox = QCheckBox(self.tr("\u041f\u0435\u0440\u0435\u0434\u0430\u0447\u0430 \u0444\u0430\u0439\u043b\u043e\u0432"), self)
         self.files_checkbox.toggled.connect(self.files_toggled)
+
+        self.auto_incoming_checkbox = QCheckBox(
+            self.tr(
+                "\u0417\u0430\u0433\u0440\u0443\u0436\u0430\u0442\u044c \u0432\u0445\u043e\u0434\u044f\u0449\u0438\u0435 "
+                "\u0444\u0430\u0439\u043b\u044b \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438"
+            ),
+            self,
+        )
+        self.auto_incoming_checkbox.toggled.connect(self.auto_incoming_toggled)
 
         self.autostart_checkbox = QCheckBox(self.tr("Запускать вместе с Windows"), self)
         self.autostart_checkbox.toggled.connect(self.autostart_toggled)
@@ -109,6 +119,7 @@ class ClipboardPage(QWidget):
         layout.addWidget(peer_box)
         layout.addWidget(self.sharing_checkbox)
         layout.addWidget(self.files_checkbox)
+        layout.addWidget(self.auto_incoming_checkbox)
         transfer_layout = QHBoxLayout()
         transfer_layout.addWidget(self.transfer_label)
         transfer_layout.addWidget(self.cancel_button)
@@ -153,6 +164,11 @@ class ClipboardPage(QWidget):
         self.files_checkbox.blockSignals(True)
         self.files_checkbox.setChecked(checked)
         self.files_checkbox.blockSignals(False)
+
+    def set_auto_incoming_checked(self, checked: bool) -> None:
+        self.auto_incoming_checkbox.blockSignals(True)
+        self.auto_incoming_checkbox.setChecked(checked)
+        self.auto_incoming_checkbox.blockSignals(False)
 
     def add_event(self, text: str) -> None:
         """Добавить строку в список последних событий (§12), самый новый - сверху."""

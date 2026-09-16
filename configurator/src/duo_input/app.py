@@ -224,6 +224,11 @@ class _ClipboardRuntime(QObject):
         self._file_capabilities_source: ClipboardCoordinator | None = None
         self._file_snapshot_source = None
         self._file_link = None
+        #: The macOS receiver, when the platform branch of ``_start_files``
+        #: built one - ``None`` on win32, where the receiver role is played by
+        #: ``self.transfer`` itself (driven by Explorer through the callback
+        #: gateway) rather than by a standalone object.
+        self._file_receiver: QObject | None = None
         from duo_input.clipboard.backend import ClipboardBackend
 
         self._backend: ClipboardBackend | None = None
@@ -258,6 +263,18 @@ class _ClipboardRuntime(QObject):
             self._start_files()
         else:
             self._stop_files()
+
+    def set_incoming_files_mode(self, auto: bool) -> None:
+        """Persist and reflect the ask/auto choice for incoming file offers.
+
+        Only the setting is touched here - an offer already waiting on
+        ``authorization_needed`` keeps waiting for its own prompt/auto
+        decision; this changes how the *next* offer is handled, not the one
+        in flight.
+        """
+        mode = "auto" if auto else "ask"
+        self._settings.setValue("clipboard/incoming_files", mode)
+        self._window.clipboard_page.set_auto_incoming_checked(auto)
 
     def set_autostart(self, enabled: bool) -> None:
         self._settings.setValue("clipboard/autostart", enabled)
@@ -374,25 +391,20 @@ class _ClipboardRuntime(QObject):
             self.tray.set_files_checked(False)
             return
 
-        # The only implementation currently selected by create_file_backend is
-        # Windows-specific. Keep its COM module out of every other runtime graph.
-        from duo_input.transfer.windows_files import ServiceCallbackGateway
-
+        # `backend` is per-platform (create_file_backend's only sys.platform
+        # check), but its INTERFACE differs by platform, not just its
+        # implementation: the Windows backend is a COM publisher driven by
+        # Explorer (set_callbacks/publish/start), while the macOS backend
+        # (MacFileReceiver) is a self-driving receiver with no equivalent of
+        # any of those. `transfer` (FileTransferService) is common to both -
+        # it plays the Mac->Windows SENDER role everywhere, and on win32 it
+        # ALSO plays the receiver role (Explorer pulls through it). On darwin
+        # its receiver role stays dormant: `_on_chunk` drops chunks it never
+        # asked for, because nothing ever calls its `open_pipe`/`request_read`
+        # there - the macOS receiver answers offers and pulls chunks itself.
         transfer = FileTransferService(coordinator)
-        callback_gateway = ServiceCallbackGateway(transfer)
         page = self._window.clipboard_page
-        # Отмена доступна с первого мгновения сессии, а не с первого чанка:
-        # вставка, застрявшая до первого байта, - именно та, которую отменяют.
-        transfer.transfer_started.connect(
-            lambda manifest: page.set_transfer_progress(0, manifest.total_bytes)
-        )
-        transfer.transfer_progress.connect(page.set_transfer_progress)
-        transfer.transfer_completed.connect(page.clear_transfer)
-        transfer.transfer_cancelled.connect(page.clear_transfer)
-        transfer.transfer_failed.connect(lambda _reason: page.clear_transfer())
-        transfer.transfer_failed.connect(
-            lambda reason: page.add_event(f"передача файлов не удалась: {reason}")
-        )
+
         transfer.send_failed.connect(
             lambda reason: page.add_event(f"файлы не объявлены: {reason}")
         )
@@ -402,36 +414,90 @@ class _ClipboardRuntime(QObject):
             )
         )
 
-        cancel_slot = lambda transfer=transfer: transfer.finish_session("cancelled")
-        page.cancel_requested.connect(cancel_slot)
+        callback_gateway = None
+        cancel_slot = None
 
-        backend.set_callbacks(
-            open_pipe=callback_gateway.open_pipe,
-            request_read=callback_gateway.request_read,
-            close_pipe=callback_gateway.close_pipe,
-            on_operation_finished=callback_gateway.on_operation_finished,
-        )
-        transfer.offer_received.connect(
-            lambda manifest: backend.publish(
-                manifest, origin_marker=manifest.transfer_id.encode("ascii")
+        if sys.platform == "darwin":
+            receiver = backend
+            # Прогресс и отмена приходят из собственных сигналов приёмника, а
+            # не из `transfer` - на macOS сессия чтения никогда не проходит
+            # через FileTransferService (см. комментарий выше).
+            receiver.transfer_started.connect(
+                lambda manifest: page.set_transfer_progress(0, manifest.total_bytes)
             )
-        )
-        backend.publish_failed.connect(
-            lambda reason: page.add_event(
-                f"буфер обмена не принял файлы: {reason}"
+            receiver.transfer_progress.connect(page.set_transfer_progress)
+            receiver.transfer_completed.connect(page.clear_transfer)
+            receiver.transfer_cancelled.connect(page.clear_transfer)
+            receiver.transfer_failed.connect(lambda _reason: page.clear_transfer())
+            receiver.transfer_failed.connect(
+                lambda reason: page.add_event(f"передача файлов не удалась: {reason}")
             )
-        )
+
+            cancel_slot = receiver.cancel
+            page.cancel_requested.connect(cancel_slot)
+
+            # `transfer` still receives the offer over the wire (it owns the
+            # link) - sanitizes it, then hands the manifest to the receiver,
+            # which drives its own FILE_READ/FILE_CHUNK loop from here on.
+            transfer.offer_received.connect(receiver.handle_offer)
+            receiver.authorization_needed.connect(self._on_file_authorization_needed)
+            self._file_receiver = receiver
+        else:
+            # существующая Windows-проводка без изменений. The only implementation
+            # currently selected by create_file_backend for win32 needs its COM
+            # module - keep that import (and ctypes.WINFUNCTYPE) out of every
+            # other runtime graph by not importing it at module scope.
+            from duo_input.transfer.windows_files import ServiceCallbackGateway
+
+            callback_gateway = ServiceCallbackGateway(transfer)
+            # Отмена доступна с первого мгновения сессии, а не с первого чанка:
+            # вставка, застрявшая до первого байта, - именно та, которую отменяют.
+            transfer.transfer_started.connect(
+                lambda manifest: page.set_transfer_progress(0, manifest.total_bytes)
+            )
+            transfer.transfer_progress.connect(page.set_transfer_progress)
+            transfer.transfer_completed.connect(page.clear_transfer)
+            transfer.transfer_cancelled.connect(page.clear_transfer)
+            transfer.transfer_failed.connect(lambda _reason: page.clear_transfer())
+            transfer.transfer_failed.connect(
+                lambda reason: page.add_event(f"передача файлов не удалась: {reason}")
+            )
+
+            cancel_slot = lambda transfer=transfer: transfer.finish_session("cancelled")
+            page.cancel_requested.connect(cancel_slot)
+
+            backend.set_callbacks(
+                open_pipe=callback_gateway.open_pipe,
+                request_read=callback_gateway.request_read,
+                close_pipe=callback_gateway.close_pipe,
+                on_operation_finished=callback_gateway.on_operation_finished,
+            )
+            transfer.offer_received.connect(
+                lambda manifest: backend.publish(
+                    manifest, origin_marker=manifest.transfer_id.encode("ascii")
+                )
+            )
+            backend.publish_failed.connect(
+                lambda reason: page.add_event(
+                    f"буфер обмена не принял файлы: {reason}"
+                )
+            )
+            backend.start()
 
         link = coordinator.link
         if link is not None:
             self._attach_file_link(transfer, link)
         transfer.set_peer_capabilities(coordinator.peer_capabilities)
+        if self._file_receiver is not None:
+            self._file_receiver.set_peer_capabilities(coordinator.peer_capabilities)
 
         def apply_capabilities(capabilities) -> None:
             current_link = coordinator.link
             if current_link is not None and current_link is not self._file_link:
                 self._attach_file_link(transfer, current_link)
             transfer.set_peer_capabilities(capabilities)
+            if self._file_receiver is not None:
+                self._file_receiver.set_peer_capabilities(capabilities)
 
         coordinator.capabilities_known.connect(apply_capabilities)
         clipboard_backend.snapshot_taken.connect(self._offer_files_from)
@@ -443,19 +509,56 @@ class _ClipboardRuntime(QObject):
         self._file_capabilities_slot = apply_capabilities
         self._file_capabilities_source = coordinator
         self._file_snapshot_source = clipboard_backend
-        backend.start()
+
+    def _on_file_authorization_needed(self, manifest) -> None:
+        """The macOS receiver is holding an offer open, waiting on us."""
+        mode = self._settings.value("clipboard/incoming_files", "ask", type=str)
+        if mode == "auto":
+            self._file_receiver.authorize(True)
+            return
+        self._prompt_file_authorization(manifest)
+
+    def _prompt_file_authorization(self, manifest) -> None:
+        """Ask the operator; a distinct method so tests can monkeypatch it
+        instead of driving a real modal dialog through qtbot."""
+        total_mb = manifest.total_bytes / (1024 * 1024)
+        box = QMessageBox(self._window)
+        box.setWindowTitle(self.tr("Входящие файлы"))
+        box.setText(
+            self.tr(
+                "Другой компьютер хочет передать {0} объект(ов) ({1:.1f} МБ)."
+            ).format(len(manifest.entries), total_mb)
+        )
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        )
+        accepted = box.exec() == QMessageBox.StandardButton.Ok
+        self._file_receiver.authorize(accepted)
 
     def _attach_file_link(self, transfer: FileTransferService, link) -> None:
         old_link = self._file_link
         if old_link is link:
             return
+        receiver = self._file_receiver
         if old_link is not None:
             try:
                 old_link.message_received.disconnect(transfer.handle_message)
             except (RuntimeError, TypeError):
                 pass
+            if receiver is not None:
+                try:
+                    old_link.message_received.disconnect(receiver.handle_message)
+                except (RuntimeError, TypeError):
+                    pass
         transfer.attach_link(link)
         link.message_received.connect(transfer.handle_message)
+        if receiver is not None:
+            link.message_received.connect(receiver.handle_message)
+            receiver.attach_link(link)
+            coordinator = self.coordinator
+            receiver.set_peer_capabilities(
+                coordinator.peer_capabilities if coordinator is not None else frozenset()
+            )
         self._file_link = link
 
     def _offer_files_from(self, snapshot) -> None:
@@ -472,6 +575,7 @@ class _ClipboardRuntime(QObject):
         capabilities_source = self._file_capabilities_source
         snapshot_source = self._file_snapshot_source
         link = self._file_link
+        receiver = self._file_receiver
 
         self.transfer = None
         self.file_backend = None
@@ -481,6 +585,7 @@ class _ClipboardRuntime(QObject):
         self._file_capabilities_source = None
         self._file_snapshot_source = None
         self._file_link = None
+        self._file_receiver = None
 
         if cancel_slot is not None:
             try:
@@ -500,6 +605,11 @@ class _ClipboardRuntime(QObject):
         if link is not None and transfer is not None:
             try:
                 link.message_received.disconnect(transfer.handle_message)
+            except (RuntimeError, TypeError):
+                pass
+        if link is not None and receiver is not None:
+            try:
+                link.message_received.disconnect(receiver.handle_message)
             except (RuntimeError, TypeError):
                 pass
 
@@ -536,6 +646,7 @@ def configure_runtime(
     runtime = _ClipboardRuntime(application, window, settings)
     window.clipboard_page.sharing_toggled.connect(runtime.set_enabled)
     window.clipboard_page.files_toggled.connect(runtime.set_files_enabled)
+    window.clipboard_page.auto_incoming_toggled.connect(runtime.set_incoming_files_mode)
     window.clipboard_page.autostart_toggled.connect(runtime.set_autostart)
     application.aboutToQuit.connect(runtime.stop)
 
@@ -550,8 +661,10 @@ def configure_runtime(
         settings.value("clipboard/files_enabled", False, type=bool)
     )
     autostart_enabled = bool(settings.value("clipboard/autostart", False, type=bool))
+    incoming_auto = settings.value("clipboard/incoming_files", "ask", type=str) == "auto"
     window.clipboard_page.set_sharing_checked(enabled)
     window.clipboard_page.set_files_checked(files_enabled)
+    window.clipboard_page.set_auto_incoming_checked(incoming_auto)
     window.clipboard_page.set_autostart_checked(autostart_enabled)
     runtime.tray.set_sharing_checked(enabled)
     runtime.tray.set_files_checked(files_enabled)

@@ -323,6 +323,11 @@
         <translation>File transfer</translation>
     </message>
     <message>
+        <location filename="../../ui/clipboard_page.py" line="76" />
+        <source>Загружать входящие файлы автоматически</source>
+        <translation>Download incoming files automatically</translation>
+    </message>
+    <message>
         <location filename="../../ui/clipboard_page.py" line="73" />
         <source>Запускать вместе с Windows</source>
         <translation>Start with Windows</translation>
@@ -1615,6 +1620,19 @@ Code: {1}</translation>
         <location filename="../../app.py" line="171" />
         <source>Отказать</source>
         <translation>Reject</translation>
+    </message>
+</context>
+<context>
+    <name>_ClipboardRuntime</name>
+    <message>
+        <location filename="../../app.py" line="526" />
+        <source>Входящие файлы</source>
+        <translation>Incoming files</translation>
+    </message>
+    <message>
+        <location filename="../../app.py" line="528" />
+        <source>Другой компьютер хочет передать {0} объект(ов) ({1:.1f} МБ).</source>
+        <translation>The other computer wants to send {0} item(s) ({1:.1f} MB).</translation>
     </message>
 </context>
 <context>

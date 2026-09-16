@@ -324,6 +324,11 @@
         <translation>Передача файлов</translation>
     </message>
     <message>
+        <location filename="../../ui/clipboard_page.py" line="76"/>
+        <source>Загружать входящие файлы автоматически</source>
+        <translation>Загружать входящие файлы автоматически</translation>
+    </message>
+    <message>
         <location filename="../../ui/clipboard_page.py" line="73"/>
         <source>Запускать вместе с Windows</source>
         <translation>Запускать вместе с Windows</translation>
@@ -1616,6 +1621,19 @@
         <location filename="../../app.py" line="171"/>
         <source>Отказать</source>
         <translation>Отказать</translation>
+    </message>
+</context>
+<context>
+    <name>_ClipboardRuntime</name>
+    <message>
+        <location filename="../../app.py" line="526"/>
+        <source>Входящие файлы</source>
+        <translation>Входящие файлы</translation>
+    </message>
+    <message>
+        <location filename="../../app.py" line="528"/>
+        <source>Другой компьютер хочет передать {0} объект(ов) ({1:.1f} МБ).</source>
+        <translation>Другой компьютер хочет передать {0} объект(ов) ({1:.1f} МБ).</translation>
     </message>
 </context>
 <context>
