@@ -60,6 +60,23 @@ FILE_OFFER), либо заменяется явным согласием пол�
 staging (transfer стартует по действию пользователя, а не по `Ctrl+C`). Выбор
 между этими вариантами — предмет дизайна, а не спайка.
 
+## Проверка 2: host-only + несколько `file://` URL (2026-09-16, implementation checkpoint)
+
+Ранний шлагбаум перед написанием Mac-приёмника (плана Task 1): вооружить
+`NSPasteboard` **несколькими** `file://` URL одним `writeObjects_` и host-only.
+
+`prepareForNewContentsWithOptions_(NSPasteboardContentsCurrentHostOnly)` +
+`writeObjects_([NSURL.fileURLWithPath_(a), NSURL.fileURLWithPath_(b)])` →
+`writeObjects ok=True`, типы `public.file-url`, `NSFilenamesPboardType`. Оператор
+нажал `⌘V` в пустой папке Finder — **появились оба файла** (`duo-multi-a.txt`,
+`duo-multi-b.txt`).
+
+**Вывод:** форма вооружения буфера для Mac-приёмника — один
+`writeObjects_([url1, url2, …])` со списком `file://` URL корневых элементов
+staging-дерева, host-only. Finder вставляет все элементы. Это последняя
+OS-specific предпосылка цепочки staging → Finder; она пройдена. Task 4/5 плана
+строятся на этой форме.
+
 ## Не установлено (за рамками этого спайка)
 
 - Читает ли Finder **лениво предоставленный** `public.file-url` (через
