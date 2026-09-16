@@ -24,6 +24,15 @@ def create_file_backend(parent=None):
         from .windows_files import WindowsFileClipboardBackend
 
         return WindowsFileClipboardBackend(parent)
+    if sys.platform == "darwin":
+        from pathlib import Path
+
+        from .macos_files import MacFileReceiver
+        from .macos_pasteboard import arm
+        from .staging import StagingArea
+
+        root = Path.home() / "Library" / "Caches" / "duo-input" / "incoming"
+        return MacFileReceiver(StagingArea(root), pasteboard_arm=arm, parent=parent)
     raise UnsupportedPlatformError(sys.platform)
 
 

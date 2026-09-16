@@ -23,10 +23,8 @@ def test_an_unknown_platform_is_refused_loudly_rather_than_silently(monkeypatch)
         create_file_backend()
 
 
-def test_macos_is_refused_because_m1_does_not_implement_it(monkeypatch):
-    # Спека §18: ядро от Windows не зависит, но адаптера для Finder нет, и
-    # молчаливая заглушка выглядела бы как работающая фича.
-    monkeypatch.setattr(sys, "platform", "darwin")
+@pytest.mark.skipif(sys.platform != "darwin", reason="darwin only")
+def test_darwin_returns_mac_receiver():
+    from duo_input.transfer.macos_files import MacFileReceiver
 
-    with pytest.raises(UnsupportedPlatformError):
-        create_file_backend()
+    assert isinstance(create_file_backend(), MacFileReceiver)
