@@ -12,6 +12,7 @@
 exercised the matrix with two real laptops on one LAN, paired and connected,
 with both file-transfer toggles on. For each row the stated procedure was used:
 `Ctrl+C` in Explorer on PC1, switch, and `Ctrl+V` in a folder on PC2.
+Rows exercised: 1-15; rows not run: none.
 
 The operator supplied PASS for every row. This record spells out only the
 planned acceptance conditions established by those results and does not add
@@ -27,7 +28,7 @@ filenames that were not supplied.
 | 3 | nested directory | **PASS** | The structure is recreated; no file is misplaced. |
 | 4 | Unicode name (Cyrillic, and one astral character) | **PASS** | The name is intact on disk. |
 | 5 | zero-byte file | **PASS** | The file is created with size 0 and no error. |
-| 6 | file above 1 GB | **PASS** | The transfer completes; native progress moves; memory is flat. A real 2 GB file was copied. Windows Task Manager showed the DuoInput copy-window/process using up to about 50 MB memory during the run. |
+| 6 | file above 1 GB | **PASS** | The transfer completes; native progress moves; memory is flat. A real 2 GB file was copied. Windows Task Manager showed the DuoInput process using up to about 50 MB memory during the run. |
 | 7 | repeated `Ctrl+V` | **PASS** | The second paste works; two copies are present. |
 | 8 | source changed between copy and paste | **PASS** | Explorer reports an error; no truncated file is left. After Ctrl+C, the source file was deleted; Ctrl+V on PC2 showed the Russian message `Ошибка на диске в процессе чтения`; PASS also establishes the row's required no-truncated-file condition. |
 | 9 | peer disconnected mid-transfer | **PASS** | Explorer reports an error; its partial file is gone. |
@@ -146,7 +147,7 @@ reasons:
 - The required two-machine Explorer acceptance was exercised and all 15 planned
   rows passed.
 - Row 6 includes the supplied observation that a real 2 GB file was copied and
-  Task Manager showed the DuoInput copy-window/process using up to about 50 MB
+  Task Manager showed the DuoInput process using up to about 50 MB
   memory during the run.
 - Row 8 includes the supplied Explorer error, `Ошибка на диске в процессе
   чтения`, after the source file was deleted following Ctrl+C, and establishes
