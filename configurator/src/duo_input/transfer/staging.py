@@ -28,6 +28,12 @@ class StagingSession:
             target = self._contained(entry.path)
             if entry.kind == ENTRY_FILE:
                 target.parent.mkdir(parents=True, exist_ok=True)
+                # Пустой файл байтов не качает (size == 0 отфильтрован из цикла
+                # чтения), поэтому материализуем его здесь — иначе он бы не
+                # существовал на диске, а finish() всё равно вооружил бы его
+                # путь в буфер обмена. touch создаёт пустой файл; последующий
+                # write() к непустому файлу откроет его в r+b и перезапишет.
+                target.touch(exist_ok=True)
             else:
                 target.mkdir(parents=True, exist_ok=True)
 

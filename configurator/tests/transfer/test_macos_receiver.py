@@ -187,6 +187,41 @@ def test_cancel_mid_download_sends_transfer_end_and_removes_incomplete(receiver,
     assert calls["armed"] is None
 
 
+def test_zero_byte_file_completes_without_a_read(receiver, tmp_path):
+    r, link, calls = receiver
+    entries = (
+        TransferEntry(path="empty.txt", kind=ENTRY_FILE, size=0, mtime_ns=0),
+        TransferEntry(path="a.txt", kind=ENTRY_FILE, size=3, mtime_ns=0),
+    )
+    r.handle_offer(_manifest(entries=entries))
+
+    r.authorize(True)
+    # ровно один FILE_READ — за непустой файл; пустой read не запрашивает
+    assert len(_sent(link, MessageType.FILE_READ)) == 1
+    assert _sent(link, MessageType.FILE_READ)[0].header["entry_index"] == 1
+    r.handle_message(_reply_to_last_read(link, b"abc"))
+
+    assert (tmp_path / "t1" / "empty.txt").is_file()
+    assert (tmp_path / "t1" / "empty.txt").read_bytes() == b""
+    assert (tmp_path / "t1" / "a.txt").read_bytes() == b"abc"
+    assert {p.name for p in calls["armed"]} == {"empty.txt", "a.txt"}
+
+
+def test_oversized_chunk_fails_transfer(receiver, tmp_path):
+    r, link, calls = receiver
+    failed = []
+    r.transfer_failed.connect(failed.append)
+    r.handle_offer(_manifest())
+    r.authorize(True)
+
+    # запросили size=5, ответ длиннее запрошенного -> нарушение протокола
+    r.handle_message(_reply_to_last_read(link, b"toolong"))
+
+    assert failed == ["oversized_chunk"]
+    assert calls["armed"] is None
+    assert not (tmp_path / "t1").exists(), "неполная staging-директория должна быть удалена"
+
+
 def test_a_foreign_or_stale_read_id_chunk_is_ignored(receiver, tmp_path):
     r, link, calls = receiver
     r.handle_offer(_manifest())
@@ -206,7 +241,9 @@ def test_a_foreign_or_stale_read_id_chunk_is_ignored(receiver, tmp_path):
         )
     )
 
-    assert not (tmp_path / "t1" / "a.txt").exists()
+    # a.txt существует как пустой файл (materialized в begin), но чужой чанк
+    # не должен был записать в него байты.
+    assert (tmp_path / "t1" / "a.txt").read_bytes() == b""
     assert len(_sent(link, MessageType.FILE_READ)) == 1, "чужой чанк не должен продвинуть цикл"
 
     r.handle_message(

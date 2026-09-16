@@ -155,7 +155,11 @@ class MacFileReceiver(QObject):
         expected = min(MAX_FILE_CHUNK_BYTES, entry.size - self._offset)
         blob = message.blob
         if len(blob) > expected:
-            logger.warning("чанк крупнее запрошенного — отброшен")
+            # Ответ крупнее запроса — нарушение протокола. Отбросить его молча
+            # значило бы навсегда зависнуть в DOWNLOADING: read_id остался бы в
+            # полёте, а второго ответа на него не будет. Отказываем, как и на
+            # усечении ниже.
+            self._fail("oversized_chunk")
             return
         if len(blob) < expected:
             # запрос не выходит за размер файла -> короткий ответ = усечённый источник

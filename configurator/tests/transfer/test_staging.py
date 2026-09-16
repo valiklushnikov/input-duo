@@ -21,6 +21,20 @@ def test_finish_marks_ready_and_returns_roots(tmp_path):
     assert (tmp_path / "t1" / "dir" / "a.txt").read_bytes() == b"hello"
     assert not (tmp_path / "t1" / ".incomplete").exists()
 
+def test_zero_byte_file_is_materialized_on_begin(tmp_path):
+    # Пустой файл байтов не качает, но обязан существовать на диске: иначе
+    # finish() вооружил бы несуществующий путь в буфер обмена.
+    area = StagingArea(tmp_path)
+    entries = [
+        TransferEntry(path="empty.txt", kind=ENTRY_FILE, size=0, mtime_ns=0),
+        TransferEntry(path="dir", kind=ENTRY_DIRECTORY, size=0, mtime_ns=0),
+        TransferEntry(path="dir/empty2.txt", kind=ENTRY_FILE, size=0, mtime_ns=0),
+    ]
+    area.begin("t1", entries)
+    assert (tmp_path / "t1" / "empty.txt").is_file()
+    assert (tmp_path / "t1" / "empty.txt").read_bytes() == b""
+    assert (tmp_path / "t1" / "dir" / "empty2.txt").is_file()
+
 def test_multi_chunk_write_does_not_truncate(tmp_path):
     area = StagingArea(tmp_path)
     s = area.begin("t1", _entries())
