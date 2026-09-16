@@ -359,3 +359,39 @@ def test_the_pure_core_modules_see_neither_qt_nor_the_windows_adapters():
         "ядро (model/paths/pipe/scanner) должно оставаться проверяемым без Qt "
         f"и без Windows, а эти модули это нарушают: {offenders}"
     )
+
+
+def test_only_transfer_macos_pasteboard_touches_pyobjc():
+    # Зеркало test_only_macos_pasteboard_touches_pyobjc из clipboard/, но для
+    # transfer/: вся грязь pyobjc/AppKit должна остаться в одном файле,
+    # иначе её нельзя будет держать за пределами основного процесса.
+    offenders = [
+        path.name
+        for path in _transfer_modules()
+        if path.name != "macos_pasteboard.py" and _has_native_import(path)
+    ]
+
+    assert offenders == [], (
+        "pyobjc/AppKit разрешён только в transfer/macos_pasteboard.py — "
+        f"нарушители: {offenders}"
+    )
+
+
+def test_macos_files_is_free_of_pyobjc_and_qtwidgets():
+    # macos_files.py вооружает буфер обмена только через инъекцию
+    # pasteboard_arm — если он когда-нибудь начнёт импортировать
+    # macos_pasteboard.py (или AppKit) напрямую, эта граница обязана упасть.
+    module = TRANSFER_PACKAGE / "macos_files.py"
+    names = _imported_modules(module)
+
+    assert not _has_native_import(module)
+    assert not any(name.startswith("PySide6.QtWidgets") for name in names)
+
+
+def test_staging_is_pure_python():
+    # staging.py — чистый Python: ни pyobjc, ни Qt вообще, никакого PySide6.
+    module = TRANSFER_PACKAGE / "staging.py"
+    names = _imported_modules(module)
+
+    assert not _has_native_import(module)
+    assert not any(name.split(".")[0] == "PySide6" for name in names)
