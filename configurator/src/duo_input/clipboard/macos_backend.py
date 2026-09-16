@@ -29,7 +29,7 @@ from __future__ import annotations
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from .backend import ORIGIN_MIME, ClipboardSnapshot, ContentFetcher
-from .formats import collect_payloads
+from .formats import collect_payloads, local_file_paths
 from .offer import ClipboardOffer
 
 #: Как часто опрашивать changeCount. 300 мс - хороший баланс отзывчивости и CPU.
@@ -54,7 +54,7 @@ def snapshot_from(mime_data) -> ClipboardSnapshot:
     """Взять из буфера то, что мы умеем синхронизировать, и ничего сверх."""
     if is_private(list(mime_data.formats())):
         return ClipboardSnapshot({})
-    return ClipboardSnapshot(collect_payloads(mime_data))
+    return ClipboardSnapshot(collect_payloads(mime_data), local_file_paths(mime_data))
 
 
 class MacOSClipboardBackend(QObject):

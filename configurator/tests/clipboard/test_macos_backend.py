@@ -6,6 +6,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QMimeData, QUrl
+
 from duo_input.clipboard.backend import ORIGIN_MIME, ClipboardSnapshot
 from duo_input.clipboard.macos_backend import (
     MacOSClipboardBackend,
@@ -208,3 +210,12 @@ def test_suppression_holds_without_any_origin_marker():
 
     assert emitted == []
     assert pasteboard.published == [offer]
+
+
+def test_snapshot_from_carries_local_file_paths():
+    """snapshot_from должен заполнять file_paths, как Windows backend."""
+    mime = QMimeData()
+    mime.setUrls([QUrl("file:///Users/x/a.txt"), QUrl("file:///Users/x/dir")])
+    snap = snapshot_from(mime)
+    assert snap.file_paths
+    assert any(p.endswith("a.txt") for p in snap.file_paths)
