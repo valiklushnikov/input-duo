@@ -482,7 +482,6 @@ class _ClipboardRuntime(QObject):
                     f"буфер обмена не принял файлы: {reason}"
                 )
             )
-            backend.start()
 
         link = coordinator.link
         if link is not None:
@@ -509,6 +508,14 @@ class _ClipboardRuntime(QObject):
         self._file_capabilities_slot = apply_capabilities
         self._file_capabilities_source = coordinator
         self._file_snapshot_source = clipboard_backend
+        # Kept at the very end, in its original position, so the Windows path's
+        # statement order is byte-for-byte what it was before the platform
+        # branch existed: the COM backend starts only after the link, the
+        # capabilities, the capability subscription and the self.* assignments
+        # are all in place. MacFileReceiver has no start() and must never be
+        # called here - it drives itself from incoming offers.
+        if sys.platform != "darwin":
+            backend.start()
 
     def _on_file_authorization_needed(self, manifest) -> None:
         """The macOS receiver is holding an offer open, waiting on us."""
