@@ -246,6 +246,29 @@ def test_new_offer_aborts_an_in_progress_download_and_removes_its_incomplete_dir
     assert calls["armed"] is None
 
 
+def test_new_offer_preserves_a_completed_ready_staging_dir(receiver, tmp_path):
+    r, link, calls = receiver
+    # Полная передача до READY: авторизуем, отдаём единственный чанк, вооружаем.
+    r.handle_offer(_manifest(transfer_id="t1"))
+    r.authorize(True)
+    r.handle_message(_reply_to_last_read(link, b"hello"))
+    assert r._state.name == "READY"
+    assert calls["armed"] and calls["armed"][0].name == "a.txt"
+    ready_root = tmp_path / "t1"
+    assert (ready_root / "a.txt").read_bytes() == b"hello"
+
+    # Новый offer приходит уже ПОСЛЕ завершения — READY трогать нельзя: на его
+    # file:// может ещё ссылаться NSPasteboard/Finder.
+    manifest2 = _manifest(transfer_id="t2")
+    r.handle_offer(manifest2)
+
+    # Файлы завершённой передачи по-прежнему на диске (не были rmtree'нуты).
+    assert (ready_root / "a.txt").read_bytes() == b"hello"
+    # А приёмник ждёт решения по новому offer.
+    assert r._state.name == "AWAITING_AUTH"
+    assert r._manifest is manifest2
+
+
 def test_a_foreign_or_stale_read_id_chunk_is_ignored(receiver, tmp_path):
     r, link, calls = receiver
     r.handle_offer(_manifest())

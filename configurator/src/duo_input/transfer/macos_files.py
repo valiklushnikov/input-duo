@@ -66,12 +66,13 @@ class MacFileReceiver(QObject):
 
     # --- offer/авторизация
     def handle_offer(self, manifest: TransferManifest) -> None:
-        # READY-staging прошлого transfer не трогаем: на него может ссылаться буфер.
-        # Но in-progress (несконченная) сессия — другое дело: новый offer её
-        # обрывает, а не молча теряет, иначе её incomplete-каталог остался бы
-        # висеть в staging навсегда (recover() снёс бы его только при
-        # следующем перезапуске программы).
-        if self._state is _State.DOWNLOADING or self._session is not None:
+        # READY-staging прошлого transfer не трогаем: на него может ссылаться
+        # буфер (NSPasteboard/Finder ещё держит его file://). Обрывается ТОЛЬКО
+        # in-progress (incomplete) загрузка — иначе её incomplete-каталог висел
+        # бы в staging до следующего перезапуска (recover() снёс бы его лишь
+        # тогда). После _complete() состояние READY, а не DOWNLOADING, поэтому
+        # завершённая передача сюда не попадает и её каталог остаётся жив.
+        if self._state is _State.DOWNLOADING:
             self._abort_session()
         self._manifest = manifest
         self._state = _State.AWAITING_AUTH
@@ -207,6 +208,11 @@ class MacFileReceiver(QObject):
                 self._fail("pasteboard_refused")
                 return
         self._state = _State.READY
+        # Завершённая сессия больше не "in-progress": её каталог теперь во
+        # владении GC/буфера обмена, а не сессии. Обнуляем _session, чтобы
+        # `self._session is not None` оставался честным признаком незавершённой
+        # загрузки — иначе следующий handle_offer/abort мог бы снести READY.
+        self._session = None
         self._staging.gc(keep=self._manifest.transfer_id)
         self.transfer_completed.emit()
 
