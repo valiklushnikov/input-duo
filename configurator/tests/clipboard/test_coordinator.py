@@ -1103,14 +1103,14 @@ def test_a_capabilities_value_that_is_not_a_list_is_ignored_rather_than_trusted(
                 "protocol_minor": PROTOCOL_MINOR,
                 "origin_id": "b" * 32,
                 "machine_name": "PC2",
-                "capabilities": "files/1",
+                "capabilities": CAPABILITY_FILES,
             },
             b"",
         )
     )
 
     assert not coordinator.peer_supports(CAPABILITY_FILES), (
-        "строка 'files/1' содержит 'files/1' как подстроку - проверка через "
+        "строка возможности содержит саму себя как подстроку - проверка через "
         "`in` по строке приняла бы её, и мы послали бы FILE_* туда, где их не ждут"
     )
 
@@ -1154,7 +1154,17 @@ def test_a_capabilities_list_of_non_strings_announces_nothing(coordinator_with_l
     coordinator, link = coordinator_with_link
 
     link.deliver(
-        _hello({"capabilities": [7, None, ["files/1"], {"files/1": True}, b"files/1"]})
+        _hello(
+            {
+                "capabilities": [
+                    7,
+                    None,
+                    [CAPABILITY_FILES],
+                    {CAPABILITY_FILES: True},
+                    CAPABILITY_FILES.encode("ascii"),
+                ]
+            }
+        )
     )
 
     assert coordinator.peer_capabilities == frozenset()
@@ -1270,3 +1280,17 @@ def test_the_live_link_is_reachable_without_reaching_into_a_private_attribute(
     coordinator._on_disconnected("кабель выдернули")
 
     assert coordinator.link is None
+
+
+def test_a_peer_speaking_the_first_file_protocol_is_not_file_capable(coordinator_with_link):
+    # files/1 нёс манифест в двухбайтовом заголовке и не знал read_id. Сборка
+    # с files/2 не может ни прочесть его объявление, ни получить ответ на своё
+    # чтение, поэтому такой пир для файлов - устаревший, а буфер обмена с ним
+    # остаётся.
+    coordinator, link = coordinator_with_link
+
+    link.deliver(_hello({"capabilities": [CAPABILITY_CLIPBOARD, "files/1"]}))
+
+    assert CAPABILITY_FILES != "files/1"
+    assert not coordinator.peer_supports(CAPABILITY_FILES)
+    assert coordinator.peer_supports(CAPABILITY_CLIPBOARD)

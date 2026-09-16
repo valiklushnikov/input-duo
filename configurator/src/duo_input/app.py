@@ -381,6 +381,11 @@ class _ClipboardRuntime(QObject):
         transfer = FileTransferService(coordinator)
         callback_gateway = ServiceCallbackGateway(transfer)
         page = self._window.clipboard_page
+        # Отмена доступна с первого мгновения сессии, а не с первого чанка:
+        # вставка, застрявшая до первого байта, - именно та, которую отменяют.
+        transfer.transfer_started.connect(
+            lambda manifest: page.set_transfer_progress(0, manifest.total_bytes)
+        )
         transfer.transfer_progress.connect(page.set_transfer_progress)
         transfer.transfer_completed.connect(page.clear_transfer)
         transfer.transfer_cancelled.connect(page.clear_transfer)
@@ -390,6 +395,11 @@ class _ClipboardRuntime(QObject):
         )
         transfer.send_failed.connect(
             lambda reason: page.add_event(f"файлы не объявлены: {reason}")
+        )
+        transfer.entries_skipped.connect(
+            lambda count, names: page.add_event(
+                f"пропущено при копировании файлов: {count} ({', '.join(names)})"
+            )
         )
 
         cancel_slot = lambda transfer=transfer: transfer.finish_session("cancelled")
@@ -494,13 +504,20 @@ class _ClipboardRuntime(QObject):
                 pass
 
         self._window.clipboard_page.clear_transfer()
+        # Порядок существенен. Сперва колбэки становятся безвредными: вызов,
+        # который COM-поток сделает во время остановки, уже не дойдёт до
+        # сервиса. Затем сервис закрывает трубы - Read, заблокированный на
+        # одной из них в потоке STA, просыпается сейчас же. И только потом
+        # бэкенд ждёт свой поток: в обратном порядке это ожидание стояло бы
+        # на заблокированном Read до таймаута, вместе с интерфейсом.
         if callback_gateway is not None:
             callback_gateway.invalidate()
+        if transfer is not None:
+            transfer.detach_link()
         if backend is not None:
             backend.stop()
             backend.deleteLater()
         if transfer is not None:
-            transfer.detach_link()
             transfer.deleteLater()
 
 
@@ -579,17 +596,12 @@ def main(argv: list[str] | None = None) -> int:
         # its ctypes COM boundary without opening a window. Keep the Windows
         # imports inside this branch: other platforms and ordinary startup do
         # not need to load the native file-transfer implementation.
-        import ctypes
-
         from duo_input.transfer.model import ENTRY_FILE, TransferEntry, TransferManifest
         from duo_input.transfer.pipe import ChunkPipe
-        from duo_input.transfer.windows_com import (
-            FILEDESCRIPTORW,
-            call_add_ref,
-            call_release,
-        )
+        from duo_input.transfer.windows_com import call_add_ref, call_release
         from duo_input.transfer.windows_files import (
             VirtualFilesDataObject,
+            descriptor_size,
             group_descriptor_bytes,
         )
 
@@ -605,7 +617,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
         try:
-            descriptor_size = ctypes.sizeof(FILEDESCRIPTORW)
+            descriptor_bytes = descriptor_size()
             blob = group_descriptor_bytes(manifest)
             data_object = VirtualFilesDataObject(
                 manifest,
@@ -618,8 +630,8 @@ def main(argv: list[str] | None = None) -> int:
             released = call_release(data_object.pointer)
             usable = (
                 data_object.pointer.value is not None
-                and len(blob) == 4 + descriptor_size
-                and descriptor_size == 592
+                and len(blob) == 4 + descriptor_bytes
+                and descriptor_bytes == 592
                 and added == 2
                 and released == 1
                 and data_object.refcount == 1
@@ -630,7 +642,7 @@ def main(argv: list[str] | None = None) -> int:
 
         print(f"files: {'ok' if usable else 'missing'}")
         print(f"callback: addref {added}, release {released}")
-        print(f"descriptor: {descriptor_size}")
+        print(f"descriptor: {descriptor_bytes}")
         return 0 if usable else 1
 
     application = QApplication.instance() or QApplication(arguments)

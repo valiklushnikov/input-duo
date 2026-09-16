@@ -167,7 +167,7 @@ def test_a_junction_pointing_at_an_ancestor_does_not_loop_forever(tmp_path):
 
 
 def test_a_file_that_disappears_between_listing_and_stat_is_skipped(tmp_path, monkeypatch):
-    # os.listdir() видит имя, но к моменту os.stat() файла уже нет - обычная
+    # os.scandir() видит имя, но к моменту os.stat() файла уже нет - обычная
     # гонка с параллельным процессом. Скан обязан пропустить запись и
     # продолжить, а не упасть целиком.
     from duo_input.transfer.scanner import REASON_UNREADABLE
@@ -196,7 +196,7 @@ def test_a_file_that_disappears_between_listing_and_stat_is_skipped(tmp_path, mo
 
 
 def test_a_directory_that_cannot_be_listed_is_skipped_not_fatal(tmp_path, monkeypatch):
-    # os.listdir() отказывает (например, ACL закрыл перечисление, хотя сам
+    # os.scandir() отказывает (например, ACL закрыл перечисление, хотя сам
     # каталог виден через stat). Каталог как узел всё ещё существует и
     # безопасен для передачи пустым; его содержимое - нет.
     from duo_input.transfer.scanner import REASON_UNREADABLE
@@ -206,14 +206,14 @@ def test_a_directory_that_cannot_be_listed_is_skipped_not_fatal(tmp_path, monkey
     locked.mkdir(parents=True)
     (folder / "img.jpg").write_bytes(b"ok")
 
-    real_listdir = os.listdir
+    real_scandir = os.scandir
 
-    def flaky_listdir(path):
+    def flaky_scandir(path):
         if os.fspath(path).endswith("locked"):
             raise PermissionError("no access")
-        return real_listdir(path)
+        return real_scandir(path)
 
-    monkeypatch.setattr(os, "listdir", flaky_listdir)
+    monkeypatch.setattr(os, "scandir", flaky_scandir)
 
     manifest, _roots = scan([folder], transfer_id="t")
 
@@ -228,3 +228,151 @@ def test_a_directory_that_cannot_be_listed_is_skipped_not_fatal(tmp_path, monkey
         "Photos/img.jpg",
         "Photos/locked",
     ]
+
+
+# ------------------------------------------------------------ ранние границы
+#
+# Потолки paths.sanitize_manifest проверяются ПОСЛЕ обхода: без ранней
+# проверки каталог на миллион файлов сначала целиком перечислялся,
+# сортировался и stat-ился, и только потом получал отказ.
+
+
+def _count_calls(monkeypatch, module, name):
+    real = getattr(module, name)
+    calls = []
+
+    def counting(*args, **kwargs):
+        calls.append(args[0] if args else None)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(module, name, counting)
+    return calls
+
+
+def test_the_entry_ceiling_stops_the_walk_instead_of_finishing_it(tmp_path, monkeypatch):
+    from duo_input.transfer import scanner
+    from duo_input.transfer.paths import UnsafePath
+
+    folder = tmp_path / "Many"
+    folder.mkdir()
+    for index in range(60):
+        (folder / f"f{index:02d}.bin").write_bytes(b"x")
+    monkeypatch.setattr(scanner, "MAX_ENTRIES", 5)
+    stats = _count_calls(monkeypatch, os, "stat")
+
+    with pytest.raises(UnsafePath):
+        scan([folder], transfer_id="t")
+
+    assert len(stats) <= 6, f"обход продолжился после потолка: {len(stats)} вызовов stat"
+
+
+def test_the_entry_ceiling_bounds_the_enumeration_of_one_huge_directory(tmp_path, monkeypatch):
+    from duo_input.transfer import scanner
+    from duo_input.transfer.paths import UnsafePath
+
+    folder = tmp_path / "Flat"
+    folder.mkdir()
+    for index in range(200):
+        (folder / f"f{index:03d}.bin").write_bytes(b"")
+    monkeypatch.setattr(scanner, "MAX_ENTRIES", 5)
+    yielded = []
+    real_scandir = os.scandir
+
+    class _Counting:
+        def __init__(self, path):
+            self._inner = real_scandir(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._inner.close()
+
+        def __iter__(self):
+            for entry in self._inner:
+                yielded.append(entry.name)
+                yield entry
+
+    monkeypatch.setattr(os, "scandir", _Counting)
+
+    with pytest.raises(UnsafePath):
+        scan([folder], transfer_id="t")
+
+    assert len(yielded) <= 7, f"каталог перечислен целиком: {len(yielded)} имён"
+
+
+def test_the_depth_ceiling_stops_the_descent(tmp_path, monkeypatch):
+    from duo_input.transfer import scanner
+    from duo_input.transfer.paths import UnsafePath
+
+    deepest = tmp_path / "d0"
+    for level in range(1, 12):
+        deepest = deepest / f"d{level}"
+    deepest.mkdir(parents=True)
+    monkeypatch.setattr(scanner, "MAX_DEPTH", 3)
+    stats = _count_calls(monkeypatch, os, "stat")
+
+    with pytest.raises(UnsafePath):
+        scan([tmp_path / "d0"], transfer_id="t")
+
+    assert len(stats) <= 4
+
+
+def test_the_total_size_ceiling_stops_the_walk(tmp_path, monkeypatch):
+    from duo_input.transfer import scanner
+    from duo_input.transfer.paths import UnsafePath
+
+    folder = tmp_path / "Big"
+    folder.mkdir()
+    for index in range(20):
+        (folder / f"f{index:02d}.bin").write_bytes(b"12345678")
+    monkeypatch.setattr(scanner, "MAX_TOTAL_BYTES", 20)
+    stats = _count_calls(monkeypatch, os, "stat")
+
+    with pytest.raises(UnsafePath):
+        scan([folder], transfer_id="t")
+
+    assert len(stats) <= 4
+
+
+def test_skipped_entries_count_towards_the_entry_ceiling(tmp_path, monkeypatch):
+    from duo_input.transfer import scanner
+    from duo_input.transfer.paths import UnsafePath
+
+    folder = tmp_path / "Locked"
+    folder.mkdir()
+    for index in range(30):
+        (folder / f"f{index:02d}.bin").write_bytes(b"x")
+    monkeypatch.setattr(scanner, "MAX_ENTRIES", 5)
+    real_stat = os.stat
+
+    def refuse_files(path, *args, **kwargs):
+        if os.fspath(path).endswith(".bin"):
+            raise PermissionError("denied")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", refuse_files)
+
+    with pytest.raises(UnsafePath):
+        scan([folder], transfer_id="t")
+
+
+def test_the_entry_ceiling_also_bounds_many_selected_roots(tmp_path, monkeypatch):
+    # Двадцать файлов, выделенных в Проводнике, - это двадцать корней, и ни
+    # один каталог при этом не перечисляется: потолок перечисления здесь не
+    # срабатывает, держит только учёт записей по ходу обхода.
+    from duo_input.transfer import scanner
+    from duo_input.transfer.paths import UnsafePath
+
+    roots = []
+    for index in range(20):
+        root = tmp_path / f"r{index:02d}.bin"
+        root.write_bytes(b"x")
+        roots.append(root)
+    monkeypatch.setattr(scanner, "MAX_ENTRIES", 5)
+    stats = _count_calls(monkeypatch, os, "stat")
+
+    with pytest.raises(UnsafePath):
+        scan(roots, transfer_id="t")
+
+    assert len(stats) <= 5

@@ -13,7 +13,7 @@ import os
 import threading
 
 import pytest
-from PySide6.QtCore import QMetaObject, Qt, Q_ARG
+from PySide6.QtCore import QObject, Qt, Signal
 
 from duo_input.clipboard.wire import CAPABILITY_CLIPBOARD, CAPABILITY_FILES
 from duo_input.clipboard.identity import load_or_create
@@ -96,18 +96,22 @@ def linked_pair(qtbot, tmp_path):
     listener.stop()
 
 
+class _ReadRelay(QObject):
+    """Очередь Qt из рабочего потока в поток сервиса - как у COM-шлюза."""
+
+    read = Signal(object, "qlonglong", "qlonglong")
+
+
 def drain(qtbot, service, transfer_id, entry_index, total, pipe=None) -> bytes:
-    """Проводник в миниатюре: запросить, подождать, взять - до EOF.
+    """Проводник в миниатюре: запросить, подождать, взять - до объявленного размера.
 
     Работает в РАБОЧЕМ потоке, как настоящий IStream, и трогает сервис только
-    через invokeMethod с QueuedConnection. Ни одного обращения к сокету отсюда.
+    через сигнал с QueuedConnection. Ни одного обращения к сокету отсюда.
 
-    Останов по ``pipe.finished``, а не по количеству уже взятых байт: иначе
-    файл нулевой длины прошёл бы этот тест, ни разу не спросив отправителя ни
-    байта - сравнение с пустой строкой было бы верным просто потому, что
-    ничего не произошло, а не потому, что протокол действительно доставил
-    пустое содержимое и объявил об этом (EOF - это пустой FILE_CHUNK, см.
-    ``FileTransferService._on_chunk``).
+    Останов по объявленному размеру - ровно так, как его знает IStream из
+    FILEDESCRIPTOR. Пустой FILE_CHUNK больше не конец файла: получатель
+    никогда не спрашивает за пределами размера, а короткий ответ посреди
+    файла закрывает поток как усечённый.
 
     ``pipe`` можно передать снаружи - когда тест уже открыл поток сам и
     именно за этим объектом собирается наблюдать (например, за его
@@ -115,25 +119,19 @@ def drain(qtbot, service, transfer_id, entry_index, total, pipe=None) -> bytes:
     """
     if pipe is None:
         pipe = service.open_pipe(transfer_id, entry_index)
+    relay = _ReadRelay()
+    relay.read.connect(service.request_read, Qt.ConnectionType.QueuedConnection)
     collected = bytearray()
     failure: list[BaseException] = []
 
     def worker() -> None:
         try:
-            while not pipe.finished:
+            while len(collected) < total:
                 chunk = pipe.take(65536)
                 if chunk:
                     collected.extend(chunk)
                     continue
-                QMetaObject.invokeMethod(
-                    service,
-                    "request_read",
-                    Qt.ConnectionType.QueuedConnection,
-                    Q_ARG(str, transfer_id),
-                    Q_ARG(int, entry_index),
-                    Q_ARG("qlonglong", len(collected)),
-                    Q_ARG(int, 65536),
-                )
+                relay.read.emit(pipe, len(collected), 65536)
                 if not pipe.wait(timeout=10.0):
                     raise TimeoutError("чанк не пришёл за 10 с")
         except BaseException as error:  # noqa: BLE001 - переносим в основной поток
@@ -241,7 +239,7 @@ def test_a_disconnect_midway_wakes_the_blocked_reader(qtbot, linked_pair, tmp_pa
     transfer_id = sender.offer_local_files([source])
     qtbot.waitUntil(lambda: receiver.offered_manifest is not None, timeout=5000)
     pipe = receiver.open_pipe(transfer_id, 0)
-    receiver.request_read(transfer_id, 0, 0, 65536)
+    receiver.request_read(pipe, 0, 65536)
     qtbot.waitUntil(lambda: pipe.depth > 0, timeout=5000)
 
     # Настоящий разрыв, а не вызов приватного обработчика: закрываем сам
@@ -270,8 +268,8 @@ def test_the_peak_queue_depth_never_exceeds_one_chunk(qtbot, linked_pair, tmp_pa
     qtbot.waitUntil(lambda: receiver.offered_manifest is not None, timeout=5000)
     pipe = receiver.open_pipe(transfer_id, 0)
     # drain должен получить именно ЭТОТ pipe: open_pipe заново открыл бы
-    # другой (свой предыдущий он закрывает как "pipe replaced"), и тогда
-    # high_water читался бы с потока, через который не прошло ни байта.
+    # другой поток, и high_water читался бы с потока, через который не
+    # прошло ни байта.
     drain_thread_result = drain(qtbot, receiver, transfer_id, 0, size, pipe=pipe)
 
     assert len(drain_thread_result) == size
@@ -290,8 +288,8 @@ def test_a_source_deleted_before_the_paste_fails_the_session(qtbot, linked_pair,
 
     failures: list[str] = []
     receiver.transfer_failed.connect(failures.append)
-    receiver.open_pipe(transfer_id, 0)
-    receiver.request_read(transfer_id, 0, 0, 1024)
+    pipe = receiver.open_pipe(transfer_id, 0)
+    receiver.request_read(pipe, 0, 1024)
     qtbot.waitUntil(lambda: bool(failures), timeout=5000)
 
     assert failures == ["source_missing"]
@@ -316,3 +314,42 @@ def test_pasting_twice_transfers_the_same_snapshot_again(qtbot, linked_pair, tmp
     second = drain(qtbot, receiver, transfer_id, 0, 4096)
 
     assert first == second == payload
+
+
+def test_a_flood_of_injected_reads_cannot_grow_the_senders_write_queue(
+    qtbot, linked_pair, tmp_path
+):
+    # Каждый FILE_READ до мегабайта отвечается синхронно: без жёсткого
+    # потолка двести крошечных запросов ставили бы в очередь сокета двести
+    # мегабайт, прежде чем цикл событий успеет слить хоть байт.
+    from duo_input.clipboard.peer import WRITE_LIMIT_BYTES
+    from duo_input.clipboard.wire import MAX_FILE_CHUNK_BYTES, Message, MessageType
+
+    sender, _receiver = linked_pair
+    source = tmp_path / "big.bin"
+    source.write_bytes(deterministic_bytes(8 * MAX_FILE_CHUNK_BYTES))
+    transfer_id = sender.offer_local_files([source])
+    link = sender._link
+    lost: list[str] = []
+    link.disconnected.connect(lost.append)
+    peak = 0
+
+    for read_id in range(1, 201):
+        sender.handle_message(
+            Message(
+                MessageType.FILE_READ,
+                {
+                    "transfer_id": transfer_id,
+                    "entry_index": 0,
+                    "offset": (read_id % 8) * MAX_FILE_CHUNK_BYTES,
+                    "length": MAX_FILE_CHUNK_BYTES,
+                    "read_id": read_id,
+                },
+                b"",
+            )
+        )
+        peak = max(peak, link.bytes_to_write)
+
+    assert peak <= WRITE_LIMIT_BYTES
+    assert lost, "нарушитель окна не был отключён"
+    assert sender.snapshots.transfer_ids == ()

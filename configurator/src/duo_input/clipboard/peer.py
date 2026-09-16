@@ -12,11 +12,15 @@
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import QByteArray, QCryptographicHash, QObject, Signal
 from PySide6.QtNetwork import QSsl, QSslCertificate, QSslConfiguration, QSslKey, QSslSocket
 
 from .identity import NodeIdentity
-from .wire import MAX_FILE_CHUNK_BYTES, FrameAssembler, Message, WireError, encode
+from .wire import MAX_FILE_CHUNK_BYTES, MAX_FRAME_BYTES, FrameAssembler, Message, WireError, encode
+
+logger = logging.getLogger(__name__)
 
 #: Сколько Qt разрешено держать непрочитанным в сокете.
 #:
@@ -33,6 +37,18 @@ READ_BUFFER_BYTES = MAX_FILE_CHUNK_BYTES * 4
 
 #: За этой отметкой очередь записи считается затором.
 WRITE_HIGH_WATER_BYTES = MAX_FILE_CHUNK_BYTES * 4
+
+#: Жёсткий потолок очереди записи. Водораздел выше только наблюдает, а
+#: send() до этого писал всегда: каждый входящий FILE_READ отвечается
+#: синхронно, до мегабайта, и поток мелких запросов успевал поставить в
+#: очередь сотни мегабайт раньше, чем цикл событий сливал хоть байт.
+#:
+#: Честный пир сюда не доходит. Он держит один запрос в полёте на поток и
+#: шлёт следующий, лишь получив ответ на предыдущий, - то есть когда тот уже
+#: покинул нашу очередь. Потолок оставляет место самому крупному законному
+#: кадру (CONTENT буфера обмена) поверх водораздела; кто его пробивает,
+#: нарушает окно, и соединение с ним разрывается.
+WRITE_LIMIT_BYTES = MAX_FRAME_BYTES + WRITE_HIGH_WATER_BYTES
 
 
 def ssl_configuration(identity: NodeIdentity) -> QSslConfiguration:
@@ -113,10 +129,29 @@ class PeerLink(QObject):
         self._wire_up(socket)
         self._on_encrypted()
 
-    def send(self, message: Message) -> None:
+    def send(self, message: Message) -> bool:
+        """Поставить кадр в очередь. ``False`` - кадр не отправлен.
+
+        Отказ не бросает исключений: сюда приходят из слотов Qt, где
+        исключение не доходит ни до кого. Переполнение очереди разрывает
+        соединение - дальше пира с нарушенным окном обслуживать нельзя.
+        """
         if self._socket is None:
-            return
-        self._socket.write(encode(message))
+            return False
+        try:
+            frame = encode(message)
+        except WireError as error:
+            logger.error("кадр %s не отправлен: %s", message.type.name, error)
+            return False
+        if self.bytes_to_write + len(frame) > WRITE_LIMIT_BYTES:
+            logger.warning(
+                "очередь записи превысила бы %d байт - соединение разорвано",
+                WRITE_LIMIT_BYTES,
+            )
+            self._fail("очередь записи переполнена")
+            return False
+        self._socket.write(frame)
+        return True
 
     def close(self) -> None:
         if self._socket is not None:
@@ -212,6 +247,10 @@ class PeerLink(QObject):
             self._fail(str(error))
             return
         for message in messages:
+            if self._socket is not socket:
+                # Обработчик предыдущего кадра разорвал соединение: кадры,
+                # пришедшие тем же чтением, принадлежат уже мёртвой связи.
+                return
             self.message_received.emit(message)
 
     def _fail(self, reason: str) -> None:
@@ -221,4 +260,11 @@ class PeerLink(QObject):
         self.disconnected.emit(reason)
 
 
-__all__ = ["PeerLink", "fingerprint_of_socket", "ssl_configuration"]
+__all__ = [
+    "READ_BUFFER_BYTES",
+    "WRITE_HIGH_WATER_BYTES",
+    "WRITE_LIMIT_BYTES",
+    "PeerLink",
+    "fingerprint_of_socket",
+    "ssl_configuration",
+]

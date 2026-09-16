@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import time
 import sys
 
 import pytest
@@ -33,12 +35,15 @@ class _Link:
         self.sent: list[Message] = []
         self.disconnected = _Signal()
 
-    def send(self, message: Message) -> None:
+    def send(self, message: Message) -> bool:
         self.sent.append(message)
+        return True
 
 
 class _Signal:
     def connect(self, _slot) -> None: ...
+
+    def disconnect(self, _slot) -> None: ...
 
 
 def test_scanning_never_logs_a_full_path(caplog, tmp_path):
@@ -100,7 +105,8 @@ def test_a_source_that_vanished_is_reported_by_name_not_by_path(caplog, qapp, tm
     service.handle_message(
         Message(
             MessageType.FILE_READ,
-            {"transfer_id": transfer_id, "entry_index": 0, "offset": 0, "length": 4},
+            {"transfer_id": transfer_id, "entry_index": 0, "offset": 0, "length": 4,
+             "read_id": 1},
             b"",
         )
     )
@@ -123,23 +129,22 @@ def test_a_rejected_manifest_is_logged_without_the_offending_path_in_full(
 ):
     caplog.set_level(logging.DEBUG)
     service = FileTransferService()
+    service.attach_link(_Link())
+    service.set_peer_capabilities(CAPS)
+    manifest = {
+        "transfer_id": "t",
+        "entries": [
+            {
+                "path": "..\\\\..\\\\Users\\\\victim\\\\secret.docx",
+                "kind": "file",
+                "size": 1,
+                "mtime_ns": 1,
+            }
+        ],
+    }
 
     service.handle_message(
-        Message(
-            MessageType.FILE_OFFER,
-            {
-                "transfer_id": "t",
-                "entries": [
-                    {
-                        "path": "..\\\\..\\\\Users\\\\victim\\\\secret.docx",
-                        "kind": "file",
-                        "size": 1,
-                        "mtime_ns": 1,
-                    }
-                ],
-            },
-            b"",
-        )
+        Message(MessageType.FILE_OFFER, {}, json.dumps(manifest).encode("utf-8"))
     )
 
     logged = "\n".join(record.getMessage() for record in caplog.records)
@@ -168,6 +173,7 @@ def test_a_chunk_is_never_logged_even_at_debug_level(caplog, qapp, tmp_path):
                 "entry_index": 0,
                 "offset": 0,
                 "length": len(SECRET),
+                "read_id": 1,
             },
             b"",
         )
@@ -176,6 +182,48 @@ def test_a_chunk_is_never_logged_even_at_debug_level(caplog, qapp, tmp_path):
     assert link.sent[-1].blob == SECRET
     logged = "\n".join(record.getMessage() for record in caplog.records)
     assert "SUPER-SECRET" not in logged
+
+
+def test_a_changed_source_deep_in_a_tree_is_logged_by_basename_only(caplog, qapp, tmp_path):
+    # SourceChanged нёс в тексте полный относительный путь записи, а сервис
+    # писал этот текст в журнал: вложенные каталоги - та же структура диска
+    # пользователя, что и абсолютный путь, только короче.
+    caplog.set_level(logging.DEBUG)
+    service = FileTransferService()
+    link = _Link()
+    service.attach_link(link)
+    service.set_peer_capabilities(CAPS)
+    nested = tmp_path / "Clients" / "Acme-Merger"
+    nested.mkdir(parents=True)
+    source = nested / "terms.bin"
+    source.write_bytes(SECRET)
+    transfer_id = service.offer_local_files([tmp_path / "Clients"])
+    offer = link.sent[-1]
+    from duo_input.transfer.model import decode_manifest
+
+    paths = [entry.path for entry in decode_manifest(offer.blob).entries]
+    entry_index = paths.index("Clients/Acme-Merger/terms.bin")
+    before = source.stat().st_mtime_ns
+    deadline = time.monotonic() + 2
+    while source.stat().st_mtime_ns == before:
+        source.write_bytes(SECRET)
+        if time.monotonic() >= deadline:
+            pytest.fail("source mtime_ns did not advance")
+
+    service.handle_message(
+        Message(
+            MessageType.FILE_READ,
+            {"transfer_id": transfer_id, "entry_index": entry_index, "offset": 0,
+             "length": 4, "read_id": 1},
+            b"",
+        )
+    )
+
+    assert link.sent[-1].header["reason"] == "source_changed"
+    logged = _logged(caplog)
+    assert "terms.bin" in logged, "изменённый источник обязан оставить диагностику"
+    assert "Clients" not in logged
+    assert "Acme-Merger" not in logged
 
 
 # ============================================ §15 над COM-модулями (задачи 2.1-2.5)

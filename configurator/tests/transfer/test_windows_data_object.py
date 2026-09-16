@@ -93,11 +93,15 @@ def _make(**kwargs):
         pipes[(transfer_id, entry_index)] = pipe
         return pipe
 
+    def key_of(pipe):
+        # Поток опознаётся своей трубой; запись о нём - по ключу записи.
+        return next(key for key, known in pipes.items() if known is pipe)
+
     obj = VirtualFilesDataObject(
         _manifest(),
         open_pipe=open_pipe,
-        request_read=lambda *args: reads.append(args),
-        close_pipe=lambda *args: closes.append(args),
+        request_read=lambda pipe, offset, length: reads.append((*key_of(pipe), offset, length)),
+        close_pipe=lambda pipe, reason=None: closes.append((*key_of(pipe), reason)),
         origin_marker=b"origin:1",
         **kwargs,
     )
@@ -588,8 +592,8 @@ def test_ending_the_operation_hands_the_owner_the_shells_hresult(data_object):
     # Это ЕДИНСТВЕННЫЙ явный сигнал завершения: 0 - готово, 0x800704C7 -
     # отменено. Без него отменённая сессия неотличима от зависшей.
     obj, *_ = data_object
-    finished: list[int] = []
-    obj.on_operation_finished = finished.append
+    finished: list[tuple[int, tuple]] = []
+    obj.on_operation_finished = lambda result, pipes: finished.append((result, pipes))
     _result, pointer = _async_pointer(obj)
     _slot(pointer, _ASYNC_START, _START_OP)(pointer, None)
     assert obj.in_operation is True
@@ -597,7 +601,7 @@ def test_ending_the_operation_hands_the_owner_the_shells_hresult(data_object):
     answer = _slot(pointer, _ASYNC_END, _END_OP)(pointer, _CANCELLED, None, 1)
 
     assert answer == S_OK
-    assert finished == [_CANCELLED]
+    assert finished == [(_CANCELLED, ())]
     assert obj.in_operation is False
 
 
@@ -631,7 +635,7 @@ def test_an_owner_whose_completion_hook_fails_does_not_take_the_shell_with_it(da
     # 0 (S_OK) и молча потерял бы единственный сигнал о завершении.
     obj, *_ = data_object
 
-    def boom(_result):
+    def boom(_result, _pipes):
         raise RuntimeError("владелец упал")
 
     obj.on_operation_finished = boom
@@ -658,3 +662,54 @@ def test_ending_the_operation_without_an_owner_hook_is_not_a_crash():
     # None его отсутствие попало бы в поле ошибок как TypeError - владелец
     # увидел бы отказ там, где ничего не случилось.
     assert obj.last_operation_error is None
+
+
+def test_exported_children_outlive_the_data_object_that_handed_them_out():
+    # Поток, перечислитель и его клон принадлежат COM до своего последнего
+    # Release, а не объекту данных, который их выдал: объект данных может
+    # быть отпущен (публикация сменилась), пока оболочка ещё читает.
+    import gc
+
+    from duo_input.transfer.windows_com import call_release, call_stream_read
+
+    obj, pipes, _reads, _closes = _make()
+    result, stream_pointer = _stream_pointer(obj, 1)
+    assert result == S_OK
+    enum_pointer = _enumerator_pointer(obj)
+    clone_pointer = ctypes.c_void_p()
+    assert _slot(enum_pointer, _CLONE, _ENUM_CLONE)(enum_pointer, ctypes.byref(clone_pointer)) == S_OK
+    pipe = pipes[("t-1", 1)]
+
+    del obj
+    gc.collect()
+
+    pipe.push(b"12345678")
+    assert call_stream_read(stream_pointer, 8) == (b"12345678", S_OK)
+    for pointer in (enum_pointer, clone_pointer):
+        assert _drain(pointer)
+    assert call_release(stream_pointer) == 0
+    assert call_release(enum_pointer) == 0
+    assert call_release(clone_pointer) == 0
+
+
+def test_a_released_child_is_let_go_by_the_export_registry():
+    import gc
+    import weakref
+
+    from duo_input.transfer.windows_com import call_release
+    from duo_input.transfer.windows_files import ExportedObjects
+
+    exports = ExportedObjects()
+    obj, *_ = _make(exports=exports)
+    result, stream_pointer = _stream_pointer(obj, 1)
+    assert result == S_OK
+    assert exports.live_count == 1
+    stream = weakref.ref(obj.streams[1])
+    obj.streams.clear()
+
+    assert call_release(stream_pointer) == 0
+    exports.collect()
+    gc.collect()
+
+    assert exports.live_count == 0
+    assert stream() is None

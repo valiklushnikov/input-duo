@@ -638,11 +638,15 @@ class PipeStream(ComObject):
         if pcb_read:
             ctypes.cast(pcb_read, ctypes.POINTER(wintypes.ULONG))[0] = 0
 
+        if int(cb) == 0:
+            return S_OK
         remaining = max(0, self._size - self.position)
         want = min(int(cb), remaining)
         if want == 0:
-            # Конец файла. Запрашивать нечего - отправитель ответил бы пустотой.
-            return S_OK
+            # Конец файла. Запрашивать нечего; S_FALSE - "прочитано меньше,
+            # чем просили, потому что поток кончился". S_OK с нулём байт по
+            # контракту ISequentialStream значил бы "прочитано всё".
+            return S_FALSE
 
         try:
             if self._discard_buffer_on_read:
@@ -664,13 +668,22 @@ class PipeStream(ComObject):
             logger.info("поток закрыт")
             return STG_E_READFAULT
 
-        if payload:
-            ctypes.memmove(pv, payload, len(payload))
+        if not payload:
+            # Труба завершена, а до обещанного в FILEDESCRIPTOR размера байты
+            # ещё есть: это усечение, а не конец файла. S_OK или S_FALSE здесь
+            # оставили бы у получателя короткий файл без единой ошибки.
+            logger.warning("данные кончились раньше объявленного размера")
+            return STG_E_READFAULT
+
+        ctypes.memmove(pv, payload, len(payload))
         self.position += len(payload)
         if pcb_read:
             ctypes.cast(pcb_read, ctypes.POINTER(wintypes.ULONG))[0] = len(payload)
-        # S_OK и при частичном чтении. S_FALSE означает конец потока, и
-        # Проводник вправе трактовать его посреди файла как ошибку.
+        # Короткое чтение посреди файла - S_OK: следующий Read дочитает.
+        # S_FALSE - только когда короче просьбы потому, что файл кончился;
+        # Проводник вправе трактовать S_FALSE посреди файла как ошибку.
+        if self.position >= self._size and len(payload) < int(cb):
+            return S_FALSE
         return S_OK
 
     def _seek(self, _this, offset, origin, new_position) -> int:

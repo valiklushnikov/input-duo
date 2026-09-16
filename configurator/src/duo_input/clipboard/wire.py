@@ -23,7 +23,11 @@ PROTOCOL_MAJOR = 1
 PROTOCOL_MINOR = 1
 
 CAPABILITY_CLIPBOARD = "clipboard/1"
-CAPABILITY_FILES = "files/1"
+#: files/2, а не files/1: вторая версия несёт манифест FILE_OFFER в теле
+#: кадра, а не в двухбайтовом заголовке, и связывает FILE_READ с ответом через
+#: read_id. Сборка с files/1 не прочла бы ни то, ни другое, поэтому для неё
+#: мы - пир без файлов, а буфер обмена между нами остаётся.
+CAPABILITY_FILES = "files/2"
 
 #: Что умеет ЭТА сборка. Пир узнаёт это из HELLO и наоборот.
 CAPABILITIES = (CAPABILITY_CLIPBOARD, CAPABILITY_FILES)
@@ -49,6 +53,10 @@ _LENGTH_BYTES = 4
 _TYPE_BYTES = 1
 _HEADER_LENGTH_BYTES = 2
 
+#: Длина заголовка пишется двумя байтами, и больше этого не уместить. Всё, что
+#: может вырасти с данными пользователя (манифест файлов), едет в теле кадра.
+MAX_HEADER_BYTES = (1 << (8 * _HEADER_LENGTH_BYTES)) - 1
+
 
 class WireError(Exception):
     """Кадр, которого не могло прислать исправное второе устройство."""
@@ -69,8 +77,8 @@ class MessageType(IntEnum):
     #
     # Старый пир, получив любой из этих типов, бросит WireError и оборвёт
     # соединение целиком, вместе с буфером обмена. Поэтому их нельзя
-    # отправлять тому, кто не объявил files/1 в HELLO - см. CAPABILITY_FILES
-    # и CAPABILITIES ниже в этом модуле. Кто их не посылает, до кого они не
+    # отправлять тому, кто не объявил CAPABILITY_FILES в HELLO - см.
+    # CAPABILITIES выше в этом модуле. Кто их не посылает, до кого они не
     # объявлены, - обязанность coordinator (HELLO/peer_supports) и, для самих
     # кадров FILE_*, transfer/service.py (Task 1.10).
     FILE_OFFER = 10
@@ -88,8 +96,24 @@ class Message:
     blob: bytes = b""
 
 
+def _header_bytes(header: dict) -> bytes:
+    return json.dumps(header, ensure_ascii=False).encode("utf-8")
+
+
+def encoded_header_length(header: dict) -> int:
+    """Сколько байт займёт этот заголовок в кадре."""
+    return len(_header_bytes(header))
+
+
 def encode(message: Message) -> bytes:
-    header = json.dumps(message.header, ensure_ascii=False).encode("utf-8")
+    """Кадр целиком - или ``WireError``, если заголовок в кадр не помещается.
+
+    Без проверки ``int.to_bytes`` поднимал ``OverflowError`` из глубины
+    кодирования: исключение, которого не ждёт ни один вызывающий.
+    """
+    header = _header_bytes(message.header)
+    if len(header) > MAX_HEADER_BYTES:
+        raise WireError(f"заголовок {len(header)} байт не помещается в {MAX_HEADER_BYTES}")
     body = len(header).to_bytes(_HEADER_LENGTH_BYTES, "big") + header + message.blob
     payload = bytes([int(message.type)]) + body
     return len(payload).to_bytes(_LENGTH_BYTES, "big") + payload
@@ -149,6 +173,7 @@ __all__ = [
     "LEGACY_CAPABILITIES",
     "MAX_FILE_CHUNK_BYTES",
     "MAX_FRAME_BYTES",
+    "MAX_HEADER_BYTES",
     "PROTOCOL_MAJOR",
     "PROTOCOL_MINOR",
     "FrameAssembler",
@@ -156,4 +181,5 @@ __all__ = [
     "MessageType",
     "WireError",
     "encode",
+    "encoded_header_length",
 ]

@@ -36,7 +36,7 @@ filenames that were not supplied.
 | 11 | destination collision | **PASS** | Explorer's own replace/skip/keep-both dialog appears. |
 | 12 | `Ctrl+X` on source | **PASS** | Paste copies; the source on PC1 still exists. |
 | 13 | clipboard changed on PC1 during an active transfer | **PASS** | The running transfer completes unaffected. |
-| 14 | folder containing a junction | **PASS** | The junction is skipped; the skip is reported; its target is not exported. |
+| 14 | folder containing a junction | **PASS, narrowed** (see below) | The junction is skipped and its target is not exported. The "skip is reported" condition is **not established** by this run: the build under acceptance recorded skips only inside the manifest and surfaced them in no UI event or log line. |
 | 15 | old client ↔ new client | **PASS** | Clipboard still works both ways; no file offer is sent; neither side drops the connection. |
 
 ## Packaged evidence already established by Task 4.3
@@ -142,10 +142,38 @@ reasons:
 - `tests/build/test_backend_artifacts.py::test_a_reference_declared_build_links_only_the_new_input_path`:
   the selected build directory is not configured for `PIO_USB_REFERENCE`.
 
+## Corrections after the final whole-branch review
+
+The final review (`aac7bd7..c4d87b3`) found defects that the matrix did not
+exercise, and their fixes change the implementation under acceptance. The
+matrix above describes the build at `86a0ffc` and is **not** evidence for the
+fixed build.
+
+- **Row 14 narrowed.** The accepted build never reported skipped entries to
+  the user; that part of the row could not have been observed in it. The fix
+  reports the count and up to five basenames as a page event on both sides.
+  This is established by automated tests only
+  (`test_skipped_entries_of_an_offer_are_reported_on_the_page`, the service
+  tests for local and remote offers); on hardware it is **not run**.
+- **Protocol changed to `files/2`.** The manifest now travels in the
+  `FILE_OFFER` body, every read carries a `read_id`, a stream is identified
+  by its pipe, `IStream::Read` distinguishes the end of file (`S_FALSE`) from
+  truncation (`STG_E_READFAULT`), a session watchdog ends a silent session,
+  and a peer without `files/2` can neither receive nor inject file messages.
+  Every row exercises the offer, read and completion paths, so rows 1-15 must
+  be re-run on the fixed build before it can be called hardware-accepted.
+  Rows 8, 9, 10, 14 and 15 are the ones whose observable behaviour the fixes
+  target directly (truncation, disconnection, cancellation, skip reporting,
+  and old-client gating, which now also treats a `files/1` build as old).
+- The automated gate on the fixed tree: 6 failed, 2432 passed, 11 skipped,
+  6 subtests passed; the six failures are the same stale UF2-cache baseline
+  identities listed above.
+
 ## What this record establishes
 
-- The required two-machine Explorer acceptance was exercised and all 15 planned
-  rows passed.
+- The required two-machine Explorer acceptance was exercised on `86a0ffc` and
+  all 15 planned rows passed, with row 14 narrowed to "skipped and not
+  exported" as explained above.
 - Row 6 includes the supplied observation that a real 2 GB file was copied and
   Task Manager showed the DuoInput process using up to about 50 MB
   memory during the run.
@@ -160,7 +188,9 @@ reasons:
 
 ## Final conclusion
 
-The file-transfer feature is **hardware-accepted: 15/15 PASS** on the two-laptop
-Explorer matrix. The automated repository gate remains non-green only because
+The build at `86a0ffc` was **hardware-accepted: 15/15 PASS**, with row 14
+narrowed to its skip and non-export conditions. The build carrying the
+final-review fixes is verified by the automated suite only; its hardware
+matrix is **not run**. The automated repository gate remains non-green only because
 of the six known stale UF2-cache baseline failures recorded above; that separate
 baseline result does not change the successful hardware matrix outcome.

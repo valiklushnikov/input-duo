@@ -303,10 +303,15 @@ def test_the_transfer_package_never_imports_qtwidgets():
 
 
 def test_only_the_windows_adapters_touch_ctypes():
+    # Обход по ВСЕМУ пакету duo_input, а не по transfer/: самопроверка в
+    # app.py однажды импортировала ctypes ради одного sizeof, и правило,
+    # смотревшее только в transfer/, осталось зелёным.
+    modules = sorted(SRC_ROOT.joinpath("duo_input").rglob("*.py"))
+    assert modules, f"no modules found under {SRC_ROOT}"
     offenders = {
-        path.name
-        for path in _transfer_modules()
-        if path.name not in _CTYPES_ALLOWED
+        str(path.relative_to(SRC_ROOT))
+        for path in modules
+        if not (path.parent.name == "transfer" and path.name in _CTYPES_ALLOWED)
         and any(name.split(".")[0] == "ctypes" for name in _imported_modules(path))
     }
 

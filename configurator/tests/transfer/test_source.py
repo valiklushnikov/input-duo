@@ -99,18 +99,31 @@ def test_a_read_past_the_end_returns_only_what_is_there(tmp_path):
     assert registry.read("t-1", 0, 8, 100) == b"89"
 
 
-def test_a_read_at_the_end_returns_nothing(tmp_path):
+def test_a_read_at_or_past_the_end_is_a_request_error(tmp_path):
+    # Получатель не спрашивает за концом файла никогда: IStream отвечает на
+    # такое чтение S_FALSE сам. Значит, такой запрос - ошибка пира, и 10**30
+    # не должен доехать до lseek, где он поднял бы OverflowError.
     registry = SnapshotRegistry()
     _publish(registry, tmp_path)
 
-    assert registry.read("t-1", 0, 10, 10) == b""
+    for offset in (10, 11, 10**30):
+        with pytest.raises(ValueError):
+            registry.read("t-1", 0, offset, 10)
 
 
-def test_a_zero_byte_file_reads_as_nothing_rather_than_failing(tmp_path):
+def test_a_zero_byte_file_has_no_readable_offset(tmp_path):
     registry = SnapshotRegistry()
     _publish(registry, tmp_path, name="empty.bin", payload=b"")
 
-    assert registry.read("t-1", 0, 0, 10) == b""
+    with pytest.raises(ValueError):
+        registry.read("t-1", 0, 0, 10)
+
+
+def test_a_read_running_past_the_end_returns_only_the_tail(tmp_path):
+    registry = SnapshotRegistry()
+    _publish(registry, tmp_path)
+
+    assert len(registry.read("t-1", 0, 8, 10)) == 2
 
 
 def test_the_first_read_marks_the_snapshot_as_serving(tmp_path):

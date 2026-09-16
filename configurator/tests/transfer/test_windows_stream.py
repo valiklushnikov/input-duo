@@ -21,6 +21,7 @@ from duo_input.transfer.pipe import ChunkPipe
 from duo_input.transfer.windows_com import (
     E_NOTIMPL,
     E_POINTER,
+    S_FALSE,
     S_OK,
     STG_E_INVALIDFUNCTION,
     STG_E_READFAULT,
@@ -95,13 +96,16 @@ def test_a_partial_read_returns_S_OK_and_a_smaller_count():
     assert (len(payload), result) == (2, S_OK)
 
 
-def test_a_read_at_the_end_of_the_file_returns_nothing_without_asking():
+def test_a_read_at_the_end_of_the_file_returns_s_false_without_asking():
+    # ISequentialStream::Read: S_FALSE - прочитано меньше, чем просили,
+    # потому что поток кончился. S_OK с нулём байт по контракту значит
+    # "всё запрошенное прочитано", то есть ноль из восьми - это ложь.
     stream, _pipe, requested = _stream(size=4)
     stream.position = 4
 
     payload, result = call_stream_read(stream.pointer, 8)
 
-    assert (payload, result) == (b"", S_OK)
+    assert (payload, result) == (b"", S_FALSE)
     assert requested == [], "a request was sent beyond the end of the file"
 
 
@@ -111,7 +115,7 @@ def test_a_position_beyond_the_end_also_returns_nothing_without_asking():
 
     payload, result = call_stream_read(stream.pointer, 8)
 
-    assert (payload, result) == (b"", S_OK)
+    assert (payload, result) == (b"", S_FALSE)
     assert requested == []
 
 
@@ -123,7 +127,7 @@ def test_an_end_of_file_read_clears_the_returned_byte_count():
         stream.pointer, None, 4, ctypes.byref(read)
     )
 
-    assert result == S_OK
+    assert result == S_FALSE
     assert read.value == 0
 
 
@@ -266,13 +270,63 @@ def test_the_default_timeout_is_passed_to_the_pipe_wait(monkeypatch):
     assert waited == [30.0]
 
 
-def test_a_finished_pipe_ends_the_stream_without_an_error():
+def test_a_pipe_that_finishes_before_the_advertised_size_is_a_read_fault():
+    # Размер обещан Проводнику в FILEDESCRIPTOR. Конец данных раньше него -
+    # это усечение, а не конец файла: S_OK или S_FALSE здесь оставили бы
+    # у получателя короткий файл без единой ошибки.
     stream, pipe, _requested = _stream(size=1024)
     pipe.finish()
 
     payload, result = call_stream_read(stream.pointer, 4)
 
+    assert (payload, result) == (b"", STG_E_READFAULT)
+
+
+def test_a_pipe_that_finishes_while_a_read_waits_is_a_read_fault():
+    stream, pipe, requested = _stream(size=1024)
+
+    def finisher() -> None:
+        while not requested:
+            time.sleep(0.005)
+        pipe.finish()
+
+    thread = threading.Thread(target=finisher, daemon=True)
+    thread.start()
+    payload, result = call_stream_read(stream.pointer, 4)
+    thread.join(timeout=2.0)
+
+    assert (payload, result) == (b"", STG_E_READFAULT)
+
+
+def test_a_short_final_read_returns_s_false_with_the_tail():
+    stream, pipe, requested = _stream(size=10)
+    stream.position = 8
+    pipe.push(b"89")
+
+    payload, result = call_stream_read(stream.pointer, 8)
+
+    assert (payload, result) == (b"89", S_FALSE)
+    assert stream.position == 10
+
+
+def test_a_read_that_exactly_reaches_the_end_is_still_s_ok():
+    stream, pipe, _requested = _stream(size=10)
+    stream.position = 6
+    pipe.push(b"6789")
+
+    payload, result = call_stream_read(stream.pointer, 4)
+
+    assert (payload, result) == (b"6789", S_OK)
+
+
+def test_a_zero_byte_read_is_s_ok_even_at_the_end():
+    stream, _pipe, requested = _stream(size=4)
+    stream.position = 4
+
+    payload, result = call_stream_read(stream.pointer, 0)
+
     assert (payload, result) == (b"", S_OK)
+    assert requested == []
 
 
 def test_seeking_to_the_end_reports_the_size_from_the_manifest():

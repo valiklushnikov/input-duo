@@ -16,12 +16,37 @@ bool исключён из int, потому что size=True, молча ста
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 
 ENTRY_FILE = "file"
 ENTRY_DIRECTORY = "directory"
 
 _KINDS = frozenset({ENTRY_FILE, ENTRY_DIRECTORY})
+
+#: Потолок любого целого, пришедшего от пира. JSON целые не ограничивает, а
+#: дальше они уходят в lseek, в FILETIME и в qlonglong - и 10**30 поднял бы
+#: OverflowError там, где протокольную ошибку уже никто не ловит.
+MAX_WIRE_INTEGER = (1 << 63) - 1
+
+#: transfer_id - короткий ASCII-токен. Он становится маркером происхождения в
+#: буфере обмена (ASCII) и попадает в журнал; своё мы делаем из uuid4().hex.
+MAX_TRANSFER_ID_CHARS = 64
+_TRANSFER_ID = re.compile(r"[0-9A-Za-z_-]{1,%d}" % MAX_TRANSFER_ID_CHARS)
+
+#: Потолок манифеста в теле FILE_OFFER. Обычная запись - около ста байт, так
+#: что 65 536 записей (paths.MAX_ENTRIES) занимают порядка шести мегабайт;
+#: потолок оставляет место длинным именам и при этом кладёт границу на то,
+#: что json.loads вообще согласится разбирать.
+MAX_MANIFEST_BYTES = 16 * 1024 * 1024
+
+
+def require_transfer_id(value) -> str:
+    """``value``, если это допустимый transfer_id, иначе ``ValueError``."""
+    if not isinstance(value, str) or _TRANSFER_ID.fullmatch(value) is None:
+        raise ValueError("transfer_id должен быть коротким ASCII-токеном")
+    return value
 
 
 def _require_str(raw: dict, key: str) -> str:
@@ -38,6 +63,8 @@ def _require_index(raw: dict, key: str) -> int:
         raise ValueError(f"{key} должна быть int")
     if value < 0:
         raise ValueError(f"{key} не может быть отрицательной")
+    if value > MAX_WIRE_INTEGER:
+        raise ValueError(f"{key} больше допустимого")
     return value
 
 
@@ -123,17 +150,43 @@ class TransferManifest:
         if not isinstance(skipped, list):
             raise ValueError("skipped должна быть list")
         return cls(
-            transfer_id=_require_str(raw, "transfer_id"),
+            transfer_id=require_transfer_id(raw.get("transfer_id")),
             entries=tuple(TransferEntry.from_dict(entry) for entry in entries),
             skipped=tuple(SkippedEntry.from_dict(skip) for skip in skipped),
             drop_effect=_require_index(raw, "drop_effect") if "drop_effect" in raw else 1,
         )
 
 
+def encode_manifest(manifest: TransferManifest) -> bytes:
+    """Тело FILE_OFFER. Размер проверяет отправитель - см. MAX_MANIFEST_BYTES."""
+    return json.dumps(manifest.to_dict(), ensure_ascii=False).encode("utf-8")
+
+
+def decode_manifest(blob: bytes) -> TransferManifest:
+    """Манифест из тела FILE_OFFER - или ``ValueError``, и ничего другого.
+
+    Длина проверяется ДО разбора: границу на работу json.loads кладёт именно
+    она. RecursionError - не ValueError, а "[[[[..." законно его поднимает.
+    """
+    if len(blob) > MAX_MANIFEST_BYTES:
+        raise ValueError("манифест больше допустимого")
+    try:
+        raw = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError) as error:
+        raise ValueError("манифест не разбирается") from error
+    return TransferManifest.from_dict(raw)
+
+
 __all__ = [
     "ENTRY_DIRECTORY",
     "ENTRY_FILE",
+    "MAX_MANIFEST_BYTES",
+    "MAX_TRANSFER_ID_CHARS",
+    "MAX_WIRE_INTEGER",
     "SkippedEntry",
     "TransferEntry",
     "TransferManifest",
+    "decode_manifest",
+    "encode_manifest",
+    "require_transfer_id",
 ]

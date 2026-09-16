@@ -203,9 +203,9 @@ def _run_verify_chunk_size() -> int:
     seen: dict[int, int] = {}
     original = FileTransferService.request_read
 
-    def _spy(self, transfer_id, entry_index, offset, length):  # type: ignore[no-untyped-def]
+    def _spy(self, pipe, offset, length):  # type: ignore[no-untyped-def]
         seen[length] = seen.get(length, 0) + 1
-        return original(self, transfer_id, entry_index, offset, length)
+        return original(self, pipe, offset, length)
 
     FileTransferService.request_read = _spy  # type: ignore[method-assign]
     try:

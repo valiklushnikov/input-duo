@@ -458,3 +458,89 @@ def test_rewiring_a_congested_link_with_a_fresh_socket_emits_the_falling_edge(
         "фронт так и не был замечен"
     )
     assert link._congested is False
+
+
+# ------------------------------------------------------ жёсткий потолок записи
+
+
+def test_the_write_limit_leaves_room_for_the_largest_legal_frame():
+    from duo_input.clipboard.peer import WRITE_LIMIT_BYTES
+
+    assert WRITE_LIMIT_BYTES >= MAX_FRAME_BYTES + WRITE_HIGH_WATER_BYTES
+
+
+def test_a_send_past_the_write_limit_is_refused_and_drops_the_link(
+    qapp, tmp_path, monkeypatch
+):
+    # Водораздел только наблюдал: send() писал всегда, и поток из мелких
+    # FILE_READ ставил в очередь по мегабайту на каждый.
+    from duo_input.clipboard.peer import WRITE_LIMIT_BYTES
+
+    link = PeerLink(load_or_create(tmp_path))
+    socket = QSslSocket(link)
+    link._wire_up(socket)
+    written = []
+    monkeypatch.setattr(type(socket), "bytesToWrite", lambda _self: WRITE_LIMIT_BYTES - 10)
+    monkeypatch.setattr(type(socket), "write", lambda _self, data: written.append(data) or len(data))
+    lost: list[str] = []
+    link.disconnected.connect(lost.append)
+
+    accepted = link.send(Message(MessageType.FILE_CHUNK, {"read_id": 1}, b"x" * 64))
+
+    assert accepted is False
+    assert written == []
+    assert len(lost) == 1
+
+
+def test_a_send_within_the_write_limit_is_written(qapp, tmp_path, monkeypatch):
+    link = PeerLink(load_or_create(tmp_path))
+    socket = QSslSocket(link)
+    link._wire_up(socket)
+    written = []
+    monkeypatch.setattr(type(socket), "bytesToWrite", lambda _self: 0)
+    monkeypatch.setattr(type(socket), "write", lambda _self, data: written.append(data) or len(data))
+
+    assert link.send(Message(MessageType.PING, {}, b"")) is True
+    assert len(written) == 1
+
+
+def test_a_message_whose_header_cannot_be_framed_is_refused_without_raising(
+    qapp, tmp_path, monkeypatch
+):
+    from duo_input.clipboard.wire import MAX_HEADER_BYTES
+
+    link = PeerLink(load_or_create(tmp_path))
+    socket = QSslSocket(link)
+    link._wire_up(socket)
+    written = []
+    monkeypatch.setattr(type(socket), "write", lambda _self, data: written.append(data) or len(data))
+
+    accepted = link.send(Message(MessageType.PING, {"pad": "x" * MAX_HEADER_BYTES}, b""))
+
+    assert accepted is False
+    assert written == []
+
+
+def test_messages_after_a_failure_in_the_same_read_are_not_delivered(
+    qapp, tmp_path, monkeypatch
+):
+    from duo_input.clipboard.wire import encode
+
+    link = PeerLink(load_or_create(tmp_path))
+    socket = QSslSocket(link)
+    link._wire_up(socket)
+    frames = encode(Message(MessageType.PING, {"n": 1}, b"")) + encode(
+        Message(MessageType.PING, {"n": 2}, b"")
+    )
+    monkeypatch.setattr(type(socket), "readAll", lambda _self: frames)
+    delivered = []
+
+    def on_message(message):
+        delivered.append(message.header["n"])
+        link._fail("flood")
+
+    link.message_received.connect(on_message)
+
+    link._on_ready_read()
+
+    assert delivered == [1]

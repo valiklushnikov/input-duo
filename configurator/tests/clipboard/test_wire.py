@@ -166,3 +166,25 @@ def test_a_chunk_at_the_ceiling_still_fits_in_one_frame():
     [decoded] = assembler.feed(encode(message))
 
     assert len(decoded.blob) == MAX_FILE_CHUNK_BYTES
+
+
+def test_a_header_at_the_two_byte_ceiling_is_encoded_and_decoded():
+    from duo_input.clipboard.wire import MAX_HEADER_BYTES, encoded_header_length
+
+    header = {"pad": ""}
+    header["pad"] = "x" * (MAX_HEADER_BYTES - encoded_header_length(header))
+    assert encoded_header_length(header) == MAX_HEADER_BYTES
+
+    [decoded] = FrameAssembler().feed(encode(Message(MessageType.PING, header, b"")))
+
+    assert decoded.header == header
+
+
+def test_a_header_past_the_two_byte_ceiling_is_a_wire_error_not_an_overflow():
+    # Длина заголовка пишется двумя байтами. Без проверки int.to_bytes
+    # поднимал OverflowError из глубины encode - исключение, которого не
+    # ждёт ни один вызывающий.
+    from duo_input.clipboard.wire import MAX_HEADER_BYTES
+
+    with pytest.raises(WireError):
+        encode(Message(MessageType.PING, {"pad": "x" * MAX_HEADER_BYTES}, b""))

@@ -15,6 +15,7 @@ from duo_input.clipboard.wire import (
     Message,
     MessageType,
 )
+from duo_input.transfer.model import MAX_MANIFEST_BYTES, TransferManifest, decode_manifest
 from duo_input.transfer.service import FileTransferService
 
 
@@ -26,8 +27,9 @@ class _FakeLink(QObject):
         super().__init__()
         self.sent: list[Message] = []
 
-    def send(self, message: Message) -> None:
+    def send(self, message: Message) -> bool:
         self.sent.append(message)
+        return True
 
     def close(self) -> None: ...
 
@@ -45,12 +47,22 @@ def _sent(link, kind):
     return [message for message in link.sent if message.type is kind]
 
 
-def _read(transfer_id, entry_index=0, offset=0, length=4):
+def _read(transfer_id, entry_index=0, offset=0, length=4, read_id=7):
     return Message(
         MessageType.FILE_READ,
-        {"transfer_id": transfer_id, "entry_index": entry_index, "offset": offset, "length": length},
+        {
+            "transfer_id": transfer_id,
+            "entry_index": entry_index,
+            "offset": offset,
+            "length": length,
+            "read_id": read_id,
+        },
         b"",
     )
+
+
+def _offered_manifest(offer: Message) -> TransferManifest:
+    return decode_manifest(offer.blob)
 
 
 def test_copying_a_file_sends_one_offer_describing_it(sender, tmp_path):
@@ -61,9 +73,10 @@ def test_copying_a_file_sends_one_offer_describing_it(sender, tmp_path):
     transfer_id = service.offer_local_files([source])
 
     [offer] = _sent(link, MessageType.FILE_OFFER)
-    assert offer.header["transfer_id"] == transfer_id
-    assert [entry["path"] for entry in offer.header["entries"]] == ["notes.txt"]
-    assert offer.header["total_bytes"] == 5
+    manifest = _offered_manifest(offer)
+    assert manifest.transfer_id == transfer_id
+    assert [entry.path for entry in manifest.entries] == ["notes.txt"]
+    assert manifest.total_bytes == 5
 
 
 def test_the_offer_carries_no_bytes_at_all(sender, tmp_path):
@@ -74,7 +87,7 @@ def test_the_offer_carries_no_bytes_at_all(sender, tmp_path):
     service.offer_local_files([source])
 
     [offer] = _sent(link, MessageType.FILE_OFFER)
-    assert offer.blob == b""
+    assert b"CLASSIFIED" not in offer.blob
     assert b"CLASSIFIED" not in repr(offer.header).encode()
 
 
@@ -108,7 +121,12 @@ def test_a_read_request_is_answered_with_exactly_those_bytes(sender, tmp_path):
 
     [chunk] = _sent(link, MessageType.FILE_CHUNK)
     assert chunk.blob == b"3456"
-    assert chunk.header == {"transfer_id": transfer_id, "entry_index": 0, "offset": 3}
+    assert chunk.header == {
+        "transfer_id": transfer_id,
+        "entry_index": 0,
+        "offset": 3,
+        "read_id": 7,
+    }
 
 
 def test_no_chunk_is_ever_sent_without_a_request(sender, tmp_path):
@@ -143,6 +161,13 @@ def test_a_request_longer_than_the_chunk_ceiling_is_refused(sender, tmp_path):
         {"transfer_id": "t", "entry_index": -1, "offset": 0, "length": 4},
         {"transfer_id": "t", "entry_index": 0, "offset": True, "length": 4},
         {"transfer_id": "t", "entry_index": 0, "length": 4},
+        {"transfer_id": "t", "entry_index": 0, "offset": 0, "length": 4},
+        {"transfer_id": "t", "entry_index": 0, "offset": 0, "length": 4, "read_id": 0},
+        {"transfer_id": "t", "entry_index": 0, "offset": 10**30, "length": 4, "read_id": 1},
+        {"transfer_id": "t", "entry_index": 10**30, "offset": 0, "length": 4, "read_id": 1},
+        {"transfer_id": "тест", "entry_index": 0, "offset": 0, "length": 4, "read_id": 1},
+        {"transfer_id": ["t"], "entry_index": 0, "offset": 0, "length": 4, "read_id": 1},
+        {"transfer_id": "t" * 65, "entry_index": 0, "offset": 0, "length": 4, "read_id": 1},
     ],
 )
 def test_a_malformed_request_is_refused_without_reading_anything(sender, header):
@@ -330,3 +355,120 @@ def test_an_os_failure_does_not_report_its_absolute_source_path(sender, tmp_path
     assert service.offer_local_files([source]) is None
     assert failures == ["access denied"]
     assert str(source) not in failures[0]
+
+
+def test_a_refusal_echoes_only_the_fields_that_passed_validation(sender):
+    service, link = sender
+
+    service.handle_message(
+        Message(
+            MessageType.FILE_READ,
+            {"transfer_id": "x" * 70_000, "entry_index": 10**30, "offset": [1],
+             "length": 4, "read_id": 9},
+            b"",
+        )
+    )
+
+    [error] = _sent(link, MessageType.FILE_ERROR)
+    assert error.header == {
+        "transfer_id": "",
+        "entry_index": -1,
+        "offset": -1,
+        "read_id": 9,
+        "reason": "bad_request",
+    }
+
+
+def test_a_read_that_starts_past_the_end_of_the_file_is_a_bad_request(sender, tmp_path):
+    service, link = sender
+    source = tmp_path / "a.bin"
+    source.write_bytes(b"0123456789")
+    transfer_id = service.offer_local_files([source])
+
+    service.handle_message(_read(transfer_id, offset=10, length=4))
+    service.handle_message(_read(transfer_id, offset=2**62, length=4))
+
+    assert _sent(link, MessageType.FILE_CHUNK) == []
+    assert [error.header["reason"] for error in _sent(link, MessageType.FILE_ERROR)] == [
+        "bad_request",
+        "bad_request",
+    ]
+
+
+def test_a_read_running_past_the_end_is_answered_with_the_tail_only(sender, tmp_path):
+    service, link = sender
+    source = tmp_path / "a.bin"
+    source.write_bytes(b"0123456789")
+    transfer_id = service.offer_local_files([source])
+
+    service.handle_message(_read(transfer_id, offset=8, length=4))
+
+    [chunk] = _sent(link, MessageType.FILE_CHUNK)
+    assert chunk.blob == b"89"
+
+
+def test_skipped_entries_of_a_local_offer_are_reported(sender, tmp_path, monkeypatch):
+    service, _link = sender
+    folder = tmp_path / "Photos"
+    folder.mkdir()
+    (folder / "a.txt").write_bytes(b"a")
+    (folder / "hidden").write_bytes(b"b")
+    reported = []
+    service.entries_skipped.connect(lambda count, names: reported.append((count, names)))
+    real_stat = os.stat
+
+    def refuse_hidden(path, *args, **kwargs):
+        if os.fspath(path).endswith("hidden"):
+            raise PermissionError("denied")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", refuse_hidden)
+
+    service.offer_local_files([folder])
+
+    assert reported == [(1, ("hidden",))]
+
+
+def test_a_manifest_too_large_for_one_frame_is_refused_before_anything_is_published(
+    sender, tmp_path, monkeypatch
+):
+    service, link = sender
+    source = tmp_path / "a.bin"
+    source.write_bytes(b"x")
+    failures: list[str] = []
+    service.send_failed.connect(failures.append)
+    monkeypatch.setattr(
+        "duo_input.transfer.service.encode_manifest",
+        lambda manifest: b" " * (MAX_MANIFEST_BYTES + 1),
+    )
+
+    assert service.offer_local_files([source]) is None
+
+    assert link.sent == []
+    assert service.snapshots.transfer_ids == ()
+    assert failures and "a.bin" not in failures[0]
+
+
+def test_a_manifest_exactly_at_the_ceiling_is_offered(sender, tmp_path, monkeypatch):
+    service, link = sender
+    source = tmp_path / "a.bin"
+    source.write_bytes(b"x")
+    real = encode_manifest_for_test()
+
+    def padded(manifest):
+        encoded = real(manifest)
+        return encoded + b" " * (MAX_MANIFEST_BYTES - len(encoded))
+
+    monkeypatch.setattr("duo_input.transfer.service.encode_manifest", padded)
+
+    transfer_id = service.offer_local_files([source])
+
+    [offer] = _sent(link, MessageType.FILE_OFFER)
+    assert len(offer.blob) == MAX_MANIFEST_BYTES
+    assert decode_manifest(offer.blob).transfer_id == transfer_id
+
+
+def encode_manifest_for_test():
+    from duo_input.transfer.model import encode_manifest
+
+    return encode_manifest

@@ -366,13 +366,16 @@ def test_without_the_string_type_check_a_non_string_reason_would_be_accepted(mon
     assert skipped.reason == 42, "проверка типа снята, а нестроковая reason всё равно отвергнута"
 
 
-def test_without_the_string_type_check_a_non_string_transfer_id_would_be_accepted(monkeypatch):
-    monkeypatch.setattr(model, "_require_str", _require_str_without_type_check)
+@pytest.mark.parametrize("transfer_id", [999, "тест", "x" * 65])
+def test_without_the_token_check_a_bad_transfer_id_would_be_accepted(monkeypatch, transfer_id):
+    # transfer_id проверяет require_transfer_id, и только он: тип, ASCII и
+    # длина - одна проверка, а не две разбросанные.
+    monkeypatch.setattr(model, "require_transfer_id", lambda value: value)
 
-    manifest = TransferManifest.from_dict(_manifest_raw(transfer_id=999))
+    manifest = TransferManifest.from_dict(_manifest_raw(transfer_id=transfer_id))
 
-    assert manifest.transfer_id == 999, (
-        "проверка типа снята, а нестроковый transfer_id всё равно отвергнут"
+    assert manifest.transfer_id == transfer_id, (
+        "проверка токена снята, а недопустимый transfer_id всё равно отвергнут"
     )
 
 

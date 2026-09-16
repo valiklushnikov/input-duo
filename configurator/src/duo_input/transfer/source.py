@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .model import ENTRY_FILE, TransferManifest
 
@@ -48,6 +48,15 @@ class SourceChanged(Exception):
 
 class SourceMissing(Exception):
     """Снимка, записи или файла нет."""
+
+
+def _name(entry) -> str:
+    """Только имя записи: текст исключения уходит в журнал (спека §15).
+
+    Относительный путь - это та же структура каталогов пользователя, что и
+    абсолютный, только короче, поэтому и его в тексте быть не должно.
+    """
+    return PurePosixPath(entry.path).name
 
 
 @dataclass
@@ -110,7 +119,14 @@ class SnapshotRegistry:
             raise SourceMissing(f"записи {entry_index} нет в манифесте")
         entry = snapshot.manifest.entries[entry_index]
         if entry.kind != ENTRY_FILE:
-            raise SourceMissing(f"запись {entry.path!r} - не файл")
+            raise SourceMissing(f"запись {_name(entry)!r} - не файл")
+
+        if not 0 <= offset < entry.size:
+            # Отдельно от SourceMissing: это ошибка запроса, а не источника.
+            # Без проверки смещение 10**30 уходило в lseek и поднимало
+            # OverflowError мимо всех протокольных веток.
+            raise ValueError("смещение за пределами файла")
+        length = min(length, entry.size - offset)
 
         descriptor = snapshot.handles.get(entry_index)
         if descriptor is None:
@@ -160,7 +176,7 @@ class SnapshotRegistry:
     def _open_and_verify(self, snapshot: _Snapshot, entry_index: int, entry) -> int:
         path = snapshot.sources.get(entry.path)
         if path is None:
-            raise SourceMissing(f"для записи {entry.path!r} нет источника")
+            raise SourceMissing(f"для записи {_name(entry)!r} нет источника")
         try:
             descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
         except OSError as error:
@@ -180,9 +196,9 @@ class SnapshotRegistry:
         """Сверка через НАШ дескриптор, не через путь."""
         stat_result = os.fstat(descriptor)
         if stat_result.st_size != entry.size:
-            raise SourceChanged(f"размер {entry.path!r} изменился")
+            raise SourceChanged(f"размер {_name(entry)!r} изменился")
         if stat_result.st_mtime_ns != entry.mtime_ns:
-            raise SourceChanged(f"время изменения {entry.path!r} изменилось")
+            raise SourceChanged(f"время изменения {_name(entry)!r} изменилось")
 
     @staticmethod
     def _read_at(descriptor: int, offset: int, length: int) -> bytes:

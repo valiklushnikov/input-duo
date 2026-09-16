@@ -24,7 +24,13 @@ from duo_input.clipboard.wire import (
     PROTOCOL_MAJOR,
 )
 from duo_input.i18n import TranslationManager
-from duo_input.transfer.model import ENTRY_FILE, TransferEntry, TransferManifest
+from duo_input.transfer.model import (
+    ENTRY_FILE,
+    SkippedEntry,
+    TransferEntry,
+    TransferManifest,
+    encode_manifest,
+)
 from duo_input.transfer.pipe import ChunkPipe
 from duo_input.transfer.platform_files import UnsupportedPlatformError
 from duo_input.transfer.service import FileTransferService, TransferState
@@ -108,12 +114,12 @@ def _configure_file_runtime(qapp, qtbot, tmp_path, monkeypatch, values):
     return settings, window, _runtime_of(qapp), made
 
 
-def _activate_transfer(transfer, transfer_id: str) -> None:
+def _activate_transfer(transfer, transfer_id: str) -> ChunkPipe:
     _offer_transfer(transfer, transfer_id)
-    transfer.open_pipe(transfer_id, 0)
+    return transfer.open_pipe(transfer_id, 0)
 
 
-def _offer_transfer(transfer, transfer_id: str) -> None:
+def _offer_transfer(transfer, transfer_id: str, skipped=()) -> None:
     manifest = TransferManifest(
         transfer_id=transfer_id,
         entries=(
@@ -121,8 +127,11 @@ def _offer_transfer(transfer, transfer_id: str) -> None:
                 path="payload.bin", kind=ENTRY_FILE, size=10, mtime_ns=1
             ),
         ),
+        skipped=tuple(skipped),
     )
-    transfer.handle_message(Message(MessageType.FILE_OFFER, manifest.to_dict(), b""))
+    # Файловое сообщение принимается только от пира, объявившего files/2.
+    transfer.set_peer_capabilities(frozenset({CAPABILITY_CLIPBOARD, CAPABILITY_FILES}))
+    transfer.handle_message(Message(MessageType.FILE_OFFER, {}, encode_manifest(manifest)))
 
 
 class _ThreadRecordingTransfer(FileTransferService):
@@ -137,22 +146,17 @@ class _ThreadRecordingTransfer(FileTransferService):
         self.operation_threads.append(("open_pipe", threading.get_ident()))
         return super().open_pipe(transfer_id, entry_index)
 
-    @Slot(str, int, "qlonglong", int)
-    def request_read(
-        self, transfer_id: str, entry_index: int, offset: int, length: int
-    ) -> None:
+    def request_read(self, pipe, offset: int, length: int) -> None:
         self.operation_threads.append(("request_read", threading.get_ident()))
-        super().request_read(transfer_id, entry_index, offset, length)
+        super().request_read(pipe, offset, length)
 
-    def close_pipe(
-        self, transfer_id: str, entry_index: int, reason: str | None = None
-    ) -> None:
+    def close_pipe(self, pipe, reason: str | None = None) -> None:
         self.operation_threads.append(("close_pipe", threading.get_ident()))
-        super().close_pipe(transfer_id, entry_index, reason)
+        super().close_pipe(pipe, reason)
 
-    def finish_session(self, status: str) -> None:
+    def finish_session(self, status: str, pipes=None) -> None:
         self.operation_threads.append(("finish_session", threading.get_ident()))
-        super().finish_session(status)
+        super().finish_session(status, pipes)
 
     def detach_link(self) -> None:
         self.lifecycle_events.append("service-detach")
@@ -1079,10 +1083,14 @@ def test_disabling_and_reenabling_files_disconnects_the_old_cancel_slot(
         new_transfer = runtime.transfer
         _activate_transfer(new_transfer, "new")
         new_transfer.transfer_progress.emit(1, 10)
+        # Остановка уже вывела старый сервис из сессии, поэтому его состояние
+        # не отличает "отмена дошла" от "не дошла": смотрим на сам вызов.
+        old_cancels: list[str] = []
+        old_transfer.finish_session = lambda status, pipes=None: old_cancels.append(status)
 
         window.clipboard_page.cancel_button.click()
 
-        assert old_transfer.state is TransferState.TRANSFERRING
+        assert old_cancels == []
         assert new_transfer.state is TransferState.CANCELLED
     finally:
         runtime.stop()
@@ -1230,7 +1238,7 @@ def test_open_pipe_callback_returns_the_real_pipe_after_running_on_qt_thread(
         assert errors == []
         assert len(result) == 1 and isinstance(result[0], ChunkPipe)
         assert transfer.state is TransferState.TRANSFERRING
-        assert result[0] is transfer._pipes[("thread-open", 0)]
+        assert result[0] in transfer._streams
         assert worker_ids[0] != threading.get_ident()
         assert transfer.operation_threads
         assert all(
@@ -1255,38 +1263,36 @@ def test_one_way_backend_callbacks_reach_real_service_and_page_on_qt_thread(
     )
     try:
         transfer = runtime.transfer
-        _activate_transfer(transfer, "thread-one-way")
-        pipe = transfer._pipes[("thread-one-way", 0)]
+        pipe = _activate_transfer(transfer, "thread-one-way")
         transfer.operation_threads.clear()
 
+        def in_flight():
+            stream = transfer._streams.get(pipe)
+            return stream is not None and stream.read is not None and (
+                stream.read.offset, stream.read.length
+            ) == (0, 10)
+
         worker, _done, _result, errors, _worker_ids = _run_in_worker(
-            lambda: runtime.file_backend.callbacks["request_read"](
-                "thread-one-way", 0, 0, 10
-            )
+            lambda: runtime.file_backend.callbacks["request_read"](pipe, 0, 10)
         )
         worker.join(timeout=1.0)
         assert not worker.is_alive()
         assert errors == []
-        qtbot.waitUntil(
-            lambda: transfer._in_flight.get(("thread-one-way", 0)) == (0, 10),
-            timeout=5000,
-        )
+        qtbot.waitUntil(in_flight, timeout=5000)
 
         worker, _done, _result, errors, _worker_ids = _run_in_worker(
-            lambda: runtime.file_backend.callbacks["close_pipe"](
-                "thread-one-way", 0
-            )
+            lambda: runtime.file_backend.callbacks["close_pipe"](pipe)
         )
         worker.join(timeout=1.0)
         assert not worker.is_alive()
         assert errors == []
         qtbot.waitUntil(lambda: pipe.finished, timeout=5000)
-        assert ("thread-one-way", 0) not in transfer._pipes
+        assert pipe not in transfer._streams
 
         transfer.transfer_progress.emit(1, 10)
         assert window.clipboard_page.transfer_label.text()
         worker, _done, _result, errors, _worker_ids = _run_in_worker(
-            lambda: runtime.file_backend.callbacks["on_operation_finished"](0)
+            lambda: runtime.file_backend.callbacks["on_operation_finished"](0, (pipe,))
         )
         worker.join(timeout=1.0)
         assert not worker.is_alive()
@@ -1338,10 +1344,15 @@ def test_open_pipe_callback_called_on_qt_thread_does_not_deadlock(
         runtime.stop()
 
 
-def test_file_shutdown_invalidates_callbacks_and_stops_backend_before_detach(
+def test_file_shutdown_invalidates_callbacks_and_detaches_before_stopping_backend(
     qapp, qtbot, tmp_path, monkeypatch
 ):
-    """Mutation: detaching first lets a racing or retained COM callback touch service."""
+    """Callbacks die first, then the pipes are closed, then the STA is joined.
+
+    Joining the STA while a Read is blocked on a pipe would freeze the GUI for
+    the whole join timeout; invalidating the gateway first keeps a callback
+    that races the shutdown away from the detached service.
+    """
     monkeypatch.setattr(app_module, "FileTransferService", _ThreadRecordingTransfer)
     _settings_, window, runtime, made = _configure_file_runtime(
         qapp,
@@ -1353,14 +1364,16 @@ def test_file_shutdown_invalidates_callbacks_and_stops_backend_before_detach(
     old_transfer = runtime.transfer
     old_backend = made[0]
     callbacks = dict(old_backend.callbacks)
-    _activate_transfer(old_transfer, "shutdown")
+    pipe = _activate_transfer(old_transfer, "shutdown")
     old_transfer.operation_threads.clear()
     old_transfer.lifecycle_events.clear()
+    pipe_closed_at_stop = []
 
     def callback_while_stopping() -> None:
         old_transfer.lifecycle_events.append("backend-stop")
+        pipe_closed_at_stop.append(pipe.closed_reason is not None)
         worker, _done, _result, _errors, _worker_ids = _run_in_worker(
-            lambda: callbacks["on_operation_finished"](0)
+            lambda: callbacks["on_operation_finished"](0, (pipe,))
         )
         worker.join(timeout=1.0)
         assert not worker.is_alive()
@@ -1369,11 +1382,12 @@ def test_file_shutdown_invalidates_callbacks_and_stops_backend_before_detach(
     try:
         window.clipboard_page.files_checkbox.setChecked(False)
 
-        assert old_transfer.lifecycle_events == ["backend-stop", "service-detach"]
+        assert old_transfer.lifecycle_events == ["service-detach", "backend-stop"]
+        assert pipe_closed_at_stop == [True]
         assert old_transfer.operation_threads == []
 
         worker, _done, _result, errors, _worker_ids = _run_in_worker(
-            lambda: callbacks["on_operation_finished"](0)
+            lambda: callbacks["on_operation_finished"](0, (pipe,))
         )
         worker.join(timeout=1.0)
         assert not worker.is_alive()
@@ -1490,14 +1504,14 @@ def test_repeated_enable_disable_keeps_only_current_callback_delivery(
         window.clipboard_page.files_checkbox.setChecked(False)
         window.clipboard_page.files_checkbox.setChecked(True)
         current_transfer = runtime.transfer
-        _activate_transfer(current_transfer, "current")
+        pipe = _activate_transfer(current_transfer, "current")
         old_transfer.operation_threads.clear()
         current_transfer.operation_threads.clear()
 
         workers = [
-            _run_in_worker(lambda: old_callback(0))[0],
+            _run_in_worker(lambda: old_callback(0, (pipe,)))[0],
             _run_in_worker(
-                lambda: runtime.file_backend.callbacks["on_operation_finished"](0)
+                lambda: runtime.file_backend.callbacks["on_operation_finished"](0, (pipe,))
             )[0],
         ]
         for worker in workers:
@@ -1513,5 +1527,94 @@ def test_repeated_enable_disable_keeps_only_current_callback_delivery(
             for operation, _thread in current_transfer.operation_threads
             if operation == "finish_session"
         ] == ["finish_session"]
+    finally:
+        runtime.stop()
+
+
+def test_cancel_is_available_as_soon_as_a_transfer_starts(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    """A paste stalled before its first chunk must still be cancellable."""
+    _settings_, window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        assert not window.clipboard_page.cancel_button.isEnabled()
+
+        _activate_transfer(runtime.transfer, "stalled")
+
+        assert window.clipboard_page.cancel_button.isEnabled()
+        window.clipboard_page.cancel_button.click()
+        assert runtime.transfer.state is TransferState.CANCELLED
+        assert not window.clipboard_page.cancel_button.isEnabled()
+    finally:
+        runtime.stop()
+
+
+def test_skipped_entries_of_an_offer_are_reported_on_the_page(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    _settings_, window, runtime, _made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        before = window.clipboard_page.events_list.count()
+
+        _offer_transfer(
+            runtime.transfer,
+            "with-skips",
+            skipped=(
+                SkippedEntry(path="Private/junction", reason="reparse_point"),
+                SkippedEntry(path="Private/locked", reason="unreadable"),
+            ),
+        )
+
+        assert window.clipboard_page.events_list.count() == before + 1
+        text = window.clipboard_page.events_list.item(0).text()
+        assert "2" in text
+        assert "junction" in text and "locked" in text
+        assert "Private" not in text
+    finally:
+        runtime.stop()
+
+
+def test_file_shutdown_does_not_wait_on_a_read_blocked_in_the_sta(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    """A Read blocked on its pipe is woken before the STA join begins."""
+    _settings_, window, runtime, made = _configure_file_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    transfer = runtime.transfer
+    pipe = _activate_transfer(transfer, "blocked")
+    woken = threading.Event()
+
+    def blocked_read() -> None:
+        try:
+            pipe.wait(30.0)
+        except Exception:  # PipeClosed is the expected wake-up
+            pass
+        woken.set()
+
+    reader = threading.Thread(target=blocked_read, daemon=True)
+    reader.start()
+    reader_released_before_join = []
+    made[0].stop_hook = lambda: reader_released_before_join.append(woken.wait(1.0))
+    try:
+        window.clipboard_page.files_checkbox.setChecked(False)
+
+        assert reader_released_before_join == [True]
     finally:
         runtime.stop()

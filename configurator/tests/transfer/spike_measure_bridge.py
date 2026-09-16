@@ -53,13 +53,14 @@ from duo_input.clipboard.wire import (
 )
 from duo_input.transfer.service import FileTransferService
 from duo_input.transfer.windows_com import (
+    S_FALSE,
     S_OK,
     TYMED_ISTREAM,
     call_get_data_medium,
     call_release,
     call_stream_read,
 )
-from duo_input.transfer.windows_files import WindowsFileClipboardBackend, post_to_service
+from duo_input.transfer.windows_files import ServiceCallbackGateway, WindowsFileClipboardBackend
 
 from spike_qt_responsiveness import Instrument
 
@@ -521,41 +522,27 @@ def _run(
 
     # ------------------------------------------------------ колбэки моста
     held_pipe: list = []
-    rtt_starts: dict[tuple[str, int, int], float] = {}
+    rtt_starts: dict[int, float] = {}
     rtt_samples_ms: list[float] = []
+    # Тот же шлюз, что собирает app.py: прибор меряет продуктовую дорогу из
+    # COM-потока в Qt, а не собственную.
+    gateway = ServiceCallbackGateway(receiver)
 
     def _open_pipe(t_id: str, entry_index: int):
-        # Синхронно и БЕЗ post_to_service - по контракту: open_pipe уже
-        # объявлен синхронным (см. бриф задачи), и это тот самый известный
-        # дефект (TRANSFER_BEGIN и сигнал уходят прямо с чужого потока),
-        # который эта задача не чинит, а измеряет как есть.
-        pipe = receiver.open_pipe(t_id, entry_index)
+        pipe = gateway.open_pipe(t_id, entry_index)
         held_pipe.append(pipe)
         return pipe
 
-    def _request_read(t_id: str, entry_index: int, offset: int, length: int) -> None:
-        # request_read - Slot; вызывается из потока-имитатора Проводника,
-        # поэтому единственная законная дорога в Qt - post_to_service.
-        rtt_starts[(t_id, entry_index, offset)] = time.perf_counter()
-        post_to_service(receiver, "request_read", t_id, entry_index, offset, length)
-
-    def _close_pipe(t_id: str, entry_index: int, reason=None) -> None:
-        # close_pipe тоже объявлен синхронным - никакого Qt внутри него нет
-        # (см. service.py): только словарь и pipe.finish()/close().
-        receiver.close_pipe(t_id, entry_index, reason)
-
-    def _on_operation_finished(result: int) -> None:
-        # Не задействуется этим спайком (см. модульный docstring: мы не
-        # проходим EndOperation), но set_callbacks требует все четыре.
-        status = "completed" if result == S_OK else "failed"
-        post_to_service(receiver, "finish_session", status)
+    def _request_read(pipe, offset: int, length: int) -> None:
+        # Один поток на передачу, поэтому смещение однозначно связывает
+        # запрос с ответом для замера RTT.
+        rtt_starts[offset] = time.perf_counter()
+        gateway.request_read(pipe, offset, length)
 
     def _on_message_for_rtt(message: Message) -> None:
         if message.type is not MessageType.FILE_CHUNK:
             return
-        header = message.header
-        key = (header.get("transfer_id"), header.get("entry_index"), header.get("offset"))
-        started = rtt_starts.pop(key, None)
+        started = rtt_starts.pop(message.header.get("offset"), None)
         if started is not None:
             rtt_samples_ms.append((time.perf_counter() - started) * 1000.0)
 
@@ -564,7 +551,9 @@ def _run(
     backend.start()
     if not _pump(app, lambda: backend.thread_id is not None, CONNECT_TIMEOUT_S):
         raise RuntimeError("поток STA не поднялся за отведённое время")
-    backend.set_callbacks(_open_pipe, _request_read, _close_pipe, _on_operation_finished)
+    backend.set_callbacks(
+        _open_pipe, _request_read, gateway.close_pipe, gateway.on_operation_finished
+    )
 
     publish_failures: list[str] = []
     backend.publish_failed.connect(publish_failures.append)
@@ -629,11 +618,9 @@ def _run(
         try:
             # GetData тоже вызывается ЗДЕСЬ, на потоке-имитаторе, а не на
             # Qt-потоке заранее: настоящий Проводник берёт IStream с СВОЕГО
-            # потока, и это ровно то место, где известный дефект open_pipe
-            # (Qt-сигнал прямо с чужого потока - см. комментарий у
-            # _open_pipe выше) на самом деле возникает. Вызвав GetData
-            # заранее с Qt-потока, эта проверка обошла бы дефект стороной,
-            # вместо того чтобы измерить систему как она есть.
+            # потока, и open_pipe идёт через шлюз ровно так же, как в
+            # продукте. Вызов с Qt-потока прошёл бы шлюз напрямую и измерил
+            # бы не ту дорогу.
             result, medium = call_get_data_medium(
                 data_object.pointer, data_object.cf_contents, 0, TYMED_ISTREAM
             )
@@ -650,7 +637,8 @@ def _run(
             position = 0
             while position < size:
                 payload, hresult = call_stream_read(stream_pointer, read_chunk_bytes)
-                if hresult != S_OK:
+                # S_FALSE - законный короткий хвост файла (IStream::Read).
+                if hresult not in (S_OK, S_FALSE):
                     # PipeStream._read возвращает тот же STG_E_READFAULT и на
                     # закрытие пира по отмене, и на СВОЙ тридцатисекундный
                     # READ_TIMEOUT_SECONDS (windows_com.py). requested_at не
@@ -764,11 +752,9 @@ def _run(
 
         if not cancelled:
             if not emulator_digest:
-                # ChunkPipe.wait() возвращает True и на finished без единого
-                # чанка в очереди, take() отдаёт b"", и PipeStream._read
-                # падает в S_OK с pcbRead=0 - то есть pipe, законченный
-                # раньше срока (ровно симптом моста, потерявшего хвост
-                # файла), выглядит для цикла имитатора как чистый EOF.
+                # Мост, потерявший хвост файла, теперь отвечает
+                # STG_E_READFAULT, но пустой ответ всё равно выводит цикл
+                # имитатора раньше срока - отсюда эта проверка.
                 raise RuntimeError(
                     f"поток кончился на {delivered} из {size} Б - мост потерял хвост"
                 )

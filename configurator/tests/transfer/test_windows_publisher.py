@@ -37,20 +37,33 @@ from duo_input.clipboard.wire import (
     MessageType,
 )
 from duo_input.transfer import windows_files
-from duo_input.transfer.model import ENTRY_DIRECTORY, ENTRY_FILE, TransferEntry, TransferManifest
+from duo_input.transfer.model import (
+    ENTRY_DIRECTORY,
+    ENTRY_FILE,
+    TransferEntry,
+    TransferManifest,
+    encode_manifest,
+)
 from duo_input.transfer.pipe import ChunkPipe
 from duo_input.transfer.service import FileTransferService
 from duo_input.transfer.windows_com import (
+    DATADIR_GET,
+    FORMATETC,
     IID_IASYNCCAPABILITY,
     S_OK,
     TYMED_HGLOBAL,
     TYMED_ISTREAM,
+    _ENUM_CLONE,
+    _ENUM_NEXT,
+    _slot,
     call_add_ref,
+    call_enum_format_etc_pointer,
     call_get_data,
     call_get_data_medium,
     call_query_interface,
     call_release,
     call_stream_read,
+    call_stream_stat,
     guid_from_string,
     register_clipboard_format,
 )
@@ -70,6 +83,9 @@ HUGE_OFFSET = 4294705152
 
 #: E_OUTOFMEMORY: отказ по существу, а не занятость буфера.
 E_OUTOFMEMORY = 0x8007000E - (1 << 32)
+
+#: HRESULT_FROM_WIN32(ERROR_CANCELLED) в знаковом виде - так его отдаёт ctypes.
+_CANCELLED = 0x800704C7 - (1 << 32)
 
 #: Потолок для каждого ожидания в этом файле. Регрессия обязана краснеть, а
 #: не висеть.
@@ -120,8 +136,9 @@ class _FakeLink(QObject):
         super().__init__()
         self.sent: list = []
 
-    def send(self, message) -> None:
+    def send(self, message) -> bool:
         self.sent.append(message)
+        return True
 
     def close(self) -> None: ...
 
@@ -141,9 +158,12 @@ class _Callbacks:
 
     def __init__(self) -> None:
         self.opened: list[tuple[str, int]] = []
-        self.closed: list[tuple[str, int, object]] = []
+        #: (номер трубы в self.pipes, reason) - поток опознаётся трубой.
+        self.closed: list[tuple[int, object]] = []
+        #: (номер трубы, offset, length)
         self.reads: list[tuple] = []
-        self.finished: list[int] = []
+        #: (HRESULT, номера труб операции)
+        self.finished: list[tuple[int, tuple[int, ...]]] = []
         self.pipes: list[ChunkPipe] = []
 
     def install(self, backend) -> "_Callbacks":
@@ -158,14 +178,17 @@ class _Callbacks:
         self.pipes.append(pipe)
         return pipe
 
-    def request_read(self, *args) -> None:
-        self.reads.append(args)
+    def _number(self, pipe) -> int:
+        return next(index for index, known in enumerate(self.pipes) if known is pipe)
 
-    def close_pipe(self, transfer_id: str, entry_index: int, reason=None) -> None:
-        self.closed.append((transfer_id, entry_index, reason))
+    def request_read(self, pipe, offset, length) -> None:
+        self.reads.append((self._number(pipe), offset, length))
 
-    def on_operation_finished(self, result: int) -> None:
-        self.finished.append(result)
+    def close_pipe(self, pipe, reason=None) -> None:
+        self.closed.append((self._number(pipe), reason))
+
+    def on_operation_finished(self, result: int, pipes) -> None:
+        self.finished.append((result, tuple(self._number(pipe) for pipe in pipes)))
 
 
 @pytest.fixture
@@ -345,34 +368,35 @@ def test_the_argument_types_are_read_from_the_receiving_object(qapp):
     Разбор по isinstance не может знать объявленных типов слота и ошибается
     на qlonglong по построению - ровно этот дефект плана всплывал трижды.
     """
-    service = FileTransferService()
+    recorder = _OverloadRecorder()
 
-    assert windows_files._declared_parameter_types(service, "request_read", 4) == (
+    assert windows_files._declared_parameter_types(recorder, "note", 2) == (
         "QString",
-        "int",
         "qlonglong",
-        "int",
     )
 
 
 def test_an_offset_above_two_to_the_thirtyone_reaches_the_real_service_intact(qtbot):
-    """Смещение в 4 ГиБ доезжает до настоящего слота настоящего сервиса.
+    """Смещение в 4 ГиБ доезжает через шлюз до настоящего сервиса.
 
-    Q_ARG(int, ...) - это 32-битный C++ int: на таком смещении он
-    переполняется, а на маленьком просто не совпадает с объявленным
-    qlonglong, и invokeMethod возвращает False. В обоих случаях чтение не
-    выходит на провод, и единственный симптом - таймаут IStream::Read через
-    тридцать секунд.
+    Шлюз несёт аргументы в своей очереди как объекты Python, а через Qt
+    передаёт только уведомление без аргументов: 32-битному C++ int здесь
+    негде переполниться, и этот тест держит это свойство.
     """
     service = FileTransferService()
     link = _FakeLink()
     service.attach_link(link)
     service.set_peer_capabilities(frozenset({CAPABILITY_CLIPBOARD, CAPABILITY_FILES}))
     manifest = _manifest(size=8 * 1024 * 1024 * 1024)
-    service.handle_message(Message(MessageType.FILE_OFFER, manifest.to_dict(), b""))
-    service.open_pipe("t-1", 0)
+    service.handle_message(Message(MessageType.FILE_OFFER, {}, encode_manifest(manifest)))
+    pipe = service.open_pipe("t-1", 0)
+    gateway = ServiceCallbackGateway(service)
 
-    post_to_service(service, "request_read", "t-1", 0, HUGE_OFFSET, 65536)
+    worker = threading.Thread(
+        target=lambda: gateway.request_read(pipe, HUGE_OFFSET, 65536), name="sta-standin"
+    )
+    worker.start()
+    worker.join(timeout=DEADLINE_S)
     qtbot.waitUntil(
         lambda: bool([m for m in link.sent if m.type is MessageType.FILE_READ]),
         timeout=5000,
@@ -816,6 +840,59 @@ def test_a_retired_publication_is_let_go_once_the_shell_lets_go(
     qtbot.waitUntil(lambda: started.retired_publications == 0, timeout=5000)
 
 
+def test_exported_children_survive_parent_pruning_until_their_final_release(
+    started, qtbot, monkeypatch
+):
+    """COM owns each exported child independently of the retired parent.
+
+    This follows the real ownership sequence: GetData hands out an IStream,
+    EnumFormatEtc hands out an enumerator, Clone hands out another child, the
+    clipboard is republished, the retired IDataObject is pruned, Python GC
+    runs, and only then are all three child pointers invoked and released.
+    """
+    monkeypatch.setattr(windows_files, "_ole_set_clipboard", lambda pointer: S_OK)
+    callbacks = _Callbacks().install(started)
+
+    started.publish(_manifest("t-old"), origin_marker=b"origin:old")
+    qtbot.waitUntil(lambda: started.published_object is not None, timeout=5000)
+    old = started.published_object
+    stream_result, medium = call_get_data_medium(
+        old.pointer, old.cf_contents, 0, TYMED_ISTREAM
+    )
+    enum_result, enum_pointer = call_enum_format_etc_pointer(old.pointer, DATADIR_GET)
+    clone_pointer = ctypes.c_void_p()
+    clone_result = _slot(enum_pointer, 6, _ENUM_CLONE)(
+        enum_pointer, ctypes.byref(clone_pointer)
+    )
+    del old
+
+    started.publish(_manifest("t-new"), origin_marker=b"origin:new")
+    qtbot.waitUntil(
+        lambda: started.published_object is not None
+        and started.published_object._manifest.transfer_id == "t-new",
+        timeout=5000,
+    )
+    qtbot.waitUntil(lambda: started.retired_publications == 0, timeout=5000)
+    gc.collect()
+
+    assert (stream_result, enum_result, clone_result) == (S_OK, S_OK, S_OK)
+    callbacks.pipes[0].push(b"abcd")
+    assert call_stream_read(ctypes.c_void_p(medium.data), 4) == (b"abcd", S_OK)
+    assert call_stream_stat(ctypes.c_void_p(medium.data)) == (4, S_OK)
+
+    for pointer in (enum_pointer, clone_pointer):
+        item = FORMATETC()
+        fetched = ctypes.wintypes.ULONG()
+        assert _slot(pointer, 3, _ENUM_NEXT)(
+            pointer, 1, ctypes.byref(item), ctypes.byref(fetched)
+        ) == S_OK
+        assert fetched.value == 1
+
+    assert call_release(medium.data) == 0
+    assert call_release(enum_pointer) == 0
+    assert call_release(clone_pointer) == 0
+
+
 def test_teardown_waits_past_the_floor_while_the_shell_still_holds_on(
     backend, qtbot, monkeypatch, caplog
 ):
@@ -889,24 +966,22 @@ def test_every_callback_reaches_the_data_object_the_backend_builds(backend):
     payload, read_result = call_stream_read(ctypes.c_void_p(medium.data), 4)
     responder.join(timeout=DEADLINE_S)
     call_release(medium.data)
-    data_object.on_operation_finished(0)
+    data_object._end_operation(None, 0, None, 1)
 
     assert (payload, read_result) == (b"abcd", S_OK)
     assert callbacks.opened == [("t-1", 0)]
-    assert callbacks.reads == [("t-1", 0, 0, 4)]
-    assert callbacks.closed == [("t-1", 0, None)]
-    assert callbacks.finished == [0]
+    assert callbacks.reads == [(0, 0, 4)]
+    assert callbacks.closed == [(0, None)]
+    assert callbacks.finished == [(0, (0,))]
 
 
 def test_a_second_read_of_one_entry_opens_and_closes_a_second_pipe(backend):
     """Два GetData по одной записи - это две трубы, и бэкенд их не склеивает.
 
     ChunkPipe не знает смещений, поэтому второй GetData по исчерпанной
-    записи законно открывает ВТОРУЮ трубу, а подписи колбэков их не
-    различают. Бэкенд намеренно не дедуплицирует: пара
-    (transfer_id, entry_index) именует ЗАПИСЬ, а не одно открытие, и
-    проглоченное второе открытие оставило бы Проводника с трубой, в которую
-    никто не пишет.
+    записи законно открывает ВТОРУЮ трубу. Пара (transfer_id, entry_index)
+    именует ЗАПИСЬ, а не одно открытие, поэтому поток в колбэках опознаётся
+    своей трубой: закрытие второго не смеет закрыть первый.
     """
     callbacks = _Callbacks().install(backend)
     data_object = backend.build_data_object(_manifest(), b"origin:1")
@@ -918,7 +993,7 @@ def test_a_second_read_of_one_entry_opens_and_closes_a_second_pipe(backend):
         call_release(medium.data)
 
     assert callbacks.opened == [("t-1", 0), ("t-1", 0)]
-    assert callbacks.closed == [("t-1", 0, None), ("t-1", 0, None)]
+    assert callbacks.closed == [(0, None), (1, None)]
     assert len(callbacks.pipes) == 2
     assert callbacks.pipes[0] is not callbacks.pipes[1]
 
@@ -982,3 +1057,95 @@ def test_the_contents_format_is_available_on_the_real_clipboard(started, qtbot):
     assert ctypes.windll.user32.IsClipboardFormatAvailable(cf), (
         "формат содержимого отсутствует - вставка отдала бы пустые файлы"
     )
+
+
+# ------------------------------------------------ идентичность операции и HRESULT
+
+
+@pytest.mark.parametrize(
+    ("hresult", "status"),
+    [
+        (0, "completed"),
+        (0x800704C7, "cancelled"),
+        (_CANCELLED, "cancelled"),
+        (0x80004005 - (1 << 32), "failed"),
+        (0x80004005, "failed"),
+    ],
+)
+def test_end_operation_hresults_map_to_session_statuses(hresult, status):
+    # ctypes отдаёт HRESULT знаковым c_long: отмена приходит как
+    # -2147023673, и сравнение с 0x800704C7 без нормализации её не узнаёт.
+    assert windows_files.operation_status(hresult) == status
+
+
+def test_a_signed_cancellation_reaches_the_service_as_cancelled(qapp, qtbot):
+    service = FileTransferService()
+    link = _FakeLink()
+    service.attach_link(link)
+    service.set_peer_capabilities(frozenset({CAPABILITY_FILES}))
+    service.handle_message(Message(MessageType.FILE_OFFER, {}, encode_manifest(_manifest())))
+    gateway = ServiceCallbackGateway(service)
+    pipe = service.open_pipe("t-1", 0)
+    cancelled = []
+    service.transfer_cancelled.connect(lambda: cancelled.append(True))
+
+    worker = threading.Thread(
+        target=lambda: gateway.on_operation_finished(_CANCELLED, (pipe,))
+    )
+    worker.start()
+    worker.join(timeout=DEADLINE_S)
+    qtbot.waitUntil(lambda: bool(cancelled), timeout=5000)
+
+    assert [m.header["status"] for m in link.sent if m.type is MessageType.TRANSFER_END] == [
+        "cancelled"
+    ]
+
+
+def test_end_operation_names_only_the_streams_of_its_own_operation(backend):
+    callbacks = _Callbacks().install(backend)
+    data_object = backend.build_data_object(_manifest(), b"origin:1")
+
+    _result, medium = call_get_data_medium(
+        data_object.pointer, data_object.cf_contents, 0, TYMED_ISTREAM
+    )
+    call_release(medium.data)
+    data_object._end_operation(None, 0, None, 1)
+    _result, medium = call_get_data_medium(
+        data_object.pointer, data_object.cf_contents, 0, TYMED_ISTREAM
+    )
+    call_release(medium.data)
+    data_object._end_operation(None, _CANCELLED, None, 1)
+    data_object._end_operation(None, 0, None, 1)
+
+    assert callbacks.finished == [(0, (0,)), (_CANCELLED, (1,)), (0, ())]
+
+
+def test_teardown_keeps_pumping_while_an_exported_stream_is_still_held(
+    backend, qtbot, monkeypatch, caplog
+):
+    # Счётчик самого IDataObject может уже вернуться к 1, а выданный им
+    # IStream всё ещё у оболочки: погасить апартамент в этот момент значит
+    # оборвать её вызов на полпути.
+    monkeypatch.setattr(windows_files, "_ole_set_clipboard", lambda pointer: S_OK)
+    monkeypatch.setattr(windows_files, "_TEARDOWN_PUMP_S", 0.05)
+    monkeypatch.setattr(windows_files, "_TEARDOWN_CEILING_S", 0.6)
+    _Callbacks().install(backend)
+    backend.start()
+    qtbot.waitUntil(lambda: backend.thread_id is not None, timeout=5000)
+    backend.publish(_manifest(), origin_marker=b"origin:1")
+    qtbot.waitUntil(lambda: backend.published_object is not None, timeout=5000)
+    published = backend.published_object
+    result, medium = call_get_data_medium(
+        published.pointer, published.cf_contents, 0, TYMED_ISTREAM
+    )
+    assert result == S_OK
+    assert published.refcount == 1
+    del published
+
+    with caplog.at_level(logging.WARNING):
+        started_at = time.monotonic()
+        backend.stop()
+        waited = time.monotonic() - started_at
+
+    assert waited >= 0.5, f"апартамент погашен через {waited:.3f} с при живом потоке"
+    call_release(medium.data)

@@ -97,6 +97,15 @@ logger = logging.getLogger(__name__)
 _FILE_ATTRIBUTE_NORMAL = 0x80
 
 
+def descriptor_size() -> int:
+    """Размер FILEDESCRIPTORW в этой сборке - для самопроверки упакованной программы.
+
+    Функция, а не ctypes.sizeof у вызывающего: ctypes разрешён только в
+    windows_com и здесь (граница проверяется тестом по всему пакету).
+    """
+    return ctypes.sizeof(FILEDESCRIPTORW)
+
+
 def descriptor_entries(manifest: TransferManifest) -> tuple[TransferEntry, ...]:
     """Return entries in manifest order, which is the Explorer ``lindex`` order."""
     return manifest.entries
@@ -137,6 +146,60 @@ FORMAT_DROP_EFFECT_NAME = "Preferred DropEffect"
 FORMAT_ORIGIN_NAME = "application/x-duo-input-origin"
 
 
+class ExportedObjects:
+    """COM-объекты, чей указатель выдан наружу, - до их последнего Release.
+
+    Время жизни ComObject в Python и счётчик ссылок COM никак не связаны.
+    Поток, перечислитель и клон, выданные оболочке, держал только объект
+    данных, который их выдал; а объект данных бэкенд отпускает, когда
+    оболочка отпустила ЕГО - не их. Следующий Read или Release по ещё живому
+    у оболочки указателю уходил в освобождённую vtable.
+
+    Поэтому выданный объект держит реестр, и отпускает его последний Release.
+    Отпускает не сразу: хук последнего Release исполняется внутри обратного
+    вызова самого объекта, и освободить его там значило бы вернуться из
+    обратного вызова в освобождённый переходник. Отпущенный объект ждёт
+    ``collect()`` - его зовёт насос STA и каждая следующая выдача.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._live: set[ComObject] = set()
+        self._released: list[ComObject] = []
+
+    @property
+    def live_count(self) -> int:
+        with self._lock:
+            return len(self._live)
+
+    def export(
+        self, obj: ComObject, on_release: Callable[[], None] | None = None
+    ) -> ctypes.c_void_p:
+        """Удерживать ``obj`` до последнего Release; вернуть его указатель."""
+
+        def released() -> None:
+            with self._lock:
+                self._live.discard(obj)
+                self._released.append(obj)
+            if on_release is not None:
+                on_release()
+
+        obj.on_last_release = released
+        with self._lock:
+            self._released.clear()
+            self._live.add(obj)
+        return obj.pointer
+
+    def collect(self) -> None:
+        """Отпустить объекты, чей последний Release уже вернулся."""
+        with self._lock:
+            self._released.clear()
+
+
+#: Реестр для объектов данных, собранных без бэкенда (самопроверка, тесты).
+_DEFAULT_EXPORTS = ExportedObjects()
+
+
 class FormatEnumerator(ComObject):
     """IEnumFORMATETC. Проводник вправе спросить, что мы вообще предлагаем.
 
@@ -145,12 +208,11 @@ class FormatEnumerator(ComObject):
     "обходится у всех и всегда" - разные утверждения, а цена его невелика.
     """
 
-    def __init__(self, formats: list[tuple[int, int, int]]) -> None:
+    def __init__(self, formats: list[tuple[int, int, int]], exports: ExportedObjects) -> None:
         super().__init__([IID_IUNKNOWN, IID_IENUMFORMATETC])
         self._formats = list(formats)
         self._cursor = 0
-        #: Клоны держатся здесь: см. _clone.
-        self._clones: list[FormatEnumerator] = []
+        self._exports = exports
         self.extend_vtable(
             [
                 _ENUM_NEXT(self._next),
@@ -189,12 +251,11 @@ class FormatEnumerator(ComObject):
     def _clone(self, _this, out) -> int:
         if not out:
             return E_POINTER
-        clone = FormatEnumerator(self._formats)
+        clone = FormatEnumerator(self._formats, self._exports)
         clone._cursor = self._cursor
-        # Клон обязан пережить возврат: держим его на себе, иначе Python
-        # соберёт объект, а Проводник уйдёт по освобождённому адресу.
-        self._clones.append(clone)
-        ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = clone.pointer
+        # Клон обязан пережить и возврат, и сам перечислитель: его держит
+        # реестр до последнего Release.
+        ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = self._exports.export(clone)
         return S_OK
 
 
@@ -242,8 +303,10 @@ class VirtualFilesDataObject(ComObject):
         close_pipe,
         origin_marker: bytes,
         async_capability: bool = True,
+        exports: ExportedObjects | None = None,
     ) -> None:
         super().__init__([IID_IUNKNOWN, IID_IDATAOBJECT])
+        self._exports = exports if exports is not None else _DEFAULT_EXPORTS
         self._manifest = manifest
         self._open_pipe = open_pipe
         self._request_read = request_read
@@ -251,18 +314,17 @@ class VirtualFilesDataObject(ComObject):
         self._origin_marker = origin_marker
         self.async_mode = False
         self.in_operation = False
-        #: Владелец подставляет сюда свой обработчик завершения сессии.
-        self.on_operation_finished: Callable[[int], None] | None = None
-        #: lindex -> последний выданный по этому индексу PipeStream.
+        #: Владелец подставляет сюда свой обработчик завершения сессии:
+        #: (HRESULT, трубы потоков, выданных этой операцией).
+        self.on_operation_finished: Callable[[int, tuple], None] | None = None
+        #: lindex -> последний выданный по этому индексу PipeStream. Только
+        #: для диагностики: время жизни выданных потоков держит реестр.
         self.streams: dict[int, PipeStream] = {}
-        #: ВСЕ выданные потоки, по порядку. Словарь выше хранит по одному на
-        #: индекс, и второй GetData по тому же lindex вытеснил бы из него
-        #: предыдущий поток - то есть освободил бы его, пока указатель на
-        #: него ещё у Проводника. Здесь не вытесняется ничего.
-        self._retained_streams: list[PipeStream] = []
+        #: Трубы потоков, выданных с прошлого EndOperation. По ним сервис
+        #: отличает завершение ЭТОЙ операции от запоздавшего чужого.
+        self._operation_pipes: list = []
         #: Для диагностики: что и в каком порядке спросил Проводник.
         self.get_data_calls: list[tuple[int, int]] = []
-        self._enumerators: list[FormatEnumerator] = []
         #: Хэндлы, которые мы выдали. Владение ими перешло к вызывающему
         #: (ReleaseStgMedium освободит их), поэтому список - это запись о
         #: выданном для диагностики, а не право что-то из него освободить.
@@ -400,18 +462,21 @@ class VirtualFilesDataObject(ComObject):
                 "open_pipe отказал для записи %d: %s", index, type(error).__name__
             )
             return E_FAIL
+        request_read, close_pipe = self._request_read, self._close_pipe
         stream = PipeStream(
             pipe,
             size=entry.size,
-            request=lambda offset, length, i=index: self._request_read(
-                transfer_id, i, offset, length
-            ),
-            on_release=lambda i=index: self._close_pipe(transfer_id, i, None),
+            # Поток опознаётся своей трубой, а не парой (transfer_id, lindex):
+            # второй GetData по той же записи - второй поток, и отпускание
+            # одного не смеет закрыть другой.
+            request=lambda offset, length, p=pipe: request_read(p, offset, length),
         )
         self.streams[index] = stream
-        self._retained_streams.append(stream)
+        self._operation_pipes.append(pipe)
         medium.tymed = TYMED_ISTREAM
-        medium.data = stream.pointer
+        medium.data = self._exports.export(
+            stream, on_release=lambda p=pipe: close_pipe(p, None)
+        )
         return S_OK
 
     def _enum_format_etc(self, _this, direction, ppenum) -> int:
@@ -419,10 +484,10 @@ class VirtualFilesDataObject(ComObject):
             return E_NOTIMPL
         if not ppenum:
             return E_POINTER
-        enumerator = FormatEnumerator(self._advertised())
-        # Держим на себе по той же причине, что и потоки.
-        self._enumerators.append(enumerator)
-        ctypes.cast(ppenum, ctypes.POINTER(ctypes.c_void_p))[0] = enumerator.pointer
+        enumerator = FormatEnumerator(self._advertised(), self._exports)
+        ctypes.cast(ppenum, ctypes.POINTER(ctypes.c_void_p))[0] = self._exports.export(
+            enumerator
+        )
         return S_OK
 
     def _get_data_here(self, _this, _fmt, _medium) -> int:
@@ -479,11 +544,12 @@ class VirtualFilesDataObject(ComObject):
 
     def _end_operation(self, _this, result, _reserved, _effects) -> int:
         self.in_operation = False
+        pipes, self._operation_pipes = tuple(self._operation_pipes), []
         if self.on_operation_finished is not None:
             try:
                 # Источник истины о завершении сессии - тот, что записал спайк 1
                 # (спека §9). НЕ переопределяйте его из этого плана.
-                self.on_operation_finished(int(result))
+                self.on_operation_finished(int(result), pipes)
             except BaseException as error:  # noqa: BLE001 - см. ComObject._release
                 # Ровно как у хука последнего Release: чужая ошибка не
                 # выходит через ctypes (там она стала бы неопределённым
@@ -673,6 +739,26 @@ def post_to_service(service, slot: str, *args) -> bool:
     return True
 
 
+#: HRESULT_FROM_WIN32(ERROR_CANCELLED): так EndOperation сообщает об отмене
+#: оператором (спайк 1, Run C).
+HRESULT_CANCELLED = 0x800704C7
+
+
+def operation_status(hresult: int) -> str:
+    """Статус сессии по HRESULT из EndOperation.
+
+    ctypes отдаёт HRESULT знаковым c_long, так что отмена приходит как
+    -2147023673; сравнение без приведения к беззнаковым 32 битам её не узнаёт
+    и записывает отменённую вставку в неудавшиеся.
+    """
+    code = int(hresult) & 0xFFFFFFFF
+    if code == 0:
+        return "completed"
+    if code == HRESULT_CANCELLED:
+        return "cancelled"
+    return "failed"
+
+
 class _ServiceInvocation:
     """One service call waiting at the sole COM-to-Qt boundary."""
 
@@ -719,23 +805,16 @@ class ServiceCallbackGateway(QObject):
             raise invocation.error
         return invocation.result
 
-    def request_read(
-        self, transfer_id: str, entry_index: int, offset: int, length: int
-    ) -> None:
-        self._enqueue(
-            "request_read", (transfer_id, entry_index, offset, length), blocking=False
-        )
+    def request_read(self, pipe, offset: int, length: int) -> None:
+        self._enqueue("request_read", (pipe, offset, length), blocking=False)
 
-    def close_pipe(
-        self, transfer_id: str, entry_index: int, reason: str | None = None
-    ) -> None:
-        self._enqueue(
-            "close_pipe", (transfer_id, entry_index, reason), blocking=False
-        )
+    def close_pipe(self, pipe, reason: str | None = None) -> None:
+        self._enqueue("close_pipe", (pipe, reason), blocking=False)
 
-    def on_operation_finished(self, result: int) -> None:
-        status = "completed" if result == 0 else "failed"
-        self._enqueue("finish_session", (status,), blocking=False)
+    def on_operation_finished(self, result: int, pipes) -> None:
+        self._enqueue(
+            "finish_session", (operation_status(result), tuple(pipes)), blocking=False
+        )
 
     def invalidate(self) -> None:
         """Detach the target and release synchronous callers before shutdown."""
@@ -840,6 +919,10 @@ class WindowsFileClipboardBackend(QObject):
         #: _retire: выбросить их в момент замены значило бы освободить
         #: vtable под работающей вставкой.
         self._retired: list[VirtualFilesDataObject] = []
+        #: Потоки и перечислители, выданные нашими объектами. Переживают и
+        #: смену публикации, и перезапуск: указатель у оболочки может
+        #: пережить и то, и другое.
+        self._exports = ExportedObjects()
         self._callbacks: dict[str, Callable] = {}
         self._start_error: BaseException | None = None
 
@@ -970,6 +1053,7 @@ class WindowsFileClipboardBackend(QObject):
             close_pipe=self._callbacks["close_pipe"],
             origin_marker=origin_marker,
             async_capability=ASYNC_CAPABILITY_REQUIRED,
+            exports=self._exports,
         )
         data_object.on_operation_finished = self._callbacks["on_operation_finished"]
         return data_object
@@ -1008,6 +1092,7 @@ class WindowsFileClipboardBackend(QObject):
             if pending is not None:
                 self._publish_now(*pending)
             self._prune_retired()
+            self._exports.collect()
             self._drain_messages(message)
             if self._stopping.is_set():
                 break
@@ -1021,7 +1106,7 @@ class WindowsFileClipboardBackend(QObject):
         не дольше _TEARDOWN_CEILING_S: достигнутый потолок - это диагноз
         "константа мала", а не молча вернувшееся падение.
         """
-        if self._published is None and not self._retired:
+        if self._published is None and not self._retired and not self._exports.live_count:
             # Буфер мы не брали - обрывать нечего и ждать нечего.
             return
         message = wintypes.MSG()
@@ -1050,9 +1135,13 @@ class WindowsFileClipboardBackend(QObject):
         """Держит ли кто-то, кроме нас, ссылку хоть на один наш объект.
 
         Счётчик 1 - это наша собственная ссылка от конструктора: всё, что
-        выше, выдано наружу.
+        выше, выдано наружу. Выданные ими потоки и перечислители считаются
+        отдельно: у объекта данных счётчик уже может быть 1, а его IStream
+        всё ещё читают.
         """
-        return any(obj.refcount > 1 for obj in self._held_objects())
+        return self._exports.live_count > 0 or any(
+            obj.refcount > 1 for obj in self._held_objects()
+        )
 
     def _prune_retired(self) -> None:
         """Отпустить прежние публикации, которые оболочка уже отпустила."""
@@ -1141,6 +1230,8 @@ class WindowsFileClipboardBackend(QObject):
 
 __all__ = [
     "ASYNC_CAPABILITY_REQUIRED",
+    "HRESULT_CANCELLED",
+    "ExportedObjects",
     "FORMAT_CONTENTS_NAME",
     "FORMAT_DESCRIPTOR_NAME",
     "FORMAT_DROP_EFFECT_NAME",
@@ -1150,6 +1241,8 @@ __all__ = [
     "VirtualFilesDataObject",
     "WindowsFileClipboardBackend",
     "descriptor_entries",
+    "descriptor_size",
     "group_descriptor_bytes",
+    "operation_status",
     "post_to_service",
 ]
