@@ -15,6 +15,7 @@ import sys
 
 import pytest
 from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QMessageBox
 
 pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="darwin receiver only")
 
@@ -168,6 +169,41 @@ def test_ask_mode_is_the_default_and_prompts(qapp, qtbot, tmp_path, monkeypatch)
 
         assert prompted == [manifest]
         assert authorized == []
+    finally:
+        runtime.stop()
+
+
+def test_prompt_survives_receiver_stopped_while_modal_is_open(qapp, qtbot, tmp_path, monkeypatch):
+    """If the file subsystem is stopped (files toggle off) while the
+    authorization modal is up, exec() returning must not touch a now-None
+    ``self._file_receiver`` - it must instead use the receiver instance
+    captured before the nested event loop started."""
+    _settings_, _window, runtime = _configure(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        receiver = runtime.file_backend
+        authorized: list[bool] = []
+        monkeypatch.setattr(receiver, "authorize", lambda accepted: authorized.append(accepted))
+
+        def fake_exec(self):
+            # Simulate the file subsystem being stopped while the modal's
+            # nested event loop is running - this nulls runtime._file_receiver.
+            runtime._stop_files()
+            return QMessageBox.StandardButton.Ok
+
+        monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+
+        # Must not raise AttributeError on a None self._file_receiver.
+        runtime._prompt_file_authorization(_manifest())
+
+        assert runtime._file_receiver is None
+        # The captured local still got its authorize() call.
+        assert authorized == [True]
     finally:
         runtime.stop()
 

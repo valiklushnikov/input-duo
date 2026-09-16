@@ -32,7 +32,14 @@ def create_file_backend(parent=None):
         from .staging import StagingArea
 
         root = Path.home() / "Library" / "Caches" / "duo-input" / "incoming"
-        return MacFileReceiver(StagingArea(root), pasteboard_arm=arm, parent=parent)
+        staging = StagingArea(root)
+        # Startup invariant (спека): incomplete-каталоги от прошлого падения
+        # снесены, а READY почищен по TTL/бюджету ДО того, как приёмник
+        # начнёт что-либо принимать. Оба метода best-effort и сами глотают
+        # ошибки файловой системы.
+        staging.recover()
+        staging.gc()
+        return MacFileReceiver(staging, pasteboard_arm=arm, parent=parent)
     raise UnsupportedPlatformError(sys.platform)
 
 

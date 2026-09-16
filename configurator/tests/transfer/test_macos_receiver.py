@@ -222,6 +222,30 @@ def test_oversized_chunk_fails_transfer(receiver, tmp_path):
     assert not (tmp_path / "t1").exists(), "неполная staging-директория должна быть удалена"
 
 
+def test_new_offer_aborts_an_in_progress_download_and_removes_its_incomplete_dir(
+    receiver, tmp_path
+):
+    r, link, calls = receiver
+    # Первая передача: авторизована, один FILE_READ в полёте, ничего не дописано.
+    r.handle_offer(_manifest(transfer_id="t1"))
+    r.authorize(True)
+    assert (tmp_path / "t1").exists()
+    assert (tmp_path / "t1" / ".incomplete").exists()
+    assert len(_sent(link, MessageType.FILE_READ)) == 1
+
+    # Второй offer приходит, пока первая передача всё ещё качается.
+    manifest2 = _manifest(transfer_id="t2")
+    r.handle_offer(manifest2)
+
+    # Незавершённая staging-директория первой передачи снесена, а не оставлена висеть.
+    assert not (tmp_path / "t1").exists()
+    # Приёмник ждёт решения по новому offer, а не застрял в DOWNLOADING старого.
+    assert r._state.name == "AWAITING_AUTH"
+    assert r._manifest is manifest2
+    assert r._session is None
+    assert calls["armed"] is None
+
+
 def test_a_foreign_or_stale_read_id_chunk_is_ignored(receiver, tmp_path):
     r, link, calls = receiver
     r.handle_offer(_manifest())

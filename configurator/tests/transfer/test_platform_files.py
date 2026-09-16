@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import shutil
 import sys
+import uuid
+from pathlib import Path
 
 import pytest
 
@@ -28,3 +31,28 @@ def test_darwin_returns_mac_receiver():
     from duo_input.transfer.macos_files import MacFileReceiver
 
     assert isinstance(create_file_backend(), MacFileReceiver)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="darwin only")
+def test_darwin_factory_recovers_leftover_incomplete_dir_at_startup():
+    """Spec invariant: an incomplete transfer dir left by a crash is removed
+    on startup recovery, before the receiver is handed to the caller.
+
+    This targets the SAME root ``create_file_backend`` uses in production
+    (``~/Library/Caches/duo-input/incoming``) since the factory has no seam
+    to redirect it to a tmp root. To keep this safe against the operator's
+    real cache directory, the leftover dir uses a unique uuid4 name (never
+    collides with a real transfer id) and is asserted on by that exact name
+    only - nothing else under the real root is touched or inspected.
+    """
+    root = Path.home() / "Library" / "Caches" / "duo-input" / "incoming"
+    root.mkdir(parents=True, exist_ok=True)
+    leftover = root / f"test-leftover-{uuid.uuid4().hex}"
+    leftover.mkdir()
+    (leftover / ".incomplete").touch()
+    try:
+        create_file_backend()
+
+        assert not leftover.exists(), "incomplete staging dir must be recovered at startup"
+    finally:
+        shutil.rmtree(leftover, ignore_errors=True)

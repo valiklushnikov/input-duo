@@ -67,6 +67,12 @@ class MacFileReceiver(QObject):
     # --- offer/авторизация
     def handle_offer(self, manifest: TransferManifest) -> None:
         # READY-staging прошлого transfer не трогаем: на него может ссылаться буфер.
+        # Но in-progress (несконченная) сессия — другое дело: новый offer её
+        # обрывает, а не молча теряет, иначе её incomplete-каталог остался бы
+        # висеть в staging навсегда (recover() снёс бы его только при
+        # следующем перезапуске программы).
+        if self._state is _State.DOWNLOADING or self._session is not None:
+            self._abort_session()
         self._manifest = manifest
         self._state = _State.AWAITING_AUTH
         self.authorization_needed.emit(manifest)

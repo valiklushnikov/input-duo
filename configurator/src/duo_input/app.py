@@ -539,8 +539,14 @@ class _ClipboardRuntime(QObject):
         box.setStandardButtons(
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
         )
+        # Capture before the nested event loop: exec() can pump events that
+        # stop the file subsystem (self._file_receiver -> None) while the
+        # modal is still open, so re-reading the attribute afterwards would
+        # risk calling authorize() on None.
+        receiver = self._file_receiver
         accepted = box.exec() == QMessageBox.StandardButton.Ok
-        self._file_receiver.authorize(accepted)
+        if receiver is not None:
+            receiver.authorize(accepted)
 
     def _attach_file_link(self, transfer: FileTransferService, link) -> None:
         old_link = self._file_link
