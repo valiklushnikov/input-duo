@@ -81,7 +81,30 @@ done
 
 if [ "$SKIP_TESTS" -eq 0 ]; then
     step "Running the clipboard test suite (macOS platform surface)"
-    ( cd "$CONFIGURATOR_ROOT" && QT_QPA_PLATFORM=offscreen "$BUILD_PY" -m pytest tests/clipboard -q )
+    # PySide6 + pytest-qt can raise SIGSEGV in Qt's global destructors at
+    # interpreter shutdown on macOS — AFTER a fully green run. Judge this gate by
+    # the reported result, not the process exit code: a post-summary crash must
+    # not fail a build whose tests all passed, while any real failure/error must.
+    GATE_LOG="$DIST_ROOT/clipboard-gate.log"
+    mkdir -p "$DIST_ROOT"
+    set +e
+    ( cd "$CONFIGURATOR_ROOT" && QT_QPA_PLATFORM=offscreen "$BUILD_PY" -m pytest tests/clipboard -q ) \
+        > "$GATE_LOG" 2>&1
+    GATE_RC=$?
+    set -e
+    cat "$GATE_LOG"
+    if grep -qiE "[0-9]+ (failed|error)|^(FAILED|ERROR) " "$GATE_LOG"; then
+        echo "clipboard gate reported test failures — aborting" >&2
+        exit 1
+    fi
+    if ! grep -qE "[0-9]+ passed" "$GATE_LOG"; then
+        echo "clipboard gate did not reach a passed summary (rc=$GATE_RC) — aborting" >&2
+        exit 1
+    fi
+    if [ "$GATE_RC" -ne 0 ]; then
+        echo "note: pytest exited $GATE_RC after a green run" \
+             "(Qt shutdown segfault on macOS) — all tests passed, continuing"
+    fi
 fi
 
 VERSION="$(version)"
@@ -95,7 +118,12 @@ step "Compiling Duo Input $VERSION"
         --output-dir=dist \
         --include-qt-plugins=platforms,styles,imageformats \
         --include-module=duo_input.clipboard.macos_pasteboard \
+        --include-module=duo_input.transfer.macos_pasteboard \
+        --include-module=duo_input.transfer.macos_files \
+        --include-module=duo_input.transfer.staging \
         --include-module=objc --include-module=AppKit --include-module=Foundation \
+        --nofollow-import-to=duo_input.transfer.windows_files \
+        --nofollow-import-to=duo_input.transfer.windows_com \
         --include-data-files="src/duo_input/resources/translations/*.qm=duo_input/resources/translations/" \
         --include-data-files="src/duo_input/resources/*.png=duo_input/resources/" \
         --include-data-files="src/duo_input/resources/*.ico=duo_input/resources/" \

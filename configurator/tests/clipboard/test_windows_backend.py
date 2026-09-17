@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -465,6 +466,10 @@ def test_an_unrelated_wrapped_format_is_not_treated_as_ours():
     assert not is_private([wrapped_windows_mime("SomeOtherApplicationFormat")])
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="imports transfer.windows_files → windows_com (ctypes.WINFUNCTYPE): Windows-only",
+)
 def test_our_own_virtual_file_publication_is_not_taken_for_a_local_copy(qapp):
     # Конец петли: буфер, несущий наш маркер и наши форматы виртуальных
     # файлов, не порождает ни payload, ни путей.
