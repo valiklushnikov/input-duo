@@ -115,6 +115,7 @@ step "Compiling Duo Input $VERSION"
         --enable-plugin=pyside6 \
         --macos-app-name=DuoInput \
         --macos-app-icon="$ICON" \
+        --macos-app-protected-resource="NSLocalNetworkUsageDescription:Duo Input finds and connects to your paired computer on the local network." \
         --output-dir=dist \
         --include-qt-plugins=platforms,styles,imageformats \
         --include-module=duo_input.clipboard.macos_pasteboard \
