@@ -1294,3 +1294,40 @@ def test_a_peer_speaking_the_first_file_protocol_is_not_file_capable(coordinator
     assert CAPABILITY_FILES != "files/1"
     assert not coordinator.peer_supports(CAPABILITY_FILES)
     assert coordinator.peer_supports(CAPABILITY_CLIPBOARD)
+
+
+def test_the_pairing_button_does_not_disrupt_a_live_link(tmp_path, qapp):
+    # Регресс #2: у уже связанных нажатие «Связать компьютеры» не должно рвать
+    # рабочую связь ради нового мультикаст-поиска.
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id="2" * 32)
+    link = _FakeLink(peer_fingerprint="f" * 64, peer_address="192.168.1.5")
+    coordinator._on_connected(link)
+    assert coordinator._link is link
+
+    coordinator.begin_pairing()
+
+    assert coordinator._link is link
+    assert not link.closed
+    assert not coordinator._pairing
+
+
+def test_the_pairing_button_reconnects_a_trusted_peer_without_searching(tmp_path):
+    # Регресс #2: у доверенного, но пока не подключённого пира кнопка должна
+    # воссоединять по сохранённому адресу (unicast), а не запускать discovery.
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id="2" * 32)
+    calls = []
+    coordinator._try_connect = lambda: calls.append(True)
+
+    coordinator.begin_pairing()
+
+    assert calls == [True]
+    assert not coordinator._pairing
+
+
+def test_the_pairing_button_still_searches_for_a_first_time_peer(tmp_path, qapp):
+    # Без доверенного пира кнопка по-прежнему запускает связывание/поиск.
+    coordinator, _ = _make_coordinator(tmp_path)
+
+    coordinator.begin_pairing()
+
+    assert coordinator._pairing

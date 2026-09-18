@@ -214,6 +214,8 @@ class ClipboardService(QObject):
         except (RuntimeError, TypeError):
             pass
         self._link = None
+        # Как и в _on_link_lost: следующая сессия начинается с чистого seq.
+        self._last_received = None
         self._fail_all_pending_fetches("связь закрыта")
         self.link_state_changed.emit("disconnected")
 
@@ -242,6 +244,12 @@ class ClipboardService(QObject):
     def _on_link_lost(self, reason: str) -> None:
         self._heartbeat.stop()
         self._link = None
+        # Связь оборвалась - возможно, второй компьютер перезапустился, и его
+        # счётчик объявлений начнётся заново с малого числа. Забываем последний
+        # принятый seq, иначе следующая сессия отвергала бы свежие объявления
+        # как "устаревшие" (offer.seq <= _last_received.seq), пока не
+        # перезапустят и нашу сторону.
+        self._last_received = None
         self._fail_all_pending_fetches(f"связь потеряна: {reason}")
         self.link_state_changed.emit(f"disconnected: {reason}")
 

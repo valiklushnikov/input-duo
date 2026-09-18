@@ -259,3 +259,17 @@ def test_second_belt_snapshot_mixing_old_and_new_formats_is_not_echo():
 
     assert len(sent) == 1
     assert sent[0].mimes() == ("image/png", "text/plain")
+
+
+def test_a_link_drop_resets_so_a_fresh_low_sequence_offer_is_accepted():
+    # Регресс #3: второй компьютер перезапустился, его seq снова малый; связь
+    # при этом оборвалась, поэтому свежее объявление обязано приниматься, а не
+    # отвергаться как "устаревшее".
+    service, backend = _service()
+    service.on_remote_offer(ClipboardOffer(THEIRS, 5, describe({"text/plain": b"before"})))
+    assert len(backend.published) == 1
+
+    service._on_link_lost("второй компьютер перезапустился")
+
+    service.on_remote_offer(ClipboardOffer(THEIRS, 1, describe({"text/plain": b"after"})))
+    assert len(backend.published) == 2

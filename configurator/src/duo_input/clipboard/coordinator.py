@@ -267,6 +267,22 @@ class ClipboardCoordinator(QObject):
     # ------------------------------------------------------------------ парринг: вход и код
 
     def begin_pairing(self) -> None:
+        # Уже есть живая связь: «Связать» не должно её рвать ради нового поиска.
+        # Смена пира - через forget_peer() («Забыть компьютер»).
+        if self._link is not None:
+            return
+        # Пир уже доверен, но связь не поднята: воссоединяемся по сохранённому
+        # адресу (unicast), а не запускаем discovery. Мультикаст-поиск нужен
+        # только для ПЕРВИЧНОГО связывания; на упакованной сборке он к тому же
+        # может быть недоступен (Local Network / multicast), тогда как unicast
+        # к известному адресу работает. Нового пира связываем только после
+        # forget_peer(), когда self.peer снова None.
+        if self.peer is not None:
+            self._retry.stop()
+            self._silence.stop()
+            self._attempt = 0
+            self._try_connect()
+            return
         # Повторный запуск начинает новый lifecycle. Согласия и callbacks
         # прежней TLS-связи не имеют права перейти в него.
         self._clear_pairing_attempt(close_link=True)
