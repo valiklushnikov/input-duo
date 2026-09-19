@@ -81,7 +81,16 @@ private final class FetchOperation {
                         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
                         self.url = url
                         self.file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-                        self.pull()
+                        if size == 0 {
+                            // Zero-byte fetch: the empty temp IS the whole
+                            // contents - no pullChunk round trip needed.
+                            try self.file?.synchronize()
+                            try self.file?.close()
+                            self.file = nil
+                            self.finish(nil)
+                        } else {
+                            self.pull()
+                        }
                     } catch { self.finish(error) }
                 }
             }

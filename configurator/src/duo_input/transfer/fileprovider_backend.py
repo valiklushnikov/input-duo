@@ -232,6 +232,11 @@ class FileProviderBackend(QObject):
         self.by_read_id: dict[int, Fetch] = {}
         self._active: set[str] = set()
         self._queue: deque[str] = deque()
+        # --- Task 11: second, finer admission gate on top of the slot gate
+        # above - pulls that are admitted at the slot level but would push
+        # outstanding bytes over MAX_TOTAL_BUFFERED_BYTES wait here (FIFO)
+        # until a prior read completes and frees budget (_admit_pull_queue).
+        self._pull_queue: deque[str] = deque()
         self._read_ids = itertools.count(1)
         # --- Task 8: arm-when-ready latch (ACK И domain READY, ровно раз).
         self._ack_transfer_id: str | None = None
@@ -571,7 +576,17 @@ class FileProviderBackend(QObject):
         return fetch_token, entry.size
 
     def pull_chunk(self, fetch_token: str, reply=None) -> None:
-        """Emit at most one request for an admitted fetch with no read in flight."""
+        """Emit at most one request for an admitted fetch with no read in flight.
+
+        Task 11: admission is now gated a second, finer time by the global
+        byte budget (``MAX_TOTAL_BUFFERED_BYTES``), on top of the existing
+        per-fetch "one outstanding read" invariant and the
+        ``MAX_ACTIVE_FETCHES`` slot gate above. A pull that would push the
+        sum of in-flight reads' expected sizes over budget is parked in
+        ``_pull_queue`` (FIFO) instead of being rejected - it fires once a
+        prior read completes and frees enough budget
+        (see ``_admit_pull``/``_admit_pull_queue``).
+        """
         fetch = self.by_token.get(fetch_token)
         if fetch is None or fetch.state in (
             FetchState.DONE,
@@ -586,7 +601,59 @@ class FileProviderBackend(QObject):
                 reply(None, False, _xpc_error(7))
             return
         fetch.reply = reply
+        self._admit_pull(fetch)
+
+    def _outstanding_bytes(self) -> int:
+        """Sum of ``expected`` across reads currently in flight - the
+        quantity ``MAX_TOTAL_BUFFERED_BYTES`` bounds. Chunks are delivered by
+        reference (``reply(message.blob)`` - see module docstring): the
+        backend itself never accumulates bytes, so this is a request-size
+        budget, not an actual buffer of received bytes."""
+        return sum(fetch.expected for fetch in self.by_read_id.values())
+
+    def _admit_pull(self, fetch: Fetch) -> None:
+        """Send the FILE_READ for ``fetch`` (whose ``reply`` is already set)
+        now, or park it in ``_pull_queue`` if it would exceed the byte
+        budget. A fetch already at EOF (``offset >= size``) bypasses the
+        budget entirely - it needs no read at all (see ``_request_chunk``)."""
+        if (
+            fetch.state is not FetchState.REQUESTING
+            or fetch.fetch_token not in self._active
+            or fetch.read_id is not None
+        ):
+            return
+        if fetch.offset >= fetch.size:
+            self._request_chunk(fetch)
+            return
+        expected = min(MAX_FILE_CHUNK_BYTES, fetch.size - fetch.offset)
+        if self._outstanding_bytes() + expected > MAX_TOTAL_BUFFERED_BYTES:
+            self._pull_queue.append(fetch.fetch_token)
+            return
         self._request_chunk(fetch)
+
+    def _admit_pull_queue(self) -> None:
+        """Admit byte-budget-queued pulls, FIFO, while the budget allows."""
+        while self._pull_queue:
+            fetch_token = self._pull_queue[0]
+            fetch = self.by_token.get(fetch_token)
+            if (
+                fetch is None
+                or fetch.reply is None
+                or fetch.state is not FetchState.REQUESTING
+                or fetch_token not in self._active
+                or fetch.read_id is not None
+            ):
+                self._pull_queue.popleft()
+                continue
+            if fetch.offset >= fetch.size:
+                self._pull_queue.popleft()
+                self._request_chunk(fetch)
+                continue
+            expected = min(MAX_FILE_CHUNK_BYTES, fetch.size - fetch.offset)
+            if self._outstanding_bytes() + expected > MAX_TOTAL_BUFFERED_BYTES:
+                break  # still over budget - FIFO means later entries are too
+            self._pull_queue.popleft()
+            self._request_chunk(fetch)
 
     def _request_chunk(self, fetch: Fetch) -> None:
         fetch_token = fetch.fetch_token
@@ -648,7 +715,9 @@ class FileProviderBackend(QObject):
             fetch.state = FetchState.REQUESTING
             self._active.add(fetch_token)
             if fetch.reply is not None:
-                self._request_chunk(fetch)
+                # Promotion out of the slot queue must still pass through
+                # the byte-budget gate (Task 11) - not bypass it.
+                self._admit_pull(fetch)
 
     def _pending_fetch(self, message: Message) -> Fetch | None:
         header = message.header
@@ -688,6 +757,7 @@ class FileProviderBackend(QObject):
         if reply is not None:
             reply(None, False, error or _xpc_error(7))
         self._admit_from_queue()
+        self._admit_pull_queue()
 
     def cancel_fetch(self, fetch_token: str) -> None:
         fetch = self.by_token.get(fetch_token)
@@ -715,6 +785,10 @@ class FileProviderBackend(QObject):
             fetch.state = FetchState.REQUESTING
         if reply is not None:
             reply(message.blob, fetch.offset >= fetch.size, None)
+        # Clearing this read (above) may have freed enough budget for a
+        # byte-budget-queued pull elsewhere - harmless no-op if not, and if
+        # this fetch just finished, _finish_fetch already ran this too.
+        self._admit_pull_queue()
 
     def _on_file_error(self, message: Message) -> None:
         fetch = self._pending_fetch(message)

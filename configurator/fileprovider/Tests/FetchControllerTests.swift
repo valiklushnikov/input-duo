@@ -5,10 +5,12 @@ private final class CannedHost: NSObject, DuoHostCallback {
     var chunks: [(Data?, Bool, Error?)] = [(Data("ab".utf8), false, nil), (Data("c".utf8), true, nil)]
     var cancelled = [String]()
     var totalSize: NSNumber = 3
+    var pullCallCount = 0
     func openFetch(_ generationId: String, entryId: NSNumber, reply: @escaping (String?, NSNumber?, Error?) -> Void) {
         reply("token", totalSize, nil)
     }
     func pullChunk(_ fetchToken: String, reply: @escaping (Data?, Bool, Error?) -> Void) {
+        pullCallCount += 1
         let next = chunks.removeFirst()
         reply(next.0, next.1, next.2)
     }
@@ -90,6 +92,47 @@ final class FetchControllerTests: XCTestCase {
             done.fulfill()
         }
         wait(for: [done], timeout: 3)
+    }
+
+    func testZeroByteFetchSkipsPullChunkAndCompletesWithEmptyTemp() throws {
+        let host = CannedHost()
+        host.totalSize = 0
+        let controller = FetchController(hostProvider: { _ in host }, temporaryDirectory: directory)
+        let original = item(size: 0)
+        let done = expectation(description: "zero byte completed")
+        let progress = controller.fetch(original, request: NSFileProviderRequest()) { url, returned, error in
+            XCTAssertNil(error)
+            XCTAssertTrue((returned as AnyObject?) === original)
+            XCTAssertEqual(try? Data(contentsOf: XCTUnwrap(url)), Data())
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 3)
+        XCTAssertEqual(progress.completedUnitCount, 0)
+        XCTAssertEqual(host.pullCallCount, 0, "zero-byte fetches must never call pullChunk")
+        XCTAssertTrue(host.cancelled.isEmpty)
+    }
+
+    func testDirectoryCreationFailureSurfacesErrorAndCancelsFetch() throws {
+        // Point temporaryDirectory at a path already occupied by a regular
+        // file, so FileManager.createDirectory(...) throws - this exercises
+        // the same finish(error)/cancelFetch path a mid-stream disk-full
+        // write error would take. Ruling: the exact DiskFull(6) vs
+        // Protocol(7) mapping is deferred to a later task - only cleanliness
+        // of the failure (single completion, cancelFetch, no leaked temp) is
+        // asserted here.
+        let blockedPath = directory.appendingPathComponent("blocked")
+        try Data().write(to: blockedPath)
+        let host = CannedHost()
+        let controller = FetchController(hostProvider: { _ in host }, temporaryDirectory: blockedPath)
+        let done = expectation(description: "disk write error")
+        _ = controller.fetch(item(), request: NSFileProviderRequest()) { url, item, error in
+            XCTAssertNil(url)
+            XCTAssertNil(item)
+            XCTAssertNotNil(error)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 3)
+        XCTAssertEqual(host.cancelled, ["token"])
     }
 
     func testExtensionFetchUsesPublishedRecordAndRejectsInvalidItems() throws {
