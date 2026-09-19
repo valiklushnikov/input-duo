@@ -1,0 +1,368 @@
+"""PyObjC NSXPC **client** for the Duo Input File Provider transport.
+
+The Swift extension (``fileprovider/Extension/FileProviderExtension.swift``)
+owns an anonymous ``NSXPCListener`` vended through ``NSFileProviderServiceSource``
+(``DuoServiceSource.swift``, service name below). This module is the *client*
+side of that connection: it discovers the connection for a domain, exports the
+``DuoHostCallback`` object the extension calls back into during
+``fetchContents``, marshals those callbacks onto the Qt thread, and survives
+invalidation/interruption with reconnect.
+
+Transport only - by design, matching the task-3 brief:
+    * no FILE_* fetch/chunk business logic,
+    * no fetch scheduler, generation publication, replica, domain-readiness
+      state machine, pasteboard, or staging.
+Those all consume this client in later tasks; ``remote()`` is how Task 7+
+gets a ``DuoExtensionControl`` proxy to call ``publishGeneration`` etc.
+
+darwin-only. Mirrors ``fileprovider_proto.py``'s framing (compiled protocol,
+no ``objc.formal_protocol`` fallback) but additionally guards its own
+PyObjC/FileProvider imports so importing this module on a non-darwin
+collection run does not hard-crash: everything that actually touches the
+Objective-C runtime is gated on ``_XPC_AVAILABLE``.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+from collections.abc import Callable
+
+from PySide6.QtCore import QMetaObject, QObject, Qt, Q_ARG, Signal, Slot
+
+logger = logging.getLogger(__name__)
+
+try:
+    import objc
+    from Foundation import NSObject
+    from FileProvider import (
+        NSFileProviderManager,
+        NSFileProviderRootContainerItemIdentifier,
+        NSFileProviderServiceName,
+    )
+
+    # fileprovider_proto.py (Task 2) is itself unconditional-import darwin-only
+    # (no guard of its own - dlopen'ing the compiled protocol dylib makes an
+    # unconditional import pointless there). Importing it inside this same
+    # guarded block, rather than at module top, keeps that darwin-only
+    # requirement from leaking into fileprovider_client's own import surface.
+    from .fileprovider_proto import extension_interface, host_interface
+
+    _XPC_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised implicitly on non-darwin
+    objc = None
+    NSObject = object
+    NSFileProviderManager = None
+    NSFileProviderRootContainerItemIdentifier = None
+    extension_interface = None
+    host_interface = None
+    NSFileProviderServiceName = None
+    _XPC_AVAILABLE = False
+
+
+#: The XPC service *label* the extension vends - see
+#: fileprovider/Extension/DuoServiceSource.swift (duoFileProviderServiceName).
+#: An NSXPC service label, not a Mach service registration: the endpoint is
+#: anonymous and delivered by the File Provider infrastructure - no App
+#: Group, no named Mach service, no temporary-exception.
+SERVICE_NAME = "com.duoinput.configurator.fileprovider.xpc"
+
+#: How long connect_service() waits on each step of async discovery before
+#: giving up. Discovery talks to fileproviderd; unbounded waits here would
+#: turn a dead daemon into a permanently hung connect_service() call.
+_GET_DOMAINS_TIMEOUT_S = 5.0
+_GET_SERVICE_TIMEOUT_S = 5.0
+_GET_CONNECTION_TIMEOUT_S = 5.0
+
+#: Vocabulary for the extension->host seam (``_dispatch_extension_call``).
+#: Both the real exported adapter below and the test fake
+#: (tests/transfer/conftest.py, fp_fake_service) speak these three kinds;
+#: they map onto the three callbacks set_callbacks() registers.
+_KIND_TO_CALLBACK = {
+    "open": "open_fetch",
+    "pull": "pull_chunk",
+    "cancel": "cancel_fetch",
+}
+
+
+if _XPC_AVAILABLE:
+
+    class _ExtensionCallbackAdapter(NSObject):
+        """Exported ``DuoHostCallback`` object - what the extension calls.
+
+        Every selector here does exactly one thing: forward the call's
+        business arguments (never the reply block - see below) to the
+        owning client's ``_dispatch_extension_call`` seam, which marshals
+        onto the Qt thread. No FILE_* logic lives here.
+
+        None of the three selectors invoke ``reply`` in this task. Actually
+        answering the extension (streaming bytes back via ``pullChunk``,
+        completing ``openFetch`` with a token) needs the fetch scheduler
+        that owns FILE_* wire calls - a later task. Transport-only means the
+        pipe exists and callbacks are observable; completing the round trip
+        is explicitly out of scope here (see task-3 report "concerns").
+        """
+
+        def initWithClient_(self, client):
+            self = objc.super(_ExtensionCallbackAdapter, self).init()
+            if self is None:
+                return None
+            self._client = client
+            return self
+
+        def openFetch_entryId_reply_(self, generation_id, entry_index, reply):
+            self._client._dispatch_extension_call("open", generation_id, entry_index)
+
+        def pullChunk_reply_(self, fetch_token, reply):
+            self._client._dispatch_extension_call("pull", fetch_token)
+
+        def cancelFetch_(self, fetch_token):
+            self._client._dispatch_extension_call("cancel", fetch_token)
+
+else:  # pragma: no cover - exercised implicitly on non-darwin
+    _ExtensionCallbackAdapter = None
+
+
+class FileProviderServiceClient(QObject):
+    """NSXPC client: discovery, connection lifecycle, and Qt marshalling.
+
+    ``connect_service()`` is idempotent while a connection is bound; after a
+    ``disconnected`` signal it re-discovers on the next call. Extension callbacks
+    reach registered callbacks (``set_callbacks``) via ``QMetaObject.invokeMethod``
+    with ``Qt.AutoConnection`` - Direct when already on this object's thread
+    (what ``fp_fake_service.simulate_extension_call`` exercises synchronously),
+    Queued when the call arrives on NSXPC's private queue. This mirrors the
+    COM->Qt boundary idiom in ``windows_files.py``'s ``ServiceCallbackGateway`` /
+    ``post_to_service``, simplified for a single generic payload rather than
+    per-slot declared C++ parameter types.
+    """
+
+    connected = Signal()
+    disconnected = Signal(str)
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._domain_identifier: str | None = None
+        self._connection = None
+        self._exported = None
+        self._callbacks: dict[str, Callable | None] = {
+            "open_fetch": None,
+            "pull_chunk": None,
+            "cancel_fetch": None,
+        }
+        self._lock = threading.Lock()
+        self._connected = False
+        self._disconnect_emitted = False
+
+    # -------------------------------------------------------------- configuration
+
+    def set_domain(self, domain_identifier: str) -> None:
+        self._domain_identifier = domain_identifier
+
+    def set_callbacks(
+        self,
+        open_fetch: Callable | None = None,
+        pull_chunk: Callable | None = None,
+        cancel_fetch: Callable | None = None,
+    ) -> None:
+        """Register the host-exported object's methods as Qt-thread callables.
+
+        Called with the plain business arguments only (no reply block - see
+        ``_ExtensionCallbackAdapter``'s docstring).
+        """
+        self._callbacks["open_fetch"] = open_fetch
+        self._callbacks["pull_chunk"] = pull_chunk
+        self._callbacks["cancel_fetch"] = cancel_fetch
+
+    # ------------------------------------------------------------------------ state
+
+    @property
+    def is_connected(self) -> bool:
+        with self._lock:
+            return self._connected
+
+    def remote(self) -> object | None:
+        """``remoteObjectProxy`` typed to ``DuoExtensionControl`` - or None."""
+        connection = self._connection
+        if connection is None:
+            return None
+        return connection.remoteObjectProxy()
+
+    # -------------------------------------------------------------------- lifecycle
+
+    def connect_service(self) -> None:
+        """Discover the domain's service connection and bind it.
+
+        Idempotent: a call while already bound to a connection is a no-op.
+        After ``disconnected`` fires, ``_connection`` is cleared, so the next
+        call re-discovers rather than reusing a dead endpoint.
+        """
+        if self._connection is not None:
+            return
+        if not _XPC_AVAILABLE:
+            raise RuntimeError(
+                "FileProviderServiceClient requires PyObjC + the FileProvider "
+                "framework, available on darwin only"
+            )
+        if self._domain_identifier is None:
+            raise RuntimeError("set_domain() must be called before connect_service()")
+        connection = self._discover_connection(self._domain_identifier)
+        self._bind_connection(connection)
+
+    def _bind_connection(self, connection) -> None:
+        """Wire interfaces, handlers, and resume - shared by real discovery
+        and by tests (fp_fake_service.grant_connection injects a fake
+        connection straight into this method, bypassing discovery)."""
+        self._disconnect_emitted = False
+        exported = (
+            _ExtensionCallbackAdapter.alloc().initWithClient_(self)
+            if _XPC_AVAILABLE
+            else None
+        )
+        connection.setExportedInterface_(host_interface())
+        connection.setExportedObject_(exported)
+        connection.setRemoteObjectInterface_(extension_interface())
+        connection.setInvalidationHandler_(self._on_invalidated)
+        connection.setInterruptionHandler_(self._on_interrupted)
+        connection.resume()
+        self._exported = exported
+        self._connection = connection
+        with self._lock:
+            self._connected = True
+        self.connected.emit()
+
+    def _on_invalidated(self) -> None:
+        self._handle_disconnect("invalidated")
+
+    def _on_interrupted(self) -> None:
+        self._handle_disconnect("interrupted")
+
+    def _handle_disconnect(self, reason: str) -> None:
+        """Emit ``disconnected`` exactly once and drop the proxy.
+
+        Both the invalidation and interruption handlers, and a second call
+        to either (a real connection can call both, and the fake's
+        ``invalidate()`` is required to be idempotent - see the task-3
+        brief), funnel through this one guarded path.
+        """
+        with self._lock:
+            if self._disconnect_emitted:
+                return
+            self._disconnect_emitted = True
+            self._connected = False
+        self._connection = None
+        self._exported = None
+        self.disconnected.emit(reason)
+
+    # ------------------------------------------------------ extension -> host seam
+
+    def _dispatch_extension_call(self, kind: str, *args) -> None:
+        """Plain-Python seam driven by both the real exported adapter and
+        the test fake (fp_fake_service.simulate_extension_call) - see
+        decision 4 in the task-3 brief. Marshals onto this object's Qt
+        thread via ``QMetaObject.invokeMethod`` with ``Qt.AutoConnection``.
+        """
+        delivered = QMetaObject.invokeMethod(
+            self,
+            "_run_dispatch",
+            Qt.ConnectionType.AutoConnection,
+            Q_ARG("QVariant", (kind, args)),
+        )
+        if not delivered:
+            logger.error("failed to marshal extension call %r onto the Qt thread", kind)
+
+    @Slot("QVariant")
+    def _run_dispatch(self, payload) -> None:
+        # PySide6 boxes tuples handed through QVariant as lists; unpacking
+        # below is agnostic to that (list and tuple unpack identically).
+        kind, args = payload
+        callback = self._callbacks.get(_KIND_TO_CALLBACK.get(kind, ""))
+        if callback is None:
+            logger.debug("no callback registered for extension call kind=%r", kind)
+            return
+        try:
+            callback(*args)
+        except Exception:  # noqa: BLE001 - must not escape a Qt slot / XPC callback
+            logger.exception("extension callback %r raised", kind)
+
+    # ------------------------------------------------------------------- discovery
+
+    def _discover_connection(self, domain_identifier: str):
+        domain = self._resolve_domain(domain_identifier)
+        if domain is None:
+            raise RuntimeError(
+                f"no NSFileProviderDomain registered for identifier {domain_identifier!r}"
+            )
+        manager = NSFileProviderManager.managerForDomain_(domain)
+        service = self._resolve_service(manager)
+        if service is None:
+            raise RuntimeError(f"extension did not vend the {SERVICE_NAME!r} service")
+        connection = self._resolve_connection(service)
+        if connection is None:
+            raise RuntimeError("extension service did not hand back an NSXPCConnection")
+        return connection
+
+    @staticmethod
+    def _resolve_domain(identifier: str):
+        outcome: dict[str, object] = {}
+        done = threading.Event()
+
+        def handler(domains, error):
+            outcome["domains"] = domains
+            outcome["error"] = error
+            done.set()
+
+        NSFileProviderManager.getDomainsWithCompletionHandler_(handler)
+        if not done.wait(_GET_DOMAINS_TIMEOUT_S):
+            raise TimeoutError("timed out listing NSFileProviderDomains")
+        error = outcome.get("error")
+        if error is not None:
+            raise RuntimeError(f"getDomainsWithCompletionHandler failed: {error}")
+        for domain in outcome.get("domains") or []:
+            if str(domain.identifier()) == identifier:
+                return domain
+        return None
+
+    @staticmethod
+    def _resolve_service(manager):
+        outcome: dict[str, object] = {}
+        done = threading.Event()
+
+        def handler(service, error):
+            outcome["service"] = service
+            outcome["error"] = error
+            done.set()
+
+        manager.getServiceWithName_itemIdentifier_completionHandler_(
+            NSFileProviderServiceName(SERVICE_NAME),
+            NSFileProviderRootContainerItemIdentifier,
+            handler,
+        )
+        if not done.wait(_GET_SERVICE_TIMEOUT_S):
+            raise TimeoutError("timed out requesting the File Provider service")
+        error = outcome.get("error")
+        if error is not None:
+            raise RuntimeError(f"getServiceWithName failed: {error}")
+        return outcome.get("service")
+
+    @staticmethod
+    def _resolve_connection(service):
+        outcome: dict[str, object] = {}
+        done = threading.Event()
+
+        def handler(connection, error):
+            outcome["connection"] = connection
+            outcome["error"] = error
+            done.set()
+
+        service.getFileProviderConnectionWithCompletionHandler_(handler)
+        if not done.wait(_GET_CONNECTION_TIMEOUT_S):
+            raise TimeoutError("timed out obtaining the NSXPCConnection")
+        error = outcome.get("error")
+        if error is not None:
+            raise RuntimeError(
+                f"getFileProviderConnectionWithCompletionHandler failed: {error}"
+            )
+        return outcome.get("connection")
+
+
+__all__ = ["FileProviderServiceClient", "SERVICE_NAME"]

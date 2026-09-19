@@ -20,3 +20,8 @@ pytest-qt==4.5.0
 # macOS clipboard parity: NSPasteboard.changeCount и host-only lazy provider,
 # которых нет в Qt. Только для сборки/разработки под macOS.
 pyobjc-framework-Cocoa==12.2.2; sys_platform == "darwin"
+
+# macOS File Provider NSXPC client (Phase 10 lazy transfer): NSFileProviderManager
+# discovery + NSXPCConnection service lifecycle. Только для сборки/разработки под
+# macOS.
+pyobjc-framework-FileProvider==12.2.2; sys_platform == "darwin"
