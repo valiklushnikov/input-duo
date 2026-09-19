@@ -202,7 +202,7 @@ class FileProviderBackend(QObject):
         self._armed_transfer_id: str | None = None
         self._arm_attempt = 0
         self._pending_resolution: (
-            tuple[int, tuple[str, ...], set[str], dict[str, object]] | None
+            tuple[int, str, tuple[str, ...], set[str], dict[str, object]] | None
         ) = None
         ready_signal = getattr(domain, "ready", None)
         if ready_signal is not None:
@@ -263,6 +263,14 @@ class FileProviderBackend(QObject):
         # докстринг) - тот тестовый API не оперирует epoch вообще.
         self._accepted_transfer_id = manifest.transfer_id
         self._accepted_roots = _root_ids(manifest)
+        # Новая принятая generation немедленно аннулирует ACK-latch и любое
+        # незавершённое разрешение URL предыдущей. Иначе READY или поздний
+        # completion старой generation сможет вооружить clipboard между
+        # Accept(B) и ACK(B).
+        self._ack_transfer_id = None
+        self._ack_roots = ()
+        self._arm_attempt += 1
+        self._pending_resolution = None
         self._publish_generation(manifest, epoch)
 
     def _publish_generation(self, manifest: TransferManifest, epoch: int) -> None:
@@ -383,10 +391,13 @@ class FileProviderBackend(QObject):
         (см. ``_armed_transfer_id``)."""
         if self._ack_transfer_id is None or not self._domain_ready:
             return
+        if self._ack_transfer_id != self._accepted_transfer_id:
+            return
         if self._armed_transfer_id == self._ack_transfer_id:
             return
+        if self._pending_resolution is not None:
+            return
         transfer_id = self._ack_transfer_id
-        self._armed_transfer_id = transfer_id
         self._arm_after_ready(transfer_id)
 
     def _arm_after_ready(self, transfer_id: str) -> None:
@@ -401,11 +412,11 @@ class FileProviderBackend(QObject):
             # Пустая generation (не должно случаться на практике) - вооружаем
             # пустым списком, той же семантикой, что arm_urls([]) у пустого
             # arm() (см. macos_pasteboard.py) - без отдельной охраны.
-            self._arm([])
+            self._arm_resolved_urls(transfer_id, [])
             return
         pending: set[str] = set(roots)
         resolved: dict[str, object] = {}
-        self._pending_resolution = (attempt, roots, pending, resolved)
+        self._pending_resolution = (attempt, transfer_id, roots, pending, resolved)
 
         def _dispatch(root_id: str, url, error) -> None:
             delivered = QMetaObject.invokeMethod(
@@ -424,28 +435,47 @@ class FileProviderBackend(QObject):
             def _completion(url, error, _root_id=root_id) -> None:
                 _dispatch(_root_id, url, error)
 
-            self._url_resolver(root_id, _completion)
+            try:
+                self._url_resolver(root_id, _completion)
+            except Exception as error:
+                _dispatch(root_id, None, error)
 
     @Slot("QVariant")
     def _run_url_resolved(self, payload) -> None:
         attempt, root_id, url, error = payload
         if self._pending_resolution is None or self._pending_resolution[0] != attempt:
             return  # superseded arm attempt - a newer one has already started
-        _, roots, pending, resolved = self._pending_resolution
+        _, transfer_id, roots, pending, resolved = self._pending_resolution
+        if transfer_id != self._accepted_transfer_id:
+            self._pending_resolution = None
+            return
         if root_id not in pending:
             return
-        pending.discard(root_id)
-        if error is not None:
+        if error is not None or url is None:
             logger.warning(
                 "failed to resolve user-visible URL for %s: %r", root_id, error
             )
-        else:
-            resolved[root_id] = url
+            self._pending_resolution = None
+            self.transfer_failed.emit("url_resolution_failed")
+            return
+        pending.discard(root_id)
+        resolved[root_id] = url
         if pending:
             return  # still waiting on other roots of this generation
-        urls = [resolved[r] for r in roots if r in resolved]
+        urls = [resolved[root_id] for root_id in roots]
         self._pending_resolution = None
+        self._arm_resolved_urls(transfer_id, urls)
+
+    def _arm_resolved_urls(self, transfer_id: str, urls: list[object]) -> None:
+        """Publish only a still-current generation, and mark it armed only
+        after the pasteboard call has returned successfully."""
+        if (
+            transfer_id != self._accepted_transfer_id
+            or transfer_id != self._ack_transfer_id
+        ):
+            return
         self._arm(urls)
+        self._armed_transfer_id = transfer_id
 
     # --- сообщения с провода (стриминг - Tasks 9-10: здесь заглушка)
     def handle_message(self, message: Message) -> None:  # noqa: ARG002 - stub

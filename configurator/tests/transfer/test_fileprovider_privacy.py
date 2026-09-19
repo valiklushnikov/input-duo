@@ -76,6 +76,19 @@ class FakeResolver:
         completion("abc123-root", None)
 
 
+class ControllableResolver:
+    """External async resolver fake whose completions the test controls."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    def __call__(self, root_id, completion) -> None:
+        self.calls.append((root_id, completion))
+
+    def complete(self, index: int, url=None, error=None) -> None:
+        self.calls[index][1](url, error)
+
+
 class FakeArm:
     def __init__(self) -> None:
         self.calls: list[list] = []
@@ -93,10 +106,13 @@ class FakeLink:
         return True
 
 
-def _manifest(transfer_id="abc123"):
+def _manifest(transfer_id="abc123", paths=("a.txt",)):
     return TransferManifest(
         transfer_id=transfer_id,
-        entries=(TransferEntry(path="a.txt", kind=ENTRY_FILE, size=5, mtime_ns=0),),
+        entries=tuple(
+            TransferEntry(path=path, kind=ENTRY_FILE, size=5, mtime_ns=0)
+            for path in paths
+        ),
         skipped=(),
         drop_effect=1,
     )
@@ -210,3 +226,89 @@ def test_stale_ack_for_a_superseded_generation_does_not_arm(fp_backend, fake_arm
     fp_backend.on_ack("bbb222")
 
     assert fake_arm.calls == [["abc123-root"]]
+
+
+def test_accepting_new_generation_clears_old_ack_latch_before_ready(
+    fp_backend, fake_arm, fake_resolver
+):
+    e_a = fp_backend.handle_offer(_manifest("aaa111"))
+    fp_backend.authorize(True, e_a)
+    fp_backend.on_ack("aaa111")
+
+    e_b = fp_backend.handle_offer(_manifest("bbb222"))
+    fp_backend.authorize(True, e_b)
+    fp_backend.on_domain_ready()
+
+    assert fake_resolver.calls == []
+    assert fake_arm.calls == []
+
+    fp_backend.on_ack("bbb222")
+
+    assert fake_arm.calls == [["abc123-root"]]
+
+
+def test_accepting_new_generation_invalidates_in_flight_resolution(
+    qapp, fake_client, fake_domain, fake_link
+):
+    resolver = ControllableResolver()
+    arm = FakeArm()
+    backend = FileProviderBackend(
+        fake_client, fake_domain, arm, url_resolver=resolver
+    )
+    backend.attach_link(fake_link)
+
+    e_a = backend.handle_offer(_manifest("aaa111", ("a.txt",)))
+    backend.authorize(True, e_a)
+    backend.on_domain_ready()
+    backend.on_ack("aaa111")
+    assert [root_id for root_id, _ in resolver.calls] == ["a.txt"]
+
+    e_b = backend.handle_offer(_manifest("bbb222", ("b.txt",)))
+    backend.authorize(True, e_b)
+    resolver.complete(0, "file:///a.txt")
+
+    assert arm.calls == []
+
+    backend.on_ack("bbb222")
+    assert [root_id for root_id, _ in resolver.calls] == ["a.txt", "b.txt"]
+    resolver.complete(1, "file:///b.txt")
+
+    assert arm.calls == [["file:///b.txt"]]
+
+
+def test_resolution_failure_emits_once_arms_nothing_and_can_retry(
+    qapp, fake_client, fake_domain, fake_link
+):
+    resolver = ControllableResolver()
+    arm = FakeArm()
+    backend = FileProviderBackend(
+        fake_client, fake_domain, arm, url_resolver=resolver
+    )
+    backend.attach_link(fake_link)
+    failures: list[str] = []
+    backend.transfer_failed.connect(failures.append)
+
+    epoch = backend.handle_offer(_manifest(paths=("a.txt", "b.txt")))
+    backend.authorize(True, epoch)
+    backend.on_domain_ready()
+    backend.on_ack("abc123")
+    assert [root_id for root_id, _ in resolver.calls] == ["a.txt", "b.txt"]
+
+    resolver.complete(1, error=RuntimeError("temporary resolver failure"))
+    resolver.complete(0, "file:///a.txt")
+
+    assert failures == ["url_resolution_failed"]
+    assert arm.calls == []
+
+    backend.on_ack("abc123")
+    assert [root_id for root_id, _ in resolver.calls] == [
+        "a.txt",
+        "b.txt",
+        "a.txt",
+        "b.txt",
+    ]
+    resolver.complete(2, "file:///a.txt")
+    resolver.complete(3, "file:///b.txt")
+
+    assert failures == ["url_resolution_failed"]
+    assert arm.calls == [["file:///a.txt", "file:///b.txt"]]
