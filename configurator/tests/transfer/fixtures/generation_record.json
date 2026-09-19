@@ -1,0 +1,21 @@
+{
+  "created_ns": 1,
+  "lease_deadline_ns": 2,
+  "manifest": {
+    "drop_effect": 1,
+    "entries": [
+      {
+        "kind": "file",
+        "mtime_ns": 111,
+        "path": "a.txt",
+        "size": 3
+      }
+    ],
+    "skipped": [],
+    "total_bytes": 3,
+    "transfer_id": "abc123"
+  },
+  "schema": 1,
+  "state": "active",
+  "transfer_id": "abc123"
+}

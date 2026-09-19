@@ -41,6 +41,22 @@ targets:
       - path: Tests
       - path: Extension
       - path: Shared
+    # The golden generation-record fixture is the SAME file
+    # `test_fileprovider_replica.py` reads on the Python side (Task 4) - one
+    # shared vector, two consumers, so a schema drift fails on both sides.
+    # xcodegen 2.46.0 silently drops a `resources:` entry whose path escapes
+    # the project directory via ".." (no PBXResourcesBuildPhase entry is
+    # emitted, no warning/error), AND silently drops one under a brand-new
+    # top-level directory not already covered by a `sources:` path (verified
+    # both independently: "Fixtures/x.json" as a new top-level dir was
+    # dropped; "Tests/x.json" under the already-declared Tests source root
+    # was picked up). So the canonical fixture is referenced through an
+    # in-tree symlink placed inside the existing Tests/ group
+    # (Tests/generation_record.json -> ../../tests/transfer/fixtures/...) -
+    # it is still the SAME file on disk (git preserves the symlink itself on
+    # checkout, so this survives clones too), not a copy that can drift.
+    resources:
+      - path: Tests/generation_record.json
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.duoinput.configurator.fileprovider.tests
