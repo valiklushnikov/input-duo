@@ -27,7 +27,7 @@ import logging
 import time
 from enum import Enum, auto
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QMetaObject, QObject, Q_ARG, Qt, Signal, Slot
 
 from ..clipboard.wire import Message
 from .fileprovider_client import FileProviderServiceClient
@@ -104,6 +104,14 @@ class FileProviderBackend(QObject):
         self._offer_epoch = 0
         self._pending_epoch: int | None = None
         self._pending_manifest: TransferManifest | None = None
+        #: Эпоха последней ПРИНЯТОЙ (accept) генерации - монотонно растёт.
+        #: Не то же самое, что _pending_epoch (та про ещё-не-решённое
+        #: предложение): _accepted_epoch фиксируется в момент authorize(True)
+        #: и служит "личностью" генерации для проверки при поздней/переставшей
+        #: быть актуальной ACK-ответке (см. _run_publish_reply). Ноль - "ещё
+        #: ничего не принято", ни один реальный epoch (нумерация с 1) с ним не
+        #: совпадёт.
+        self._accepted_epoch = 0
         self._active_transfer_id: str | None = None
         self._generation_state: _GenerationState | None = None
 
@@ -152,9 +160,13 @@ class FileProviderBackend(QObject):
         if not accepted:
             self.transfer_cancelled.emit()
             return
-        self._publish_generation(manifest)
+        # Фиксируем принятую генерацию ДО асинхронной публикации: её epoch -
+        # это "личность", по которой поздняя ACK-ответка узнает, не была ли она
+        # уже перекрыта более новой принятой генерацией (см. _run_publish_reply).
+        self._accepted_epoch = epoch
+        self._publish_generation(manifest, epoch)
 
-    def _publish_generation(self, manifest: TransferManifest) -> None:
+    def _publish_generation(self, manifest: TransferManifest, epoch: int) -> None:
         remote = self._client.remote()
         if remote is None:
             logger.warning(
@@ -173,11 +185,54 @@ class FileProviderBackend(QObject):
         )
 
         def _on_reply(ack, error) -> None:
-            self._on_publish_reply(manifest, ack, error)
+            # NSXPCConnection доставляет reply-блок publishGeneration:reply: на
+            # приватной XPC/фоновой очереди - НЕ на Qt-потоке. Мутация полей
+            # QObject и emit сигналов оттуда небезопасны, поэтому переносим
+            # обработку на Qt-поток тем же приёмом, что и обратное направление
+            # (FileProviderServiceClient._dispatch_extension_call): при
+            # AutoConnection это прямой (синхронный) вызов, когда мы уже на
+            # Qt-потоке - на этом держатся синхронные фейки в тестах - и
+            # очередь, когда ответ пришёл с чужого потока.
+            self._deliver_publish_reply(manifest, epoch, ack, error)
 
         remote.publishGeneration_reply_(record, _on_reply)
 
-    def _on_publish_reply(self, manifest: TransferManifest, ack, error) -> None:
+    def _deliver_publish_reply(
+        self, manifest: TransferManifest, epoch: int, ack, error
+    ) -> None:
+        delivered = QMetaObject.invokeMethod(
+            self,
+            "_run_publish_reply",
+            Qt.ConnectionType.AutoConnection,
+            Q_ARG("QVariant", (manifest, epoch, ack, error)),
+        )
+        if not delivered:
+            logger.error(
+                "failed to marshal publish reply for %s onto the Qt thread",
+                manifest.transfer_id,
+            )
+
+    @Slot("QVariant")
+    def _run_publish_reply(self, payload) -> None:
+        # PySide6 боксит кортеж через QVariant как list; распаковка ниже к
+        # этому безразлична (list и tuple распаковываются одинаково).
+        manifest, epoch, ack, error = payload
+        # Поздняя/переставшая быть актуальной ACK: пока публикация A была в
+        # полёте, принята более новая генерация B (_accepted_epoch = B).
+        # Игнорируем ответку A целиком - ни мутации _active_transfer_id/
+        # _generation_state, ни generation_ready. Иначе Task 8, повесив
+        # generation_ready на pasteboard_arm, перевооружил бы буфер обмена
+        # корнями старой (пусть и одобренной) генерации поверх уже активной
+        # новой.
+        if epoch != self._accepted_epoch:
+            logger.debug(
+                "ignoring publish reply for superseded generation %s "
+                "(epoch %d != current %d)",
+                manifest.transfer_id,
+                epoch,
+                self._accepted_epoch,
+            )
+            return
         if not ack:
             logger.warning(
                 "extension declined generation %s: %r", manifest.transfer_id, error

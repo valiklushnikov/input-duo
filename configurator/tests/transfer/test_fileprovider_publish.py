@@ -44,6 +44,30 @@ class FakeRemote:
         reply(self.ack, None)
 
 
+class DeferredFakeRemote:
+    """Fake remote that stores reply callbacks so a test can fire them out of
+    order - models a live NSXPCConnection delivering ``publishGeneration:reply:``
+    replies asynchronously and possibly out of the order the calls were made.
+    """
+
+    def __init__(self) -> None:
+        self.published: list[str] = []
+        self.pending: list[tuple[str, object]] = []
+
+    def publishGeneration_reply_(self, record: bytes, reply) -> None:
+        transfer_id = json.loads(record.decode("utf-8"))["transfer_id"]
+        self.published.append(transfer_id)
+        self.pending.append((transfer_id, reply))
+
+    def deliver(self, transfer_id: str, ack: bool = True, error=None) -> None:
+        for i, (tid, reply) in enumerate(self.pending):
+            if tid == transfer_id:
+                self.pending.pop(i)
+                reply(ack, error)
+                return
+        raise KeyError(f"no pending reply for {transfer_id!r}")
+
+
 class FakeClient:
     """Stand-in for ``FileProviderServiceClient`` - only ``remote()`` matters here."""
 
@@ -217,6 +241,31 @@ def test_nacked_publish_emits_transfer_failed_and_no_generation_ready(fp_backend
     assert fake_remote.published == ["abc123"]  # publish WAS attempted...
     assert failed == ["publish_rejected"]  # ...but the extension declined it
     assert ready == []
+
+
+def test_late_ack_for_superseded_generation_is_ignored(qapp, fake_domain, fake_arm, fake_link):
+    # I1 (fix round 1): an out-of-order publish ACK for a generation that was
+    # superseded before its reply arrived must NOT clobber the active-generation
+    # bookkeeping nor re-emit generation_ready for the stale generation.
+    remote = DeferredFakeRemote()
+    backend = FileProviderBackend(FakeClient(remote), fake_domain, fake_arm)
+    backend.attach_link(fake_link)
+    ready = []
+    backend.generation_ready.connect(lambda tid, roots: ready.append(tid))
+
+    e_a = backend.handle_offer(_manifest("aaa111"))
+    backend.authorize(True, e_a)  # publish A - reply deferred
+    e_b = backend.handle_offer(_manifest("bbb222"))
+    backend.authorize(True, e_b)  # publish B - reply deferred; B is now the accepted gen
+    assert remote.published == ["aaa111", "bbb222"]
+
+    remote.deliver("bbb222")  # B's ACK arrives first -> B becomes active
+    assert ready == ["bbb222"]
+    assert backend._active_transfer_id == "bbb222"
+
+    remote.deliver("aaa111")  # A's late ACK arrives after B was already active
+    assert ready == ["bbb222"]  # NOT re-emitted for the superseded A
+    assert backend._active_transfer_id == "bbb222"  # active generation stays B
 
 
 def test_remote_unavailable_fails_without_crashing_and_publishes_nothing(fp_backend, fake_client):
