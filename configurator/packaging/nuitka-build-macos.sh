@@ -45,6 +45,23 @@ TRANSLATIONS="$CONFIGURATOR_ROOT/src/duo_input/resources/translations"
 ICON="$CONFIGURATOR_ROOT/src/duo_input/resources/duo-input.icns"
 LICENSES="$REPOSITORY_ROOT/docs/release/third-party-licenses.md"
 
+# --- macOS File Provider (Phase 10 / Task 18): appex + shim dylib embedding.
+#
+# The production host bundle identifier. Deliberately explicit rather than
+# left to Nuitka's default (which falls back to the --macos-app-name, "DuoInput"
+# — not reverse-DNS shaped) so it is stable, matches the
+# `com.duoinput.configurator` prefix the appex/dylib bundle ids nest under
+# (fileprovider/project.yml's bundleIdPrefix), and is checked by
+# tests/packaging/test_dist.py's bundle-ID collision guard against every known
+# scratchpad spike id (com.duoinput.DuoNuitka, .DuoEnumSpike, .DuoFPX2, ...).
+HOST_BUNDLE_ID="com.duoinput.configurator"
+#: 4YKVN22BMX = "Valentin Lushnikov (Personal Team)" — no paid Developer ID
+#: account or App Group entitlement involved anywhere in this build.
+FILEPROVIDER_TEAM_ID="4YKVN22BMX"
+FILEPROVIDER_BUILD_SCRIPT="$PACKAGING_ROOT/fileprovider-build.sh"
+FILEPROVIDER_APPEX_NAME="DuoInputFileProvider.appex"
+FILEPROVIDER_DYLIB_NAME="libduofpproto.dylib"
+
 step() { printf '\n==> %s\n' "$1"; }
 
 # Prefer an explicit 3.12 (Homebrew), matching pyproject's >=3.12,<3.13 pin.
@@ -114,6 +131,7 @@ step "Compiling Duo Input $VERSION"
     "$BUILD_PY" -m nuitka --standalone --macos-create-app-bundle --assume-yes-for-downloads \
         --enable-plugin=pyside6 \
         --macos-app-name=DuoInput \
+        --macos-signed-app-name="$HOST_BUNDLE_ID" \
         --macos-app-icon="$ICON" \
         --macos-app-protected-resource="NSLocalNetworkUsageDescription:Duo Input finds and connects to your paired computer on the local network." \
         --output-dir=dist \
@@ -122,7 +140,13 @@ step "Compiling Duo Input $VERSION"
         --include-module=duo_input.transfer.macos_pasteboard \
         --include-module=duo_input.transfer.macos_files \
         --include-module=duo_input.transfer.staging \
+        --include-module=duo_input.transfer.fileprovider_backend \
+        --include-module=duo_input.transfer.fileprovider_client \
+        --include-module=duo_input.transfer.fileprovider_domain \
+        --include-module=duo_input.transfer.fileprovider_proto \
+        --include-module=duo_input.transfer.fileprovider_replica \
         --include-module=objc --include-module=AppKit --include-module=Foundation \
+        --include-module=FileProvider \
         --nofollow-import-to=duo_input.transfer.windows_files \
         --nofollow-import-to=duo_input.transfer.windows_com \
         --include-data-files="src/duo_input/resources/translations/*.qm=duo_input/resources/translations/" \
@@ -151,6 +175,77 @@ mkdir -p "$RESOURCES_APP"
 cp "$LICENSES" "$RESOURCES_APP/third-party-licenses.md"
 cp "$(dirname "$TRANSLATIONS")/fonts/OFL.txt" "$RESOURCES_APP/OFL-GolosText.txt"
 
+step "Building the File Provider appex + shim dylib"
+[ -x "$FILEPROVIDER_BUILD_SCRIPT" ] || chmod +x "$FILEPROVIDER_BUILD_SCRIPT"
+# Two lines on stdout: the appex path, then the dylib path (see the script's
+# own header). Both are already signed on the Personal Team by this call —
+# nested-first, per Apple's guidance (sign leaves before the tree that
+# contains them; never `codesign --deep` a container that embeds an app
+# extension, since --deep would blindly re-apply the OUTER entitlements
+# — this build's empty host entitlements — onto the appex's own
+# app-sandbox entitlement).
+# macOS ships bash 3.2 (no `mapfile`): read the script's two output lines
+# (appex path, then dylib path) with plain `read` from a here-string instead.
+FILEPROVIDER_ARTIFACTS_OUT="$("$FILEPROVIDER_BUILD_SCRIPT")"
+{
+    IFS= read -r FILEPROVIDER_APPEX_SRC
+    IFS= read -r FILEPROVIDER_DYLIB_SRC
+} <<< "$FILEPROVIDER_ARTIFACTS_OUT"
+[ -d "$FILEPROVIDER_APPEX_SRC" ] || { echo "fileprovider-build.sh did not report a usable appex path" >&2; exit 1; }
+[ -f "$FILEPROVIDER_DYLIB_SRC" ] || { echo "fileprovider-build.sh did not report a usable dylib path" >&2; exit 1; }
+
+step "Embedding the appex (Contents/PlugIns) and shim dylib (Contents/Frameworks)"
+# Added AFTER Nuitka's own build (which already ad-hoc self-signs the .app it
+# just produced) rather than via `--include-data-files`, so neither nested
+# artifact's real Personal-Team signature is clobbered by that ad-hoc pass.
+PLUGINS_APP="$OUTPUT_APP/Contents/PlugIns"
+FRAMEWORKS_APP="$OUTPUT_APP/Contents/Frameworks"
+mkdir -p "$PLUGINS_APP" "$FRAMEWORKS_APP"
+rm -rf "$PLUGINS_APP/$FILEPROVIDER_APPEX_NAME"
+cp -R "$FILEPROVIDER_APPEX_SRC" "$PLUGINS_APP/$FILEPROVIDER_APPEX_NAME"
+cp "$FILEPROVIDER_DYLIB_SRC" "$FRAMEWORKS_APP/$FILEPROVIDER_DYLIB_NAME"
+
+step "Signing the outer bundle (Personal Team, hardened runtime)"
+# The appex and dylib keep the signatures fileprovider-build.sh already gave
+# them (nested-first). This is a SHALLOW sign of just the outer container —
+# never --deep here, for the same reason noted above. A shallow sign still
+# correctly reseals Contents' resource envelope to include the newly added
+# PlugIns/Frameworks entries; nested code (the appex, any .framework) is
+# referenced by its own independent signature, not re-hashed as a plain
+# resource.
+IDENTITY="$(security find-identity -v -p codesigning | sed -n '1s/^[[:space:]]*[0-9]*)[[:space:]]*\([0-9A-F]*\).*/\1/p')"
+[ -n "$IDENTITY" ] || { echo "no codesigning identity found in the keychain (security find-identity -v -p codesigning)" >&2; exit 1; }
+
+HOST_ENTITLEMENTS="$DIST_ROOT/host-production.entitlements"
+# Deliberately empty: the host ships NO application-groups, named-Mach-service,
+# or temporary-exception entitlement, and needs none of the appex's
+# com.apple.security.app-sandbox (the host process itself is not sandboxed;
+# only the File Provider extension is).
+cat > "$HOST_ENTITLEMENTS" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict/>
+</plist>
+PLIST
+
+codesign --force --sign "$IDENTITY" --options runtime \
+    --entitlements "$HOST_ENTITLEMENTS" \
+    --identifier "$HOST_BUNDLE_ID" \
+    "$OUTPUT_APP"
+
+step "Verifying the signed bundle (codesign --verify --deep --strict)"
+codesign --verify --deep --strict "$OUTPUT_APP"
+
+for artifact in "$OUTPUT_APP" "$PLUGINS_APP/$FILEPROVIDER_APPEX_NAME"; do
+    team="$(codesign -dv "$artifact" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+    if [ "$team" != "$FILEPROVIDER_TEAM_ID" ]; then
+        echo "unexpected signing team for $artifact: '$team' (expected $FILEPROVIDER_TEAM_ID)" >&2
+        exit 1
+    fi
+done
+
 printf '\nDuo Input %s built into %s\n' "$VERSION" "$OUTPUT_APP"
-echo "Unsigned: first launch needs right-click -> Open, or:"
+echo "Signed on the Personal Team ($FILEPROVIDER_TEAM_ID); codesign --verify --deep --strict passed."
+echo "Gatekeeper still needs right-click -> Open on an unnotarized build, or:"
 echo "  xattr -dr com.apple.quarantine \"$OUTPUT_APP\""
