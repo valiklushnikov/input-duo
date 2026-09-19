@@ -12,12 +12,23 @@ import UniformTypeIdentifiers
 final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, NSFileProviderServicing {
     private let domain: NSFileProviderDomain
     private let manager: NSFileProviderManager?
+    private let replicaStore: ReplicaStore
     /// Strong reference: the service source owns the anonymous listener.
     private var serviceSource: DuoServiceSource?
 
-    required init(domain: NSFileProviderDomain) {
+    required convenience init(domain: NSFileProviderDomain) {
+        self.init(domain: domain, replicaStore: ReplicaStore())
+    }
+
+    /// Test seam: production always goes through `init(domain:)` above,
+    /// which uses `ReplicaStore`'s real sandboxed default base directory.
+    /// Unit tests inject a temp-directory-backed store instead, so
+    /// constructing this class in-process never touches the real
+    /// `~/Library` (the test bundle itself is not sandboxed).
+    init(domain: NSFileProviderDomain, replicaStore: ReplicaStore) {
         self.domain = domain
         self.manager = NSFileProviderManager(for: domain)
+        self.replicaStore = replicaStore
         super.init()
     }
 
@@ -42,14 +53,27 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         request: NSFileProviderRequest,
         completionHandler: @escaping (NSFileProviderItem?, Error?) -> Void
     ) -> Progress {
+        let noSuchItem = NSError(domain: NSFileProviderErrorDomain, code: NSFileProviderError.noSuchItem.rawValue)
+
         if identifier == .rootContainer {
             completionHandler(RootItem(), nil)
+            return Progress()
+        }
+
+        guard let parsed = DuoItemModel.parse(identifier),
+              let record = replicaStore.record(for: parsed.transferId), record.isActive else {
+            completionHandler(nil, noSuchItem)
+            return Progress()
+        }
+
+        if let index = parsed.index {
+            if let item = DuoItemFactory.item(for: record, index: index) {
+                completionHandler(item, nil)
+            } else {
+                completionHandler(nil, noSuchItem)
+            }
         } else {
-            completionHandler(
-                nil,
-                NSError(domain: NSFileProviderErrorDomain,
-                        code: NSFileProviderError.noSuchItem.rawValue)
-            )
+            completionHandler(DuoItemFactory.containerItem(for: record), nil)
         }
         return Progress()
     }
@@ -70,7 +94,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         for containerItemIdentifier: NSFileProviderItemIdentifier,
         request: NSFileProviderRequest
     ) throws -> NSFileProviderEnumerator {
-        return EmptyEnumerator()
+        return DuoEnumerator(enumeratedItemIdentifier: containerItemIdentifier, store: replicaStore)
     }
 
     // MARK: - Mutating operations: read-only backend, all unsupported.
