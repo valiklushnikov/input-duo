@@ -375,6 +375,64 @@ class _ClipboardRuntime(QObject):
 
         self._application.setQuitOnLastWindowClosed(True)
 
+    def _fileprovider_flag_enabled(self) -> bool:
+        """Read live - checked by ``MacReceiveRouter`` on every offer (Task
+        16 ruling #3), so toggling this setting takes effect for the very
+        next offer without restarting the file-transfer subsystem."""
+        return bool(
+            self._settings.value("clipboard/fileprovider_enabled", False, type=bool)
+        )
+
+    def _build_fileprovider_kwargs(self) -> dict:
+        """Assemble the ``MacReceiveRouter`` File Provider dependencies
+        (Task 16), or an empty-FP set of kwargs when the feature should stay
+        off. Default is OFF (Task 20 owns flipping the rollout default): with
+        the flag off, this builds NOTHING File-Provider-specific - no domain,
+        no XPC client, no connection attempt - so behavior with the flag off
+        is byte-for-byte the plain-staging behavior that existed before Task
+        16. Construction is best-effort: any failure (missing PyObjC/
+        FileProvider framework, XPC discovery failure, ...) is caught and
+        logged, and the router falls back to staging-only, exactly as if the
+        flag were off.
+        """
+        flag_enabled = self._fileprovider_flag_enabled
+        if not flag_enabled():
+            return {"fileprovider_flag_enabled": flag_enabled}
+        try:
+            from duo_input.transfer.fileprovider_backend import (
+                _FP_AVAILABLE,
+                FileProviderBackend,
+            )
+            from duo_input.transfer.fileprovider_client import FileProviderServiceClient
+            from duo_input.transfer.fileprovider_domain import FileProviderDomainManager
+            from duo_input.transfer.macos_pasteboard import arm_urls
+
+            domain = FileProviderDomainManager(parent=self._application)
+            client = FileProviderServiceClient(parent=self._application)
+            client.set_domain(domain.domain_identifier)
+            fp_backend = FileProviderBackend(
+                client, domain, arm_urls, parent=self._application
+            )
+            # "Domain is ensured at app startup" (Task 6) - this is the first
+            # point the file-transfer subsystem (and thus the FP feature) is
+            # started, so that is here, not at process launch, and only when
+            # the flag is actually on. Both calls are idempotent/non-blocking
+            # (QTimer-driven backoff, no sleep) - see their own docstrings.
+            domain.ensure_domain()
+            client.connect_service()
+        except Exception:  # noqa: BLE001 - best-effort optional subsystem
+            logger.exception(
+                "File Provider недоступен на этом хосте - остаёмся на staging"
+            )
+            return {"fileprovider_flag_enabled": flag_enabled}
+        return {
+            "fileprovider_backend": fp_backend,
+            "fileprovider_domain": domain,
+            "fileprovider_client": client,
+            "fileprovider_flag_enabled": flag_enabled,
+            "fileprovider_os_supported": lambda: _FP_AVAILABLE,
+        }
+
     def _start_files(self) -> None:
         if self.transfer is not None:
             return
@@ -382,8 +440,11 @@ class _ClipboardRuntime(QObject):
         clipboard_backend = self._backend
         if coordinator is None or clipboard_backend is None:
             return
+        fileprovider_kwargs = (
+            self._build_fileprovider_kwargs() if sys.platform == "darwin" else {}
+        )
         try:
-            backend = create_file_backend(coordinator)
+            backend = create_file_backend(coordinator, **fileprovider_kwargs)
         except UnsupportedPlatformError:
             logger.info("file transfer is not supported on this platform")
             self._settings.setValue("clipboard/files_enabled", False)
@@ -463,7 +524,9 @@ class _ClipboardRuntime(QObject):
                 lambda reason: page.add_event(f"передача файлов не удалась: {reason}")
             )
 
-            cancel_slot = lambda transfer=transfer: transfer.finish_session("cancelled")
+            def cancel_slot(transfer=transfer) -> None:
+                transfer.finish_session("cancelled")
+
             page.cancel_requested.connect(cancel_slot)
 
             backend.set_callbacks(

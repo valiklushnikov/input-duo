@@ -27,10 +27,21 @@ def test_an_unknown_platform_is_refused_loudly_rather_than_silently(monkeypatch)
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="darwin only")
-def test_darwin_returns_mac_receiver():
+def test_darwin_returns_mac_receive_router_wrapping_mac_receiver():
+    """Task 16: darwin now always returns the ``MacReceiveRouter`` facade
+    (per-offer File Provider/staging selection), not a bare ``MacFileReceiver``
+    - but with no File Provider backend wired in (the zero-arg call from
+    every OTHER test in this module and from ``test_macos_receiver.py``),
+    the router always selects the same staging receiver it wraps, so staging
+    behavior is unchanged."""
     from duo_input.transfer.macos_files import MacFileReceiver
+    from duo_input.transfer.platform_files import MacReceiveRouter
 
-    assert isinstance(create_file_backend(), MacFileReceiver)
+    backend = create_file_backend()
+
+    assert isinstance(backend, MacReceiveRouter)
+    assert isinstance(backend._staging, MacFileReceiver)
+    assert backend._fp is None
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="darwin only")
