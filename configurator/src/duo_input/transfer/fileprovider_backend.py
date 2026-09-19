@@ -561,9 +561,12 @@ class FileProviderBackend(QObject):
             or fetch.state is not FetchState.REQUESTING
             or fetch_token not in self._active
             or fetch.read_id is not None
-            or fetch.offset >= fetch.size
-            or self._link is None
         ):
+            return
+        if fetch.offset >= fetch.size:
+            self._finish_fetch(fetch, FetchState.DONE)
+            return
+        if self._link is None:
             return
         expected = min(MAX_FILE_CHUNK_BYTES, fetch.size - fetch.offset)
         read_id = next(self._read_ids)
@@ -571,19 +574,33 @@ class FileProviderBackend(QObject):
         fetch.expected = expected
         fetch.state = FetchState.RECEIVING
         self.by_read_id[read_id] = fetch
-        self._link.send(
-            Message(
-                MessageType.FILE_READ,
-                {
-                    "transfer_id": fetch.generation_id,
-                    "entry_index": fetch.entry_index,
-                    "offset": fetch.offset,
-                    "length": expected,
-                    "read_id": read_id,
-                },
-                b"",
-            )
+        message = Message(
+            MessageType.FILE_READ,
+            {
+                "transfer_id": fetch.generation_id,
+                "entry_index": fetch.entry_index,
+                "offset": fetch.offset,
+                "length": expected,
+                "read_id": read_id,
+            },
+            b"",
         )
+        try:
+            sent = self._link.send(message)
+        except Exception as error:  # noqa: BLE001 - external transport boundary
+            logger.warning(
+                "FILE_READ send failed for fetch %s: %s",
+                fetch_token,
+                type(error).__name__,
+            )
+            sent = False
+        if (
+            sent is False
+            and fetch.state is FetchState.RECEIVING
+            and fetch.read_id == read_id
+            and self.by_read_id.get(read_id) is fetch
+        ):
+            self._finish_fetch(fetch, FetchState.FAILED)
 
     def _admit_from_queue(self) -> None:
         while self._queue and len(self._active) < MAX_ACTIVE_FETCHES:
@@ -634,8 +651,16 @@ class FileProviderBackend(QObject):
         fetch = self._pending_fetch(message)
         if fetch is None:
             return
+        chunk_size = len(message.blob)
+        if (
+            chunk_size == 0
+            or chunk_size > fetch.expected
+            or fetch.offset + chunk_size > fetch.size
+        ):
+            self._finish_fetch(fetch, FetchState.FAILED)
+            return
         self._clear_read(fetch)
-        fetch.offset += len(message.blob)
+        fetch.offset += chunk_size
         if fetch.offset >= fetch.size:
             self._finish_fetch(fetch, FetchState.DONE)
         else:

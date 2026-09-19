@@ -41,6 +41,31 @@ class FakeLink:
         return True
 
 
+class RejectingLink(FakeLink):
+    def send(self, message: Message) -> bool:
+        self.sent.append(message)
+        return False
+
+
+class RaisingLink(FakeLink):
+    def send(self, message: Message) -> bool:
+        self.sent.append(message)
+        raise OSError("link closed")
+
+
+class SynchronouslyCompletingLink(FakeLink):
+    def __init__(self, blob: bytes) -> None:
+        super().__init__()
+        self.blob = blob
+        self.backend: FileProviderBackend | None = None
+
+    def send(self, message: Message) -> bool:
+        self.sent.append(message)
+        assert self.backend is not None
+        self.backend.handle_message(_reply(message, self.blob))
+        return False
+
+
 def _manifest(
     transfer_id: str = "generation-1", sizes: tuple[int, ...] = (3, 5, 7, 9, 11, 13)
 ) -> TransferManifest:
@@ -57,11 +82,19 @@ def _manifest(
     )
 
 
-def _backend(qapp, manifest: TransferManifest | None = None, *, deferred=False):
+def _backend(
+    qapp,
+    manifest: TransferManifest | None = None,
+    *,
+    deferred=False,
+    link: FakeLink | None = None,
+):
     remote = FakeRemote(deferred=deferred)
-    link = FakeLink()
+    link = link or FakeLink()
     backend = FileProviderBackend(FakeClient(remote), object(), lambda _urls: None)
     backend.attach_link(link)
+    if isinstance(link, SynchronouslyCompletingLink):
+        link.backend = backend
     manifest = manifest or _manifest()
     epoch = backend.handle_offer(manifest)
     backend.authorize(True, epoch)
@@ -230,6 +263,140 @@ def test_boolean_response_coordinates_do_not_match_integer_fetch_coordinates(qap
     assert fetch.offset == 0
     assert fetch.read_id == read.header["read_id"]
     assert fetch.state == "receiving"
+
+
+def test_zero_size_fetches_complete_and_release_slots_without_reading(qapp):
+    manifest = _manifest(sizes=(0, 0, 0, 0, 3, 5))
+    backend, link, _remote, manifest = _backend(qapp, manifest)
+    tokens = _open_all(backend, manifest)
+
+    for token in tokens[:4]:
+        backend.pull_chunk(token)
+
+    assert [backend.by_token[token].state for token in tokens[:4]] == [
+        "done",
+        "done",
+        "done",
+        "done",
+    ]
+    assert [backend.by_token[token].state for token in tokens[4:]] == [
+        "requesting",
+        "requesting",
+    ]
+    assert backend._active == set(tokens[4:])
+    assert list(backend._queue) == []
+    assert link.sent == []
+
+
+@pytest.mark.parametrize("link_type", [RejectingLink, RaisingLink])
+def test_send_failure_fails_only_that_fetch_and_admits_fifo_successor(qapp, link_type):
+    link = link_type()
+    backend, _link, _remote, manifest = _backend(qapp, link=link)
+    tokens = _open_all(backend, manifest)
+
+    backend.pull_chunk(tokens[0])
+
+    failed = backend.by_token[tokens[0]]
+    assert failed.state == "failed"
+    assert failed.offset == 0
+    assert failed.read_id is None
+    assert failed.expected == 0
+    assert backend.by_read_id == {}
+    assert tokens[0] not in backend._active
+    assert backend.by_token[tokens[4]].state == "requesting"
+    assert list(backend._queue) == [tokens[5]]
+
+
+def test_false_send_result_does_not_undo_synchronous_completion(qapp):
+    link = SynchronouslyCompletingLink(b"abc")
+    manifest = _manifest(sizes=(3,))
+    backend, _link, _remote, manifest = _backend(qapp, manifest, link=link)
+    [token] = _open_all(backend, manifest)
+
+    backend.pull_chunk(token)
+
+    fetch = backend.by_token[token]
+    assert fetch.state == "done"
+    assert fetch.offset == 3
+    assert fetch.read_id is None
+    assert backend.by_read_id == {}
+    assert backend._active == set()
+
+
+@pytest.mark.parametrize("blob", [b"", b"abcd"])
+def test_malformed_chunk_fails_exact_fetch_without_advancing_offset(qapp, blob):
+    manifest = _manifest(sizes=(3, 5, 7, 9, 11))
+    backend, link, _remote, manifest = _backend(qapp, manifest)
+    tokens = _open_all(backend, manifest)
+    backend.pull_chunk(tokens[0])
+    [read] = link.sent
+
+    backend.handle_message(_reply(read, blob))
+
+    failed = backend.by_token[tokens[0]]
+    assert failed.state == "failed"
+    assert failed.offset == 0
+    assert failed.read_id is None
+    assert failed.expected == 0
+    assert backend.by_read_id == {}
+    assert backend.by_token[tokens[4]].state == "requesting"
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("transfer_id", "different-generation"),
+        ("entry_index", 1),
+        ("offset", 1),
+    ],
+)
+def test_response_coordinate_mismatch_does_not_mutate_indexed_fetch(
+    qapp, field, bad_value
+):
+    manifest = _manifest(sizes=(3, 5))
+    backend, link, _remote, manifest = _backend(qapp, manifest)
+    first, _second = _open_all(backend, manifest)
+    backend.pull_chunk(first)
+    [read] = link.sent
+    mismatched = dict(read.header, **{field: bad_value})
+
+    backend.handle_message(Message(MessageType.FILE_CHUNK, mismatched, b"abc"))
+
+    fetch = backend.by_token[first]
+    assert fetch.offset == 0
+    assert fetch.read_id == read.header["read_id"]
+    assert fetch.expected == 3
+    assert fetch.state == "receiving"
+    assert backend.by_read_id == {read.header["read_id"]: fetch}
+
+
+def test_stale_known_read_id_does_not_mutate_another_fetch(qapp):
+    manifest = _manifest(sizes=(3, 5))
+    backend, link, _remote, manifest = _backend(qapp, manifest)
+    first, second = _open_all(backend, manifest)
+    backend.pull_chunk(first)
+    backend.pull_chunk(second)
+    first_read, second_read = link.sent
+    backend.handle_message(_reply(first_read, b"abc"))
+    second_before = backend.by_token[second]
+    snapshot = (
+        second_before.offset,
+        second_before.read_id,
+        second_before.expected,
+        second_before.state,
+    )
+    stale_for_second = dict(second_read.header, read_id=first_read.header["read_id"])
+
+    backend.handle_message(Message(MessageType.FILE_CHUNK, stale_for_second, b"abcde"))
+
+    second_fetch = backend.by_token[second]
+    assert (
+        second_fetch.offset,
+        second_fetch.read_id,
+        second_fetch.expected,
+        second_fetch.state,
+    ) == snapshot
+    assert backend.by_read_id == {second_read.header["read_id"]: second_fetch}
 
 
 def test_backend_has_no_shared_sequential_cursor_fields(qapp):
