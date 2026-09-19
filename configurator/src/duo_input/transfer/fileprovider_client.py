@@ -21,6 +21,7 @@ PyObjC/FileProvider imports so importing this module on a non-darwin
 collection run does not hard-crash: everything that actually touches the
 Objective-C runtime is gated on ``_XPC_AVAILABLE``.
 """
+
 from __future__ import annotations
 
 import logging
@@ -84,22 +85,52 @@ _KIND_TO_CALLBACK = {
 }
 
 
+def _xpc_error(code: int):
+    """The shared DuoFPErrorDomain codes, bridged as NSError on macOS."""
+    if _XPC_AVAILABLE:
+        from Foundation import NSError
+
+        return NSError.errorWithDomain_code_userInfo_(
+            "com.duoinput.configurator.fileprovider.error", code, None
+        )
+    return RuntimeError(f"DuoFPErrorDomain:{code}")
+
+
 if _XPC_AVAILABLE:
+    # Clang supplies the XPC protocol's extended signatures. PyObjC additionally
+    # needs the callable metadata to convert received blocks into Python
+    # callables with the correct BOOL/object arguments.
+    for _selector, _index, _second_type in (
+        (b"openFetch:entryId:reply:", 4, b"@"),
+        (b"pullChunk:reply:", 3, objc._C_NSBOOL),
+    ):
+        objc.registerMetaDataForSelector(
+            b"_ExtensionCallbackAdapter",
+            _selector,
+            {
+                "arguments": {
+                    _index: {
+                        "type": b"@?",
+                        "callable_retained": True,
+                        "callable": {
+                            "retval": {"type": b"v"},
+                            "arguments": {
+                                0: {"type": b"^v"},
+                                1: {"type": b"@"},
+                                2: {"type": _second_type},
+                                3: {"type": b"@"},
+                            },
+                        },
+                    }
+                }
+            },
+        )
 
     class _ExtensionCallbackAdapter(NSObject):
         """Exported ``DuoHostCallback`` object - what the extension calls.
 
-        Every selector here does exactly one thing: forward the call's
-        business arguments (never the reply block - see below) to the
-        owning client's ``_dispatch_extension_call`` seam, which marshals
-        onto the Qt thread. No FILE_* logic lives here.
-
-        None of the three selectors invoke ``reply`` in this task. Actually
-        answering the extension (streaming bytes back via ``pullChunk``,
-        completing ``openFetch`` with a token) needs the fetch scheduler
-        that owns FILE_* wire calls - a later task. Transport-only means the
-        pipe exists and callbacks are observable; completing the round trip
-        is explicitly out of scope here (see task-3 report "concerns").
+        Arguments, including retained reply blocks, cross to the Qt thread.
+        The backend owns pending replies; no wire logic runs on the XPC queue.
         """
 
         def initWithClient_(self, client):
@@ -110,10 +141,12 @@ if _XPC_AVAILABLE:
             return self
 
         def openFetch_entryId_reply_(self, generation_id, entry_index, reply):
-            self._client._dispatch_extension_call("open", generation_id, entry_index)
+            self._client._dispatch_extension_call(
+                "open", generation_id, entry_index, reply
+            )
 
         def pullChunk_reply_(self, fetch_token, reply):
-            self._client._dispatch_extension_call("pull", fetch_token)
+            self._client._dispatch_extension_call("pull", fetch_token, reply)
 
         def cancelFetch_(self, fetch_token):
             self._client._dispatch_extension_call("cancel", fetch_token)
@@ -178,8 +211,8 @@ class FileProviderServiceClient(QObject):
     ) -> None:
         """Register the host-exported object's methods as Qt-thread callables.
 
-        Called with the plain business arguments only (no reply block - see
-        ``_ExtensionCallbackAdapter``'s docstring).
+        Open receives (generation, index, reply); pull receives (token, reply).
+        Cancel receives the token. All run on this object's Qt thread.
         """
         self._callbacks["open_fetch"] = open_fetch
         self._callbacks["pull_chunk"] = pull_chunk
@@ -303,14 +336,30 @@ class FileProviderServiceClient(QObject):
         # PySide6 boxes tuples handed through QVariant as lists; unpacking
         # below is agnostic to that (list and tuple unpack identically).
         kind, args = payload
+        args = list(args)
+        reply = args[-1] if kind in ("open", "pull") and callable(args[-1]) else None
+        settled = False
+
+        def once(*values):
+            nonlocal settled
+            if not settled:
+                settled = True
+                reply(*values)
+
+        if reply is not None:
+            args[-1] = once
         callback = self._callbacks.get(_KIND_TO_CALLBACK.get(kind, ""))
         if callback is None:
             logger.debug("no callback registered for extension call kind=%r", kind)
+            if reply is not None:
+                once(None, None if kind == "open" else False, _xpc_error(8))
             return
         try:
             callback(*args)
         except Exception:  # noqa: BLE001 - must not escape a Qt slot / XPC callback
             logger.exception("extension callback %r raised", kind)
+            if reply is not None:
+                once(None, None if kind == "open" else False, _xpc_error(7))
 
     # ------------------------------------------------------------------- discovery
 

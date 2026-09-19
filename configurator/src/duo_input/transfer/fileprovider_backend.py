@@ -8,8 +8,8 @@ generation через XPC в реплику Swift-расширения (атом
 URL корней generation через инъецируемый резолвер и вооружает СУЩЕСТВУЮЩИЙ
 host-only буфер обмена (``pasteboard_arm`` - см. ``macos_pasteboard.arm_urls``),
 а не второй подсистему. Task 9 добавляет ограниченный FIFO-планировщик
-независимых fetch'ей и сопоставление ``FILE_CHUNK`` по ``read_id``; доставка
-чанка через Swift IPC остаётся Task 10.
+независимых fetch'ей и сопоставление ``FILE_CHUNK`` по ``read_id``; Task 10
+доставляет ответы через Swift IPC, сохраняя один pending reply на fetch.
 
 Приватностный инвариант всего модуля - "эпоха авторизации": ``handle_offer``
 возвращает эпоху текущего предложения; ``authorize`` обязан игнорировать любой
@@ -47,7 +47,7 @@ from enum import Enum, StrEnum, auto
 from PySide6.QtCore import QMetaObject, QObject, Q_ARG, Qt, Signal, Slot
 
 from ..clipboard.wire import MAX_FILE_CHUNK_BYTES, Message, MessageType
-from .fileprovider_client import FileProviderServiceClient
+from .fileprovider_client import FileProviderServiceClient, _xpc_error
 from .fileprovider_domain import FileProviderDomainManager
 from .fileprovider_replica import STATE_ACTIVE, build_generation_record
 from .model import ENTRY_FILE, TransferManifest
@@ -137,6 +137,7 @@ class Fetch:
     expected: int
     size: int
     state: FetchState
+    reply: Callable | None = None
 
 
 class _GenerationState(Enum):
@@ -188,7 +189,8 @@ class FileProviderBackend(QObject):
         pasteboard_arm,
         parent=None,
         *,
-        url_resolver: Callable[[str, Callable[[object, object], None]], None] | None = None,
+        url_resolver: Callable[[str, Callable[[object, object], None]], None]
+        | None = None,
     ) -> None:
         super().__init__(parent)
         self._client = client
@@ -245,8 +247,10 @@ class FileProviderBackend(QObject):
             ready_signal.connect(self.on_domain_ready)
         if getattr(domain, "is_ready", False):
             self.on_domain_ready()
+        if hasattr(client, "set_callbacks"):
+            client.set_callbacks(self.open_fetch, self.pull_chunk, self.cancel_fetch)
 
-    # --- проводка (streaming ещё не подключён - Tasks 9-10)
+    # --- проводка
     def attach_link(self, link) -> None:
         self._link = link
 
@@ -469,6 +473,7 @@ class FileProviderBackend(QObject):
                 )
 
         for root_id in roots:
+
             def _completion(url, error, _root_id=root_id) -> None:
                 _dispatch(_root_id, url, error)
 
@@ -515,7 +520,19 @@ class FileProviderBackend(QObject):
         self._armed_transfer_id = transfer_id
 
     # --- Task 9: bounded per-fetch scheduler
-    def open_fetch(self, generation_id: str, entry_index: int) -> tuple[str, int]:
+    def open_fetch(self, generation_id: str, entry_index: int, reply=None):
+        try:
+            token, size = self._open_fetch(generation_id, entry_index)
+        except ValueError:
+            if reply is None:
+                raise
+            reply(None, None, _xpc_error(4))
+            return None
+        if reply is not None:
+            reply(token, size, None)
+        return token, size
+
+    def _open_fetch(self, generation_id: str, entry_index: int) -> tuple[str, int]:
         """Open one regular file from the generation acknowledged as ACTIVE."""
         manifest = self._active_manifest
         if manifest is None or manifest.transfer_id != generation_id:
@@ -553,20 +570,40 @@ class FileProviderBackend(QObject):
             self._queue.append(fetch_token)
         return fetch_token, entry.size
 
-    def pull_chunk(self, fetch_token: str) -> None:
+    def pull_chunk(self, fetch_token: str, reply=None) -> None:
         """Emit at most one request for an admitted fetch with no read in flight."""
         fetch = self.by_token.get(fetch_token)
+        if fetch is None or fetch.state in (
+            FetchState.DONE,
+            FetchState.FAILED,
+            FetchState.CANCELLED,
+        ):
+            if reply is not None:
+                reply(None, False, _xpc_error(7))
+            return
+        if fetch.reply is not None or fetch.read_id is not None:
+            if reply is not None:
+                reply(None, False, _xpc_error(7))
+            return
+        fetch.reply = reply
+        self._request_chunk(fetch)
+
+    def _request_chunk(self, fetch: Fetch) -> None:
+        fetch_token = fetch.fetch_token
         if (
-            fetch is None
-            or fetch.state is not FetchState.REQUESTING
+            fetch.state is not FetchState.REQUESTING
             or fetch_token not in self._active
             or fetch.read_id is not None
         ):
             return
         if fetch.offset >= fetch.size:
+            reply, fetch.reply = fetch.reply, None
             self._finish_fetch(fetch, FetchState.DONE)
+            if reply is not None:
+                reply(b"", True, None)
             return
         if self._link is None:
+            self._finish_fetch(fetch, FetchState.FAILED, _xpc_error(8))
             return
         expected = min(MAX_FILE_CHUNK_BYTES, fetch.size - fetch.offset)
         read_id = next(self._read_ids)
@@ -600,7 +637,7 @@ class FileProviderBackend(QObject):
             and fetch.read_id == read_id
             and self.by_read_id.get(read_id) is fetch
         ):
-            self._finish_fetch(fetch, FetchState.FAILED)
+            self._finish_fetch(fetch, FetchState.FAILED, _xpc_error(3))
 
     def _admit_from_queue(self) -> None:
         while self._queue and len(self._active) < MAX_ACTIVE_FETCHES:
@@ -610,6 +647,8 @@ class FileProviderBackend(QObject):
                 continue
             fetch.state = FetchState.REQUESTING
             self._active.add(fetch_token)
+            if fetch.reply is not None:
+                self._request_chunk(fetch)
 
     def _pending_fetch(self, message: Message) -> Fetch | None:
         header = message.header
@@ -641,36 +680,53 @@ class FileProviderBackend(QObject):
         fetch.read_id = None
         fetch.expected = 0
 
-    def _finish_fetch(self, fetch: Fetch, state: FetchState) -> None:
+    def _finish_fetch(self, fetch: Fetch, state: FetchState, error=None) -> None:
+        reply, fetch.reply = fetch.reply, None
         self._clear_read(fetch)
         fetch.state = state
         self._active.discard(fetch.fetch_token)
+        if reply is not None:
+            reply(None, False, error or _xpc_error(7))
         self._admit_from_queue()
+
+    def cancel_fetch(self, fetch_token: str) -> None:
+        fetch = self.by_token.get(fetch_token)
+        if fetch is not None and fetch.state not in (
+            FetchState.DONE,
+            FetchState.FAILED,
+            FetchState.CANCELLED,
+        ):
+            self._finish_fetch(fetch, FetchState.CANCELLED, _xpc_error(3))
 
     def _on_chunk(self, message: Message) -> None:
         fetch = self._pending_fetch(message)
         if fetch is None:
             return
         chunk_size = len(message.blob)
-        if (
-            chunk_size == 0
-            or chunk_size > fetch.expected
-            or fetch.offset + chunk_size > fetch.size
-        ):
-            self._finish_fetch(fetch, FetchState.FAILED)
+        if chunk_size != fetch.expected or fetch.offset + chunk_size > fetch.size:
+            self._finish_fetch(fetch, FetchState.FAILED, _xpc_error(7))
             return
+        reply, fetch.reply = fetch.reply, None
         self._clear_read(fetch)
         fetch.offset += chunk_size
         if fetch.offset >= fetch.size:
             self._finish_fetch(fetch, FetchState.DONE)
         else:
             fetch.state = FetchState.REQUESTING
+        if reply is not None:
+            reply(message.blob, fetch.offset >= fetch.size, None)
 
     def _on_file_error(self, message: Message) -> None:
         fetch = self._pending_fetch(message)
         if fetch is None:
             return
-        self._finish_fetch(fetch, FetchState.FAILED)
+        reason = message.header.get("reason")
+        code = (
+            {"source_missing": 1, "source_changed": 2}.get(reason, 7)
+            if isinstance(reason, str)
+            else 7
+        )
+        self._finish_fetch(fetch, FetchState.FAILED, _xpc_error(code))
 
     # --- messages from the unchanged files/2 wire
     def handle_message(self, message: Message) -> None:
@@ -679,7 +735,7 @@ class FileProviderBackend(QObject):
         elif message.type is MessageType.FILE_ERROR:
             self._on_file_error(message)
 
-    # --- завершение (стриминг ещё не подключён - Tasks 9-10: заглушки)
+    # --- session-wide lifecycle is implemented by the later lifecycle tasks
     def cancel(self) -> None:
         return
 
