@@ -1,30 +1,42 @@
-"""FileProviderBackend - offer -> авторизация -> публикация generation (Task 7).
+"""FileProviderBackend - offer -> авторизация -> публикация generation ->
+вооружение буфера обмена (Tasks 7-8).
 
 Первый вертикальный срез File Provider бэкенда: принятый offer публикует
 generation через XPC в реплику Swift-расширения (атомарно + ACK), чтобы
-пространство File Provider стало видимым. Стриминг (FILE_READ/FILE_CHUNK)
-приезжает в Tasks 9-10, вооружение буфера обмена (``pasteboard_arm``) - в
-Task 8. Здесь оба явно НЕ реализованы: ``handle_message`` - заглушка, ``_arm``
-хранится, но не вызывается нигде в этом модуле.
+пространство File Provider стало видимым (Task 7). Как только это ACK
+получено И домен (Task 6) READY, Task 8 резолвит user-visible ``file://``
+URL корней generation через инъецируемый резолвер и вооружает СУЩЕСТВУЮЩИЙ
+host-only буфер обмена (``pasteboard_arm`` - см. ``macos_pasteboard.arm_urls``),
+а не второй подсистему. Стриминг (FILE_READ/FILE_CHUNK) приезжает в Tasks
+9-10 - ``handle_message`` здесь по-прежнему заглушка.
 
 Приватностный инвариант всего модуля - "эпоха авторизации": ``handle_offer``
 возвращает эпоху текущего предложения; ``authorize`` обязан игнорировать любой
 вызов, чей ``epoch`` не совпадает с текущим ожидающим (протухший/перекрытый
-Accept) - публикация generation, запись в реплику и (в Task 8) вооружение
-буфера обмена происходят СТРОГО после Accept текущей эпохи и только для неё.
-Это переопределяет "мягкий компромисс" из spec §22: протухшая авторизация
-теперь не публикует НИЧЕГО, а не публикует "с последующим retire".
+Accept) - публикация generation, запись в реплику и вооружение буфера обмена
+происходят СТРОГО после Accept текущей эпохи и только для неё. Это
+переопределяет "мягкий компромисс" из spec §22: протухшая авторизация теперь
+не публикует НИЧЕГО, а не публикует "с последующим retire".
 
-``domain`` (Task 6) инъецируется и хранится, но не участвует в гейтинге
-публикации в этой задаче - per-offer выбор File Provider vs staging и
-готовность домена это Task 16 (сознательно не делается здесь, чтобы не
-дублировать логику раньше времени).
+Task 8 добавляет второй, независимый latch поверх этого: вооружение буфера
+обмена происходит только когда ОБА события произошли - ACK текущей generation
+(``on_ack``/``_run_publish_reply``) И готовность домена (``on_domain_ready``,
+подключённый к ``domain.ready``) - и не более одного раза на generation (см.
+``_maybe_arm``/``_armed_transfer_id``). Если READY ещё не наступил к моменту
+ACK, вооружение просто откладывается - fallback на этот случай (Task 16) здесь
+сознательно не реализован.
+
+``domain`` (Task 6) инъецируется и хранится; в этой задаче он участвует
+ТОЛЬКО как источник сигнала ``ready`` для latch'а выше - per-offer выбор
+File Provider vs staging при деградированном домене это Task 16 (сознательно
+не делается здесь, чтобы не дублировать логику раньше времени).
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from enum import Enum, auto
 
 from PySide6.QtCore import QMetaObject, QObject, Q_ARG, Qt, Signal, Slot
@@ -36,6 +48,61 @@ from .fileprovider_replica import STATE_ACTIVE, build_generation_record
 from .model import TransferManifest
 
 logger = logging.getLogger(__name__)
+
+try:
+    from FileProvider import NSFileProviderManager
+
+    _FP_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised implicitly on non-darwin
+    NSFileProviderManager = None
+    _FP_AVAILABLE = False
+
+
+def _default_url_resolver(
+    domain: object,
+) -> Callable[[str, Callable[[object, object], None]], None]:
+    """Real resolver: ``root_id`` -> the user-visible ``file://`` URL
+    ``NSFileProviderManager`` hands back for it, via
+    ``getUserVisibleURLForItemIdentifier:completionHandler:``. Never
+    instantiated by a test - tests inject a fake resolver instead (see the
+    ``FileProviderBackend`` docstring / task-8 brief). Looks the domain up by
+    identifier the same way ``fileprovider_domain._FileProviderRealAdapter``
+    does, since the injected ``domain`` here is Task 6's
+    ``FileProviderDomainManager`` (only exposes ``domain_identifier``, not
+    the raw ``NSFileProviderDomain``).
+    """
+
+    def resolve(root_id: str, completion: Callable[[object, object], None]) -> None:
+        if not _FP_AVAILABLE:
+            completion(None, RuntimeError("PyObjC FileProvider framework unavailable"))
+            return
+        identifier = getattr(domain, "domain_identifier", None)
+        if identifier is None:
+            completion(None, RuntimeError("domain has no domain_identifier"))
+            return
+
+        def on_domains(domains, error):
+            if error is not None:
+                completion(None, error)
+                return
+            target = next(
+                (d for d in (domains or []) if str(d.identifier()) == identifier), None
+            )
+            if target is None:
+                completion(None, RuntimeError(f"domain {identifier!r} not registered"))
+                return
+            manager = NSFileProviderManager.managerForDomain_(target)
+            if manager is None:
+                completion(None, RuntimeError("no manager for domain"))
+                return
+            manager.getUserVisibleURLForItemIdentifier_completionHandler_(
+                root_id, completion
+            )
+
+        NSFileProviderManager.getDomainsWithCompletionHandler_(on_domains)
+
+    return resolve
+
 
 #: Срок аренды генерации по умолчанию - совпадает с TTL staging (StagingArea,
 #: ttl_seconds=86_400). Не проверяется тестами; см. ruling #1 в task-7 brief -
@@ -74,7 +141,7 @@ def _root_ids(manifest: TransferManifest) -> tuple[str, ...]:
 
 
 class FileProviderBackend(QObject):
-    """Offer/authorize/publish половина File Provider бэкенда (Task 7)."""
+    """Offer/authorize/publish/arm - File Provider бэкенд (Tasks 7-8)."""
 
     #: (manifest, epoch) - epoch должен быть передан обратно в authorize().
     authorization_needed = Signal(object, int)
@@ -83,7 +150,7 @@ class FileProviderBackend(QObject):
     transfer_completed = Signal()
     transfer_failed = Signal(str)
     transfer_cancelled = Signal()
-    #: (transfer_id, root_ids) - внутренний сигнал, потребляет Task 8 (arm).
+    #: (transfer_id, root_ids) - внутренний сигнал; питает ack-latch Task 8.
     generation_ready = Signal(str, object)
 
     def __init__(
@@ -92,13 +159,22 @@ class FileProviderBackend(QObject):
         domain: FileProviderDomainManager,
         pasteboard_arm,
         parent=None,
+        *,
+        url_resolver: Callable[[str, Callable[[object, object], None]], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self._client = client
-        #: Хранится, но не гейтит публикацию в этой задаче - см. Task 16.
+        #: Хранится; в этой задаче участвует только как источник ``ready``
+        #: для arm-latch'а ниже - per-offer гейтинг публикации это Task 16.
         self._domain = domain
-        #: НЕ вызывается нигде в этом модуле - вооружение это Task 8.
+        #: Вызывается ТОЛЬКО из ``_arm_after_ready``, когда оба latch'а держат.
         self._arm = pasteboard_arm
+        #: root_id -> (url, error) резолвер. По умолчанию - реальный
+        #: NSFileProviderManager (см. ``_default_url_resolver``); тесты
+        #: инъецируют фейк.
+        self._url_resolver = (
+            url_resolver if url_resolver is not None else _default_url_resolver(domain)
+        )
         self._link = None
         self._peer_caps: frozenset[str] = frozenset()
         self._offer_epoch = 0
@@ -112,8 +188,27 @@ class FileProviderBackend(QObject):
         #: ничего не принято", ни один реальный epoch (нумерация с 1) с ним не
         #: совпадёт.
         self._accepted_epoch = 0
+        #: transfer_id/root_ids принятой (accept) генерации - зеркалит
+        #: _accepted_epoch, но по transfer_id, а не по epoch: on_ack() (тестовый
+        #: API, см. task-8 brief) не знает эпох, только transfer_id.
+        self._accepted_transfer_id: str | None = None
+        self._accepted_roots: tuple[str, ...] = ()
         self._active_transfer_id: str | None = None
         self._generation_state: _GenerationState | None = None
+        # --- Task 8: arm-when-ready latch (ACK И domain READY, ровно раз).
+        self._ack_transfer_id: str | None = None
+        self._ack_roots: tuple[str, ...] = ()
+        self._domain_ready = False
+        self._armed_transfer_id: str | None = None
+        self._arm_attempt = 0
+        self._pending_resolution: (
+            tuple[int, tuple[str, ...], set[str], dict[str, object]] | None
+        ) = None
+        ready_signal = getattr(domain, "ready", None)
+        if ready_signal is not None:
+            ready_signal.connect(self.on_domain_ready)
+        if getattr(domain, "is_ready", False):
+            self.on_domain_ready()
 
     # --- проводка (streaming ещё не подключён - Tasks 9-10)
     def attach_link(self, link) -> None:
@@ -164,6 +259,10 @@ class FileProviderBackend(QObject):
         # это "личность", по которой поздняя ACK-ответка узнает, не была ли она
         # уже перекрыта более новой принятой генерацией (см. _run_publish_reply).
         self._accepted_epoch = epoch
+        # Параллельная "личность" по transfer_id для on_ack() (см. его
+        # докстринг) - тот тестовый API не оперирует epoch вообще.
+        self._accepted_transfer_id = manifest.transfer_id
+        self._accepted_roots = _root_ids(manifest)
         self._publish_generation(manifest, epoch)
 
     def _publish_generation(self, manifest: TransferManifest, epoch: int) -> None:
@@ -241,7 +340,112 @@ class FileProviderBackend(QObject):
             return
         self._active_transfer_id = manifest.transfer_id
         self._generation_state = _GenerationState.ACTIVE_CLIPBOARD
-        self.generation_ready.emit(manifest.transfer_id, _root_ids(manifest))
+        roots = _root_ids(manifest)
+        self.generation_ready.emit(manifest.transfer_id, roots)
+        # Драйвим тот же arm-when-ready latch, что и тестовый on_ack() -
+        # см. ruling #3 в task-8 brief: реальный ACK не дублирует логику
+        # вооружения, а идёт через ту же _note_generation_acked().
+        self._note_generation_acked(manifest.transfer_id, roots)
+
+    # --- Task 8: arm-when-ready latch (ACK + domain READY, ровно раз)
+
+    def on_ack(self, transfer_id: str) -> None:
+        """Тестовый/plan-mandated API: симулировать приход publish ACK для
+        ``transfer_id``, минуя реальный XPC-путь ``_run_publish_reply``.
+
+        Игнорирует ACK для чего угодно, кроме ТЕКУЩЕЙ принятой (accept)
+        генерации - тот же принцип устаревания, что ``_run_publish_reply``
+        выражает через ``epoch != self._accepted_epoch``, здесь выражен через
+        ``transfer_id``, поскольку у этого входа нет своей эпохи.
+        """
+        if transfer_id != self._accepted_transfer_id:
+            logger.debug(
+                "ignoring on_ack(%r): not the currently accepted generation (%r)",
+                transfer_id,
+                self._accepted_transfer_id,
+            )
+            return
+        self._note_generation_acked(transfer_id, self._accepted_roots)
+
+    def on_domain_ready(self) -> None:
+        """Domain (Task 6) стал READY - вторая половина arm-latch'а."""
+        self._domain_ready = True
+        self._maybe_arm()
+
+    def _note_generation_acked(self, transfer_id: str, roots: tuple[str, ...]) -> None:
+        self._ack_transfer_id = transfer_id
+        self._ack_roots = roots
+        self._maybe_arm()
+
+    def _maybe_arm(self) -> None:
+        """Вооружить буфер обмена, когда ОБА latch'а держат - и не более
+        одного раза на generation, даже если ack/ready перепрошли ещё раз
+        (см. ``_armed_transfer_id``)."""
+        if self._ack_transfer_id is None or not self._domain_ready:
+            return
+        if self._armed_transfer_id == self._ack_transfer_id:
+            return
+        transfer_id = self._ack_transfer_id
+        self._armed_transfer_id = transfer_id
+        self._arm_after_ready(transfer_id)
+
+    def _arm_after_ready(self, transfer_id: str) -> None:
+        """Резолвить user-visible URL корней ``transfer_id`` (латчнутых в
+        ``_ack_roots``) через ``self._url_resolver`` и вооружить буфер обмена
+        ОДНИМ вызовом ``self._arm`` после того, как ВСЕ корни резолвнуты.
+        """
+        roots = self._ack_roots
+        self._arm_attempt += 1
+        attempt = self._arm_attempt
+        if not roots:
+            # Пустая generation (не должно случаться на практике) - вооружаем
+            # пустым списком, той же семантикой, что arm_urls([]) у пустого
+            # arm() (см. macos_pasteboard.py) - без отдельной охраны.
+            self._arm([])
+            return
+        pending: set[str] = set(roots)
+        resolved: dict[str, object] = {}
+        self._pending_resolution = (attempt, roots, pending, resolved)
+
+        def _dispatch(root_id: str, url, error) -> None:
+            delivered = QMetaObject.invokeMethod(
+                self,
+                "_run_url_resolved",
+                Qt.ConnectionType.AutoConnection,
+                Q_ARG("QVariant", (attempt, root_id, url, error)),
+            )
+            if not delivered:
+                logger.error(
+                    "failed to marshal URL resolution for %s onto the Qt thread",
+                    root_id,
+                )
+
+        for root_id in roots:
+            def _completion(url, error, _root_id=root_id) -> None:
+                _dispatch(_root_id, url, error)
+
+            self._url_resolver(root_id, _completion)
+
+    @Slot("QVariant")
+    def _run_url_resolved(self, payload) -> None:
+        attempt, root_id, url, error = payload
+        if self._pending_resolution is None or self._pending_resolution[0] != attempt:
+            return  # superseded arm attempt - a newer one has already started
+        _, roots, pending, resolved = self._pending_resolution
+        if root_id not in pending:
+            return
+        pending.discard(root_id)
+        if error is not None:
+            logger.warning(
+                "failed to resolve user-visible URL for %s: %r", root_id, error
+            )
+        else:
+            resolved[root_id] = url
+        if pending:
+            return  # still waiting on other roots of this generation
+        urls = [resolved[r] for r in roots if r in resolved]
+        self._pending_resolution = None
+        self._arm(urls)
 
     # --- сообщения с провода (стриминг - Tasks 9-10: здесь заглушка)
     def handle_message(self, message: Message) -> None:  # noqa: ARG002 - stub
