@@ -59,6 +59,17 @@ enum ErrorMap {
     }
 }
 
+/// Task 17: the correlation-id log chain for one fetch - `transfer_id`/
+/// `entry_index` (parsed from the item identifier, `"<transfer_id>:<index>"`
+/// - see `DuoItemModel.parse`) plus `fetch_token`/`read_id` once those exist.
+/// Every field logged here is an id, a count, or an enum-ish label - NEVER a
+/// path (`item.filename`, `url.path`) and NEVER chunk bytes, mirroring the
+/// Python side's privacy invariant (task-17 brief ruling #1 / spec §15,§28).
+/// Ids are marked `.public` on purpose: they carry no user path/content, and
+/// a redacted correlation id is useless for the log chain this task exists
+/// to add.
+private let fetchLog = Logger(subsystem: "com.duoinput.configurator.fileprovider", category: "fetch")
+
 /// Each operation owns one temp file and serializes all XPC callbacks.
 final class FetchController {
     typealias HostProvider = (@escaping (Error) -> Void) -> DuoHostCallback?
@@ -73,7 +84,8 @@ final class FetchController {
 
     func fetch(_ item: DuoItem, request: NSFileProviderRequest,
                completion: @escaping (URL?, NSFileProviderItem?, Error?) -> Void) -> Progress {
-        Logger(subsystem: "com.duoinput.configurator.fileprovider", category: "fetch").info("FETCH_ENTER")
+        let parsed = DuoItemModel.parse(item.itemIdentifier)
+        fetchLog.info("FETCH_ENTER transfer_id=\(parsed?.transferId ?? "?", privacy: .public) entry_index=\(parsed?.index ?? -1, privacy: .public)")
         let operation = FetchOperation(item: item, directory: temporaryDirectory, completion: completion)
         operation.start(hostProvider)
         return operation.progress
@@ -94,6 +106,10 @@ private final class FetchOperation {
     private var opened = false
     private var pullSequence = 0
     private var offset: Int64 = 0
+    //: Correlation ids for the log chain (task 17) - filled in once `start()`
+    //: parses the item identifier. Never a path/filename, only the ids.
+    private var transferId: String?
+    private var entryIndex: Int?
 
     init(item: DuoItem, directory: URL, completion: @escaping (URL?, NSFileProviderItem?, Error?) -> Void) {
         self.item = item
@@ -122,6 +138,8 @@ private final class FetchOperation {
                   index >= 0, let size = self.item.documentSize?.int64Value, size >= 0 else {
                 self.finish(self.error(7)); return
             }
+            self.transferId = parsed.transferId
+            self.entryIndex = index
             self.host = provider { error in self.queue.async { self.finish(error) } }
             guard let host = self.host else { self.finish(self.error(8)); return }
             host.openFetch(parsed.transferId, entryId: NSNumber(value: index)) { token, total, error in
@@ -133,6 +151,7 @@ private final class FetchOperation {
                         return
                     }
                     self.token = token
+                    fetchLog.info("fp_fetch_started transfer_id=\(parsed.transferId, privacy: .public) entry_index=\(index, privacy: .public) fetch_token=\(token ?? "?", privacy: .public)")
                     if let error { self.finish(error); return }
                     guard let token, !token.isEmpty, total?.int64Value == size else {
                         self.finish(self.error(7)); return
@@ -179,6 +198,8 @@ private final class FetchOperation {
                     try self.file?.write(contentsOf: chunk)
                     self.offset += Int64(chunk.count)
                     self.progress.completedUnitCount = self.offset
+                    // fp_bytes_received: the byte COUNT only, never the chunk itself.
+                    fetchLog.info("fp_bytes_received transfer_id=\(self.transferId ?? "?", privacy: .public) entry_index=\(self.entryIndex ?? -1, privacy: .public) fetch_token=\(token, privacy: .public) bytes=\(chunk.count, privacy: .public)")
                     if eof {
                         try self.file?.synchronize()
                         try self.file?.close()
@@ -198,10 +219,17 @@ private final class FetchOperation {
         file = nil
         if let error {
             let mapped = ErrorMap.toNSFileProviderError(error)
+            // fp_fetch_failed/_cancelled: the mapped NSFileProviderError code
+            // only - never the local file's URL/path, never chunk content.
+            let nsError = error as NSError
+            let event = (nsError.domain == NSCocoaErrorDomain && nsError.code == NSUserCancelledError)
+                ? "fp_fetch_cancelled" : "fp_fetch_failed"
+            fetchLog.info("\(event, privacy: .public) transfer_id=\(self.transferId ?? "?", privacy: .public) entry_index=\(self.entryIndex ?? -1, privacy: .public) fetch_token=\(self.token ?? "?", privacy: .public) code=\(mapped.code, privacy: .public)")
             if let token { host?.cancelFetch(token) }
             if let url { try? FileManager.default.removeItem(at: url) }
             completion(nil, nil, mapped)
         } else {
+            fetchLog.info("fp_fetch_completed transfer_id=\(self.transferId ?? "?", privacy: .public) entry_index=\(self.entryIndex ?? -1, privacy: .public) fetch_token=\(self.token ?? "?", privacy: .public)")
             completion(url, item, nil)
         }
         host = nil

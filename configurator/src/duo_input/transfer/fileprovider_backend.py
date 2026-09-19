@@ -43,8 +43,9 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum, StrEnum, auto
+from pathlib import PurePosixPath
 
-from PySide6.QtCore import QMetaObject, QObject, Q_ARG, Qt, Signal, Slot
+from PySide6.QtCore import QMetaObject, QObject, QTimer, Q_ARG, Qt, Signal, Slot
 
 from ..clipboard.wire import MAX_FILE_CHUNK_BYTES, Message, MessageType
 from .fileprovider_client import FileProviderServiceClient, _xpc_error
@@ -123,6 +124,38 @@ GENERATION_TTL_NS = LEASE_NS
 #: самую старую quiesced (ref==0) generation - count-budget, аналог disk-budget
 #: у StagingArea.gc. Только метаданные реплики, не байты.
 MAX_GENERATIONS = 8
+
+#: Task 17 (ruling 3, carried from Task 14): deadline for a single outstanding
+#: FILE_READ before the per-fetch watchdog fails it with Timeout. No exact
+#: value is spec-mandated (spec §16 names "session timeout (watchdog)" without
+#: a number) - chosen comfortably above a realistic single-chunk round trip
+#: (MAX_FILE_CHUNK_BYTES fits in memory; no disk-bound wait expected on either
+#: side) while still catching a genuinely hung host. Injectable via
+#: ``timer_factory``/``read_timeout_ms`` so tests never wait it out.
+FETCH_READ_TIMEOUT_MS = 30_000
+
+
+def _entry_name(manifest: TransferManifest, entry_index: int) -> str:
+    """Basename-only display name for one manifest entry - mirrors
+    ``source.py:_name()``. Used ONLY in log lines (never in wire messages),
+    and only the basename, never the (possibly nested) manifest path, per the
+    module's privacy invariant (task-17 brief ruling #1)."""
+    try:
+        return PurePosixPath(manifest.entries[entry_index].path).name
+    except (IndexError, AttributeError):
+        return ""
+
+
+def _log_event(event: str, **fields: object) -> None:
+    """One structured log line per observable transition: ``event`` plus
+    ``key=value`` correlation ids (``transfer_id``/``entry_index``/
+    ``fetch_token``/``read_id``/basename-only ``name``) - see the counters
+    section of the module docstring and task-17 brief ruling #1. NEVER pass a
+    full manifest path or blob/content bytes here - only ids, basenames,
+    counts and enum-ish labels.
+    """
+    rendered = " ".join(f"{key}={value}" for key, value in fields.items())
+    logger.info("%s %s", event, rendered)
 
 
 class FetchState(StrEnum):
@@ -231,8 +264,25 @@ class FileProviderBackend(QObject):
         clock: Callable[[], int] | None = None,
         generation_ttl_ns: int = GENERATION_TTL_NS,
         max_generations: int = MAX_GENERATIONS,
+        timer_factory: Callable[[], object] | None = None,
+        read_timeout_ms: int = FETCH_READ_TIMEOUT_MS,
     ) -> None:
         super().__init__(parent)
+        # --- Task 17: observability - a plain dict, not a metrics framework
+        # (ruling #2). Counters are incremented in place; gauges (e.g.
+        # fp_active_fetches) are overwritten wherever the quantity they track
+        # changes. Readable directly by tests via ``backend.counters``.
+        self.counters: dict[str, int | str] = {}
+        # --- Task 17 (ruling #3, carried from Task 14): per-outstanding-read
+        # watchdog. ``timer_factory`` defaults to a real QTimer bound to this
+        # backend; tests inject a fake factory so expiry never waits on a real
+        # clock (see task-17 report). Keyed by read_id - the same key
+        # by_read_id uses - so arm/disarm always targets exactly one read.
+        self._timer_factory = (
+            timer_factory if timer_factory is not None else lambda: QTimer(self)
+        )
+        self._read_timeout_ms = read_timeout_ms
+        self._read_timers: dict[int, object] = {}
         self._client = client
         #: Хранится; в этой задаче участвует только как источник ``ready``
         #: для arm-latch'а ниже - per-offer гейтинг публикации это Task 16.
@@ -307,6 +357,12 @@ class FileProviderBackend(QObject):
         ready_signal = getattr(domain, "ready", None)
         if ready_signal is not None:
             ready_signal.connect(self.on_domain_ready)
+        # Task 17: fp_domain_state/fp_domain_not_ready - observability only,
+        # optional (test fakes such as plain ``object()`` or FakeDomain
+        # without this signal keep working exactly as before Task 8/16 did).
+        state_changed_signal = getattr(domain, "state_changed", None)
+        if state_changed_signal is not None:
+            state_changed_signal.connect(self._on_domain_state_changed)
         if getattr(domain, "is_ready", False):
             self.on_domain_ready()
         if hasattr(client, "set_callbacks"):
@@ -325,6 +381,8 @@ class FileProviderBackend(QObject):
         """
         self._release_link_lost_slot()
         self._link = link
+        self._bump("fp_ipc_connect")
+        _log_event("fp_ipc_connect")
         disconnected = getattr(link, "disconnected", None)
         if disconnected is None:
             return
@@ -357,6 +415,8 @@ class FileProviderBackend(QObject):
         if link is not self._link:
             return  # stale slot from an already-superseded link - ignore
         logger.info("file provider peer link lost (%s)", reason)
+        self._bump("fp_ipc_disconnect")
+        _log_event("fp_ipc_disconnect", reason=reason)
         self._release_link_lost_slot()
         self._link = None
         self._fail_all_active(_xpc_error(3))  # DuoFPErrorPeerLost
@@ -396,6 +456,79 @@ class FileProviderBackend(QObject):
 
     def set_peer_capabilities(self, caps) -> None:
         self._peer_caps = frozenset(caps)
+
+    # --- Task 17: counters (a plain dict - see __init__ - not a framework)
+    def _bump(self, name: str, by: int = 1) -> None:
+        self.counters[name] = self.counters.get(name, 0) + by
+
+    def _sync_active_gauges(self) -> None:
+        self.counters["fp_active_fetches"] = len(self._active)
+        self.counters["fp_queued_fetches"] = len(self._queue)
+
+    def _sync_generation_gauge(self) -> None:
+        active = sum(
+            1
+            for generation in self._generations.values()
+            if generation.state is _GenerationState.ACTIVE_CLIPBOARD
+        )
+        self.counters["fp_generation_active"] = active
+
+    def record_backend_selected(self, kind: str) -> None:
+        """Hook for ``MacReceiveRouter._select_backend`` (Task 16,
+        ``platform_files.py``) to call at the real selection site, so
+        ``fp_backend_selected{file_provider|staging}`` increments where the
+        choice is actually made. ``platform_files.py`` is NOT in this task's
+        file list (see task-17 report "fp_backend_selected" section) - this
+        method is exposed for that router to call, but the call site itself
+        is intentionally NOT wired here.
+        """
+        if kind not in ("file_provider", "staging"):
+            raise ValueError(f"unknown backend kind: {kind!r}")
+        self._bump(f"fp_backend_selected_{kind}")
+        _log_event("fp_backend_selected", backend=kind)
+
+    def _on_domain_state_changed(self, state: str) -> None:
+        self.counters["fp_domain_state"] = state
+        _log_event("fp_domain_state", state=state)
+        if state != "ready":
+            self._bump("fp_domain_not_ready")
+            _log_event("fp_domain_not_ready", state=state)
+
+    # --- Task 17 (ruling #3): per-outstanding-read watchdog
+    def _arm_watchdog(self, read_id: int) -> None:
+        timer = self._timer_factory()
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda: self._on_watchdog_expired(read_id))
+        self._read_timers[read_id] = timer
+        timer.start(self._read_timeout_ms)
+
+    def _disarm_watchdog(self, read_id: int) -> None:
+        timer = self._read_timers.pop(read_id, None)
+        if timer is not None:
+            timer.stop()
+
+    def _on_watchdog_expired(self, read_id: int) -> None:
+        """A single outstanding read's deadline passed with no chunk/error.
+        Fails EXACTLY that fetch with Timeout (the same mapping
+        ``on_session_timeout`` uses) - every other in-flight fetch is
+        untouched. Guards against a stale/racing timer firing after the read
+        already settled (disarmed) or was reassigned - by the time a real
+        settle happens ``_clear_read`` has already popped this read_id out of
+        both ``_read_timers`` and ``by_read_id``.
+        """
+        self._read_timers.pop(read_id, None)
+        fetch = self.by_read_id.get(read_id)
+        if fetch is None or fetch.read_id != read_id:
+            return  # already settled - stale timer, no-op
+        self._bump("fp_fetch_timeout")
+        _log_event(
+            "fp_fetch_timeout",
+            transfer_id=fetch.generation_id,
+            entry_index=fetch.entry_index,
+            fetch_token=fetch.fetch_token,
+            read_id=read_id,
+        )
+        self._finish_fetch(fetch, FetchState.FAILED, _xpc_error(5))  # DuoFPErrorTimeout
 
     # --- offer/авторизация
     def handle_offer(self, manifest: TransferManifest) -> int:
@@ -738,6 +871,15 @@ class FileProviderBackend(QObject):
             self._active.add(fetch_token)
         else:
             self._queue.append(fetch_token)
+        self._sync_active_gauges()
+        self._bump("fp_fetch_started")
+        _log_event(
+            "fp_fetch_started",
+            transfer_id=generation_id,
+            entry_index=entry_index,
+            fetch_token=fetch_token,
+            name=_entry_name(manifest, entry_index),
+        )
         return fetch_token, entry.size
 
     def pull_chunk(self, fetch_token: str, reply=None) -> None:
@@ -843,6 +985,12 @@ class FileProviderBackend(QObject):
         fetch.expected = expected
         fetch.state = FetchState.RECEIVING
         self.by_read_id[read_id] = fetch
+        # Task 17 (ruling #3): arm the per-read watchdog BEFORE calling
+        # send() - a fake link may complete synchronously inside send()
+        # itself (see SynchronouslyCompletingLink in
+        # test_fileprovider_scheduler.py), which must disarm this same timer
+        # via _clear_read before send() even returns.
+        self._arm_watchdog(read_id)
         message = Message(
             MessageType.FILE_READ,
             {
@@ -883,6 +1031,7 @@ class FileProviderBackend(QObject):
                 # Promotion out of the slot queue must still pass through
                 # the byte-budget gate (Task 11) - not bypass it.
                 self._admit_pull(fetch)
+        self._sync_active_gauges()
 
     def _pending_fetch(self, message: Message) -> Fetch | None:
         header = message.header
@@ -911,14 +1060,34 @@ class FileProviderBackend(QObject):
     def _clear_read(self, fetch: Fetch) -> None:
         if fetch.read_id is not None:
             self.by_read_id.pop(fetch.read_id, None)
+            self._disarm_watchdog(fetch.read_id)
         fetch.read_id = None
         fetch.expected = 0
 
+    #: FetchState (terminal) -> its counter name, for _finish_fetch below.
+    _TERMINAL_COUNTERS = {
+        FetchState.DONE: "fp_fetch_completed",
+        FetchState.CANCELLED: "fp_fetch_cancelled",
+        FetchState.FAILED: "fp_fetch_failed",
+    }
+
     def _finish_fetch(self, fetch: Fetch, state: FetchState, error=None) -> None:
         reply, fetch.reply = fetch.reply, None
+        read_id = fetch.read_id
         self._clear_read(fetch)
         fetch.state = state
         self._active.discard(fetch.fetch_token)
+        self._sync_active_gauges()
+        counter_name = self._TERMINAL_COUNTERS.get(state)
+        if counter_name is not None:
+            self._bump(counter_name)
+            _log_event(
+                counter_name,
+                transfer_id=fetch.generation_id,
+                entry_index=fetch.entry_index,
+                fetch_token=fetch.fetch_token,
+                read_id=read_id,
+            )
         if reply is not None:
             reply(None, False, error or _xpc_error(7))
         self._admit_from_queue()
@@ -962,14 +1131,41 @@ class FileProviderBackend(QObject):
     def _on_chunk(self, message: Message) -> None:
         fetch = self._pending_fetch(message)
         if fetch is None:
+            # No outstanding read matches this message - it settled/moved on
+            # already (cancelled, timed out, or a stale duplicate) by the
+            # time this chunk arrived.
+            self._bump("fp_late_chunk")
+            _log_event("fp_late_chunk", read_id=message.header.get("read_id"))
             return
         chunk_size = len(message.blob)
         if chunk_size != fetch.expected or fetch.offset + chunk_size > fetch.size:
+            if chunk_size > fetch.expected or fetch.offset + chunk_size > fetch.size:
+                event = "fp_oversized_chunk"
+            else:
+                event = "fp_truncated"
+            self._bump(event)
+            _log_event(
+                event,
+                transfer_id=fetch.generation_id,
+                entry_index=fetch.entry_index,
+                fetch_token=fetch.fetch_token,
+                read_id=fetch.read_id,
+            )
             self._finish_fetch(fetch, FetchState.FAILED, _xpc_error(7))
             return
+        self._bump("fp_bytes_received", chunk_size)
         reply, fetch.reply = fetch.reply, None
+        read_id = fetch.read_id
         self._clear_read(fetch)
         fetch.offset += chunk_size
+        _log_event(
+            "fp_bytes_received",
+            transfer_id=fetch.generation_id,
+            entry_index=fetch.entry_index,
+            fetch_token=fetch.fetch_token,
+            read_id=read_id,
+            bytes=chunk_size,
+        )
         if fetch.offset >= fetch.size:
             self._finish_fetch(fetch, FetchState.DONE)
         else:
@@ -1019,6 +1215,7 @@ class FileProviderBackend(QObject):
             created_ns=self._clock(),
         )
         self._gen_in_use.setdefault(transfer_id, 0)
+        self._sync_generation_gauge()
 
     def _retire_generation(self, generation_id: str) -> None:
         """Persist ``state="retired"`` over XPC and mark the local record
@@ -1031,6 +1228,7 @@ class FileProviderBackend(QObject):
         if generation is None or generation.state is _GenerationState.RETIRED:
             return
         generation.state = _GenerationState.RETIRED
+        self._sync_generation_gauge()
         remote = self._client.remote()
         if remote is not None:
             remote.retireGeneration_reply_(
@@ -1139,6 +1337,9 @@ class FileProviderBackend(QObject):
         self._gen_in_use.pop(generation_id, None)
         if generation is None:
             return
+        self._sync_generation_gauge()
+        self._bump("fp_gc_generation")
+        _log_event("fp_gc_generation", transfer_id=generation_id)
         remote = self._client.remote()
         if remote is not None:
             remote.deleteGeneration_reply_(
@@ -1203,6 +1404,7 @@ class FileProviderBackend(QObject):
 
 __all__ = [
     "Fetch",
+    "FETCH_READ_TIMEOUT_MS",
     "FetchState",
     "FileProviderBackend",
     "GENERATION_TTL_NS",

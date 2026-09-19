@@ -1,4 +1,10 @@
 import FileProvider
+import os
+
+/// Task 17: correlation-id log markers for enumeration. Only ids/counts are
+/// logged - never a filename/path and never manifest content - mirroring the
+/// privacy invariant `FetchController.swift`'s `fetchLog` documents.
+private let enumeratorLog = Logger(subsystem: "com.duoinput.configurator.fileprovider", category: "enumerate")
 
 /// Enumerates one container's children, reconstructed purely from
 /// `ReplicaStore` (Task 4) - no network, no host, no XPC. One instance per
@@ -29,7 +35,10 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
     func invalidate() {}
 
     func enumerateItems(for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage) {
-        observer.didEnumerate(children())
+        let items = children()
+        let parsed = DuoItemModel.parse(enumeratedItemIdentifier)
+        enumeratorLog.info("fp_enumerate transfer_id=\(parsed?.transferId ?? "root", privacy: .public) entry_index=\(parsed?.index ?? -1, privacy: .public) count=\(items.count, privacy: .public)")
+        observer.didEnumerate(items)
         observer.finishEnumerating(upTo: nil)
     }
 
