@@ -40,14 +40,24 @@ class _FakeError:
 
 class _FakeManager:
     """Records every call the domain manager makes and lets the test
-    complete them on demand - add/remove complete immediately by default,
-    probes are always driven explicitly via ``complete_next_probe``.
+    complete them on demand.
+
+    Probes are always driven explicitly via ``complete_next_probe``. ``add``
+    and ``remove`` complete synchronously by default (matching the common
+    happy-path shape); pass ``defer_add=True``/``defer_remove=True`` to queue
+    their completions instead, so a test can drive the state machine into a
+    later cycle and *then* fire the earlier cycle's completion late - the
+    stale-completion race in finding I1.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, defer_add: bool = False, defer_remove: bool = False) -> None:
         self.add_calls: list[tuple[str, str]] = []
         self.remove_calls: list[str] = []
         self._add_result: object | None = None
+        self._defer_add = defer_add
+        self._defer_remove = defer_remove
+        self._pending_add_completions: list = []
+        self._pending_remove_completions: list = []
         self._pending_probe_completions: list = []
         self.probe_count = 0
 
@@ -56,15 +66,29 @@ class _FakeManager:
 
     def add_domain(self, identifier: str, display_name: str, completion) -> None:
         self.add_calls.append((identifier, display_name))
-        completion(self._add_result)
+        if self._defer_add:
+            self._pending_add_completions.append(completion)
+        else:
+            completion(self._add_result)
 
     def remove_domain(self, identifier: str, completion) -> None:
         self.remove_calls.append(identifier)
-        completion(None)
+        if self._defer_remove:
+            self._pending_remove_completions.append(completion)
+        else:
+            completion(None)
 
     def probe_ready(self, identifier: str, completion) -> None:
         self.probe_count += 1
         self._pending_probe_completions.append(completion)
+
+    def complete_next_add(self, error: object | None) -> None:
+        completion = self._pending_add_completions.pop(0)
+        completion(error)
+
+    def complete_next_remove(self, error: object | None) -> None:
+        completion = self._pending_remove_completions.pop(0)
+        completion(error)
 
     def complete_next_probe(self, error: object | None) -> None:
         completion = self._pending_probe_completions.pop(0)
@@ -260,3 +284,136 @@ def test_remove_domain_transitions_through_removing_to_absent():
     assert states == [DomainState.REMOVING.value, DomainState.ABSENT.value]
     assert domain.state is DomainState.ABSENT
     assert not domain.is_ready
+
+
+# --------------------------------------------------------------------- Fix round 1
+# Finding I1: stale/overlapping async completions from a superseded cycle must
+# not clobber the current one (generation guard + backoff-timer neutralisation).
+
+
+def test_pending_backoff_timer_from_superseded_cycle_does_not_redrive_after_remove():
+    # WAITING_ENABLED with a backoff-retry timer queued, then a remove
+    # supersedes it: firing the stale timer must NOT issue a new probe or
+    # re-drive to READY, and must NOT re-emit `ready` after removal.
+    domain, manager, schedule = _make()
+    manager.set_add_result(None)
+    ready_events = []
+    domain.ready.connect(lambda: ready_events.append(1))
+
+    domain.ensure_domain()
+    manager.complete_next_probe(_FakeError(ERROR_PROVIDER_NOT_FOUND))
+    assert schedule.calls  # a backoff-retry timer is pending
+    assert domain.state is DomainState.WAITING_ENABLED
+
+    domain.remove_domain()  # supersedes the WAITING_ENABLED cycle
+    assert domain.state is DomainState.ABSENT
+
+    schedule.fire_next()  # the stale backoff timer fires late
+
+    assert manager.probe_count == 1  # no new probe issued by the stale timer
+    assert domain.state is DomainState.ABSENT
+    assert ready_events == []
+
+
+def test_stale_add_completion_after_remove_is_ignored():
+    # remove_domain() during REGISTERING (add still in flight): when the
+    # original add finally completes, its completion is stale and must be
+    # ignored rather than driving into WAITING_ENABLED/probe.
+    manager = _FakeManager(defer_add=True)
+    domain, manager, _ = _make(manager=manager)
+    ready_events = []
+    domain.ready.connect(lambda: ready_events.append(1))
+
+    domain.ensure_domain()
+    assert domain.state is DomainState.REGISTERING
+
+    domain.remove_domain()  # supersedes the in-flight add
+    assert domain.state is DomainState.ABSENT
+
+    manager.complete_next_add(None)  # the original add completes late
+
+    assert domain.state is DomainState.ABSENT
+    assert manager.probe_count == 0  # stale add did not start probing
+    assert ready_events == []
+
+
+def test_ensure_during_removing_is_not_clobbered_by_stale_remove_completion():
+    # ensure_domain() called while a remove is still in flight starts a fresh
+    # cycle; the earlier remove's late completion must NOT force ABSENT and
+    # clobber the new cycle.
+    manager = _FakeManager(defer_remove=True)
+    domain, manager, _ = _make(manager=manager)
+    manager.set_add_result(None)
+
+    domain.ensure_domain()
+    manager.complete_next_probe(None)
+    assert domain.state is DomainState.READY
+
+    domain.remove_domain()  # remove is deferred - stays REMOVING
+    assert domain.state is DomainState.REMOVING
+
+    domain.ensure_domain()  # fresh cycle supersedes the pending remove
+    assert domain.state is DomainState.WAITING_ENABLED
+    assert manager.add_calls == [("DuoInput", "Duo Input"), ("DuoInput", "Duo Input")]
+
+    manager.complete_next_remove(None)  # the superseded remove completes late
+    assert domain.state is DomainState.WAITING_ENABLED  # not clobbered to ABSENT
+
+    manager.complete_next_probe(None)
+    assert domain.state is DomainState.READY
+
+
+# Finding I2: a synchronous raise from the injected manager must degrade, not
+# propagate out of a Qt-timer-driven callback.
+
+
+def test_add_raising_synchronously_degrades():
+    class _RaisingManager(_FakeManager):
+        def add_domain(self, identifier, display_name, completion):
+            raise RuntimeError("objc bridge boom")
+
+    domain, _, schedule = _make(manager=_RaisingManager())
+    degraded_reasons = []
+    domain.degraded.connect(degraded_reasons.append)
+
+    domain.ensure_domain()  # must not raise
+
+    assert domain.state is DomainState.DEGRADED
+    assert len(degraded_reasons) == 1
+    assert "objc bridge boom" in degraded_reasons[0]
+    assert not schedule.calls
+
+
+def test_probe_raising_synchronously_degrades():
+    class _RaisingProbeManager(_FakeManager):
+        def probe_ready(self, identifier, completion):
+            raise RuntimeError("probe bridge boom")
+
+    manager = _RaisingProbeManager()
+    manager.set_add_result(None)
+    domain, _, schedule = _make(manager=manager)
+    degraded_reasons = []
+    domain.degraded.connect(degraded_reasons.append)
+
+    domain.ensure_domain()  # add ok -> WAITING_ENABLED -> probe raises, must not escape
+
+    assert domain.state is DomainState.DEGRADED
+    assert len(degraded_reasons) == 1
+    assert "probe bridge boom" in degraded_reasons[0]
+    assert not schedule.calls
+
+
+def test_remove_raising_synchronously_degrades():
+    class _RaisingRemoveManager(_FakeManager):
+        def remove_domain(self, identifier, completion):
+            raise RuntimeError("remove bridge boom")
+
+    domain, _, _ = _make(manager=_RaisingRemoveManager())
+    degraded_reasons = []
+    domain.degraded.connect(degraded_reasons.append)
+
+    domain.remove_domain()  # must not raise
+
+    assert domain.state is DomainState.DEGRADED
+    assert len(degraded_reasons) == 1
+    assert "remove bridge boom" in degraded_reasons[0]

@@ -232,6 +232,15 @@ class FileProviderDomainManager(QObject):
         self._state = DomainState.ABSENT
         self._attempt = 0
         self._ready_emitted = False
+        #: Monotonic operation id. Every ``ensure_domain()``/``remove_domain()``
+        #: bumps it; each async completion and each backoff-timer callback
+        #: captures the value current at the moment it was scheduled and
+        #: refuses to apply its transition if it no longer matches (see
+        #: ``_is_current``). This is how a superseded cycle's stale ``add``/
+        #: ``probe``/``remove`` completion - or a backoff-retry timer that can't
+        #: be un-scheduled - is neutralised rather than allowed to clobber the
+        #: current one (e.g. re-driving to READY after a remove).
+        self._generation = 0
 
     @property
     def domain_identifier(self) -> str:
@@ -253,8 +262,11 @@ class FileProviderDomainManager(QObject):
         Idempotent while a previous call is still in flight or has already
         succeeded (``REGISTERING``/``WAITING_ENABLED``/``READY``): a second
         call is a pure no-op rather than a duplicate ``addDomain``. Callable
-        again from ``ABSENT`` or ``DEGRADED`` to retry the whole flow from
-        scratch - a degraded domain is not a dead end.
+        again from ``ABSENT``, ``DEGRADED`` or ``REMOVING`` to (re)start the
+        whole flow from scratch - a degraded domain is not a dead end, and a
+        remove that is still in flight does not block a fresh cycle: bumping
+        the generation below makes the superseded remove's late completion a
+        no-op (see ``_is_current``).
         """
         if self._state in (
             DomainState.REGISTERING,
@@ -262,28 +274,87 @@ class FileProviderDomainManager(QObject):
             DomainState.READY,
         ):
             return
+        generation = self._bump_generation()
         self._attempt = 0
         self._ready_emitted = False
         self._set_state(DomainState.REGISTERING)
-        self._manager.add_domain(DOMAIN_IDENTIFIER, DOMAIN_DISPLAY_NAME, self._on_add_complete)
+        self._guarded_manager_call(
+            generation,
+            lambda: self._manager.add_domain(
+                DOMAIN_IDENTIFIER,
+                DOMAIN_DISPLAY_NAME,
+                lambda error: self._on_add_complete(generation, error),
+            ),
+            "failed to add domain",
+        )
 
     def remove_domain(self) -> None:
+        generation = self._bump_generation()
         self._set_state(DomainState.REMOVING)
-        self._manager.remove_domain(DOMAIN_IDENTIFIER, self._on_remove_complete)
+        self._guarded_manager_call(
+            generation,
+            lambda: self._manager.remove_domain(
+                DOMAIN_IDENTIFIER,
+                lambda error: self._on_remove_complete(generation, error),
+            ),
+            "failed to remove domain",
+        )
+
+    # -------------------------------------------------------------- generations
+
+    def _bump_generation(self) -> int:
+        self._generation += 1
+        return self._generation
+
+    def _is_current(self, generation: int) -> bool:
+        return generation == self._generation
+
+    def _guarded_manager_call(
+        self, generation: int, call: Callable[[], None], failure_reason: str
+    ) -> None:
+        """Invoke an injected-manager call, degrading instead of propagating.
+
+        A synchronous raise from the real adapter (e.g. an ObjC bridging
+        exception) must not escape a Qt-timer-driven callback and crash the
+        app: it is routed through ``_degrade`` like any other failure. The
+        generation guard means a raise from a call whose cycle has already
+        been superseded is swallowed silently rather than degrading a newer,
+        unrelated cycle.
+        """
+        try:
+            call()
+        except Exception as exc:  # noqa: BLE001 - must not escape into the Qt loop
+            if self._is_current(generation):
+                self._degrade(f"{failure_reason}: {exc!r}")
+            else:
+                logger.debug("ignoring raise from superseded manager call: %r", exc)
 
     # ---------------------------------------------------------------- completions
 
-    def _on_add_complete(self, error: object | None) -> None:
+    def _on_add_complete(self, generation: int, error: object | None) -> None:
+        if not self._is_current(generation):
+            return
         if error is not None:
             self._degrade(f"failed to add domain: {_describe_error(error)}")
             return
         self._set_state(DomainState.WAITING_ENABLED)
-        self._probe()
+        self._probe(generation)
 
-    def _probe(self) -> None:
-        self._manager.probe_ready(DOMAIN_IDENTIFIER, self._on_probe_complete)
+    def _probe(self, generation: int) -> None:
+        if not self._is_current(generation):
+            return
+        self._guarded_manager_call(
+            generation,
+            lambda: self._manager.probe_ready(
+                DOMAIN_IDENTIFIER,
+                lambda error: self._on_probe_complete(generation, error),
+            ),
+            "domain probe raised",
+        )
 
-    def _on_probe_complete(self, error: object | None) -> None:
+    def _on_probe_complete(self, generation: int, error: object | None) -> None:
+        if not self._is_current(generation):
+            return
         if error is None:
             self._set_state(DomainState.READY)
             if not self._ready_emitted:
@@ -301,9 +372,11 @@ class FileProviderDomainManager(QObject):
             return
         delay_ms = readiness_delay_ms(self._attempt)
         self._attempt += 1
-        self._schedule(delay_ms, self._probe)
+        self._schedule(delay_ms, lambda: self._probe(generation))
 
-    def _on_remove_complete(self, error: object | None) -> None:
+    def _on_remove_complete(self, generation: int, error: object | None) -> None:
+        if not self._is_current(generation):
+            return
         if error is not None:
             self._degrade(f"failed to remove domain: {_describe_error(error)}")
             return
