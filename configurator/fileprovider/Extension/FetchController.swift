@@ -51,7 +51,14 @@ private final class FetchOperation {
     func start(_ provider: @escaping FetchController.HostProvider) {
         progress.cancellationHandler = { [weak self] in
             guard let self else { return }
-            self.queue.async { self.finish(CocoaError(.userCancelled)) }
+            // Task 12: Finder cancel -> Progress.cancellationHandler -> here.
+            // finish(error) below already does the rest generically (settle
+            // once, remove temp, tell the host via cancelFetch(token)) - see
+            // finish(_:) - so this handler only needs to supply the literal
+            // NSUserCancelledError the plan mandates.
+            self.queue.async {
+                self.finish(NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError))
+            }
         }
         queue.async {
             guard !self.progress.isCancelled,

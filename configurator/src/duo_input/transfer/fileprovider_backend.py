@@ -760,13 +760,31 @@ class FileProviderBackend(QObject):
         self._admit_pull_queue()
 
     def cancel_fetch(self, fetch_token: str) -> None:
+        """Task 12: Finder cancel, purely local - NO wire message (there is
+        no ``FILE_CANCEL`` in ``MessageType`` and none must ever be added;
+        see task-12 brief ruling #1). Drops ``fetch_token`` from ``by_token``
+        AND ``by_read_id`` (the latter via ``_finish_fetch``/``_clear_read``),
+        stops issuing any further ``FILE_READ`` for it, frees whatever byte
+        budget it held and re-admits both queues (``_admit_from_queue``/
+        ``_admit_pull_queue`` inside ``_finish_fetch``).
+
+        Idempotent no-op for an unknown token or one already settled
+        (``DONE``/``FAILED``/already ``CANCELLED``) - ruling #2: cancel vs.
+        completion is settle-once, and the loser here is always this no-op
+        branch, never a crash. A ``FILE_CHUNK`` that later arrives for the
+        read this fetch held finds nothing in ``by_read_id`` and is dropped
+        silently by ``_pending_fetch`` (unknown ``read_id`` - the same path
+        Task 9/10 already use for stale reads).
+        """
         fetch = self.by_token.get(fetch_token)
-        if fetch is not None and fetch.state not in (
+        if fetch is None or fetch.state in (
             FetchState.DONE,
             FetchState.FAILED,
             FetchState.CANCELLED,
         ):
-            self._finish_fetch(fetch, FetchState.CANCELLED, _xpc_error(3))
+            return
+        self._finish_fetch(fetch, FetchState.CANCELLED, _xpc_error(3))
+        self.by_token.pop(fetch_token, None)
 
     def _on_chunk(self, message: Message) -> None:
         fetch = self._pending_fetch(message)
