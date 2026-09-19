@@ -116,6 +116,13 @@ LEASE_SECONDS = 86_400
 LEASE_NS = LEASE_SECONDS * 1_000_000_000
 MAX_ACTIVE_FETCHES = 4
 MAX_TOTAL_BUFFERED_BYTES = 8 * 1024 * 1024
+#: TTL после которого протухшая (retired) generation без in-use ref подлежит
+#: удалению - зеркалит StagingArea(ttl_seconds=86_400)/LEASE_NS.
+GENERATION_TTL_NS = LEASE_NS
+#: Сколько retired generation держим одновременно: за этим порогом GC вытесняет
+#: самую старую quiesced (ref==0) generation - count-budget, аналог disk-budget
+#: у StagingArea.gc. Только метаданные реплики, не байты.
+MAX_GENERATIONS = 8
 
 
 class FetchState(StrEnum):
@@ -138,17 +145,47 @@ class Fetch:
     size: int
     state: FetchState
     reply: Callable | None = None
+    #: True пока этот fetch держит in-use ref своей generation. Ставится один
+    #: раз в _open_fetch, снимается ровно один раз при первом settle (см.
+    #: _finish_fetch/_decrement_in_use) - гарантия "decrement exactly once"
+    #: даже если cancel гонится с завершением (settle-once).
+    in_use_counted: bool = False
 
 
 class _GenerationState(Enum):
-    """Состояние generation, которую этот бэкенд считает опубликованной.
+    """Durable-состояние generation в учёте этого бэкенда.
 
-    Только учёт для Task 8/16 (arm, per-offer routing) - сама реплика хранит
-    свой собственный ``state`` (``STATE_ACTIVE``/``STATE_RETIRED`` из
-    fileprovider_replica.py), это разные словари понятий.
+    ``ACTIVE_CLIPBOARD`` - текущая вооружённая generation; ``RETIRED`` -
+    перекрытая новым буфером обмена, но с СОХРАНЁННОЙ записью реплики (Task 15).
+    Это зеркалит два durable-состояния самой реплики
+    (``STATE_ACTIVE``/``STATE_RETIRED`` из fileprovider_replica.py).
+
+    ``IN_USE`` и ``GC_ELIGIBLE`` из брифа - НЕ отдельные enum-состояния, а
+    производные условия поверх ``RETIRED``: retired с in-use ref (>0) - это
+    IN_USE (delete заблокирован), retired без in-use ref и за TTL/бюджетом -
+    это GC_ELIGIBLE (delete разрешён). См. ``_gc``.
     """
 
     ACTIVE_CLIPBOARD = auto()
+    RETIRED = auto()
+
+
+@dataclass
+class _Generation:
+    """Учётная запись одной опубликованной generation - только метаданные
+    жизненного цикла (не байты, не FILE_READ-состояние). ``manifest`` держим,
+    чтобы retired-но-ещё-референсимая generation оставалась servable
+    (``_open_fetch`` смотрит сюда, а не только на ``_active_manifest``)."""
+
+    transfer_id: str
+    manifest: TransferManifest
+    state: _GenerationState
+    #: Момент активации (ACK), наносекунды инъецируемых часов - точка отсчёта
+    #: TTL и порядок вытеснения по count-budget (старые первыми).
+    created_ns: int
+    #: True после отправки TRANSFER_END при переходе в quiesced (retired &
+    #: ref==0) - чтобы сигнал ушёл РОВНО один раз на generation.
+    quiesced: bool = False
 
 
 def _root_ids(manifest: TransferManifest) -> tuple[str, ...]:
@@ -191,6 +228,9 @@ class FileProviderBackend(QObject):
         *,
         url_resolver: Callable[[str, Callable[[object, object], None]], None]
         | None = None,
+        clock: Callable[[], int] | None = None,
+        generation_ttl_ns: int = GENERATION_TTL_NS,
+        max_generations: int = MAX_GENERATIONS,
     ) -> None:
         super().__init__(parent)
         self._client = client
@@ -226,6 +266,21 @@ class FileProviderBackend(QObject):
         self._active_transfer_id: str | None = None
         self._active_manifest: TransferManifest | None = None
         self._generation_state: _GenerationState | None = None
+        # --- Task 15: generation lifecycle (retire / TTL+budget GC).
+        #: Инъецируемые часы (наносекунды) для TTL - тесты передают ручной
+        #: clock, продакшн - time.time_ns. Не sleep'аем нигде.
+        self._clock = clock if clock is not None else time.time_ns
+        self._generation_ttl_ns = generation_ttl_ns
+        self._max_generations = max_generations
+        #: transfer_id -> учётная запись жизненного цикла (active/retired).
+        #: Retired-запись КЕПТ здесь (реплика тоже кепт), пока GC её не удалит.
+        self._generations: dict[str, _Generation] = {}
+        #: transfer_id -> число ACTIVE fetch'ей, привязанных к generation
+        #: (in-use ref). ЯВНЫЙ счётчик, а не скан by_token: by_token хранит и
+        #: settled-записи (Task 19 уберёт этот leak), скан бы их пересчитал и
+        #: deleteGeneration не сработал бы никогда. Инкремент в _open_fetch,
+        #: декремент РОВНО раз при settle (см. Fetch.in_use_counted).
+        self._gen_in_use: dict[str, int] = {}
         # --- Task 9: per-fetch scheduler. There is deliberately no shared
         # cursor/offset/read id: every open owns all three through Fetch.
         self.by_token: dict[str, Fetch] = {}
@@ -471,9 +526,17 @@ class FileProviderBackend(QObject):
             )
             self.transfer_failed.emit("publish_rejected")
             return
+        # Task 15: перехват предыдущей активной generation ДО перезаписи
+        # _active_transfer_id - её нужно RETIRE (state-only, запись кепт), а не
+        # бросить: она может быть ещё в работе (in-use ref) и её нельзя терять
+        # посреди fetch'а. deleteGeneration - позже, из GC, и только без ref.
+        prev_id = self._active_transfer_id
+        self._register_active_generation(manifest)
         self._active_transfer_id = manifest.transfer_id
         self._active_manifest = manifest
         self._generation_state = _GenerationState.ACTIVE_CLIPBOARD
+        if prev_id is not None and prev_id != manifest.transfer_id:
+            self._retire_generation(prev_id)
         roots = _root_ids(manifest)
         self.generation_ready.emit(manifest.transfer_id, roots)
         # Драйвим тот же arm-when-ready latch, что и тестовый on_ack() -
@@ -629,10 +692,19 @@ class FileProviderBackend(QObject):
         return token, size
 
     def _open_fetch(self, generation_id: str, entry_index: int) -> tuple[str, int]:
-        """Open one regular file from the generation acknowledged as ACTIVE."""
-        manifest = self._active_manifest
-        if manifest is None or manifest.transfer_id != generation_id:
-            raise ValueError(f"generation {generation_id!r} is not active")
+        """Open one regular file from a tracked generation.
+
+        Task 15: serve ANY tracked generation, not just the active one - a
+        RETIRED generation keeps its replica record and stays servable while
+        referenced, and opening a fetch on it takes an in-use ref that blocks
+        its GC deletion (never its retire). An unknown/already-GC'd id raises,
+        exactly as a non-active id did before (the acked-generation gate in
+        test_fileprovider_scheduler still holds: nothing is tracked before ACK).
+        """
+        generation = self._generations.get(generation_id)
+        if generation is None:
+            raise ValueError(f"generation {generation_id!r} is not published")
+        manifest = generation.manifest
         if (
             not isinstance(entry_index, int)
             or isinstance(entry_index, bool)
@@ -658,7 +730,9 @@ class FileProviderBackend(QObject):
             expected=0,
             size=entry.size,
             state=state,
+            in_use_counted=True,
         )
+        self._gen_in_use[generation_id] = self._gen_in_use.get(generation_id, 0) + 1
         self.by_token[fetch_token] = fetch
         if state is FetchState.REQUESTING:
             self._active.add(fetch_token)
@@ -849,6 +923,14 @@ class FileProviderBackend(QObject):
             reply(None, False, error or _xpc_error(7))
         self._admit_from_queue()
         self._admit_pull_queue()
+        # Task 15: settle-once in-use decrement. Every terminal path
+        # (DONE/FAILED/CANCELLED) funnels through here, and in_use_counted
+        # guards against a double-decrement when e.g. a cancel races an
+        # already-settled completion. When the generation's ref hits 0 it may
+        # now be quiesced (if retired) and GC-eligible.
+        if fetch.in_use_counted:
+            fetch.in_use_counted = False
+            self._decrement_in_use(fetch.generation_id)
 
     def cancel_fetch(self, fetch_token: str) -> None:
         """Task 12: Finder cancel, purely local - NO wire message (there is
@@ -925,6 +1007,185 @@ class FileProviderBackend(QObject):
         )
         self._finish_fetch(fetch, FetchState.FAILED, _xpc_error(code))
 
+    # --- Task 15: generation lifecycle (retire / quiesce / TTL+budget GC)
+    def _register_active_generation(self, manifest: TransferManifest) -> None:
+        """Record a freshly-acked generation as the active clipboard. Its
+        ``created_ns`` (from the injectable clock) is the TTL/eviction anchor."""
+        transfer_id = manifest.transfer_id
+        self._generations[transfer_id] = _Generation(
+            transfer_id=transfer_id,
+            manifest=manifest,
+            state=_GenerationState.ACTIVE_CLIPBOARD,
+            created_ns=self._clock(),
+        )
+        self._gen_in_use.setdefault(transfer_id, 0)
+
+    def _retire_generation(self, generation_id: str) -> None:
+        """Persist ``state="retired"`` over XPC and mark the local record
+        RETIRED - the record is KEPT (still enumerable/servable), never deleted
+        here. Retire is state-only and is NEVER blocked by an in-use ref. If
+        the generation is already quiesced (no in-use ref) it also emits the
+        quiesce ``TRANSFER_END`` now; otherwise that waits until the last
+        in-use ref drops (see ``_decrement_in_use``)."""
+        generation = self._generations.get(generation_id)
+        if generation is None or generation.state is _GenerationState.RETIRED:
+            return
+        generation.state = _GenerationState.RETIRED
+        remote = self._client.remote()
+        if remote is not None:
+            remote.retireGeneration_reply_(
+                generation_id, self._control_reply_cb("retireGeneration", generation_id)
+            )
+        else:
+            logger.warning(
+                "cannot retire generation %s: extension not connected", generation_id
+            )
+        if self._gen_in_use.get(generation_id, 0) == 0:
+            self._quiesce_generation(generation_id)
+        self._gc()
+
+    def _decrement_in_use(self, generation_id: str) -> None:
+        """Drop one in-use ref. At zero, a RETIRED generation quiesces (frees
+        the sender's fds via ``TRANSFER_END``) and becomes GC-eligible."""
+        remaining = self._gen_in_use.get(generation_id, 0) - 1
+        if remaining <= 0:
+            self._gen_in_use[generation_id] = 0
+            self._quiesce_generation(generation_id)
+            self._gc()
+        else:
+            self._gen_in_use[generation_id] = remaining
+
+    def _quiesce_generation(self, generation_id: str) -> None:
+        """A generation has quiesced when it is RETIRED and holds no in-use
+        ref: signal the (unchanged) sender to ``close_descriptors`` via the
+        EXISTING ``TRANSFER_END`` wire message, exactly once per generation."""
+        generation = self._generations.get(generation_id)
+        if generation is None or generation.state is not _GenerationState.RETIRED:
+            return
+        if generation.quiesced or self._gen_in_use.get(generation_id, 0) != 0:
+            return
+        generation.quiesced = True
+        self._send_transfer_end(generation_id)
+
+    def _send_transfer_end(self, generation_id: str) -> None:
+        """Send ``TRANSFER_END`` for a quiesced generation - the sender frees
+        the held file descriptors it kept for this generation's reads
+        (``close_descriptors``). Uses the existing closed-set wire message; no
+        new ``MessageType`` is introduced. Best-effort: a missing/failed link
+        just means there is nothing left to tell."""
+        if self._link is None:
+            return
+        message = Message(
+            MessageType.TRANSFER_END,
+            {
+                "transfer_id": generation_id,
+                "session_id": generation_id,
+                "status": "completed",
+            },
+            b"",
+        )
+        try:
+            self._link.send(message)
+        except Exception as error:  # noqa: BLE001 - external transport boundary
+            logger.warning(
+                "TRANSFER_END send failed for %s: %s",
+                generation_id,
+                type(error).__name__,
+            )
+
+    def _gc(self) -> None:
+        """Permanently delete quiesced, unreferenced RETIRED generations that
+        are past TTL or over the count budget - mirrors ``StagingArea.gc``
+        (TTL sweep, then oldest-first budget eviction). ``deleteGeneration``
+        fires ONLY when the generation has no in-use ref AND (past TTL OR over
+        budget); the active generation and any in-use generation are never
+        touched."""
+        now = self._clock()
+        retired = sorted(
+            (
+                g
+                for g in self._generations.values()
+                if g.state is _GenerationState.RETIRED
+            ),
+            key=lambda g: g.created_ns,  # oldest first
+        )
+        # 1) TTL: delete quiesced (ref==0) generations past their lease.
+        survivors: list[_Generation] = []
+        for generation in retired:
+            in_use = self._gen_in_use.get(generation.transfer_id, 0)
+            if in_use == 0 and now - generation.created_ns > self._generation_ttl_ns:
+                self._delete_generation(generation.transfer_id)
+            else:
+                survivors.append(generation)
+        # 2) Count budget: evict oldest quiesced generations beyond the budget.
+        # An in-use generation is skipped (never dropped mid-fetch) and does not
+        # itself count against the deletable budget below.
+        over_budget = len(survivors) - self._max_generations
+        for generation in survivors:
+            if over_budget <= 0:
+                break
+            if self._gen_in_use.get(generation.transfer_id, 0) != 0:
+                continue
+            self._delete_generation(generation.transfer_id)
+            over_budget -= 1
+
+    def _delete_generation(self, generation_id: str) -> None:
+        """Permanently remove a generation: drop local tracking and ask the
+        extension to remove the replica record + signal the OS to drop the
+        items (``deleteGeneration``). Best-effort like ``StagingArea.gc``: local
+        state is dropped up front, a failed XPC reply is only logged (the next
+        startup purge would reclaim a record the extension failed to remove)."""
+        generation = self._generations.pop(generation_id, None)
+        self._gen_in_use.pop(generation_id, None)
+        if generation is None:
+            return
+        remote = self._client.remote()
+        if remote is not None:
+            remote.deleteGeneration_reply_(
+                generation_id, self._control_reply_cb("deleteGeneration", generation_id)
+            )
+        else:
+            logger.warning(
+                "cannot delete generation %s: extension not connected", generation_id
+            )
+
+    def purge_stale_generations(self, persisted_ids) -> list[str]:
+        """Startup recovery: any persisted replica record with NO live snapshot
+        in this process (not in ``_generations``) is orphaned - a leftover from
+        a previous run - and is permanently removed via ``deleteGeneration``.
+        Returns the ids purged. The real source of ``persisted_ids`` (the
+        extension enumerating its replica) is wired at app start (Step 5,
+        system-manual); this logic is unit-tested directly."""
+        purged: list[str] = []
+        remote = self._client.remote()
+        for generation_id in persisted_ids:
+            if generation_id in self._generations:
+                continue
+            purged.append(generation_id)
+            if remote is not None:
+                remote.deleteGeneration_reply_(
+                    generation_id,
+                    self._control_reply_cb("deleteGeneration", generation_id),
+                )
+            else:
+                logger.warning(
+                    "cannot purge stale generation %s: extension not connected",
+                    generation_id,
+                )
+        return purged
+
+    def _control_reply_cb(self, op: str, generation_id: str) -> Callable:
+        """Reply block for retire/delete XPC calls. These do NOT mutate QObject
+        state (local bookkeeping already happened before the call), so unlike
+        publish they need no Qt-thread marshalling - a rejected reply is only
+        logged; GC/startup-purge is best-effort and self-healing."""
+
+        def _cb(ack, error=None) -> None:
+            if not ack:
+                logger.warning("%s for %s rejected: %r", op, generation_id, error)
+
+        return _cb
+
     # --- messages from the unchanged files/2 wire
     def handle_message(self, message: Message) -> None:
         if message.type is MessageType.FILE_CHUNK:
@@ -944,8 +1205,10 @@ __all__ = [
     "Fetch",
     "FetchState",
     "FileProviderBackend",
+    "GENERATION_TTL_NS",
     "LEASE_NS",
     "LEASE_SECONDS",
     "MAX_ACTIVE_FETCHES",
+    "MAX_GENERATIONS",
     "MAX_TOTAL_BUFFERED_BYTES",
 ]
