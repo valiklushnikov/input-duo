@@ -42,3 +42,20 @@ def test_extension_callback_marshals_to_qt_thread(fp_fake_service):
     fp_fake_service.grant_connection(client)
     fp_fake_service.simulate_extension_call("open", "abc123", 0)
     assert calls == [("open", "abc123", 0)]
+
+
+def test_redundant_connect_service_does_not_rebind(fp_fake_service):
+    from duo_input.transfer.fileprovider_client import FileProviderServiceClient
+
+    client = FileProviderServiceClient()
+    connects = []
+    client.connected.connect(lambda: connects.append(1))
+    client.set_domain("DuoInput")
+    fp_fake_service.grant_connection(client)     # binds once, emits connected once
+    assert connects == [1]
+    bound = client._connection
+    # A redundant connect while already connected must be a pure no-op: it must
+    # not rediscover, rebind, or re-emit `connected`.
+    client.connect_service()
+    assert connects == [1]
+    assert client._connection is bound

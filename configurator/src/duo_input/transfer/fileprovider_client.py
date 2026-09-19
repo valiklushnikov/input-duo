@@ -149,9 +149,21 @@ class FileProviderServiceClient(QObject):
             "pull_chunk": None,
             "cancel_fetch": None,
         }
+        # One lock guards ALL mutable connection state - _connection,
+        # _exported, _connected, _disconnect_emitted, and the _connecting
+        # claim below. Signal emits and ObjC/Qt call-outs
+        # (connection.resume(), self.connected/disconnected.emit()) always
+        # happen OUTSIDE the lock so a signal handler that re-enters
+        # (e.g. a `disconnected` slot calling connect_service()) can never
+        # deadlock against a critical section we still hold.
         self._lock = threading.Lock()
         self._connected = False
         self._disconnect_emitted = False
+        #: True only while one connect_service() call is between claiming the
+        #: slot and finishing its bind. Two concurrent connect_service() calls
+        #: must not both pass the guard and double-bind (leaking the first
+        #: connection and emitting `connected` twice).
+        self._connecting = False
 
     # -------------------------------------------------------------- configuration
 
@@ -182,7 +194,8 @@ class FileProviderServiceClient(QObject):
 
     def remote(self) -> object | None:
         """``remoteObjectProxy`` typed to ``DuoExtensionControl`` - or None."""
-        connection = self._connection
+        with self._lock:
+            connection = self._connection
         if connection is None:
             return None
         return connection.remoteObjectProxy()
@@ -193,11 +206,13 @@ class FileProviderServiceClient(QObject):
         """Discover the domain's service connection and bind it.
 
         Idempotent: a call while already bound to a connection is a no-op.
-        After ``disconnected`` fires, ``_connection`` is cleared, so the next
-        call re-discovers rather than reusing a dead endpoint.
+        Concurrency-safe: the check-then-claim below is atomic under the lock,
+        so two racing calls (e.g. a manual retry racing a reconnect fired from
+        a ``disconnected`` handler) cannot both proceed to bind - the second
+        sees the ``_connecting`` claim and returns. After ``disconnected``
+        fires, ``_connection`` is cleared, so the next call re-discovers
+        rather than reusing a dead endpoint.
         """
-        if self._connection is not None:
-            return
         if not _XPC_AVAILABLE:
             raise RuntimeError(
                 "FileProviderServiceClient requires PyObjC + the FileProvider "
@@ -205,14 +220,26 @@ class FileProviderServiceClient(QObject):
             )
         if self._domain_identifier is None:
             raise RuntimeError("set_domain() must be called before connect_service()")
-        connection = self._discover_connection(self._domain_identifier)
-        self._bind_connection(connection)
+        with self._lock:
+            if self._connection is not None or self._connecting:
+                return
+            self._connecting = True
+        try:
+            connection = self._discover_connection(self._domain_identifier)
+            self._bind_connection(connection)
+        finally:
+            with self._lock:
+                self._connecting = False
 
     def _bind_connection(self, connection) -> None:
         """Wire interfaces, handlers, and resume - shared by real discovery
         and by tests (fp_fake_service.grant_connection injects a fake
-        connection straight into this method, bypassing discovery)."""
-        self._disconnect_emitted = False
+        connection straight into this method, bypassing discovery).
+
+        The ObjC call-outs (setters, ``resume``) and the ``connected`` emit
+        happen outside the lock; only the state publication is locked, so a
+        ``connected`` handler that re-enters this object cannot deadlock.
+        """
         exported = (
             _ExtensionCallbackAdapter.alloc().initWithClient_(self)
             if _XPC_AVAILABLE
@@ -224,9 +251,10 @@ class FileProviderServiceClient(QObject):
         connection.setInvalidationHandler_(self._on_invalidated)
         connection.setInterruptionHandler_(self._on_interrupted)
         connection.resume()
-        self._exported = exported
-        self._connection = connection
         with self._lock:
+            self._disconnect_emitted = False
+            self._exported = exported
+            self._connection = connection
             self._connected = True
         self.connected.emit()
 
@@ -249,8 +277,8 @@ class FileProviderServiceClient(QObject):
                 return
             self._disconnect_emitted = True
             self._connected = False
-        self._connection = None
-        self._exported = None
+            self._connection = None
+            self._exported = None
         self.disconnected.emit(reason)
 
     # ------------------------------------------------------ extension -> host seam
