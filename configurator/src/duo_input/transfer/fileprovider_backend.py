@@ -7,8 +7,9 @@ generation через XPC в реплику Swift-расширения (атом
 получено И домен (Task 6) READY, Task 8 резолвит user-visible ``file://``
 URL корней generation через инъецируемый резолвер и вооружает СУЩЕСТВУЮЩИЙ
 host-only буфер обмена (``pasteboard_arm`` - см. ``macos_pasteboard.arm_urls``),
-а не второй подсистему. Стриминг (FILE_READ/FILE_CHUNK) приезжает в Tasks
-9-10 - ``handle_message`` здесь по-прежнему заглушка.
+а не второй подсистему. Task 9 добавляет ограниченный FIFO-планировщик
+независимых fetch'ей и сопоставление ``FILE_CHUNK`` по ``read_id``; доставка
+чанка через Swift IPC остаётся Task 10.
 
 Приватностный инвариант всего модуля - "эпоха авторизации": ``handle_offer``
 возвращает эпоху текущего предложения; ``authorize`` обязан игнорировать любой
@@ -34,18 +35,22 @@ File Provider vs staging при деградированном домене эт
 
 from __future__ import annotations
 
+import itertools
 import logging
 import time
+import uuid
+from collections import deque
 from collections.abc import Callable
-from enum import Enum, auto
+from dataclasses import dataclass
+from enum import Enum, StrEnum, auto
 
 from PySide6.QtCore import QMetaObject, QObject, Q_ARG, Qt, Signal, Slot
 
-from ..clipboard.wire import Message
+from ..clipboard.wire import MAX_FILE_CHUNK_BYTES, Message, MessageType
 from .fileprovider_client import FileProviderServiceClient
 from .fileprovider_domain import FileProviderDomainManager
 from .fileprovider_replica import STATE_ACTIVE, build_generation_record
-from .model import TransferManifest
+from .model import ENTRY_FILE, TransferManifest
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +114,29 @@ def _default_url_resolver(
 #: это просто "не мудрить", а не согласованная политика аренды.
 LEASE_SECONDS = 86_400
 LEASE_NS = LEASE_SECONDS * 1_000_000_000
+MAX_ACTIVE_FETCHES = 4
+MAX_TOTAL_BUFFERED_BYTES = 8 * 1024 * 1024
+
+
+class FetchState(StrEnum):
+    QUEUED = auto()
+    REQUESTING = auto()
+    RECEIVING = auto()
+    DONE = auto()
+    CANCELLED = auto()
+    FAILED = auto()
+
+
+@dataclass
+class Fetch:
+    fetch_token: str
+    generation_id: str
+    entry_index: int
+    offset: int
+    read_id: int | None
+    expected: int
+    size: int
+    state: FetchState
 
 
 class _GenerationState(Enum):
@@ -141,7 +169,7 @@ def _root_ids(manifest: TransferManifest) -> tuple[str, ...]:
 
 
 class FileProviderBackend(QObject):
-    """Offer/authorize/publish/arm - File Provider бэкенд (Tasks 7-8)."""
+    """Offer/publish/arm plus independent, bounded File Provider fetches."""
 
     #: (manifest, epoch) - epoch должен быть передан обратно в authorize().
     authorization_needed = Signal(object, int)
@@ -194,7 +222,15 @@ class FileProviderBackend(QObject):
         self._accepted_transfer_id: str | None = None
         self._accepted_roots: tuple[str, ...] = ()
         self._active_transfer_id: str | None = None
+        self._active_manifest: TransferManifest | None = None
         self._generation_state: _GenerationState | None = None
+        # --- Task 9: per-fetch scheduler. There is deliberately no shared
+        # cursor/offset/read id: every open owns all three through Fetch.
+        self.by_token: dict[str, Fetch] = {}
+        self.by_read_id: dict[int, Fetch] = {}
+        self._active: set[str] = set()
+        self._queue: deque[str] = deque()
+        self._read_ids = itertools.count(1)
         # --- Task 8: arm-when-ready latch (ACK И domain READY, ровно раз).
         self._ack_transfer_id: str | None = None
         self._ack_roots: tuple[str, ...] = ()
@@ -347,6 +383,7 @@ class FileProviderBackend(QObject):
             self.transfer_failed.emit("publish_rejected")
             return
         self._active_transfer_id = manifest.transfer_id
+        self._active_manifest = manifest
         self._generation_state = _GenerationState.ACTIVE_CLIPBOARD
         roots = _root_ids(manifest)
         self.generation_ready.emit(manifest.transfer_id, roots)
@@ -477,15 +514,145 @@ class FileProviderBackend(QObject):
         self._arm(urls)
         self._armed_transfer_id = transfer_id
 
-    # --- сообщения с провода (стриминг - Tasks 9-10: здесь заглушка)
-    def handle_message(self, message: Message) -> None:  # noqa: ARG002 - stub
-        """Ничего не делает в этой задаче.
+    # --- Task 9: bounded per-fetch scheduler
+    def open_fetch(self, generation_id: str, entry_index: int) -> tuple[str, int]:
+        """Open one regular file from the generation acknowledged as ACTIVE."""
+        manifest = self._active_manifest
+        if manifest is None or manifest.transfer_id != generation_id:
+            raise ValueError(f"generation {generation_id!r} is not active")
+        if (
+            not isinstance(entry_index, int)
+            or isinstance(entry_index, bool)
+            or not 0 <= entry_index < len(manifest.entries)
+        ):
+            raise ValueError(f"entry {entry_index!r} is not in the active generation")
+        entry = manifest.entries[entry_index]
+        if entry.kind != ENTRY_FILE:
+            raise ValueError("directories have no fetchable contents")
 
-        Ни при каких обстоятельствах не отправляет FILE_READ и не трогает
-        буфер обмена - это гарантия privacy-инварианта этой задачи, а не
-        забытая реализация: тело появится в Tasks 9-10.
-        """
-        return
+        fetch_token = uuid.uuid4().hex
+        state = (
+            FetchState.REQUESTING
+            if len(self._active) < MAX_ACTIVE_FETCHES
+            else FetchState.QUEUED
+        )
+        fetch = Fetch(
+            fetch_token=fetch_token,
+            generation_id=generation_id,
+            entry_index=entry_index,
+            offset=0,
+            read_id=None,
+            expected=0,
+            size=entry.size,
+            state=state,
+        )
+        self.by_token[fetch_token] = fetch
+        if state is FetchState.REQUESTING:
+            self._active.add(fetch_token)
+        else:
+            self._queue.append(fetch_token)
+        return fetch_token, entry.size
+
+    def pull_chunk(self, fetch_token: str) -> None:
+        """Emit at most one request for an admitted fetch with no read in flight."""
+        fetch = self.by_token.get(fetch_token)
+        if (
+            fetch is None
+            or fetch.state is not FetchState.REQUESTING
+            or fetch_token not in self._active
+            or fetch.read_id is not None
+            or fetch.offset >= fetch.size
+            or self._link is None
+        ):
+            return
+        expected = min(MAX_FILE_CHUNK_BYTES, fetch.size - fetch.offset)
+        read_id = next(self._read_ids)
+        fetch.read_id = read_id
+        fetch.expected = expected
+        fetch.state = FetchState.RECEIVING
+        self.by_read_id[read_id] = fetch
+        self._link.send(
+            Message(
+                MessageType.FILE_READ,
+                {
+                    "transfer_id": fetch.generation_id,
+                    "entry_index": fetch.entry_index,
+                    "offset": fetch.offset,
+                    "length": expected,
+                    "read_id": read_id,
+                },
+                b"",
+            )
+        )
+
+    def _admit_from_queue(self) -> None:
+        while self._queue and len(self._active) < MAX_ACTIVE_FETCHES:
+            fetch_token = self._queue.popleft()
+            fetch = self.by_token.get(fetch_token)
+            if fetch is None or fetch.state is not FetchState.QUEUED:
+                continue
+            fetch.state = FetchState.REQUESTING
+            self._active.add(fetch_token)
+
+    def _pending_fetch(self, message: Message) -> Fetch | None:
+        header = message.header
+        read_id = header.get("read_id")
+        if not isinstance(read_id, int) or isinstance(read_id, bool):
+            return None
+        entry_index = header.get("entry_index")
+        offset = header.get("offset")
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in (entry_index, offset)
+        ):
+            return None
+        fetch = self.by_read_id.get(read_id)
+        if fetch is None or fetch.read_id != read_id:
+            return None
+        if (
+            fetch.state is not FetchState.RECEIVING
+            or header.get("transfer_id") != fetch.generation_id
+            or entry_index != fetch.entry_index
+            or offset != fetch.offset
+        ):
+            return None
+        return fetch
+
+    def _clear_read(self, fetch: Fetch) -> None:
+        if fetch.read_id is not None:
+            self.by_read_id.pop(fetch.read_id, None)
+        fetch.read_id = None
+        fetch.expected = 0
+
+    def _finish_fetch(self, fetch: Fetch, state: FetchState) -> None:
+        self._clear_read(fetch)
+        fetch.state = state
+        self._active.discard(fetch.fetch_token)
+        self._admit_from_queue()
+
+    def _on_chunk(self, message: Message) -> None:
+        fetch = self._pending_fetch(message)
+        if fetch is None:
+            return
+        self._clear_read(fetch)
+        fetch.offset += len(message.blob)
+        if fetch.offset >= fetch.size:
+            self._finish_fetch(fetch, FetchState.DONE)
+        else:
+            fetch.state = FetchState.REQUESTING
+
+    def _on_file_error(self, message: Message) -> None:
+        fetch = self._pending_fetch(message)
+        if fetch is None:
+            return
+        self._finish_fetch(fetch, FetchState.FAILED)
+
+    # --- messages from the unchanged files/2 wire
+    def handle_message(self, message: Message) -> None:
+        if message.type is MessageType.FILE_CHUNK:
+            self._on_chunk(message)
+        elif message.type is MessageType.FILE_ERROR:
+            self._on_file_error(message)
 
     # --- завершение (стриминг ещё не подключён - Tasks 9-10: заглушки)
     def cancel(self) -> None:
@@ -495,4 +662,12 @@ class FileProviderBackend(QObject):
         return
 
 
-__all__ = ["FileProviderBackend", "LEASE_NS", "LEASE_SECONDS"]
+__all__ = [
+    "Fetch",
+    "FetchState",
+    "FileProviderBackend",
+    "LEASE_NS",
+    "LEASE_SECONDS",
+    "MAX_ACTIVE_FETCHES",
+    "MAX_TOTAL_BUFFERED_BYTES",
+]
