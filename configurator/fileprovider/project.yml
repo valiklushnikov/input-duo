@@ -1,0 +1,53 @@
+name: DuoInputFileProvider
+options:
+  bundleIdPrefix: com.duoinput.configurator
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "14.0"
+settings:
+  base:
+    DEVELOPMENT_TEAM: 4YKVN22BMX
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    ENABLE_HARDENED_RUNTIME: YES
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  # Production File Provider extension. Embedded into Duo Input.app/Contents/PlugIns
+  # by the packaging step (Task 18); built standalone here for the Task 1 gate.
+  DuoInputFileProvider:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.duoinput.configurator.fileprovider
+        PRODUCT_MODULE_NAME: DuoInputFileProvider
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Extension/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Extension/Extension.entitlements
+  # Logic unit-test bundle. It compiles the extension sources directly (source
+  # membership) so `FileProviderExtension` is referenceable without @testable
+  # import of an .appex product (app-extension products are not linkable like
+  # frameworks). The conformance regression guard lives here.
+  DuoInputFileProviderTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+      - path: Extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.duoinput.configurator.fileprovider.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  DuoInputFileProvider:
+    build:
+      targets:
+        DuoInputFileProvider: all
+        DuoInputFileProviderTests: [test]
+    test:
+      targets:
+        - DuoInputFileProviderTests
