@@ -72,7 +72,11 @@ final class FetchControllerTests: XCTestCase {
         let done = expectation(description: "failed")
         _ = controller.fetch(item(), request: NSFileProviderRequest()) { url, _, error in
             XCTAssertNil(url)
-            XCTAssertEqual((error as NSError?)?.code, 7)
+            // Task 14: the raw DuoFPErrorProtocol(7) FetchController used to
+            // hand straight to Finder is now mapped through ErrorMap to the
+            // specific NSFileProviderError it actually means.
+            XCTAssertEqual((error as NSError?)?.domain, NSFileProviderErrorDomain)
+            XCTAssertEqual((error as NSError?)?.code, NSFileProviderError.cannotSynchronize.rawValue)
             done.fulfill()
         }
         wait(for: [done], timeout: 3)
@@ -115,11 +119,16 @@ final class FetchControllerTests: XCTestCase {
     func testDirectoryCreationFailureSurfacesErrorAndCancelsFetch() throws {
         // Point temporaryDirectory at a path already occupied by a regular
         // file, so FileManager.createDirectory(...) throws - this exercises
-        // the same finish(error)/cancelFetch path a mid-stream disk-full
-        // write error would take. Ruling: the exact DiskFull(6) vs
-        // Protocol(7) mapping is deferred to a later task - only cleanliness
-        // of the failure (single completion, cancelFetch, no leaked temp) is
-        // asserted here.
+        // the same finish(error)/cancelFetch path a mid-stream local write
+        // error would take. Task 14 resolves the DiskFull(6) vs Protocol(7)
+        // question this used to defer: this particular failure ("path
+        // already exists") is a local Cocoa error, not a DuoFPErrorDomain
+        // one, and not actually a full-disk condition - ErrorMap passes it
+        // through unchanged rather than reclassifying it as either. A GENUINE
+        // local disk-full write failure already surfaces as its own
+        // NSPOSIXErrorDomain/ENOSPC on its own, with no mapping needed - see
+        // ErrorMap's doc comment. Only cleanliness of the failure (single
+        // completion, cancelFetch, no leaked temp) is asserted here.
         let blockedPath = directory.appendingPathComponent("blocked")
         try Data().write(to: blockedPath)
         let host = CannedHost()

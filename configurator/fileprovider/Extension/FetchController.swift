@@ -3,6 +3,62 @@ import FileProvider
 import Darwin
 import os
 
+/// Maps a `DuoFPErrorDomain` error (`Shared/DuoFPErrors.h` - the wire
+/// vocabulary the host/Python side emits over the fetch XPC) onto a specific
+/// Foundation/`NSFileProviderError`, per spec §16's table (Task 14). Numeric
+/// codes are matched directly rather than through the Swift-bridged
+/// `DuoFPError` enum case names, for the same reason
+/// `DuoExtensionControlService.mapError` gives for doing the same thing:
+/// NS_ERROR_ENUM's exact Swift import shape (and `protocol` being a Swift
+/// keyword) is not something worth depending on here.
+///
+/// `.serverUnreachable` is Apple's documented transient/"retry me" code -
+/// unlike `.noSuchItem`/`.cannotSynchronize`, returning it from a fetch does
+/// NOT cause Finder to evict or delete the dataless placeholder. Every code
+/// that means "the connection to the sender is gone right now" - peerLost,
+/// timeout, notConnected (host down) - maps here, on purpose (task-14 brief
+/// ruling #2): those must never look like a deletion.
+///
+/// Anything that is not a `DuoFPErrorDomain` error (the literal
+/// `NSUserCancelledError` `FetchOperation`'s `cancellationHandler` builds, or
+/// a genuine local POSIX/Cocoa error from writing the temp file - e.g. a
+/// truly full LOCAL disk already surfaces as `NSPOSIXErrorDomain`/`ENOSPC`
+/// on its own) is passed through unchanged rather than re-wrapped: it is
+/// already a specific, meaningful Foundation error, not a generic one.
+enum ErrorMap {
+    static func toNSFileProviderError(_ error: Error) -> NSError {
+        let nsError = error as NSError
+        guard nsError.domain == DuoFPErrorDomain else {
+            return nsError
+        }
+        switch nsError.code {
+        case 1: // DuoFPErrorSourceMissing
+            return NSError(domain: NSFileProviderErrorDomain,
+                            code: NSFileProviderError.noSuchItem.rawValue)
+        case 2: // DuoFPErrorSourceChanged
+            return NSError(domain: NSFileProviderErrorDomain,
+                            code: NSFileProviderError.cannotSynchronize.rawValue)
+        case 3: // DuoFPErrorPeerLost
+            return NSError(domain: NSFileProviderErrorDomain,
+                            code: NSFileProviderError.serverUnreachable.rawValue)
+        case 4: // DuoFPErrorUnauthorized
+            return NSError(domain: NSFileProviderErrorDomain,
+                            code: NSFileProviderError.notAuthenticated.rawValue)
+        case 5: // DuoFPErrorTimeout
+            return NSError(domain: NSFileProviderErrorDomain,
+                            code: NSFileProviderError.serverUnreachable.rawValue)
+        case 6: // DuoFPErrorDiskFull
+            return NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC))
+        case 8: // DuoFPErrorNotConnected (host down)
+            return NSError(domain: NSFileProviderErrorDomain,
+                            code: NSFileProviderError.serverUnreachable.rawValue)
+        default: // 7 DuoFPErrorProtocol, and any future/unrecognized code
+            return NSError(domain: NSFileProviderErrorDomain,
+                            code: NSFileProviderError.cannotSynchronize.rawValue)
+        }
+    }
+}
+
 /// Each operation owns one temp file and serializes all XPC callbacks.
 final class FetchController {
     typealias HostProvider = (@escaping (Error) -> Void) -> DuoHostCallback?
@@ -141,9 +197,10 @@ private final class FetchOperation {
         try? file?.close()
         file = nil
         if let error {
+            let mapped = ErrorMap.toNSFileProviderError(error)
             if let token { host?.cancelFetch(token) }
             if let url { try? FileManager.default.removeItem(at: url) }
-            completion(nil, nil, error)
+            completion(nil, nil, mapped)
         } else {
             completion(url, item, nil)
         }

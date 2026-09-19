@@ -59,11 +59,16 @@ final class DuoExtensionControlService: NSObject, DuoExtensionControl {
     /// introduced here. `.invalidRecord` (a bad/unparseable record) maps to
     /// `DuoFPErrorProtocol` (7); `.notFound` (retire/delete of an id with no
     /// replica) maps to `DuoFPErrorSourceMissing` (1), since the thing that's
-    /// missing is precisely the durable source record; `.io` (fsync/rename
-    /// failure) maps to `DuoFPErrorProtocol` (7) as the general "the durable
-    /// operation itself failed" fallback. The numeric codes are referenced
-    /// directly (not through the Swift-bridged `DuoFPError` enum case names)
-    /// to avoid depending on NS_ERROR_ENUM's exact Swift import shape.
+    /// missing is precisely the durable source record; `.io` (create/write/
+    /// fsync/rename failure - see `ReplicaStore.durableWrite`/`delete`) maps
+    /// to `DuoFPErrorDiskFull` (6) - task-14 brief ruling #3(b) fixes this
+    /// from the `DuoFPErrorProtocol` (7) fallback it used to fall through to:
+    /// a durable-write failure on this store is overwhelmingly a full disk in
+    /// the extension's own container, not a protocol violation, and Python's
+    /// receiving end (`_xpc_error`) has a specific, more useful code for
+    /// exactly that. The numeric codes are referenced directly (not through
+    /// the Swift-bridged `DuoFPError` enum case names) to avoid depending on
+    /// NS_ERROR_ENUM's exact Swift import shape.
     private static func mapError(_ error: Error) -> NSError {
         if let nsError = error as NSError?, nsError.domain == DuoFPErrorDomain {
             return nsError
@@ -72,6 +77,8 @@ final class DuoExtensionControlService: NSObject, DuoExtensionControl {
         switch error {
         case ReplicaStoreError.notFound:
             code = 1 // DuoFPErrorSourceMissing
+        case ReplicaStoreError.io:
+            code = 6 // DuoFPErrorDiskFull
         default:
             code = 7 // DuoFPErrorProtocol
         }

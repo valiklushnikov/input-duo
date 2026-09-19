@@ -238,6 +238,8 @@ class FileProviderBackend(QObject):
         # until a prior read completes and frees budget (_admit_pull_queue).
         self._pull_queue: deque[str] = deque()
         self._read_ids = itertools.count(1)
+        # --- Task 14: link.disconnected -> local fail-all (see attach_link).
+        self._link_lost_slot: tuple[object, Callable] | None = None
         # --- Task 8: arm-when-ready latch (ACK И domain READY, ровно раз).
         self._ack_transfer_id: str | None = None
         self._ack_roots: tuple[str, ...] = ()
@@ -257,7 +259,85 @@ class FileProviderBackend(QObject):
 
     # --- проводка
     def attach_link(self, link) -> None:
+        """Attach the peer link and, if it exposes a ``disconnected`` signal
+        (the real ``PeerLink`` does - see ``clipboard/peer.py``; the plain
+        ``FakeLink`` fixture in test_fileprovider_scheduler.py deliberately
+        does not, and must keep working unchanged), subscribe to it so a real
+        disconnect fails every in-flight fetch locally (Task 14 - see
+        ``_on_link_lost``/``_fail_all_active``). Mirrors the existing
+        ``TransferService.attach_link``/``_release_link_lost_slot`` idiom
+        (``service.py``) rather than inventing a new one.
+        """
+        self._release_link_lost_slot()
         self._link = link
+        disconnected = getattr(link, "disconnected", None)
+        if disconnected is None:
+            return
+
+        def _on_disconnected(reason, attached_link=link) -> None:
+            self._on_link_lost(attached_link, reason)
+
+        disconnected.connect(_on_disconnected)
+        self._link_lost_slot = (link, _on_disconnected)
+
+    def _release_link_lost_slot(self) -> None:
+        slot, self._link_lost_slot = self._link_lost_slot, None
+        if slot is None:
+            return
+        link, handler = slot
+        try:
+            link.disconnected.disconnect(handler)
+        except (RuntimeError, TypeError):
+            pass
+
+    def _on_link_lost(self, link, reason: str) -> None:
+        """Real disconnect (invalidated/interrupted/socket-closed): local-only
+        fail-all, no wire message (there is nothing left to send it to, and
+        ``FILE_ERROR`` already only flows host->us, never us->host) - see
+        task-14 brief ruling #4. ``self._link`` is cleared so any fetch
+        opened/pulled AFTER this point sees "not connected" (code 8,
+        ``serverUnreachable`` on the Swift side) rather than trying to use a
+        dead link.
+        """
+        if link is not self._link:
+            return  # stale slot from an already-superseded link - ignore
+        logger.info("file provider peer link lost (%s)", reason)
+        self._release_link_lost_slot()
+        self._link = None
+        self._fail_all_active(_xpc_error(3))  # DuoFPErrorPeerLost
+
+    def on_session_timeout(self) -> None:
+        """Hook for a session watchdog (owned elsewhere) to call when the
+        session is judged dead: every fetch still in flight fails locally
+        with Timeout, the same local-only fail-all as a link disconnect."""
+        self._fail_all_active(_xpc_error(5))  # DuoFPErrorTimeout
+
+    def _fail_all_active(self, error) -> None:
+        """Settle every fetch not already in a terminal state with ``error``,
+        one at a time through the existing ``_finish_fetch`` (so each one's
+        pending XPC reply is settled, its byte-budget freed, and both queues
+        re-admitted exactly like any other single-fetch failure) - see
+        ``_on_link_lost``/``on_session_timeout``. Snapshotting the token list
+        first is required: ``_finish_fetch`` re-admits ``_queue``, which can
+        promote a QUEUED fetch to REQUESTING (still non-terminal, still
+        correctly failed on the next iteration) - iterating ``by_token``
+        itself while it mutates would be unsafe.
+        """
+        tokens = [
+            token
+            for token, fetch in self.by_token.items()
+            if fetch.state
+            not in (FetchState.DONE, FetchState.FAILED, FetchState.CANCELLED)
+        ]
+        for token in tokens:
+            fetch = self.by_token.get(token)
+            if fetch is None or fetch.state in (
+                FetchState.DONE,
+                FetchState.FAILED,
+                FetchState.CANCELLED,
+            ):
+                continue
+            self._finish_fetch(fetch, FetchState.FAILED, error)
 
     def set_peer_capabilities(self, caps) -> None:
         self._peer_caps = frozenset(caps)
@@ -526,6 +606,17 @@ class FileProviderBackend(QObject):
 
     # --- Task 9: bounded per-fetch scheduler
     def open_fetch(self, generation_id: str, entry_index: int, reply=None):
+        # Task 14: host-down (no peer link at all, e.g. never attached or
+        # already disconnected - see _on_link_lost) must reply NotConnected,
+        # not silently admit a fetch that can never actually read a byte
+        # (pull_chunk's own self._link is None check in _request_chunk only
+        # fires once a read is admitted - by then the item already looks
+        # "in progress" to Finder for no reason).
+        if self._link is None:
+            if reply is None:
+                raise RuntimeError("file provider peer not connected")
+            reply(None, None, _xpc_error(8))
+            return None
         try:
             token, size = self._open_fetch(generation_id, entry_index)
         except ValueError:
@@ -808,13 +899,27 @@ class FileProviderBackend(QObject):
         # this fetch just finished, _finish_fetch already ran this too.
         self._admit_pull_queue()
 
+    #: Wire ``FILE_ERROR`` ``reason`` -> ``DuoFPErrorDomain`` code (spec §16).
+    #: ``"cancelled"``/``"not connected"`` are deliberately absent - those are
+    #: purely local (Finder cancel, no peer link at all), never a reason the
+    #: OTHER side puts on the wire.
+    _FILE_ERROR_REASON_CODES = {
+        "source_missing": 1,  # DuoFPErrorSourceMissing
+        "source_changed": 2,  # DuoFPErrorSourceChanged
+        "peer_lost": 3,  # DuoFPErrorPeerLost
+        "unauthorized": 4,  # DuoFPErrorUnauthorized
+        "timeout": 5,  # DuoFPErrorTimeout
+        "disk_full": 6,  # DuoFPErrorDiskFull
+        "protocol": 7,  # DuoFPErrorProtocol
+    }
+
     def _on_file_error(self, message: Message) -> None:
         fetch = self._pending_fetch(message)
         if fetch is None:
             return
         reason = message.header.get("reason")
         code = (
-            {"source_missing": 1, "source_changed": 2}.get(reason, 7)
+            self._FILE_ERROR_REASON_CODES.get(reason, 7)
             if isinstance(reason, str)
             else 7
         )
