@@ -101,6 +101,12 @@ class MacReceiveRouter(QObject):
         #: (см. ``_fallback_to_staging``) - подавляет повторный вопрос
         #: пользователю через ``authorization_needed`` наружу.
         self._suppress_staging_prompt = False
+        #: Task 20: fallback registry for ``fp_backend_selected_{kind}`` when
+        #: there is no FP backend instance to hold Task 17's own counters
+        #: (Stage 1 default: flag off, ``fileprovider=None`` - see
+        #: ``_record_selection``). Kept on the router itself rather than a
+        #: module-level global so it never leaks across router instances/tests.
+        self.selection_counters: dict[str, int] = {}
 
         self._wire(self._staging, is_fp=False)
         if self._fp is not None:
@@ -160,8 +166,34 @@ class MacReceiveRouter(QObject):
             and self._client is not None
             and self._client.remote() is not None
         ):
+            self._record_selection("file_provider")
             return self._fp
+        self._record_selection("staging")
         return self._staging
+
+    def _record_selection(self, kind: str) -> None:
+        """Task 20: fire the Task 17 ``fp_backend_selected_{kind}`` counter
+        at the real selection site, exactly once per ``handle_offer`` (the
+        internal pre-publication fallback in ``_fallback_to_staging`` does
+        NOT go through here again - it is not a new per-offer decision, see
+        that method's docstring).
+
+        When an FP backend instance exists (flag on, FP constructed - see
+        app.py's ``_build_fileprovider_kwargs``), this reuses ITS OWN Task 17
+        counters registry via the existing ``record_backend_selected`` hook,
+        so a staging selection while FP is merely degraded (domain not
+        ready/service unavailable) lands next to every other Task 17 counter
+        on the same instance. Only when there is no FP backend instance at
+        all (Stage 1 default: flag off - the common case) does the router
+        fall back to its own tiny ``selection_counters`` dict under the
+        identical key - no new metrics framework, just the smallest registry
+        that still counts a staging-only run (ruling #2, Task 20)."""
+        record = getattr(self._fp, "record_backend_selected", None)
+        if record is not None:
+            record(kind)
+            return
+        key = f"fp_backend_selected_{kind}"
+        self.selection_counters[key] = self.selection_counters.get(key, 0) + 1
 
     # --- offer/авторизация
     def handle_offer(self, manifest) -> None:

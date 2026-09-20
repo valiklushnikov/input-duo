@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, QSettings, Qt, Signal, Slot
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QSettings, Qt, Signal
 from PySide6.QtWidgets import QMessageBox
 
 from duo_input import app as app_module
@@ -31,8 +31,9 @@ from duo_input.transfer.model import (
     TransferManifest,
     encode_manifest,
 )
+from duo_input.transfer.macos_files import MacFileReceiver
 from duo_input.transfer.pipe import ChunkPipe
-from duo_input.transfer.platform_files import UnsupportedPlatformError
+from duo_input.transfer.platform_files import MacReceiveRouter, UnsupportedPlatformError
 from duo_input.transfer.service import FileTransferService, TransferState
 
 
@@ -1616,5 +1617,228 @@ def test_file_shutdown_does_not_wait_on_a_read_blocked_in_the_sta(
         window.clipboard_page.files_checkbox.setChecked(False)
 
         assert reader_released_before_join == [True]
+    finally:
+        runtime.stop()
+
+
+# --------------------------------------------------------------------------
+# Task 20: rollout flag (default OFF), per-offer fallback, and the
+# fp_backend_selected_{file_provider,staging} telemetry counter (Task 17's
+# registry, wired at the real selection site in ``MacReceiveRouter``).
+#
+# ``create_file_backend`` is deliberately left unmocked here (mirrors
+# ``test_macos_receiver_wiring.py``): the point is that the REAL
+# ``MacReceiveRouter`` picks a REAL ``FileProviderBackend``/``MacFileReceiver``
+# and that the REAL Task 17 counters move - not that some fake object was
+# asked the right question. Only the XPC/domain I/O boundary (an actual macOS
+# File Provider domain + extension connection) is faked, exactly like
+# ``FakeDomain``/``FakeFPClient`` in test_fileprovider_backend_selection.py.
+# --------------------------------------------------------------------------
+
+
+class _FakeFPDomainManager:
+    """Stands in for the real ``FileProviderDomainManager`` (an actual
+    fileproviderd domain, Task 6) - these tests exercise the router's
+    SELECTION decision (Task 16) and its telemetry (Task 20), not the domain
+    machinery itself (covered by its own suite, test_fileprovider_domain.py)."""
+
+    def __init__(self, parent=None) -> None:
+        self.domain_identifier = "test.duo-input.fileprovider"
+        self.is_ready = True
+        self.ensure_domain_calls = 0
+
+    def ensure_domain(self) -> None:
+        self.ensure_domain_calls += 1
+
+
+class _FakeFPServiceClient:
+    """Stands in for the real ``FileProviderServiceClient`` (real XPC to the
+    extension) - ``remote()`` is the only thing ``MacReceiveRouter._select_backend``
+    reads from it."""
+
+    def __init__(self, parent=None) -> None:
+        self._remote = object()
+        self.domain_id = None
+        self.connect_calls = 0
+
+    def set_domain(self, domain_id) -> None:
+        self.domain_id = domain_id
+
+    def connect_service(self) -> None:
+        self.connect_calls += 1
+
+    def remote(self):
+        return self._remote
+
+
+def _wire_fake_fileprovider_boundary(monkeypatch, qapp, *, domain_ready: bool):
+    """Patch the two I/O-boundary classes ``app.py``'s
+    ``_build_fileprovider_kwargs`` local-imports at call time, so
+    ``configure_runtime`` builds a REAL ``FileProviderBackend`` wired to fake
+    domain/client objects instead of touching real fileproviderd/XPC."""
+    domains: list[_FakeFPDomainManager] = []
+    clients: list[_FakeFPServiceClient] = []
+
+    def make_domain(parent=None):
+        domain = _FakeFPDomainManager(parent)
+        domain.is_ready = domain_ready
+        domains.append(domain)
+        return domain
+
+    def make_client(parent=None):
+        client = _FakeFPServiceClient(parent)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(
+        "duo_input.transfer.fileprovider_domain.FileProviderDomainManager", make_domain
+    )
+    monkeypatch.setattr(
+        "duo_input.transfer.fileprovider_client.FileProviderServiceClient", make_client
+    )
+    return domains, clients
+
+
+def _fp_manifest(transfer_id: str) -> TransferManifest:
+    return TransferManifest(
+        transfer_id=transfer_id,
+        entries=(TransferEntry(path="a.bin", kind=ENTRY_FILE, size=10, mtime_ns=1),),
+    )
+
+
+def _configure_rollout_runtime(qapp, qtbot, tmp_path, monkeypatch, values):
+    """Same production path as ``test_macos_receiver_wiring.py``'s
+    ``_configure`` - ``create_file_backend`` is real. The stubbed prompt (in
+    place of the default "ask" mode's modal) keeps every test focused on
+    backend SELECTION, never calling ``authorize()`` at all - the deeper
+    publish/authorize flow is covered by Task 7/8/16's own suites, and would
+    otherwise need a full fake XPC remote object here."""
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    settings = _settings(tmp_path, dict(values))
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+    configure_runtime(qapp, window, settings)
+    runtime = _runtime_of(qapp)
+    monkeypatch.setattr(runtime, "_prompt_file_authorization", lambda manifest: None)
+    return settings, window, runtime
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="File Provider rollout is darwin-only")
+def test_the_fileprovider_flag_defaults_to_false_on_first_run(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    """A settings file with no ``clipboard/fileprovider_enabled`` key at all
+    (a genuinely first run) must read as OFF - Stage 1 default (ruling #1:
+    hard block on shipping default True)."""
+    _settings_, _window, runtime = _configure_rollout_runtime(
+        qapp, qtbot, tmp_path, monkeypatch, {"clipboard/enabled": True}
+    )
+    try:
+        assert runtime._fileprovider_flag_enabled() is False
+    finally:
+        runtime.stop()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="File Provider rollout is darwin-only")
+def test_flag_on_with_fileprovider_ready_routes_the_offer_to_file_provider_and_counts_it(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    domains, clients = _wire_fake_fileprovider_boundary(monkeypatch, qapp, domain_ready=True)
+    _settings_, _window, runtime = _configure_rollout_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {
+            "clipboard/enabled": True,
+            "clipboard/files_enabled": True,
+            "clipboard/fileprovider_enabled": True,
+        },
+    )
+    try:
+        router = runtime.file_backend
+        assert isinstance(router, MacReceiveRouter)
+        assert isinstance(router._staging, MacFileReceiver)
+        fp_backend = router._fp
+        assert fp_backend is not None
+        assert domains and clients  # the real boundary classes were constructed
+
+        router.handle_offer(_fp_manifest("gen-fp"))
+
+        assert router._active_backend is fp_backend
+        assert fp_backend.counters["fp_backend_selected_file_provider"] == 1
+        assert "fp_backend_selected_staging" not in fp_backend.counters
+    finally:
+        runtime.stop()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="File Provider rollout is darwin-only")
+def test_flag_off_routes_the_offer_to_staging_without_building_file_provider_and_counts_it(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    """Stage 1 default: the flag is off, so no domain/client/backend is even
+    constructed (app.py's ``_build_fileprovider_kwargs`` docstring) - and the
+    staging selection still increments the counter through the router's own
+    fallback registry (ruling #2: no FP backend instance exists to hold it)."""
+    _settings_, _window, runtime = _configure_rollout_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {"clipboard/enabled": True, "clipboard/files_enabled": True},
+    )
+    try:
+        router = runtime.file_backend
+        assert isinstance(router, MacReceiveRouter)
+        assert router._fp is None
+
+        router.handle_offer(_fp_manifest("gen-staging"))
+
+        assert router._active_backend is router._staging
+        assert router.selection_counters["fp_backend_selected_staging"] == 1
+    finally:
+        runtime.stop()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="File Provider rollout is darwin-only")
+def test_toggling_the_flag_mid_generation_does_not_migrate_the_active_transfer(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    """Rollback is 'flip the flag' precisely because the per-offer choice is
+    fixed once (ruling #4): flipping mid-flight must not touch the transfer
+    already in progress, only the NEXT offer."""
+    _wire_fake_fileprovider_boundary(monkeypatch, qapp, domain_ready=True)
+    settings, _window, runtime = _configure_rollout_runtime(
+        qapp,
+        qtbot,
+        tmp_path,
+        monkeypatch,
+        {
+            "clipboard/enabled": True,
+            "clipboard/files_enabled": True,
+            "clipboard/fileprovider_enabled": True,
+        },
+    )
+    try:
+        router = runtime.file_backend
+        fp_backend = router._fp
+        router.handle_offer(_fp_manifest("gen-1"))
+        assert router._active_backend is fp_backend
+
+        # Flip the flag off while "gen-1" is still in flight.
+        settings.setValue("clipboard/fileprovider_enabled", False)
+
+        assert router._active_backend is fp_backend  # unchanged - no migration
+
+        forwarded: list[object] = []
+        monkeypatch.setattr(fp_backend, "handle_message", forwarded.append)
+        message = Message(MessageType.FILE_CHUNK, {}, b"")
+        router.handle_message(message)
+        assert forwarded == [message]  # still addressed to the same backend
+
+        # The NEXT offer, after the toggle, is a fresh per-offer decision -
+        # it goes to staging without restarting anything.
+        router.handle_offer(_fp_manifest("gen-2"))
+        assert router._active_backend is router._staging
     finally:
         runtime.stop()
