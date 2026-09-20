@@ -134,6 +134,23 @@ MAX_GENERATIONS = 8
 #: ``timer_factory``/``read_timeout_ms`` so tests never wait it out.
 FETCH_READ_TIMEOUT_MS = 30_000
 
+#: NSFileProviderErrorDomainDisabled. There is a transient ~1-minute window
+#: right after ``addDomain`` where the domain is still DISABLED:
+#: ``getUserVisibleURLForItemIdentifier`` fails with this code and the mount
+#: ``ls`` times out, until fileproviderd itself flips the domain to
+#: ``state:enabled``. Observed and documented in the 2026-09-17 lazy-file-
+#: provider spike ("код интеграции обязан учитывать: ретраи/ожидание enabled").
+#: So an -2011 on the arm path is NOT a real failure - it means "not enabled
+#: yet"; we retry the resolve rather than dropping the FP arm into staging.
+FP_DOMAIN_DISABLED_CODE = -2011
+#: Backoff between arm resolve retries while the domain is still disabled, and
+#: a finite cap: chosen comfortably above the observed ~1-min window so the
+#: first-registration transient is absorbed, but bounded so a genuinely stuck
+#: (not merely transient) DISABLED state still eventually falls back honestly.
+#: Both injectable-adjacent via ``timer_factory`` (tests drive the fake timer).
+ARM_RETRY_INTERVAL_MS = 2_500
+ARM_DISABLED_MAX_RETRIES = 48
+
 
 def _entry_name(manifest: TransferManifest, entry_index: int) -> str:
     """Basename-only display name for one manifest entry - mirrors
@@ -313,6 +330,7 @@ class FileProviderBackend(QObject):
         #: API, см. task-8 brief) не знает эпох, только transfer_id.
         self._accepted_transfer_id: str | None = None
         self._accepted_roots: tuple[str, ...] = ()
+        self._accepted_manifest: TransferManifest | None = None
         self._active_transfer_id: str | None = None
         self._active_manifest: TransferManifest | None = None
         self._generation_state: _GenerationState | None = None
@@ -356,6 +374,12 @@ class FileProviderBackend(QObject):
         self._pending_resolution: (
             tuple[int, str, tuple[str, ...], set[str], dict[str, object]] | None
         ) = None
+        #: How many times the current arm has retried because the domain was
+        #: still transiently DISABLED (-2011); reset on a new accepted
+        #: generation and on a successful/terminal resolve. See
+        #: FP_DOMAIN_DISABLED_CODE / _schedule_arm_retry.
+        self._arm_retries = 0
+        self._arm_retry_timer: object | None = None
         ready_signal = getattr(domain, "ready", None)
         if ready_signal is not None:
             ready_signal.connect(self.on_domain_ready)
@@ -578,6 +602,10 @@ class FileProviderBackend(QObject):
         # докстринг) - тот тестовый API не оперирует epoch вообще.
         self._accepted_transfer_id = manifest.transfer_id
         self._accepted_roots = _root_ids(manifest)
+        # Kept so _fp_item_identifier can map roots→FP identifiers on the arm
+        # path even when arm is driven by the test-only on_ack() seam (which,
+        # unlike the real _run_publish_reply, never sets _active_manifest).
+        self._accepted_manifest = manifest
         # Новая принятая generation немедленно аннулирует ACK-latch и любое
         # незавершённое разрешение URL предыдущей. Иначе READY или поздний
         # completion старой generation сможет вооружить clipboard между
@@ -586,10 +614,33 @@ class FileProviderBackend(QObject):
         self._ack_roots = ()
         self._arm_attempt += 1
         self._pending_resolution = None
+        # A new accepted generation supersedes any in-flight domain-disabled
+        # arm retry from a previous one (its retry timer must not fire and
+        # re-arm the old roots).
+        self._arm_retries = 0
+        self._cancel_arm_retry()
         self._publish_generation(manifest, epoch)
 
     def _publish_generation(self, manifest: TransferManifest, epoch: int) -> None:
-        remote = self._client.remote()
+        # Use an XPC error handler so a dropped/failed publish (connection
+        # rejected by the appex, appex crash, etc.) surfaces as a logged error
+        # instead of the reply block silently never firing - which is exactly
+        # the failure mode that masked an earlier reply-block bug.
+        def _xpc_error_handler(error) -> None:
+            logger.error(
+                "publishGeneration XPC connection error for %s: %r",
+                manifest.transfer_id,
+                error,
+            )
+
+        # Prefer the error-handler proxy (production client); fall back to the
+        # plain proxy for test fakes / any client that predates it.
+        get_remote = getattr(self._client, "remote_with_error_handler", None)
+        remote = (
+            get_remote(_xpc_error_handler)
+            if get_remote is not None
+            else self._client.remote()
+        )
         if remote is None:
             logger.warning(
                 "cannot publish generation %s: extension not connected",
@@ -730,12 +781,39 @@ class FileProviderBackend(QObject):
         transfer_id = self._ack_transfer_id
         self._arm_after_ready(transfer_id)
 
+    def _fp_item_identifier(self, transfer_id: str, root: str) -> str:
+        """Map a top-level manifest root (first path segment / basename, as
+        ``_root_ids()`` produces) to the ``NSFileProviderItemIdentifier`` the
+        Swift domain vends for it: the entry's ``"<transfer_id>:<index>"`` when
+        the root is itself a manifest entry (a top-level file or directory
+        entry - see ``ItemModel.swift``), else the bare ``"<transfer_id>"``
+        generation container as a safe fallback (an implicit top-level dir with
+        no directory entry of its own)."""
+        manifest = self._accepted_manifest or self._active_manifest
+        if manifest is not None:
+            for index, entry in enumerate(manifest.entries):
+                if entry.path == root:
+                    return f"{transfer_id}:{index}"
+        return transfer_id
+
     def _arm_after_ready(self, transfer_id: str) -> None:
         """Резолвить user-visible URL корней ``transfer_id`` (латчнутых в
         ``_ack_roots``) через ``self._url_resolver`` и вооружить буфер обмена
         ОДНИМ вызовом ``self._arm`` после того, как ВСЕ корни резолвнуты.
         """
-        roots = self._ack_roots
+        # BUGFIX (production E2E, bug #2): getUserVisibleURLForItemIdentifier
+        # needs a real NSFileProviderItemIdentifier - the Swift domain vends
+        # "<transfer_id>:<index>" for entries (and "<transfer_id>" for the
+        # generation container), NOT the top-level path segment (basename) that
+        # _root_ids()/_ack_roots carries for the clipboard tree. Passing the
+        # basename ("filetest1.txt") handed fileproviderd an unknown identifier
+        # -> NSFileProviderErrorDomain -2011 "Sync is not enabled for (null)".
+        # Unit tests inject a fake resolver that accepts any id, so this only
+        # surfaced on the real File Provider path.
+        basenames = self._ack_roots
+        roots = tuple(
+            self._fp_item_identifier(transfer_id, name) for name in basenames
+        )
         self._arm_attempt += 1
         attempt = self._arm_attempt
         if not roots:
@@ -783,10 +861,32 @@ class FileProviderBackend(QObject):
         if root_id not in pending:
             return
         if error is not None or url is None:
+            # Transient DISABLED window right after addDomain (-2011): the
+            # domain isn't enabled yet, not a real failure. Retry the whole arm
+            # after a short delay instead of dropping the FP arm into staging;
+            # give up (honest failure) only past the retry cap. See
+            # FP_DOMAIN_DISABLED_CODE.
+            if (
+                self._is_domain_disabled(error)
+                and self._arm_retries < ARM_DISABLED_MAX_RETRIES
+            ):
+                self._arm_retries += 1
+                logger.info(
+                    "fp arm: domain disabled (-2011), not enabled yet; "
+                    "retry %d/%d for %s in %dms",
+                    self._arm_retries,
+                    ARM_DISABLED_MAX_RETRIES,
+                    transfer_id,
+                    ARM_RETRY_INTERVAL_MS,
+                )
+                self._pending_resolution = None
+                self._schedule_arm_retry(transfer_id)
+                return
             logger.warning(
                 "failed to resolve user-visible URL for %s: %r", root_id, error
             )
             self._pending_resolution = None
+            self._arm_retries = 0
             self.transfer_failed.emit("url_resolution_failed")
             return
         pending.discard(root_id)
@@ -795,7 +895,53 @@ class FileProviderBackend(QObject):
             return  # still waiting on other roots of this generation
         urls = [resolved[root_id] for root_id in roots]
         self._pending_resolution = None
+        self._arm_retries = 0
         self._arm_resolved_urls(transfer_id, urls)
+
+    @staticmethod
+    def _is_domain_disabled(error) -> bool:
+        """True iff ``error`` is NSFileProviderErrorDomainDisabled (-2011) - the
+        transient "domain not enabled yet" state just after ``addDomain`` (see
+        FP_DOMAIN_DISABLED_CODE). Tolerates both a real ``NSError`` (``code``/
+        ``domain`` are zero-arg methods) and a plain test double (attributes)."""
+        if error is None:
+            return False
+        code = getattr(error, "code", None)
+        code = code() if callable(code) else code
+        domain = getattr(error, "domain", None)
+        domain = domain() if callable(domain) else domain
+        return code == FP_DOMAIN_DISABLED_CODE and (
+            domain is None or "NSFileProviderErrorDomain" in str(domain)
+        )
+
+    def _schedule_arm_retry(self, transfer_id: str) -> None:
+        """Re-run ``_arm_after_ready`` after ``ARM_RETRY_INTERVAL_MS`` - the
+        domain is still in its transient disabled window. Cancels any prior
+        retry timer; the fire is gated on the generation still being the
+        current accepted+acked one and not already armed, so a superseding
+        generation's retry can never re-arm stale roots."""
+        self._cancel_arm_retry()
+        timer = self._timer_factory()
+        timer.setSingleShot(True)
+
+        def _fire() -> None:
+            self._arm_retry_timer = None
+            if (
+                transfer_id == self._accepted_transfer_id
+                and transfer_id == self._ack_transfer_id
+                and self._armed_transfer_id != transfer_id
+            ):
+                self._arm_after_ready(transfer_id)
+
+        timer.timeout.connect(_fire)
+        self._arm_retry_timer = timer
+        timer.start(ARM_RETRY_INTERVAL_MS)
+
+    def _cancel_arm_retry(self) -> None:
+        timer = self._arm_retry_timer
+        self._arm_retry_timer = None
+        if timer is not None:
+            timer.stop()
 
     def _arm_resolved_urls(self, transfer_id: str, urls: list[object]) -> None:
         """Publish only a still-current generation, and mark it armed only

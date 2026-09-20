@@ -162,7 +162,20 @@ if _XPC_AVAILABLE:
                         "callable": {
                             "retval": {"type": b"v"},
                             "arguments": {
-                                0: {"type": b"^v"},
+                                # Block self. For an OUTGOING block (one PyObjC
+                                # CREATES and sends over NSXPC), the remote side
+                                # verifies our block's NSMethodSignature against
+                                # the clang-derived one, whose arg 0 is the real
+                                # block type '@?' ({isObject,isBlock}). PyObjC's
+                                # '^v' (opaque void*) works for the INCOMING
+                                # fetch blocks above (received, not created) but
+                                # here makes the wire sig arg0='^v' mismatch the
+                                # extension's local '@?', so NSXPC rejects the
+                                # message as undecodable ("incompatible reply
+                                # block signature") and publishGeneration is
+                                # never even invoked. Same INCOMING-vs-OUTGOING
+                                # asymmetry as the BOOL 'Z' vs 'B' fix below.
+                                0: {"type": b"@?"},
                                 # BOOL ack. For an OUTGOING block PyObjC feeds
                                 # the arg encoding to NSGetSizeAndAlignment,
                                 # which rejects PyObjC's 'Z' (_C_NSBOOL) alias
@@ -283,6 +296,17 @@ class FileProviderServiceClient(QObject):
         if connection is None:
             return None
         return connection.remoteObjectProxy()
+
+    def remote_with_error_handler(self, handler) -> object | None:
+        """Same proxy as ``remote()`` but with an XPC error handler, so a
+        dropped/failed message (connection rejected by the appex, appex crash,
+        etc.) surfaces via ``handler`` instead of the reply block silently
+        never firing."""
+        with self._lock:
+            connection = self._connection
+        if connection is None:
+            return None
+        return connection.remoteObjectProxyWithErrorHandler_(handler)
 
     # -------------------------------------------------------------------- lifecycle
 

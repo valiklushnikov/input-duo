@@ -448,5 +448,7 @@ def test_real_backends_fp_happy_path_end_to_end(qapp, tmp_path):
     router.handle_offer(manifest)
     router.authorize(True)
 
-    assert armed_urls == [["file:///a.txt"]]
+    # root_id resolved is the FP item identifier "<transfer_id>:<index>", not
+    # the basename - the clipboard is armed with the real user-visible URL.
+    assert armed_urls == [["file:///real-t1:0"]]
     assert link.sent == []  # публикация/вооружение не шлют FILE_READ сами по себе

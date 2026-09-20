@@ -261,7 +261,9 @@ def test_accepting_new_generation_invalidates_in_flight_resolution(
     backend.authorize(True, e_a)
     backend.on_domain_ready()
     backend.on_ack("aaa111")
-    assert [root_id for root_id, _ in resolver.calls] == ["a.txt"]
+    # The resolver is handed real NSFileProviderItemIdentifiers
+    # ("<transfer_id>:<index>"), not the clipboard-tree basenames.
+    assert [root_id for root_id, _ in resolver.calls] == ["aaa111:0"]
 
     e_b = backend.handle_offer(_manifest("bbb222", ("b.txt",)))
     backend.authorize(True, e_b)
@@ -270,7 +272,7 @@ def test_accepting_new_generation_invalidates_in_flight_resolution(
     assert arm.calls == []
 
     backend.on_ack("bbb222")
-    assert [root_id for root_id, _ in resolver.calls] == ["a.txt", "b.txt"]
+    assert [root_id for root_id, _ in resolver.calls] == ["aaa111:0", "bbb222:0"]
     resolver.complete(1, "file:///b.txt")
 
     assert arm.calls == [["file:///b.txt"]]
@@ -292,7 +294,7 @@ def test_resolution_failure_emits_once_arms_nothing_and_can_retry(
     backend.authorize(True, epoch)
     backend.on_domain_ready()
     backend.on_ack("abc123")
-    assert [root_id for root_id, _ in resolver.calls] == ["a.txt", "b.txt"]
+    assert [root_id for root_id, _ in resolver.calls] == ["abc123:0", "abc123:1"]
 
     resolver.complete(1, error=RuntimeError("temporary resolver failure"))
     resolver.complete(0, "file:///a.txt")
@@ -302,13 +304,149 @@ def test_resolution_failure_emits_once_arms_nothing_and_can_retry(
 
     backend.on_ack("abc123")
     assert [root_id for root_id, _ in resolver.calls] == [
-        "a.txt",
-        "b.txt",
-        "a.txt",
-        "b.txt",
+        "abc123:0",
+        "abc123:1",
+        "abc123:0",
+        "abc123:1",
     ]
     resolver.complete(2, "file:///a.txt")
     resolver.complete(3, "file:///b.txt")
 
     assert failures == ["url_resolution_failed"]
     assert arm.calls == [["file:///a.txt", "file:///b.txt"]]
+
+
+class _DomainDisabledError:
+    """Minimal NSError stand-in for NSFileProviderErrorDomainDisabled (-2011),
+    the transient "domain not enabled yet" window right after addDomain."""
+
+    def code(self) -> int:
+        return -2011
+
+    def domain(self) -> str:
+        return "NSFileProviderErrorDomain"
+
+    def __repr__(self) -> str:
+        return "NSError(NSFileProviderErrorDomain:-2011 disabled)"
+
+
+class _RetryFakeTimer:
+    """Single-shot QTimer stand-in; the test fires expiry via ``.fire()``."""
+
+    def __init__(self) -> None:
+        self._callback = None
+        self.running = False
+
+    def setSingleShot(self, _single: bool) -> None:  # noqa: N802 - QTimer selector
+        pass
+
+    @property
+    def timeout(self) -> "_RetryFakeTimer":
+        return self
+
+    def connect(self, callback) -> None:
+        self._callback = callback
+
+    def start(self, _ms: int) -> None:
+        self.running = True
+
+    def stop(self) -> None:
+        self.running = False
+
+    def fire(self) -> None:
+        if self.running and self._callback is not None:
+            self.running = False
+            self._callback()
+
+
+def test_arm_retries_while_domain_transiently_disabled(
+    qapp, fake_client, fake_domain, fake_link
+):
+    """-2011 (NSFileProviderErrorDomainDisabled) on the arm path is the
+    transient "domain not enabled yet" window right after addDomain, not a real
+    failure: the backend retries the resolve (never emitting transfer_failed /
+    dropping into staging) until the domain enables and the URL resolves, then
+    arms exactly once."""
+    timers: list[_RetryFakeTimer] = []
+
+    def timer_factory() -> _RetryFakeTimer:
+        timer = _RetryFakeTimer()
+        timers.append(timer)
+        return timer
+
+    resolver = ControllableResolver()
+    arm = FakeArm()
+    failures: list[str] = []
+    backend = FileProviderBackend(
+        fake_client,
+        fake_domain,
+        arm,
+        url_resolver=resolver,
+        timer_factory=timer_factory,
+    )
+    backend.attach_link(fake_link)
+    backend.transfer_failed.connect(failures.append)
+
+    epoch = backend.handle_offer(_manifest())
+    backend.authorize(True, epoch)
+    backend.on_domain_ready()
+    backend.on_ack("abc123")
+
+    # First resolve attempt lands in the transient disabled window.
+    assert [rid for rid, _ in resolver.calls] == ["abc123:0"]
+    resolver.complete(0, error=_DomainDisabledError())
+    # No failure, nothing armed, a retry timer scheduled instead.
+    assert failures == []
+    assert arm.calls == []
+    assert len(timers) == 1 and timers[0].running
+
+    # Retry fires; domain still disabled once more.
+    timers[0].fire()
+    assert [rid for rid, _ in resolver.calls] == ["abc123:0", "abc123:0"]
+    resolver.complete(1, error=_DomainDisabledError())
+    assert failures == []
+    assert arm.calls == []
+    assert len(timers) == 2 and timers[1].running
+
+    # Domain finally enabled: resolve succeeds -> armed exactly once.
+    timers[1].fire()
+    assert [rid for rid, _ in resolver.calls] == ["abc123:0", "abc123:0", "abc123:0"]
+    resolver.complete(2, "file:///abc123:0")
+    assert failures == []
+    assert arm.calls == [["file:///abc123:0"]]
+
+
+def test_non_disabled_resolution_error_fails_without_retry(
+    qapp, fake_client, fake_domain, fake_link
+):
+    """A non -2011 resolver error is a genuine failure: emit transfer_failed
+    once, arm nothing, and schedule NO retry (contrast the disabled window)."""
+    timers: list[_RetryFakeTimer] = []
+
+    def timer_factory() -> _RetryFakeTimer:
+        timer = _RetryFakeTimer()
+        timers.append(timer)
+        return timer
+
+    resolver = ControllableResolver()
+    arm = FakeArm()
+    failures: list[str] = []
+    backend = FileProviderBackend(
+        fake_client,
+        fake_domain,
+        arm,
+        url_resolver=resolver,
+        timer_factory=timer_factory,
+    )
+    backend.attach_link(fake_link)
+    backend.transfer_failed.connect(failures.append)
+
+    epoch = backend.handle_offer(_manifest())
+    backend.authorize(True, epoch)
+    backend.on_domain_ready()
+    backend.on_ack("abc123")
+    resolver.complete(0, error=RuntimeError("real failure"))
+
+    assert failures == ["url_resolution_failed"]
+    assert arm.calls == []
+    assert timers == []  # no retry scheduled for a genuine (non -2011) error
