@@ -31,5 +31,26 @@ def test_windows_and_macos_snapshots_are_byte_identical():
     mac = mac_snapshot(data).payloads
 
     assert win == mac
-    assert set(win) == {"text/plain", "text/html", "text/uri-list", "image/png"}
+    # image/png отсутствует: при наличии локального file:// URL сопутствующий
+    # image трактуется как иконка file-copy (Finder кладёт её на pasteboard) и
+    # не синхронизируется - см. png_bytes. Поведение общее для обеих платформ,
+    # поэтому паритет сохраняется.
+    assert set(win) == {"text/plain", "text/html", "text/uri-list"}
     assert win["text/uri-list"] == b"https://example.com\r\n"  # file:// вырезан
+
+
+def test_image_without_local_files_stays_in_both_snapshots():
+    """Настоящее изображение без file:// URL синхронизируется на обеих
+    платформах байт-в-байт (эвристика file-icon сюда не применяется)."""
+    data = QMimeData()
+    data.setData("text/plain", b"hi")
+    image = QImage(2, 2, QImage.Format.Format_RGB32)
+    image.fill(0x00FF00)
+    data.setImageData(image)
+
+    win = win_snapshot(data).payloads
+    mac = mac_snapshot(data).payloads
+
+    assert win == mac
+    assert "image/png" in win
+    assert win["image/png"].startswith(b"\x89PNG\r\n\x1a\n")

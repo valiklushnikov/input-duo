@@ -78,6 +78,37 @@ def test_png_bytes_without_image_is_absent():
     assert png_bytes(QMimeData()) is None
 
 
+def test_png_bytes_skips_the_file_icon_when_local_files_are_present():
+    """Copying a file in Finder puts the file's icon on the pasteboard as an
+    image alongside the file URL. That icon must NOT be encoded as image/png:
+    it is not content worth syncing (files sync via local_file_paths), and on
+    macOS its pixel buffer is short/invalid so reading it crashes QImage.save
+    (SIGSEGV in QImageWriter memmove). When local file URLs are present, the
+    image is that icon and png_bytes must return None without touching it."""
+    image = QImage(2, 2, QImage.Format.Format_RGB32)
+    image.fill(0xFF0000)
+    data = QMimeData()
+    data.setImageData(image)
+    data.setUrls([QUrl.fromLocalFile("/Users/me/a.txt")])
+
+    assert png_bytes(data) is None
+
+
+def test_png_bytes_still_encodes_a_real_image_with_only_web_urls():
+    """A genuine image copied from an app (no local file URLs) is still
+    encoded - the skip above is scoped to local-file copies, not any URL."""
+    image = QImage(2, 2, QImage.Format.Format_RGB32)
+    image.fill(0x00FF00)
+    data = QMimeData()
+    data.setImageData(image)
+    data.setUrls([QUrl("https://example.com/pic")])
+
+    result = png_bytes(data)
+
+    assert result is not None
+    assert result.startswith(b"\x89PNG\r\n\x1a\n")
+
+
 def test_normalized_payload_dispatches_plain_text_directly():
     data = QMimeData()
     data.setData("text/plain", "привет".encode("utf-8"))

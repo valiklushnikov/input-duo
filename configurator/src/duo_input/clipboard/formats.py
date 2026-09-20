@@ -87,6 +87,16 @@ def png_bytes(mime_data: QMimeData) -> bytes | None:
             return existing
     if not mime_data.hasImage():
         return None
+    # Копирование файла в Finder кладёт на pasteboard иконку файла как
+    # image (application/x-qt-image) РЯДОМ с file:// URL. Эту иконку кодировать
+    # в PNG нельзя: (1) это не контент для синхронизации - файлы уходят своим
+    # каналом (local_file_paths), а (2) на macOS её пиксельный буфер короче/
+    # невалиден (метаданные QImage говорят 1024x1024xARGB32, но реальных байт
+    # меньше), поэтому ЛЮБОЕ чтение пикселей - save/copy/convert - падает
+    # SIGSEGV в QImageWriter (memmove за концом буфера). Раз есть локальные
+    # файлы, image - это их иконка: пропускаем, не трогая пиксели.
+    if local_file_paths(mime_data):
+        return None
     image = mime_data.imageData()
     if isinstance(image, QPixmap):
         image = image.toImage()
