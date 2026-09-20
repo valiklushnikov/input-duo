@@ -16,6 +16,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     /// Strong reference: the service source owns the anonymous listener.
     private let serviceSource: DuoServiceSource
     private let fetchController: FetchController
+    /// Post-fetch cache cleanup (materialize→grace→evict→verify). nil only when
+    /// no manager is available (tests / degraded host).
+    private let cleanup: EvictionCoordinator?
 
     required convenience init(domain: NSFileProviderDomain) {
         self.init(domain: domain, replicaStore: ReplicaStore())
@@ -28,18 +31,32 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     /// `~/Library` (the test bundle itself is not sandboxed).
     init(domain: NSFileProviderDomain, replicaStore: ReplicaStore,
          hostProvider: FetchController.HostProvider? = nil,
-         temporaryDirectory: URL = FileManager.default.temporaryDirectory) {
+         temporaryDirectory: URL? = nil) {
         self.domain = domain
-        self.manager = NSFileProviderManager(for: domain)
+        let manager = NSFileProviderManager(for: domain)
+        self.manager = manager
         self.replicaStore = replicaStore
         let source = DuoServiceSource(store: replicaStore)
         self.serviceSource = source
+        // The URL handed to fetchContents's completion MUST live on the same
+        // volume as the manager's temporaryDirectoryURL(), so the system can
+        // CLONE it into the dataless item instead of copying the whole file - a
+        // second full-size pass (e.g. 4 GB) that otherwise stretches the Finder
+        // "Preparing to copy" phase. Fall back to an injected dir (tests) or the
+        // process temp dir only when the manager has none.
+        let tempDir = temporaryDirectory
+            ?? (try? manager?.temporaryDirectoryURL())
+            ?? FileManager.default.temporaryDirectory
         self.fetchController = FetchController(hostProvider: hostProvider ?? { source.hostProxy(errorHandler: $0) },
-                                               temporaryDirectory: temporaryDirectory)
+                                               temporaryDirectory: tempDir)
+        self.cleanup = manager.map { EvictionCoordinator(environment: ManagerEvictionEnvironment(manager: $0)) }
         super.init()
     }
 
-    func invalidate() { serviceSource.invalidate() }
+    func invalidate() {
+        cleanup?.shutdown()
+        serviceSource.invalidate()
+    }
 
     // MARK: - NSFileProviderServicing (mandatory)
 
@@ -96,7 +113,20 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             completionHandler(nil, nil, NSError(domain: NSFileProviderErrorDomain, code: NSFileProviderError.noSuchItem.rawValue))
             return Progress()
         }
-        return fetchController.fetch(item, request: request, completion: completionHandler)
+        // Post-fetch cache cleanup: fetchContents completion means "content
+        // supplied to File Provider", NOT "materialized into the mount" - the
+        // system clones the temp into the mount asynchronously ~after
+        // completion. So we only SCHEDULE cleanup; the coordinator waits for the
+        // exact item to appear in the materialized set, then (grace) evicts and
+        // verifies. Never evict at completion (proven no-op race).
+        let cleanup = self.cleanup
+        let transferId = parsed.transferId
+        let scheduling: (URL?, NSFileProviderItem?, Error?) -> Void = { url, fetchedItem, error in
+            completionHandler(url, fetchedItem, error)
+            guard error == nil else { return }
+            cleanup?.schedule(itemIdentifier: itemIdentifier.rawValue, transferId: transferId)
+        }
+        return fetchController.fetch(item, request: request, completion: scheduling)
     }
 
     func enumerator(

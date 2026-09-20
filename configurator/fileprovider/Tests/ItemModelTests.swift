@@ -100,6 +100,12 @@ final class ItemModelTests: XCTestCase {
 
         XCTAssertTrue(item.capabilities.contains(.allowsReading))
         XCTAssertTrue(item.capabilities.contains(.allowsWriting))
+        // Production contract: a materialized file MUST be purgeable, else
+        // NSFileProviderManager.evictItem fails with -2008 (nonEvictable) and
+        // post-fetch cache cleanup can never dehydrate the blob. See
+        // NSFileProviderManager.h: evictItem returns NSFileProviderErrorNonEvictable
+        // "if the item has been marked as non-purgeable by the provider".
+        XCTAssertTrue(item.capabilities.contains(.allowsEvicting))
         // NOTE: NSFileProviderItemCapabilitiesAllowsContentEnumerating is
         // defined by the SDK itself as a bit-identical alias of
         // AllowsReading (see NSFileProviderItem.h), so it is trivially
