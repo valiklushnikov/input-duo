@@ -15,7 +15,14 @@ from __future__ import annotations
 import logging
 
 from PySide6.QtCore import QByteArray, QCryptographicHash, QObject, Signal
-from PySide6.QtNetwork import QSsl, QSslCertificate, QSslConfiguration, QSslKey, QSslSocket
+from PySide6.QtNetwork import (
+    QAbstractSocket,
+    QSsl,
+    QSslCertificate,
+    QSslConfiguration,
+    QSslKey,
+    QSslSocket,
+)
 
 from .identity import NodeIdentity
 from .wire import MAX_FILE_CHUNK_BYTES, MAX_FRAME_BYTES, FrameAssembler, Message, WireError, encode
@@ -231,6 +238,15 @@ class PeerLink(QObject):
         socket = self._socket
         if socket is None:
             return
+        # Включить TCP keepalive теперь, когда сокет реально подключён (нативный
+        # дескриптор существует - до connect опция не применяется). Молчащий/
+        # NAT-осиротевший путь иначе умирает тихо, и разрыв всплывает лишь при
+        # следующей записи - посреди передачи это роняет всё копирование.
+        # Keepalive держит NAT-трансляцию живой и детектирует мёртвого пира
+        # быстрее прикладного heartbeat/silence. Ортогонально устойчивости fetch
+        # к реконнекту (Swift FetchController): keepalive снижает частоту
+        # разрывов, retry переживает те, что всё же случаются.
+        socket.setSocketOption(QAbstractSocket.SocketOption.KeepAliveOption, 1)
         self._peer_fingerprint = fingerprint_of_socket(socket)
         if self._expected_fingerprint is not None and self._peer_fingerprint != self._expected_fingerprint:
             self._fail("сертификат не тот, что был закреплён")

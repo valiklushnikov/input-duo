@@ -123,7 +123,11 @@ final class ErrorMappingTests: XCTestCase {
 
     func testFetchFailingWithHostDownSurfacesRetriableServerUnreachableNotDeletion() throws {
         let host = FailingHost(failureCode: 8) // DuoFPErrorNotConnected
-        let controller = FetchController(hostProvider: { _ in host }, temporaryDirectory: directory)
+        // Retry off: this test pins the ERROR MAPPING (host-down -> retriable
+        // serverUnreachable, not a deletion) + cleanup; the transient-retry
+        // behavior has its own tests in FetchControllerTests.
+        let controller = FetchController(hostProvider: { _ in host }, temporaryDirectory: directory,
+                                         retry: .init(maxAttempts: 1))
         let done = expectation(description: "host-down fetch failed")
         _ = controller.fetch(item(), request: NSFileProviderRequest()) { url, item, error in
             XCTAssertNil(url)
@@ -143,7 +147,8 @@ final class ErrorMappingTests: XCTestCase {
 
     func testFetchFailingWithPeerLostSurfacesRetriableServerUnreachable() throws {
         let host = FailingHost(failureCode: 3) // DuoFPErrorPeerLost
-        let controller = FetchController(hostProvider: { _ in host }, temporaryDirectory: directory)
+        let controller = FetchController(hostProvider: { _ in host }, temporaryDirectory: directory,
+                                         retry: .init(maxAttempts: 1))
         let done = expectation(description: "peer-lost fetch failed")
         _ = controller.fetch(item(), request: NSFileProviderRequest()) { _, _, error in
             let nsError = error as NSError?

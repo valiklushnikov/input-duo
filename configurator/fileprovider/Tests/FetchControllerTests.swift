@@ -17,7 +17,34 @@ private final class CannedHost: NSObject, DuoHostCallback {
     func cancelFetch(_ fetchToken: String) { cancelled.append(fetchToken) }
 }
 
+/// Fails `openFetch` with `code` the first `failOpenTimes` calls, then serves a
+/// normal 3-byte "abc" so a transient-error retry can succeed on a later attempt.
+private final class FlakyHost: NSObject, DuoHostCallback {
+    let failOpenTimes: Int
+    let code: Int
+    var totalSize: NSNumber = 3
+    var chunks: [(Data?, Bool, Error?)] = [(Data("abc".utf8), true, nil)]
+    var openCalls = 0
+    var cancelled = [String]()
+    init(failOpenTimes: Int, code: Int) { self.failOpenTimes = failOpenTimes; self.code = code }
+    func openFetch(_ generationId: String, entryId: NSNumber, reply: @escaping (String?, NSNumber?, Error?) -> Void) {
+        openCalls += 1
+        if openCalls <= failOpenTimes {
+            reply(nil, nil, NSError(domain: DuoFPErrorDomain, code: code))
+        } else {
+            reply("token", totalSize, nil)
+        }
+    }
+    func pullChunk(_ fetchToken: String, reply: @escaping (Data?, Bool, Error?) -> Void) {
+        let next = chunks.removeFirst()
+        reply(next.0, next.1, next.2)
+    }
+    func cancelFetch(_ fetchToken: String) { cancelled.append(fetchToken) }
+}
+
 final class FetchControllerTests: XCTestCase {
+    /// Runs the scheduled retry immediately - deterministic, no real waiting.
+    private let now: FetchController.Scheduler = { _, work in work() }
     private var directory: URL!
     override func setUpWithError() throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -51,7 +78,11 @@ final class FetchControllerTests: XCTestCase {
     func testHostErrorAfterPartialWriteRemovesTempAndCompletesOnce() throws {
         let host = CannedHost()
         host.chunks[1] = (nil, false, NSError(domain: DuoFPErrorDomain, code: 3))
-        let controller = FetchController(hostProvider: { _ in host }, temporaryDirectory: directory)
+        // Retry disabled here: this test pins the partial-write cleanup on a host
+        // error, which is orthogonal to the transient-retry behavior covered by
+        // its own tests below.
+        let controller = FetchController(hostProvider: { _ in host }, temporaryDirectory: directory,
+                                         retry: .init(maxAttempts: 1))
         let done = expectation(description: "failed once")
         done.assertForOverFulfill = true
         _ = controller.fetch(item(), request: NSFileProviderRequest()) { url, item, error in
@@ -142,6 +173,59 @@ final class FetchControllerTests: XCTestCase {
         }
         wait(for: [done], timeout: 3)
         XCTAssertEqual(host.cancelled, ["token"])
+    }
+
+    // MARK: - Transient host-unreachable retry (peer link drop mid-transfer)
+
+    /// A transient host error (notConnected) on the first attempt is retried and
+    /// succeeds once the host is reachable again - the fetch completes normally
+    /// instead of surfacing a failure that would abort a Finder folder copy.
+    func testTransientHostErrorRetriesThenSucceeds() throws {
+        let host = FlakyHost(failOpenTimes: 1, code: 8)  // notConnected once
+        let controller = FetchController(hostProvider: { _ in host }, temporaryDirectory: directory,
+                                         scheduler: now)
+        let done = expectation(description: "retried then completed")
+        _ = controller.fetch(item(), request: NSFileProviderRequest()) { url, _, error in
+            XCTAssertNil(error)
+            XCTAssertEqual(try? Data(contentsOf: XCTUnwrap(url)), Data("abc".utf8))
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 3)
+        XCTAssertEqual(host.openCalls, 2, "one retry after the transient failure")
+    }
+
+    /// A host that never becomes reachable retries up to the budget, then fails
+    /// with serverUnreachable (Apple's transient/retry-me code) - never a
+    /// deletion-shaped error, and bounded so it cannot hang forever.
+    func testHostUnavailableRetriesUntilBudgetThenServerUnreachable() throws {
+        var providerCalls = 0
+        let controller = FetchController(hostProvider: { _ in providerCalls += 1; return nil },
+                                         temporaryDirectory: directory,
+                                         retry: .init(maxAttempts: 3), scheduler: now)
+        let done = expectation(description: "exhausted")
+        _ = controller.fetch(item(), request: NSFileProviderRequest()) { url, _, error in
+            XCTAssertNil(url)
+            XCTAssertEqual((error as NSError?)?.domain, NSFileProviderErrorDomain)
+            XCTAssertEqual((error as NSError?)?.code, NSFileProviderError.serverUnreachable.rawValue)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 3)
+        XCTAssertEqual(providerCalls, 3, "three attempts, then give up")
+    }
+
+    /// A non-transient host error (sourceChanged) is NOT retried - it is final.
+    func testNonTransientErrorIsNotRetried() throws {
+        let host = FlakyHost(failOpenTimes: 99, code: 2)  // sourceChanged, always
+        let controller = FetchController(hostProvider: { _ in host }, temporaryDirectory: directory,
+                                         scheduler: now)
+        let done = expectation(description: "failed immediately")
+        _ = controller.fetch(item(), request: NSFileProviderRequest()) { _, _, error in
+            XCTAssertEqual((error as NSError?)?.domain, NSFileProviderErrorDomain)
+            XCTAssertEqual((error as NSError?)?.code, NSFileProviderError.cannotSynchronize.rawValue)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 3)
+        XCTAssertEqual(host.openCalls, 1, "sourceChanged is final: no retry")
     }
 
     func testExtensionFetchUsesPublishedRecordAndRejectsInvalidItems() throws {

@@ -73,21 +73,53 @@ private let fetchLog = Logger(subsystem: "com.duoinput.configurator.fileprovider
 /// Each operation owns one temp file and serializes all XPC callbacks.
 final class FetchController {
     typealias HostProvider = (@escaping (Error) -> Void) -> DuoHostCallback?
+    /// Deferred scheduler for fetch retries (a real timer in production, a
+    /// controllable one in tests). Never a busy loop.
+    typealias Scheduler = (TimeInterval, @escaping () -> Void) -> Void
+
+    /// Bounded retry for TRANSIENT host-unreachable fetch failures (peerLost/
+    /// timeout/notConnected - DuoFP codes 3/5/8). The peer TCP link drops and
+    /// auto-reconnects within seconds; without this a single drop fails every
+    /// in-flight fetch and Finder aborts the whole folder copy. Retrying across
+    /// the reconnect lets the copy survive it. Non-transient errors (source
+    /// missing/changed, unauthorized, disk-full, protocol, local write, cancel)
+    /// are NEVER retried - they are already specific and final.
+    struct RetryPolicy {
+        var maxAttempts: Int
+        var backoffBase: TimeInterval
+        var backoffMax: TimeInterval
+        init(maxAttempts: Int = 6, backoffBase: TimeInterval = 0.5, backoffMax: TimeInterval = 4) {
+            self.maxAttempts = maxAttempts
+            self.backoffBase = backoffBase
+            self.backoffMax = backoffMax
+        }
+    }
+
     private let hostProvider: HostProvider
     private let temporaryDirectory: URL
+    private let retry: RetryPolicy
+    private let scheduler: Scheduler
 
     init(hostProvider: @escaping HostProvider,
-         temporaryDirectory: URL = FileManager.default.temporaryDirectory) {
+         temporaryDirectory: URL = FileManager.default.temporaryDirectory,
+         retry: RetryPolicy = RetryPolicy(),
+         scheduler: Scheduler? = nil) {
         self.hostProvider = hostProvider
         self.temporaryDirectory = temporaryDirectory
+        self.retry = retry
+        self.scheduler = scheduler ?? { delay, work in
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay, execute: work)
+        }
     }
 
     func fetch(_ item: DuoItem, request: NSFileProviderRequest,
                completion: @escaping (URL?, NSFileProviderItem?, Error?) -> Void) -> Progress {
         let parsed = DuoItemModel.parse(item.itemIdentifier)
         fetchLog.info("FETCH_ENTER transfer_id=\(parsed?.transferId ?? "?", privacy: .public) entry_index=\(parsed?.index ?? -1, privacy: .public)")
-        let operation = FetchOperation(item: item, directory: temporaryDirectory, completion: completion)
-        operation.start(hostProvider)
+        let operation = FetchOperation(item: item, directory: temporaryDirectory,
+                                       hostProvider: hostProvider, retry: retry,
+                                       scheduler: scheduler, completion: completion)
+        operation.start()
         return operation.progress
     }
 }
@@ -96,6 +128,9 @@ private final class FetchOperation {
     let progress: Progress
     private let item: DuoItem
     private let directory: URL
+    private let hostProvider: FetchController.HostProvider
+    private let retry: FetchController.RetryPolicy
+    private let scheduler: FetchController.Scheduler
     private let completion: (URL?, NSFileProviderItem?, Error?) -> Void
     private let queue = DispatchQueue(label: "com.duoinput.fileprovider.fetch")
     private var host: DuoHostCallback?
@@ -106,33 +141,65 @@ private final class FetchOperation {
     private var opened = false
     private var pullSequence = 0
     private var offset: Int64 = 0
+    //: 1-based fetch attempt. Bumped on every (re)start and captured by each
+    //: async callback, so a superseded attempt's late callback (e.g. the old
+    //: host's connection-lost handler firing after we already retried) is
+    //: ignored instead of corrupting the live attempt.
+    private var attempt = 0
+    //: Wall-clock start of the byte transfer (first pull), for throughput /
+    //: estimated-time-remaining on `progress` so the system shows speed and
+    //: "N left", not just a bare fraction.
+    private var startNs: UInt64 = 0
     //: Correlation ids for the log chain (task 17) - filled in once `start()`
     //: parses the item identifier. Never a path/filename, only the ids.
     private var transferId: String?
     private var entryIndex: Int?
 
-    init(item: DuoItem, directory: URL, completion: @escaping (URL?, NSFileProviderItem?, Error?) -> Void) {
+    init(item: DuoItem, directory: URL,
+         hostProvider: @escaping FetchController.HostProvider,
+         retry: FetchController.RetryPolicy,
+         scheduler: @escaping FetchController.Scheduler,
+         completion: @escaping (URL?, NSFileProviderItem?, Error?) -> Void) {
         self.item = item
         self.directory = directory
+        self.hostProvider = hostProvider
+        self.retry = retry
+        self.scheduler = scheduler
         self.completion = completion
-        progress = Progress(totalUnitCount: item.documentSize?.int64Value ?? 0)
+        let progress = Progress(totalUnitCount: item.documentSize?.int64Value ?? 0)
+        // Classify the fetch as a file DOWNLOAD so Finder/fileproviderd render a
+        // real determinate progress bar while materializing a dataless item
+        // (the "Preparing to copy" phase of a paste into a non-FP folder),
+        // instead of an indeterminate spinner. Without kind=.file +
+        // fileOperationKind=.downloading the system does not treat the returned
+        // Progress as user-facing download progress even though totalUnitCount/
+        // completedUnitCount are set.
+        progress.kind = .file
+        progress.setUserInfoObject(Progress.FileOperationKind.downloading, forKey: .fileOperationKindKey)
+        self.progress = progress
     }
 
     private func error(_ code: Int) -> NSError { NSError(domain: DuoFPErrorDomain, code: code) }
 
-    func start(_ provider: @escaping FetchController.HostProvider) {
-        progress.cancellationHandler = { [weak self] in
-            guard let self else { return }
-            // Task 12: Finder cancel -> Progress.cancellationHandler -> here.
-            // finish(error) below already does the rest generically (settle
-            // once, remove temp, tell the host via cancelFetch(token)) - see
-            // finish(_:) - so this handler only needs to supply the literal
-            // NSUserCancelledError the plan mandates.
-            self.queue.async {
-                self.finish(NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError))
+    func start() {
+        if attempt == 0 {
+            progress.cancellationHandler = { [weak self] in
+                guard let self else { return }
+                // Task 12: Finder cancel -> Progress.cancellationHandler -> here.
+                // finish(error) below already does the rest generically (settle
+                // once, remove temp, tell the host via cancelFetch(token)) - see
+                // finish(_:) - so this handler only needs to supply the literal
+                // NSUserCancelledError the plan mandates. Cancel is terminal, so
+                // it goes straight to finish, never through the retry path.
+                self.queue.async {
+                    self.finish(NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError))
+                }
             }
         }
         queue.async {
+            guard !self.finished else { return }
+            self.attempt += 1
+            let attempt = self.attempt
             guard !self.progress.isCancelled,
                   let parsed = DuoItemModel.parse(self.item.itemIdentifier), let index = parsed.index,
                   index >= 0, let size = self.item.documentSize?.int64Value, size >= 0 else {
@@ -140,11 +207,16 @@ private final class FetchOperation {
             }
             self.transferId = parsed.transferId
             self.entryIndex = index
-            self.host = provider { error in self.queue.async { self.finish(error) } }
-            guard let host = self.host else { self.finish(self.error(8)); return }
+            self.host = self.hostProvider { error in self.queue.async { self.settle(error, attempt: attempt) } }
+            guard let host = self.host else { self.settle(self.error(8), attempt: attempt); return }
             host.openFetch(parsed.transferId, entryId: NSNumber(value: index)) { token, total, error in
                 self.queue.async {
-                    guard !self.opened else { return }
+                    guard self.attempt == attempt, !self.opened else {
+                        // Superseded attempt (we already retried): drop it, but
+                        // free any host session it opened out from under us.
+                        if self.attempt != attempt, let token { host.cancelFetch(token) }
+                        return
+                    }
                     self.opened = true
                     if self.finished {
                         if let token { host.cancelFetch(token) }
@@ -152,7 +224,7 @@ private final class FetchOperation {
                     }
                     self.token = token
                     fetchLog.info("fp_fetch_started transfer_id=\(parsed.transferId, privacy: .public) entry_index=\(index, privacy: .public) fetch_token=\(token ?? "?", privacy: .public)")
-                    if let error { self.finish(error); return }
+                    if let error { self.settle(error, attempt: attempt); return }
                     guard let token, !token.isEmpty, total?.int64Value == size else {
                         self.finish(self.error(7)); return
                     }
@@ -171,23 +243,24 @@ private final class FetchOperation {
                             self.file = nil
                             self.finish(nil)
                         } else {
-                            self.pull()
+                            self.startNs = DispatchTime.now().uptimeNanoseconds
+                            self.pull(attempt: attempt)
                         }
-                    } catch { self.finish(error) }
+                    } catch { self.finish(error) }  // local write/create error: never retried
                 }
             }
         }
     }
 
-    private func pull() {
-        guard !finished, let token, let host else { return }
+    private func pull(attempt: Int) {
+        guard !finished, self.attempt == attempt, let token, let host else { return }
         pullSequence += 1
         let sequence = pullSequence
         host.pullChunk(token) { chunk, eof, error in
             self.queue.async {
-                guard !self.finished, self.pullSequence == sequence else { return }
+                guard !self.finished, self.attempt == attempt, self.pullSequence == sequence else { return }
                 self.pullSequence += 1
-                if let error { self.finish(error); return }
+                if let error { self.settle(error, attempt: attempt); return }
                 guard let chunk, chunk.count <= 1_048_576,
                       Int64(chunk.count) <= self.progress.totalUnitCount - self.offset,
                       (!chunk.isEmpty || (eof && self.offset == self.progress.totalUnitCount)),
@@ -198,6 +271,18 @@ private final class FetchOperation {
                     try self.file?.write(contentsOf: chunk)
                     self.offset += Int64(chunk.count)
                     self.progress.completedUnitCount = self.offset
+                    // Feed throughput + estimated time remaining so the system
+                    // shows speed and "N left" alongside the fraction, not just
+                    // a bare bar. Derived from average rate since the first pull.
+                    let elapsedNs = DispatchTime.now().uptimeNanoseconds &- self.startNs
+                    if elapsedNs > 0, self.offset > 0 {
+                        let bytesPerSecond = Double(self.offset) * 1_000_000_000.0 / Double(elapsedNs)
+                        if bytesPerSecond > 0 {
+                            self.progress.throughput = Int(bytesPerSecond)
+                            let remaining = self.progress.totalUnitCount - self.offset
+                            self.progress.estimatedTimeRemaining = Double(remaining) / bytesPerSecond
+                        }
+                    }
                     // fp_bytes_received: the byte COUNT only, never the chunk itself.
                     fetchLog.info("fp_bytes_received transfer_id=\(self.transferId ?? "?", privacy: .public) entry_index=\(self.entryIndex ?? -1, privacy: .public) fetch_token=\(token, privacy: .public) bytes=\(chunk.count, privacy: .public)")
                     if eof {
@@ -205,10 +290,50 @@ private final class FetchOperation {
                         try self.file?.close()
                         self.file = nil
                         self.finish(nil)
-                    } else { self.pull() }
-                } catch { self.finish(error) }
+                    } else { self.pull(attempt: attempt) }
+                } catch { self.finish(error) }  // local write error: never retried
             }
         }
+    }
+
+    /// A transient host-unreachable error (peerLost/timeout/notConnected) is
+    /// retried within budget; anything else finishes immediately.
+    private func settle(_ error: Error, attempt: Int) {
+        guard !finished, self.attempt == attempt else { return }
+        if isRetryable(error), self.attempt < retry.maxAttempts {
+            scheduleRetry(error)
+        } else {
+            finish(error)
+        }
+    }
+
+    private func isRetryable(_ error: Error) -> Bool {
+        let ns = error as NSError
+        // DuoFPError peerLost(3)/timeout(5)/notConnected(8): the peer link is
+        // gone right now but auto-reconnects. NOT sourceMissing/changed/
+        // unauthorized/diskFull/protocol, and never a local/Cocoa error.
+        return ns.domain == DuoFPErrorDomain && (ns.code == 3 || ns.code == 5 || ns.code == 8)
+    }
+
+    private func scheduleRetry(_ error: Error) {
+        // Tear down this attempt's partial state; the next start() re-acquires a
+        // fresh host (waiting for the peer link to reconnect) and re-opens from
+        // the beginning. The Progress object is reused so Finder keeps the same
+        // download; its completed count restarts at 0 for the new attempt.
+        if let token { host?.cancelFetch(token) }
+        try? file?.close()
+        file = nil
+        if let url { try? FileManager.default.removeItem(at: url) }
+        url = nil
+        token = nil
+        opened = false
+        offset = 0
+        pullSequence = 0
+        host = nil
+        progress.completedUnitCount = 0
+        let delay = min(retry.backoffBase * pow(2, Double(attempt - 1)), retry.backoffMax)
+        fetchLog.info("fp_fetch_retry transfer_id=\(self.transferId ?? "?", privacy: .public) entry_index=\(self.entryIndex ?? -1, privacy: .public) attempt=\(self.attempt, privacy: .public) next_retry_ms=\(Int(delay * 1000), privacy: .public) code=\((error as NSError).code, privacy: .public)")
+        scheduler(delay) { self.queue.async { self.start() } }
     }
 
     private func finish(_ error: Error?) {

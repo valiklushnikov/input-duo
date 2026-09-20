@@ -210,6 +210,10 @@ class _FakeSocket:
     def ignoreSslErrors(self):
         self.ignored = True
 
+    def setSocketOption(self, option, value):
+        self.socket_options = getattr(self, "socket_options", [])
+        self.socket_options.append((option, value))
+
     def abort(self):
         self.aborted = True
 
@@ -306,6 +310,27 @@ def test_the_read_buffer_is_bounded_so_a_flood_cannot_grow_it(qapp, tmp_path):
         "нулевой readBufferSize означает 'без границы' - именно то, что "
         "этот тест существует чтобы запретить"
     )
+
+
+def test_encrypted_enables_tcp_keepalive(qapp, tmp_path, monkeypatch):
+    # Без keepalive осиротевший NAT-путь умирает тихо и разрыв всплывает лишь
+    # при следующей записи - посреди передачи это роняет всё копирование.
+    # Опция ставится в _on_encrypted (после connect: раньше она не применяется).
+    from PySide6.QtNetwork import QAbstractSocket
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        QSslSocket, "setSocketOption", lambda self, opt, val: calls.append((opt, val))
+    )
+    identity = load_or_create(tmp_path)
+    link = PeerLink(identity)
+    socket = QSslSocket(link)
+    link._socket = socket
+    link._expected_fingerprint = None  # режим парринга: _on_encrypted дойдёт до конца
+
+    link._on_encrypted()
+
+    assert (QAbstractSocket.SocketOption.KeepAliveOption, 1) in calls
 
 
 def test_the_read_buffer_leaves_room_for_several_chunks_but_not_for_a_flood():
