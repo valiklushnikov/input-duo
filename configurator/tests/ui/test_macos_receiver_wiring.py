@@ -17,12 +17,13 @@ import pytest
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QMessageBox
 
-pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="darwin receiver only")
-
 from duo_input import app as app_module
 from duo_input.app import build_main_window, configure_runtime
 from duo_input.transfer.macos_files import MacFileReceiver
 from duo_input.transfer.model import ENTRY_FILE, TransferEntry, TransferManifest
+from duo_input.transfer.platform_files import MacReceiveRouter
+
+pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="darwin receiver only")
 
 
 def _settings(tmp_path, values: dict[str, object]) -> QSettings:
@@ -60,8 +61,15 @@ def _manifest(transfer_id: str = "t1") -> TransferManifest:
 
 
 def test_files_enabled_creates_mac_receiver(qapp, qtbot, tmp_path, monkeypatch):
-    """set_files_enabled(True) on darwin builds a real MacFileReceiver, not a
-    module-existence stand-in - create_file_backend is NOT monkeypatched."""
+    """set_files_enabled(True) on darwin builds a real MacFileReceiver behind
+    the router, not a module-existence stand-in - create_file_backend is NOT
+    monkeypatched. Task 16's ``create_file_backend`` always wraps darwin's
+    receiver in a ``MacReceiveRouter`` (byte-for-byte staging-only behavior
+    with the File Provider flag off, per its docstring), so the object that
+    now proves staging is the active/default backend is
+    ``router._staging``, not ``file_backend`` itself - matching the pattern
+    already used by the flag-off rollout test at
+    ``test_runtime_wiring.py``'s ``router._staging`` assertion."""
     _settings_, _window, runtime = _configure(
         qapp,
         qtbot,
@@ -70,7 +78,8 @@ def test_files_enabled_creates_mac_receiver(qapp, qtbot, tmp_path, monkeypatch):
         {"clipboard/enabled": True, "clipboard/files_enabled": True},
     )
     try:
-        assert isinstance(runtime.file_backend, MacFileReceiver)
+        assert isinstance(runtime.file_backend, MacReceiveRouter)
+        assert isinstance(runtime.file_backend._staging, MacFileReceiver)
         assert runtime._file_receiver is runtime.file_backend
         # win32-only plumbing must stay untouched on darwin.
         assert runtime._file_callback_gateway is None

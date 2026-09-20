@@ -99,9 +99,36 @@ class _FileBackend(QObject):
 
 
 def _configure_file_runtime(qapp, qtbot, tmp_path, monkeypatch, values):
+    # `_start_files` (app.py) has branched hard on the REAL `sys.platform`
+    # since Task 8's macOS receiver wiring (commit 11dcd65): on darwin it
+    # wires the receiver-shaped signals (`transfer_started`/.../`cancel`),
+    # on every other platform it imports the real `windows_files.
+    # ServiceCallbackGateway` and drives `_FileBackend` through
+    # `set_callbacks`/`start`/`publish` - the COM-shaped interface this fake
+    # implements and that every assertion below (`.starts`, `.publications`,
+    # `.callbacks[...]`) depends on byte-for-byte. That interface has no
+    # darwin equivalent (MacFileReceiver drives itself; see
+    # `test_macos_receiver_wiring.py`), and `duo_input.transfer.windows_com`
+    # cannot even be imported outside Windows (`ctypes.WINFUNCTYPE` does not
+    # exist there - confirmed: this fixture has been unable to reach a
+    # passing state on macOS since 11dcd65, independent of Task 16). There is
+    # no test-only way to exercise the real win32 branch here without
+    # reimplementing the COM vtable machinery `windows_com` provides, so this
+    # whole fixture - and every test that calls it - is win32-only; skip
+    # cleanly elsewhere rather than fail on an environment it was never able
+    # to run on.
+    if sys.platform != "win32":
+        pytest.skip("Windows file-transfer COM plumbing; requires win32 (see fixture docstring)")
     made: list[_FileBackend] = []
 
-    def create(parent=None):
+    def create(parent=None, **_fileprovider_kwargs):
+        # _fileprovider_kwargs: ``fileprovider_flag_enabled``/``fileprovider_backend``/
+        # ``fileprovider_domain``/``fileprovider_client``/``fileprovider_os_supported``
+        # (Task 16's ``_build_fileprovider_kwargs``, app.py ~447). These tests exercise
+        # the staging/backend wiring above ``create_file_backend``, not File Provider
+        # selection itself (that's ``test_macos_receiver_wiring.py`` /
+        # ``test_runtime_wiring.py``'s rollout tests below), so the kwargs are accepted
+        # and ignored here rather than asserted on.
         backend = _FileBackend(parent)
         made.append(backend)
         return backend
@@ -1463,7 +1490,7 @@ def test_unsupported_backend_after_user_toggle_rolls_back_setting_and_controls(
     """Mutation: returning early without rollback leaves a saved, checked false promise."""
     monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
 
-    def unsupported(_parent=None):
+    def unsupported(_parent=None, **_fileprovider_kwargs):
         raise UnsupportedPlatformError("test platform")
 
     monkeypatch.setattr(app_module, "create_file_backend", unsupported)
