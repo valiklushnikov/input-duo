@@ -136,10 +136,11 @@ def test_completing_fetch_admits_fifo_successor(qapp):
     tokens = _open_all(backend, manifest)
     backend.pull_chunk(tokens[0])
     [read] = link.sent
+    first_fetch = backend.by_token[tokens[0]]
 
     backend.handle_message(_reply(read, b"abc"))
 
-    assert backend.by_token[tokens[0]].state == "done"
+    assert first_fetch.state == "done"
     assert backend.by_token[tokens[4]].state == "requesting"
     assert backend.by_token[tokens[5]].state == "queued"
     assert tokens[4] in backend._active
@@ -269,11 +270,12 @@ def test_zero_size_fetches_complete_and_release_slots_without_reading(qapp):
     manifest = _manifest(sizes=(0, 0, 0, 0, 3, 5))
     backend, link, _remote, manifest = _backend(qapp, manifest)
     tokens = _open_all(backend, manifest)
+    zero_size_fetches = [backend.by_token[token] for token in tokens[:4]]
 
     for token in tokens[:4]:
         backend.pull_chunk(token)
 
-    assert [backend.by_token[token].state for token in tokens[:4]] == [
+    assert [fetch.state for fetch in zero_size_fetches] == [
         "done",
         "done",
         "done",
@@ -293,10 +295,10 @@ def test_send_failure_fails_only_that_fetch_and_admits_fifo_successor(qapp, link
     link = link_type()
     backend, _link, _remote, manifest = _backend(qapp, link=link)
     tokens = _open_all(backend, manifest)
+    failed = backend.by_token[tokens[0]]
 
     backend.pull_chunk(tokens[0])
 
-    failed = backend.by_token[tokens[0]]
     assert failed.state == "failed"
     assert failed.offset == 0
     assert failed.read_id is None
@@ -312,10 +314,10 @@ def test_false_send_result_does_not_undo_synchronous_completion(qapp):
     manifest = _manifest(sizes=(3,))
     backend, _link, _remote, manifest = _backend(qapp, manifest, link=link)
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
 
     backend.pull_chunk(token)
 
-    fetch = backend.by_token[token]
     assert fetch.state == "done"
     assert fetch.offset == 3
     assert fetch.read_id is None
@@ -330,10 +332,10 @@ def test_malformed_chunk_fails_exact_fetch_without_advancing_offset(qapp, blob):
     tokens = _open_all(backend, manifest)
     backend.pull_chunk(tokens[0])
     [read] = link.sent
+    failed = backend.by_token[tokens[0]]
 
     backend.handle_message(_reply(read, blob))
 
-    failed = backend.by_token[tokens[0]]
     assert failed.state == "failed"
     assert failed.offset == 0
     assert failed.read_id is None
@@ -405,3 +407,27 @@ def test_backend_has_no_shared_sequential_cursor_fields(qapp):
 
     assert forbidden.isdisjoint(FileProviderBackend.__dict__)
     assert forbidden.isdisjoint(vars(backend))
+
+
+def test_by_token_does_not_retain_a_done_or_a_failed_fetch(qapp):
+    """Task 19 fix: by_token must drop a fetch the instant it settles
+    (DONE/FAILED/CANCELLED alike) - previously only CANCELLED was popped
+    (cancel_fetch's own explicit pop), so a long-lived extension leaked one
+    dict entry per completed or failed fetch forever. See _finish_fetch."""
+    manifest = _manifest(sizes=(3, 5))
+    backend, link, _remote, manifest = _backend(qapp, manifest)
+    done_token, failed_token = _open_all(backend, manifest)
+
+    # Settle done_token to DONE via a full, well-formed chunk.
+    backend.pull_chunk(done_token)
+    [done_read] = link.sent
+    backend.handle_message(_reply(done_read, b"abc"))
+    assert done_token not in backend.by_token
+
+    # Settle failed_token to FAILED via a malformed (oversized) chunk.
+    backend.pull_chunk(failed_token)
+    [failed_read] = [m for m in link.sent if m is not done_read]
+    backend.handle_message(_reply(failed_read, b"toolong!!"))
+    assert failed_token not in backend.by_token
+
+    assert backend.by_token == {}

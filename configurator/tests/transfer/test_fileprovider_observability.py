@@ -270,13 +270,14 @@ def test_fetch_cancelled_counter_increments_on_cancel(qapp):
 def test_fetch_failed_counter_increments_on_wire_file_error(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)))
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
     backend.pull_chunk(token)
     [read] = link.sent
 
     backend.handle_message(_file_error(read, "protocol"))
 
     assert backend.counters["fp_fetch_failed"] == 1
-    assert backend.by_token[token].state == "failed"
+    assert fetch.state == "failed"
 
 
 # --- bytes received -------------------------------------------------------
@@ -355,6 +356,7 @@ def test_late_chunk_counter_increments_for_an_unmatched_read(qapp):
 def test_oversized_chunk_counter_increments_and_fails_the_fetch(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)))
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
     backend.pull_chunk(token)
     [read] = link.sent
 
@@ -362,12 +364,13 @@ def test_oversized_chunk_counter_increments_and_fails_the_fetch(qapp):
 
     assert backend.counters["fp_oversized_chunk"] == 1
     assert backend.counters.get("fp_truncated", 0) == 0
-    assert backend.by_token[token].state == "failed"
+    assert fetch.state == "failed"
 
 
 def test_truncated_chunk_counter_increments_and_fails_the_fetch(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(5,)))
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
     backend.pull_chunk(token)
     [read] = link.sent
 
@@ -375,7 +378,7 @@ def test_truncated_chunk_counter_increments_and_fails_the_fetch(qapp):
 
     assert backend.counters["fp_truncated"] == 1
     assert backend.counters.get("fp_oversized_chunk", 0) == 0
-    assert backend.by_token[token].state == "failed"
+    assert fetch.state == "failed"
 
 
 # --- generation lifecycle: gc + active gauge --------------------------------
@@ -435,6 +438,7 @@ def test_watchdog_expiry_fails_exactly_the_stalled_fetch_with_timeout(qapp):
         qapp, _manifest(sizes=(3, 5)), timer_factory=factory
     )
     tokens = _open_all(backend, manifest)
+    fetches = {token: backend.by_token[token] for token in tokens}
     replies: dict[str, list] = {token: [] for token in tokens}
     for token in tokens:
         backend.pull_chunk(token, lambda *args, t=token: replies[t].append(args))
@@ -447,11 +451,11 @@ def test_watchdog_expiry_fails_exactly_the_stalled_fetch_with_timeout(qapp):
     assert chunk is None
     assert ok is False
     assert error.code() == 5  # DuoFPErrorTimeout
-    assert backend.by_token[tokens[0]].state == "failed"
+    assert fetches[tokens[0]].state == "failed"
     assert backend.counters["fp_fetch_timeout"] == 1
     assert backend.counters["fp_fetch_failed"] == 1
     # the OTHER fetch is completely undisturbed
-    assert backend.by_token[tokens[1]].state == "receiving"
+    assert fetches[tokens[1]].state == "receiving"
     assert replies[tokens[1]] == []
     assert factory.created[1].running
 
@@ -462,6 +466,7 @@ def test_chunk_arrival_disarms_the_watchdog_no_timeout_counted(qapp):
         qapp, _manifest(sizes=(3,)), timer_factory=factory
     )
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
     backend.pull_chunk(token)
     [read] = link.sent
     assert len(factory.created) == 1
@@ -473,7 +478,7 @@ def test_chunk_arrival_disarms_the_watchdog_no_timeout_counted(qapp):
     factory.created[0].fire()  # stale fire after disarm must be a no-op
 
     assert backend.counters.get("fp_fetch_timeout", 0) == 0
-    assert backend.by_token[token].state == "done"
+    assert fetch.state == "done"
 
 
 def test_cancel_disarms_the_watchdog(qapp):
@@ -502,11 +507,12 @@ def test_watchdog_only_fails_the_read_it_was_armed_for_not_a_reused_token(qapp):
         qapp, _manifest(sizes=(3, 3)), timer_factory=factory
     )
     tokens = _open_all(backend, manifest)
+    fetch0 = backend.by_token[tokens[0]]
     backend.pull_chunk(tokens[0])
     first_read = link.sent[0]
     stale_timer = factory.created[0]
     backend.handle_message(_reply(first_read, b"abc"))  # settles + disarms
-    assert backend.by_token[tokens[0]].state == "done"
+    assert fetch0.state == "done"
 
     backend.pull_chunk(tokens[1])  # a fresh read, gets a fresh read_id/timer
 

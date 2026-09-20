@@ -26,19 +26,21 @@ from test_fileprovider_scheduler import _backend, _manifest, _open_all, _reply
 def test_zero_byte_fetch_completes_without_any_read(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(0,)))
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
     replies = []
 
     backend.pull_chunk(token, lambda *a: replies.append(a))
 
     assert replies == [(b"", True, None)]
     assert link.sent == []
-    assert backend.by_token[token].state == "done"
+    assert fetch.state == "done"
 
 
 def test_exactly_one_chunk_ceiling_completes_in_a_single_read(qapp):
     manifest = _manifest(sizes=(MAX_FILE_CHUNK_BYTES,))
     backend, link, _remote, manifest = _backend(qapp, manifest)
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
     replies = []
 
     backend.pull_chunk(token, lambda *a: replies.append(a))
@@ -48,7 +50,7 @@ def test_exactly_one_chunk_ceiling_completes_in_a_single_read(qapp):
         "entry_index": 0,
         "offset": 0,
         "length": MAX_FILE_CHUNK_BYTES,
-        "read_id": backend.by_token[token].read_id,
+        "read_id": fetch.read_id,
     }
     backend.handle_message(_reply(read, b"a" * MAX_FILE_CHUNK_BYTES))
 
@@ -57,7 +59,7 @@ def test_exactly_one_chunk_ceiling_completes_in_a_single_read(qapp):
     assert len(chunk) == MAX_FILE_CHUNK_BYTES
     assert eof is True
     assert error is None
-    assert backend.by_token[token].state == "done"
+    assert fetch.state == "done"
 
 
 def test_multi_chunk_file_reassembles_with_increasing_offsets(qapp):
@@ -95,6 +97,7 @@ def test_multi_chunk_file_reassembles_with_increasing_offsets(qapp):
 def test_oversized_reply_is_a_protocol_error(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)))
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
     replies = []
     backend.pull_chunk(token, lambda *a: replies.append(a))
     [read] = link.sent
@@ -105,12 +108,13 @@ def test_oversized_reply_is_a_protocol_error(qapp):
     chunk, ok, error = replies[0]
     assert chunk is None and ok is False
     assert error.code() == 7
-    assert backend.by_token[token].state == "failed"
+    assert fetch.state == "failed"
 
 
 def test_truncated_reply_is_a_protocol_error(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)))
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
     replies = []
     backend.pull_chunk(token, lambda *a: replies.append(a))
     [read] = link.sent
@@ -121,7 +125,7 @@ def test_truncated_reply_is_a_protocol_error(qapp):
     chunk, ok, error = replies[0]
     assert chunk is None and ok is False
     assert error.code() == 7
-    assert backend.by_token[token].state == "failed"
+    assert fetch.state == "failed"
 
 
 def test_pull_chunk_queues_when_it_would_exceed_the_byte_budget_even_with_free_active_slots(

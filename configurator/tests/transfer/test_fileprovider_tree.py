@@ -81,6 +81,7 @@ def test_two_top_level_files_fetch_concurrently_to_correct_bytes(qapp):
     manifest = _tree_manifest()
     backend, link, _remote, manifest = _backend(qapp, manifest)
     root1, root2 = _open_many(backend, manifest.transfer_id, [8, 9])
+    fetch_root1, fetch_root2 = backend.by_token[root1], backend.by_token[root2]
 
     replies1, replies2 = [], []
     backend.pull_chunk(root1, lambda *a: replies1.append(a))
@@ -97,8 +98,8 @@ def test_two_top_level_files_fetch_concurrently_to_correct_bytes(qapp):
 
     assert replies2 == [(b"r" * 8, True, None)]
     assert replies1 == [(b"o" * 6, True, None)]
-    assert backend.by_token[root1].state == "done"
-    assert backend.by_token[root2].state == "done"
+    assert fetch_root1.state == "done"
+    assert fetch_root2.state == "done"
 
 
 # --- directory entries are not fetchable, and saying so disturbs nothing ----
@@ -161,17 +162,18 @@ def test_depth_two_nested_file_fetch_reassembles_correctly(qapp):
     replies = []
     backend.pull_chunk(token, lambda *a: replies.append(a))
     [read] = link.sent
+    fetch = backend.by_token[token]
     assert read.header == {
         "transfer_id": manifest.transfer_id,
         "entry_index": 5,
         "offset": 0,
         "length": 4,
-        "read_id": backend.by_token[token].read_id,
+        "read_id": fetch.read_id,
     }
     backend.handle_message(_reply(read, b"deep"))
 
     assert replies == [(b"deep", True, None)]
-    assert backend.by_token[token].state == "done"
+    assert fetch.state == "done"
 
 
 # --- bounded concurrency across a tree ---------------------------------------
@@ -204,12 +206,13 @@ def test_queue_admits_fifo_successor_across_tree_branches(qapp):
     tokens = _open_many(backend, manifest.transfer_id, FILE_INDICES)
     # Active: dirA/a.bin, dirA/b.bin, dirA/c.bin, dirA/sub/d.bin (indices 0-3).
     # Queued: dirB/a.bin, root1.bin, root2.bin (indices 4-6), in that order.
+    fetch0 = backend.by_token[tokens[0]]
     backend.pull_chunk(tokens[0])
     [read] = link.sent
 
     backend.handle_message(_reply(read, b"AAA"))  # completes dirA/a.bin (3 bytes)
 
-    assert backend.by_token[tokens[0]].state == "done"
+    assert fetch0.state == "done"
     assert backend.by_token[tokens[4]].state == "requesting"  # dirB/a.bin - FIFO head
     assert tokens[4] in backend._active
     assert list(backend._queue) == list(tokens[5:])  # root1.bin, root2.bin - order preserved
@@ -265,8 +268,10 @@ def test_cancelling_one_sibling_does_not_disturb_other_siblings_state_or_bytes(q
     assert _snapshot(backend, c_token) == snapshot_c_before
     assert replies_a == []
     assert replies_c == []
-    assert backend.by_read_id[read_a.header["read_id"]] is backend.by_token[a_token]
-    assert backend.by_read_id[read_c.header["read_id"]] is backend.by_token[c_token]
+    fetch_a = backend.by_token[a_token]
+    fetch_c = backend.by_token[c_token]
+    assert backend.by_read_id[read_a.header["read_id"]] is fetch_a
+    assert backend.by_read_id[read_c.header["read_id"]] is fetch_c
 
     # Both siblings still complete correctly, with THEIR OWN bytes, afterward.
     backend.handle_message(_reply(read_a, b"AAA"))
@@ -274,8 +279,8 @@ def test_cancelling_one_sibling_does_not_disturb_other_siblings_state_or_bytes(q
 
     assert replies_a == [(b"AAA", True, None)]
     assert replies_c == [(b"CCCCCCC", True, None)]
-    assert backend.by_token[a_token].state == "done"
-    assert backend.by_token[c_token].state == "done"
+    assert fetch_a.state == "done"
+    assert fetch_c.state == "done"
     # The cancelled sibling's read_id is gone; the survivors' were never
     # confused with it or with each other.
     assert read_b.header["read_id"] not in backend.by_read_id
@@ -300,9 +305,10 @@ def test_erroring_one_sibling_does_not_disturb_other_siblings_state_or_bytes(qap
     snapshot_c_before = _snapshot(backend, c_token)
 
     # Malformed reply for b_token (wrong length: b.bin expects 5 bytes).
+    fetch_b = backend.by_token[b_token]
     backend.handle_message(_reply(read_b, b"toolong!!"))
 
-    assert backend.by_token[b_token].state == "failed"
+    assert fetch_b.state == "failed"
     assert len(replies_b) == 1
     assert replies_b[0][0] is None and replies_b[0][1] is False
 
@@ -311,13 +317,15 @@ def test_erroring_one_sibling_does_not_disturb_other_siblings_state_or_bytes(qap
     assert replies_a == []
     assert replies_c == []
 
+    fetch_a = backend.by_token[a_token]
+    fetch_c = backend.by_token[c_token]
     backend.handle_message(_reply(read_a, b"AAA"))
     backend.handle_message(_reply(read_c, b"CCCCCCC"))
 
     assert replies_a == [(b"AAA", True, None)]
     assert replies_c == [(b"CCCCCCC", True, None)]
-    assert backend.by_token[a_token].state == "done"
-    assert backend.by_token[c_token].state == "done"
+    assert fetch_a.state == "done"
+    assert fetch_c.state == "done"
 
 
 # --- fetch identity is by entry_index, never by filename/path ---------------

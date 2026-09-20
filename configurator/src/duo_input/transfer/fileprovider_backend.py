@@ -326,10 +326,12 @@ class FileProviderBackend(QObject):
         #: Retired-запись КЕПТ здесь (реплика тоже кепт), пока GC её не удалит.
         self._generations: dict[str, _Generation] = {}
         #: transfer_id -> число ACTIVE fetch'ей, привязанных к generation
-        #: (in-use ref). ЯВНЫЙ счётчик, а не скан by_token: by_token хранит и
-        #: settled-записи (Task 19 уберёт этот leak), скан бы их пересчитал и
-        #: deleteGeneration не сработал бы никогда. Инкремент в _open_fetch,
-        #: декремент РОВНО раз при settle (см. Fetch.in_use_counted).
+        #: (in-use ref). ЯВНЫЙ счётчик, а не скан by_token: даже после Task 19
+        #: (settled-записи больше не задерживаются в by_token - см.
+        #: _finish_fetch) скан пересчитывал бы только ещё-не-удалённые записи
+        #: в момент вызова, а не устойчивый учёт поверх времени. Инкремент в
+        #: _open_fetch, декремент РОВНО раз при settle (см.
+        #: Fetch.in_use_counted).
         self._gen_in_use: dict[str, int] = {}
         # --- Task 9: per-fetch scheduler. There is deliberately no shared
         # cursor/offset/read id: every open owns all three through Fetch.
@@ -1100,6 +1102,15 @@ class FileProviderBackend(QObject):
         if fetch.in_use_counted:
             fetch.in_use_counted = False
             self._decrement_in_use(fetch.generation_id)
+        # Task 19: every terminal settle (DONE/FAILED/CANCELLED) drops the
+        # token from by_token here, unified - previously only cancel_fetch did
+        # this explicitly, so a long-lived extension leaked one dict entry per
+        # completed/failed fetch forever. All production readers of by_token
+        # already use .get() and handle a None/missing entry the same way they
+        # handle "unknown token" (see pull_chunk/_admit_pull_queue/
+        # _admit_from_queue/cancel_fetch) - verified during task-19 review, so
+        # dropping it here the instant a fetch goes terminal is safe.
+        self.by_token.pop(fetch.fetch_token, None)
 
     def cancel_fetch(self, fetch_token: str) -> None:
         """Task 12: Finder cancel, purely local - NO wire message (there is
@@ -1126,7 +1137,6 @@ class FileProviderBackend(QObject):
         ):
             return
         self._finish_fetch(fetch, FetchState.CANCELLED, _xpc_error(3))
-        self.by_token.pop(fetch_token, None)
 
     def _on_chunk(self, message: Message) -> None:
         fetch = self._pending_fetch(message)

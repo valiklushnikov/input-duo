@@ -102,6 +102,7 @@ def test_real_snapshot_bytes_are_read_only_after_fetch_and_explicit_pull(
 def test_bad_chunk_settles_reply_once_and_releases_exact_fetch(qapp, blob):
     backend, link, _, manifest = _backend(qapp, _manifest(sizes=(3, 5)))
     token, _ = backend.open_fetch(manifest.transfer_id, 0)
+    fetch = backend.by_token[token]
     replies = []
     backend.pull_chunk(token, lambda *args: replies.append(args))
     read = link.sent[0]
@@ -116,7 +117,7 @@ def test_bad_chunk_settles_reply_once_and_releases_exact_fetch(qapp, blob):
     assert replies[0][2].code() == 7
     assert replies[0][2].domain() == "com.duoinput.configurator.fileprovider.error"
     assert backend.by_read_id == {}
-    assert backend.by_token[token].state == "failed"
+    assert fetch.state == "failed"
 
 
 def test_queued_pull_waits_then_completes_and_duplicate_does_not_replace_reply(qapp):

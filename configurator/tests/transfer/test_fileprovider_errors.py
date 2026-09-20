@@ -56,6 +56,7 @@ def test_disconnect_fails_every_active_fetch_with_peer_lost(qapp):
     manifest = _manifest(sizes=(3, 5, 7, 9, 11, 13))  # 4 active + 2 queued
     backend, link, _remote, manifest = _backend(qapp, manifest, link=link)
     tokens = _open_all(backend, manifest)
+    fetches = {token: backend.by_token[token] for token in tokens}
     replies = {token: [] for token in tokens}
     for token in tokens:
         backend.pull_chunk(token, lambda *a, t=token: replies[t].append(a))
@@ -78,7 +79,7 @@ def test_disconnect_fails_every_active_fetch_with_peer_lost(qapp):
         assert chunk is None and ok is False
         assert error.domain() == "com.duoinput.configurator.fileprovider.error"
         assert error.code() in (3, 8)  # DuoFPErrorPeerLost / DuoFPErrorNotConnected
-        assert backend.by_token[token].state == "failed"
+        assert fetches[token].state == "failed"
     assert [replies[t][0][2].code() for t in tokens[:4]] == [3, 3, 3, 3]
 
 
@@ -111,12 +112,13 @@ def test_disconnect_twice_is_a_harmless_no_op(qapp):
     link = DisconnectableLink()
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)), link=link)
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
     backend.pull_chunk(token)
 
     link.disconnected.emit("first")
     link.disconnected.emit("second")  # must not raise, must not re-settle
 
-    assert backend.by_token[token].state == "failed"
+    assert fetch.state == "failed"
 
 
 def test_reattaching_a_new_link_after_disconnect_stops_listening_to_the_old_one(qapp):
@@ -166,6 +168,7 @@ def test_open_fetch_without_link_and_without_reply_raises(qapp):
 def test_pull_chunk_with_link_down_after_open_replies_not_connected(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)))
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
     backend._link = None  # link died between open_fetch and pull_chunk
 
     replies = []
@@ -173,7 +176,7 @@ def test_pull_chunk_with_link_down_after_open_replies_not_connected(qapp):
 
     assert replies == [(None, False, replies[0][2])]
     assert replies[0][2].code() == 8  # DuoFPErrorNotConnected
-    assert backend.by_token[token].state == "failed"
+    assert fetch.state == "failed"
 
 
 # --- FILE_ERROR reason -> DuoFPError code (spec §16) ------------------------
@@ -195,6 +198,7 @@ def test_pull_chunk_with_link_down_after_open_replies_not_connected(qapp):
 def test_file_error_reason_maps_to_the_correct_duofperror_code(qapp, reason, expected_code):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(9,)))
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
     replies = []
     backend.pull_chunk(token, lambda *a: replies.append(a))
     [read] = link.sent
@@ -203,7 +207,7 @@ def test_file_error_reason_maps_to_the_correct_duofperror_code(qapp, reason, exp
 
     assert replies == [(None, False, replies[0][2])]
     assert replies[0][2].code() == expected_code
-    assert backend.by_token[token].state == "failed"
+    assert fetch.state == "failed"
 
 
 # --- session watchdog: local fail-all with Timeout --------------------------
@@ -213,6 +217,7 @@ def test_session_timeout_fails_every_active_fetch_with_timeout(qapp):
     manifest = _manifest(sizes=(3, 5, 7, 9, 11, 13))
     backend, link, _remote, manifest = _backend(qapp, manifest)
     tokens = _open_all(backend, manifest)
+    fetches = {token: backend.by_token[token] for token in tokens}
     replies = {token: [] for token in tokens}
     for token in tokens:
         backend.pull_chunk(token, lambda *a, t=token: replies[t].append(a))
@@ -222,7 +227,7 @@ def test_session_timeout_fails_every_active_fetch_with_timeout(qapp):
     for token in tokens:
         assert len(replies[token]) == 1, token
         assert replies[token][0][2].code() == 5  # DuoFPErrorTimeout
-        assert backend.by_token[token].state == "failed"
+        assert fetches[token].state == "failed"
     assert link.sent, "the active fetches really had reads in flight, not just queued"
 
 
@@ -240,18 +245,20 @@ def test_session_timeout_with_no_fetches_in_flight_is_a_no_op(qapp):
 def test_oversized_chunk_yields_protocol_code(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)))
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
     backend.pull_chunk(token)
     [read] = link.sent
 
     backend.handle_message(_reply(read, b"toobig!!"))  # 8 bytes for a 3-byte file
 
-    assert backend.by_token[token].state == "failed"
+    assert fetch.state == "failed"
 
 
 def test_truncated_final_chunk_yields_protocol_code(qapp):
     manifest = _manifest(sizes=(5,))
     backend, link, _remote, manifest = _backend(qapp, manifest)
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
     replies = []
     backend.pull_chunk(token, lambda *a: replies.append(a))
     [read] = link.sent
@@ -262,4 +269,4 @@ def test_truncated_final_chunk_yields_protocol_code(qapp):
 
     assert replies == [(None, False, replies[0][2])]
     assert replies[0][2].code() == 7  # DuoFPErrorProtocol
-    assert backend.by_token[token].state == "failed"
+    assert fetch.state == "failed"

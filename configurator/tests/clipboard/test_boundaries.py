@@ -272,7 +272,19 @@ SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
 TRANSFER_PACKAGE = SRC_ROOT / "duo_input" / "transfer"
 
 _PURE_MODULES = ("model.py", "paths.py", "pipe.py", "scanner.py")
-_CTYPES_ALLOWED = ("windows_com.py", "windows_files.py")
+_CTYPES_ALLOWED = ("windows_com.py", "windows_files.py", "fileprovider_proto.py")
+#: Task 19: the File Provider slice adds its own pyobjc-touching modules,
+#: mirroring the existing macos_pasteboard.py exception rather than loosening
+#: the rule itself. fileprovider_client.py/fileprovider_domain.py guard their
+#: PyObjC/FileProvider imports behind a top-level try/except (see their module
+#: docstrings) so this module stays importable on non-darwin; fileprovider_
+#: proto.py is the ctypes+pyobjc wire-layer counterpart of windows_com.py.
+_FP_PYOBJC_ALLOWED = (
+    "macos_pasteboard.py",
+    "fileprovider_client.py",
+    "fileprovider_domain.py",
+    "fileprovider_proto.py",
+)
 
 
 def _transfer_modules() -> list[Path]:
@@ -368,12 +380,12 @@ def test_only_transfer_macos_pasteboard_touches_pyobjc():
     offenders = [
         path.name
         for path in _transfer_modules()
-        if path.name != "macos_pasteboard.py" and _has_native_import(path)
+        if path.name not in _FP_PYOBJC_ALLOWED and _has_native_import(path)
     ]
 
     assert offenders == [], (
-        "pyobjc/AppKit разрешён только в transfer/macos_pasteboard.py — "
-        f"нарушители: {offenders}"
+        "pyobjc/AppKit разрешён только в transfer/macos_pasteboard.py и в "
+        f"File Provider модулях из _FP_PYOBJC_ALLOWED — нарушители: {offenders}"
     )
 
 

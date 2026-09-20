@@ -185,10 +185,11 @@ def test_repeated_paste_of_completed_generation_serves_without_remote_refetch(qa
     _publish(backend, "A")
 
     token, _size = backend.open_fetch("A", 0)
+    fetch = backend.by_token[token]
     backend.pull_chunk(token)
     [read] = [m for m in link.sent if m.type is MessageType.FILE_READ]
     backend.handle_message(_reply(read, b"abc"))
-    assert backend.by_token[token].state == "done"
+    assert fetch.state == "done"
 
     reads_before = len([m for m in link.sent if m.type is MessageType.FILE_READ])
     # Re-paste (re-open) of the same, already-completed generation is served
@@ -241,20 +242,21 @@ def test_in_use_ref_returns_to_zero_after_all_fetches_settle(qapp):
 
     tokens = [backend.open_fetch("A", i)[0] for i in range(3)]
     assert backend._gen_in_use["A"] == 3
+    fetch0, _fetch1, fetch2 = (backend.by_token[t] for t in tokens)
 
     # Settle each via a completed read (DONE), a cancel (CANCELLED),
     # and a protocol error (FAILED) - every terminal path decrements once.
     backend.pull_chunk(tokens[0])
     [read0] = [m for m in link.sent if m.type is MessageType.FILE_READ]
     backend.handle_message(_reply(read0, b"abc"))  # DONE
-    assert backend.by_token[tokens[0]].state == "done"
+    assert fetch0.state == "done"
 
     backend.cancel_fetch(tokens[1])  # CANCELLED
 
     backend.pull_chunk(tokens[2])
     read2 = [m for m in link.sent if m.type is MessageType.FILE_READ][-1]
     backend.handle_message(_reply(read2, b"toolong-oops"))  # FAILED (oversized)
-    assert backend.by_token[tokens[2]].state == "failed"
+    assert fetch2.state == "failed"
 
     assert backend._gen_in_use["A"] == 0
 

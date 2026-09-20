@@ -187,17 +187,18 @@ def _file_error(read):
 def test_completion_winning_the_race_makes_a_later_cancel_a_no_op(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)))
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
     replies = []
     backend.pull_chunk(token, lambda *a: replies.append(a))
     [read] = link.sent
 
     backend.handle_message(_reply(read, b"abc"))  # completion wins
-    assert backend.by_token[token].state == "done"
+    assert fetch.state == "done"
     assert len(replies) == 1
 
     backend.cancel_fetch(token)  # loser: must be a total no-op
 
-    assert backend.by_token[token].state == "done"  # unchanged, not clobbered
+    assert fetch.state == "done"  # unchanged, not clobbered
     assert len(replies) == 1  # no second settle
 
 
