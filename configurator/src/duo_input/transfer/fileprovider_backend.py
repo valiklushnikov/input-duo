@@ -617,7 +617,13 @@ class FileProviderBackend(QObject):
             # очередь, когда ответ пришёл с чужого потока.
             self._deliver_publish_reply(manifest, epoch, ack, error)
 
-        remote.publishGeneration_reply_(record, _on_reply)
+        try:
+            remote.publishGeneration_reply_(record, _on_reply)
+        except Exception:  # noqa: BLE001 - a swallowed XPC/block error here is invisible otherwise
+            logger.exception(
+                "publishGeneration raised over XPC for %s", manifest.transfer_id
+            )
+            raise
 
     def _deliver_publish_reply(
         self, manifest: TransferManifest, epoch: int, ack, error

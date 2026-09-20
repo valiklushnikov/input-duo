@@ -126,6 +126,57 @@ if _XPC_AVAILABLE:
             },
         )
 
+    # The REMOTE direction needs the same treatment. When the host calls
+    # publish/retire/deleteGeneration:reply: on the DuoExtensionControl proxy it
+    # passes a Python callable as the reply block; PyObjC can only turn that into
+    # an NSXPCConnection-acceptable block if it knows the block's argument types.
+    # The clang protocol carries the method encoding but NOT the inner block
+    # argument types, so without this metadata NSXPCConnection rejects the call
+    # with "Block was not compiled using a compiler that inserts type information
+    # about arguments". Each reply is void(^)(BOOL ack, NSError *error); the
+    # block sits at method argument index 3 (self, _cmd, id/record, reply).
+    # PyObjC resolves an outgoing call by the proxy's ACTUAL class. The proxy
+    # NSXPCConnection.remoteObjectProxy() returns is a runtime-generated
+    # __NSXPCInterfaceProxy_<ProtocolName> (verified at runtime:
+    # __NSXPCInterfaceProxy_DuoExtensionControl), which does NOT formally
+    # conform to the protocol - so registering against the protocol name alone
+    # is never consulted. Register against that concrete proxy class name (its
+    # name is deterministic from the protocol name); keep the protocol name too
+    # as a harmless belt-and-suspenders.
+    for _control_class in (
+        b"__NSXPCInterfaceProxy_DuoExtensionControl",
+        b"DuoExtensionControl",
+    ):
+      for _control_selector in (
+        b"publishGeneration:reply:",
+        b"retireGeneration:reply:",
+        b"deleteGeneration:reply:",
+      ):
+        objc.registerMetaDataForSelector(
+            _control_class,
+            _control_selector,
+            {
+                "arguments": {
+                    3: {
+                        "type": b"@?",
+                        "callable": {
+                            "retval": {"type": b"v"},
+                            "arguments": {
+                                0: {"type": b"^v"},
+                                # BOOL ack. For an OUTGOING block PyObjC feeds
+                                # the arg encoding to NSGetSizeAndAlignment,
+                                # which rejects PyObjC's 'Z' (_C_NSBOOL) alias
+                                # ("unsupported type encoding spec 'Z'"). Use the
+                                # real ARM64 BOOL=_Bool encoding 'B' (_C_BOOL).
+                                1: {"type": objc._C_BOOL},
+                                2: {"type": b"@"},
+                            },
+                        },
+                    }
+                }
+            },
+        )
+
     class _ExtensionCallbackAdapter(NSObject):
         """Exported ``DuoHostCallback`` object - what the extension calls.
 
