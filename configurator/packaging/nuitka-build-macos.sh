@@ -206,13 +206,6 @@ cp -R "$FILEPROVIDER_APPEX_SRC" "$PLUGINS_APP/$FILEPROVIDER_APPEX_NAME"
 cp "$FILEPROVIDER_DYLIB_SRC" "$FRAMEWORKS_APP/$FILEPROVIDER_DYLIB_NAME"
 
 step "Signing the outer bundle (Personal Team, hardened runtime)"
-# The appex and dylib keep the signatures fileprovider-build.sh already gave
-# them (nested-first). This is a SHALLOW sign of just the outer container —
-# never --deep here, for the same reason noted above. A shallow sign still
-# correctly reseals Contents' resource envelope to include the newly added
-# PlugIns/Frameworks entries; nested code (the appex, any .framework) is
-# referenced by its own independent signature, not re-hashed as a plain
-# resource.
 IDENTITY="$(security find-identity -v -p codesigning | sed -n '1s/^[[:space:]]*[0-9]*)[[:space:]]*\([0-9A-F]*\).*/\1/p')"
 [ -n "$IDENTITY" ] || { echo "no codesigning identity found in the keychain (security find-identity -v -p codesigning)" >&2; exit 1; }
 
@@ -229,6 +222,37 @@ cat > "$HOST_ENTITLEMENTS" <<'PLIST'
 </plist>
 PLIST
 
+# Sign EVERY nested Mach-O with the Personal Team first (inside-out). Nuitka
+# ad-hoc self-signs the bundle it produces, so Contents/MacOS/Python, the
+# bundled PySide6 Qt libraries (many are EXTENSIONLESS Mach-O, e.g.
+# Contents/MacOS/QtCore), and every *.so/*.dylib carry TeamIdentifier "not
+# set". Under the hardened runtime, dyld refuses to map a non-platform library
+# whose Team ID differs from the loading process, so a bundle whose outer app
+# is Team-signed but whose Python/Qt libs are ad-hoc CRASHES at launch
+# ("different Team IDs") even though `codesign --verify --deep --strict`
+# passes. We must therefore re-sign each nested Mach-O with the real team.
+# Exclude Contents/PlugIns (the appex is already correctly signed WITH its own
+# app-sandbox entitlements by fileprovider-build.sh — re-signing it here would
+# clobber that, which is exactly why we do NOT use `codesign --deep` on the
+# outer app) and the main executable (sealed by the outer sign below).
+step "Signing nested Mach-O libraries (Python, Qt, *.so/*.dylib) on the team"
+nested_signed=0
+while IFS= read -r macho; do
+    case "$macho" in
+        "$OUTPUT_APP/Contents/MacOS/app") continue ;;
+        "$OUTPUT_APP"/Contents/PlugIns/*) continue ;;
+    esac
+    if file "$macho" 2>/dev/null | grep -q "Mach-O"; then
+        codesign --force --sign "$IDENTITY" --options runtime --timestamp=none "$macho"
+        nested_signed=$((nested_signed + 1))
+    fi
+done < <(find "$OUTPUT_APP/Contents" -type f -not -path "$OUTPUT_APP/Contents/PlugIns/*")
+echo "Signed $nested_signed nested Mach-O libraries on team $FILEPROVIDER_TEAM_ID."
+
+# Now seal the main executable + outer container. Shallow (never --deep): the
+# appex keeps its own signature/entitlements and every other nested Mach-O was
+# just signed above, so the outer seal only needs to (re)sign the main binary
+# and hash the already-signed nested code by reference.
 codesign --force --sign "$IDENTITY" --options runtime \
     --entitlements "$HOST_ENTITLEMENTS" \
     --identifier "$HOST_BUNDLE_ID" \

@@ -430,6 +430,37 @@ def test_the_signed_bundle_passes_deep_strict_verification(mac_dist: Path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_the_nested_mach_o_libraries_are_signed_by_the_personal_team(mac_dist: Path):
+    """Regression guard: the Nuitka-produced nested Mach-O — the embedded
+    Python interpreter and the bundled PySide6 Qt libraries — must carry the
+    SAME Team ID as the host executable.
+
+    Nuitka ad-hoc self-signs the bundle it emits, leaving Contents/MacOS/Python
+    and the (extensionless) Qt libraries with "TeamIdentifier not set". Under
+    the hardened runtime, dyld refuses to map a non-platform library whose team
+    differs from the loading process, so such a bundle CRASHES at launch with
+    "different Team IDs" — even though `codesign --verify --deep --strict`
+    passes. `codesign --verify` therefore does not catch this class of bug;
+    only an explicit per-library team check (or an actual launch) does.
+    """
+    macos_dir = mac_dist / "Contents" / "MacOS"
+    # The embedded interpreter, plus at least one bundled Qt library (which
+    # ships EXTENSIONLESS under Contents/MacOS/, e.g. QtCore) — the exact files
+    # a `*.so`/`*.dylib`-only signing sweep would miss.
+    python_lib = macos_dir / "Python"
+    qt_libs = sorted(macos_dir.glob("Qt*"))
+    assert python_lib.is_file(), f"expected embedded interpreter at {python_lib}"
+    assert qt_libs, f"expected bundled Qt libraries under {macos_dir}"
+
+    for lib in [python_lib, qt_libs[0]]:
+        team = _codesign_field(lib, "TeamIdentifier")
+        assert team == EXPECTED_TEAM_IDENTIFIER, (
+            f"{lib.name} is signed by team {team!r}, not {EXPECTED_TEAM_IDENTIFIER!r} "
+            "— the bundle will crash at launch under the hardened runtime "
+            "(dyld 'different Team IDs')."
+        )
+
+
 # ------------------------------------------------- bundle-ID collision guard
 #
 # Pure logic, no build required: reads the source project files directly, so
