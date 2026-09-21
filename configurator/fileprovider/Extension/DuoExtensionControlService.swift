@@ -1,5 +1,11 @@
 import Foundation
 import FileProvider
+import os
+
+private let controlServiceLog = Logger(
+    subsystem: "com.duoinput.configurator.fileprovider",
+    category: "control"
+)
 
 /// Signals the File Provider system to pull namespace changes. Injected so the
 /// control service is unit-testable without a live `NSFileProviderManager`.
@@ -52,10 +58,19 @@ final class DuoExtensionControlService: NSObject, DuoExtensionControl {
     }
 
     func publishGeneration(_ recordJSON: Data, reply: @escaping (Bool, Error?) -> Void) {
+        controlServiceLog.info(
+            "fp_extension_control_rpc_received operation=publishGeneration bytes=\(recordJSON.count, privacy: .public) thread=\(Thread.current.description, privacy: .public) timestamp=\(Date().timeIntervalSince1970, privacy: .public)"
+        )
         do {
             // The publish contract is the DURABLE RECORD (what the host arms the
             // clipboard on). Ack on that.
             let record = try store.publish(recordJSON: recordJSON)
+            controlServiceLog.info(
+                "fp_replica_record_present operation=publishGeneration transfer_id=\(record.transferId, privacy: .public)"
+            )
+            controlServiceLog.info(
+                "fp_extension_control_rpc_reply operation=publishGeneration transfer_id=\(record.transferId, privacy: .public) success=true timestamp=\(Date().timeIntervalSince1970, privacy: .public)"
+            )
             reply(true, nil)
             // The working-set update change is a visibility optimisation with a
             // backstop: enumerateItems lists the record via allActive()/
@@ -64,10 +79,29 @@ final class DuoExtensionControlService: NSObject, DuoExtensionControl {
             // that strands an orphan, still-visible generation the host never
             // tracks. (Delete changes are the ONLY deletion channel and stay
             // mandatory - see deleteGeneration.)
-            try? journal.append(kind: .update, itemIdentifiers: DuoItemModel.namespaceIdentifiers(of: record))
+            do {
+                let revision = try journal.append(
+                    kind: .update,
+                    itemIdentifiers: DuoItemModel.namespaceIdentifiers(of: record)
+                )
+                controlServiceLog.info(
+                    "fp_journal_update_present operation=publishGeneration transfer_id=\(record.transferId, privacy: .public) revision=\(revision, privacy: .public)"
+                )
+            } catch {
+                controlServiceLog.error(
+                    "fp_journal_update_failed operation=publishGeneration transfer_id=\(record.transferId, privacy: .public) error=\(String(describing: error), privacy: .public)"
+                )
+            }
             signalWorkingSetAndRoot()
+            controlServiceLog.info(
+                "fp_working_set_signalled operation=publishGeneration transfer_id=\(record.transferId, privacy: .public) signal_present=\(self.signal != nil, privacy: .public)"
+            )
         } catch {
-            reply(false, Self.mapError(error))
+            let mapped = Self.mapError(error)
+            controlServiceLog.error(
+                "fp_extension_control_rpc_reply operation=publishGeneration success=false code=\(mapped.code, privacy: .public) timestamp=\(Date().timeIntervalSince1970, privacy: .public)"
+            )
+            reply(false, mapped)
         }
     }
 

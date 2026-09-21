@@ -228,6 +228,27 @@ def _file_error(read: Message, reason: str) -> Message:
     return Message(MessageType.FILE_ERROR, dict(read.header, reason=reason), b"")
 
 
+# --- control RPC handshake observability ---------------------------------
+
+
+def test_publish_logs_control_rpc_send_reply_and_completion(qapp, caplog):
+    caplog.set_level(logging.INFO, logger=_LOGGER_NAME)
+
+    _backend(qapp, _manifest(transfer_id="generation-handshake", sizes=(3,)))
+
+    messages = [record.getMessage() for record in caplog.records]
+    for event in (
+        "fp_host_control_rpc_begin",
+        "fp_host_control_rpc_sent",
+        "fp_host_control_rpc_reply",
+        "fp_host_control_rpc_completion",
+    ):
+        assert any(
+            event in message and "transfer_id=generation-handshake" in message
+            for message in messages
+        )
+
+
 # --- fetch lifecycle counters -------------------------------------------
 
 

@@ -16,6 +16,8 @@ checks for.
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import QObject, Signal
 
 import pytest
@@ -160,13 +162,17 @@ def fp_backend(qapp, fake_client, fake_domain, fake_arm, fake_resolver, fake_lin
 # --- Step 1: the failing privacy regression test, verbatim from the brief.
 
 
-def test_arm_then_wait_sends_no_file_read(fp_backend, fake_link, fake_arm, qtbot):
+def test_arm_then_wait_sends_no_file_read(
+    fp_backend, fake_link, fake_arm, qtbot, caplog
+):
+    caplog.set_level(logging.INFO, logger="duo_input.transfer.fileprovider_backend")
     e = fp_backend.handle_offer(_manifest())
     fp_backend.authorize(True, e)
     fp_backend.on_ack("abc123")  # simulate publish ACK
     fp_backend.on_domain_ready()  # simulate READY
     qtbot.wait(200)
     assert fake_arm.calls == [["abc123-root"]]  # armed
+    assert "fp_clipboard_armed transfer_id=abc123" in caplog.text
     assert not any(m.type.name == "FILE_READ" for m in fake_link.sent)  # NO read
 
 

@@ -624,6 +624,12 @@ class FileProviderBackend(QObject):
         self._publish_generation(manifest, epoch)
 
     def _publish_generation(self, manifest: TransferManifest, epoch: int) -> None:
+        _log_event(
+            "fp_host_control_rpc_begin",
+            operation="publishGeneration",
+            transfer_id=manifest.transfer_id,
+            timestamp_ns=time.time_ns(),
+        )
         # Use an XPC error handler so a dropped/failed publish (connection
         # rejected by the appex, appex crash, etc.) surfaces as a logged error
         # instead of the reply block silently never firing - which is exactly
@@ -660,6 +666,14 @@ class FileProviderBackend(QObject):
         )
 
         def _on_reply(ack, error) -> None:
+            _log_event(
+                "fp_host_control_rpc_reply",
+                operation="publishGeneration",
+                transfer_id=manifest.transfer_id,
+                ack=bool(ack),
+                error_present=error is not None,
+                timestamp_ns=time.time_ns(),
+            )
             # NSXPCConnection доставляет reply-блок publishGeneration:reply: на
             # приватной XPC/фоновой очереди - НЕ на Qt-потоке. Мутация полей
             # QObject и emit сигналов оттуда небезопасны, поэтому переносим
@@ -671,6 +685,12 @@ class FileProviderBackend(QObject):
             self._deliver_publish_reply(manifest, epoch, ack, error)
 
         try:
+            _log_event(
+                "fp_host_control_rpc_sent",
+                operation="publishGeneration",
+                transfer_id=manifest.transfer_id,
+                timestamp_ns=time.time_ns(),
+            )
             remote.publishGeneration_reply_(record, _on_reply)
         except Exception:  # noqa: BLE001 - a swallowed XPC/block error here is invisible otherwise
             logger.exception(
@@ -698,6 +718,14 @@ class FileProviderBackend(QObject):
         # PySide6 боксит кортеж через QVariant как list; распаковка ниже к
         # этому безразлична (list и tuple распаковываются одинаково).
         manifest, epoch, ack, error = payload
+        _log_event(
+            "fp_host_control_rpc_completion",
+            operation="publishGeneration",
+            transfer_id=manifest.transfer_id,
+            ack=bool(ack),
+            error_present=error is not None,
+            timestamp_ns=time.time_ns(),
+        )
         # Поздняя/переставшая быть актуальной ACK: пока публикация A была в
         # полёте, принята более новая генерация B (_accepted_epoch = B).
         # Игнорируем ответку A целиком - ни мутации _active_transfer_id/
@@ -955,6 +983,12 @@ class FileProviderBackend(QObject):
             return
         self._arm(urls)
         self._armed_transfer_id = transfer_id
+        _log_event(
+            "fp_clipboard_armed",
+            transfer_id=transfer_id,
+            url_count=len(urls),
+            timestamp_ns=time.time_ns(),
+        )
 
     # --- Task 9: bounded per-fetch scheduler
     def open_fetch(self, generation_id: str, entry_index: int, reply=None):
