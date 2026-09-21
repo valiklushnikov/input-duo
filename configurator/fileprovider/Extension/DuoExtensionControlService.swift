@@ -136,6 +136,18 @@ final class DuoExtensionControlService: NSObject, DuoExtensionControl {
         }
     }
 
+    /// Side-effect-free connection activation (see DuoFPProto.h). The host calls
+    /// this once right after binding the XPC connection so the incoming message
+    /// makes `DuoServiceSource.shouldAcceptNewConnection` fire and capture the
+    /// connection — which is what lets the extension later obtain `hostProxy`
+    /// and call back for fetches. Without it, a Mac restart with no new publish
+    /// leaves the connection un-accepted and fetches fail NotConnected/-1004.
+    /// It touches NO store/journal/working-set state and emits no signal.
+    func activate(reply: @escaping (Bool, Error?) -> Void) {
+        controlServiceLog.info("fp_extension_control_rpc_reply operation=activate success=true")
+        reply(true, nil)
+    }
+
     /// Durable journal write already happened before this is called; a signal is
     /// only a request to enumerate, never a deletion ACK.
     private func signalWorkingSetAndRoot() {

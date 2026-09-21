@@ -37,6 +37,13 @@ NS_ASSUME_NONNULL_BEGIN
                     reply:(void (^)(BOOL ack, NSError * _Nullable error))reply;
 - (void)deleteGeneration:(NSString *)generationId
                     reply:(void (^)(BOOL ack, NSError * _Nullable error))reply;
+// Side-effect-free liveness/attach RPC. The host calls this once right after
+// binding the XPC connection so the extension's NSXPCListener fires
+// shouldAcceptNewConnection and captures the connection — establishing the
+// bidirectional channel WITHOUT a clipboard publication. Required so a durable
+// (retired) generation stays fetchable after a Mac app/extension restart with
+// no new publish (Gate C restart durability). It mutates NOTHING.
+- (void)activateWithReply:(void (^)(BOOL ack, NSError * _Nullable error))reply;
 @end
 
 // Anchors: referencing @protocol(...) from an exported, default-visibility

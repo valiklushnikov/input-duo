@@ -397,6 +397,37 @@ class FileProviderServiceClient(QObject):
             self._connection = connection
             self._connected = True
         self.connected.emit()
+        self._activate_connection(connection)
+
+    def _activate_connection(self, connection) -> None:
+        """Send one side-effect-free ``activate`` RPC right after binding.
+
+        NSXPC does not fire the extension listener's ``shouldAcceptNewConnection``
+        until the first message flows over the connection. The host only calls
+        the extension when it publishes a generation, so after a Mac
+        app/extension restart with NO new clipboard publication the connection
+        is resumed but never accepted extension-side: the extension's
+        ``DuoServiceSource.connection`` stays nil, ``hostProxy()`` returns nil,
+        and every fetch of a durable (retired) generation fails NotConnected ->
+        Finder ``-1004`` (Gate C restart durability). This lifecycle-only ping
+        forces that first message so the connection is accepted and the
+        ext -> host fetch path works without any publication. It mutates nothing
+        extension-side (see DuoExtensionControlService.activate). Best-effort:
+        a failed activation is logged, never fatal.
+        """
+        def _on_error(error) -> None:
+            logger.warning("file provider connection activation error: %r", error)
+
+        proxy = connection.remoteObjectProxyWithErrorHandler_(_on_error)
+        if proxy is None:
+            return
+
+        def _reply(_ack, error) -> None:
+            if error is not None:
+                logger.warning("file provider activate reply error: %r", error)
+
+        proxy.activateWithReply_(_reply)
+        _log_service_event("fp_host_connection_activate")
 
     def _on_invalidated(self) -> None:
         self._handle_disconnect("invalidated")

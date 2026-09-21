@@ -129,6 +129,10 @@ def extension_interface() -> NSXPCInterface:
             (b"publishGeneration:reply:", 1, [], True),
             (b"retireGeneration:reply:", 1, [], True),
             (b"deleteGeneration:reply:", 1, [], True),
+            # Side-effect-free connection activation; reply block is arg 0
+            # (NSError auto-added). Sent right after bind so the extension
+            # accepts the connection without a publish (Gate C restart).
+            (b"activateWithReply:", 0, [], True),
         ],
     )
 

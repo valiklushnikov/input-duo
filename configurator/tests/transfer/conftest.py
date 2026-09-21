@@ -18,6 +18,30 @@ def qapp():
     yield app
 
 
+class _RecordingRemoteProxy:
+    """Stand-in for ``connection.remoteObjectProxy()`` that records any
+    selector-style call the host makes on the extension (e.g. an activation
+    ``activateWithReply_``). Reply-style calls (last arg callable) get their
+    reply invoked so the host's flow completes, mirroring a real ack."""
+
+    def __init__(self, sink: list) -> None:
+        self._sink = sink
+
+    def __getattr__(self, name: str):
+        def _call(*args):
+            self._sink.append((name, *args))
+            if args and callable(args[-1]):
+                reply = args[-1]
+                try:
+                    reply(True, None)
+                except TypeError:
+                    try:
+                        reply()
+                    except TypeError:
+                        pass
+        return _call
+
+
 class _FakeXPCConnection:
     """Duck-typed stand-in for ``NSXPCConnection`` (Task 3).
 
@@ -36,7 +60,11 @@ class _FakeXPCConnection:
         self.interruption_handler = None
         self.resumed = False
         self.invalidated = False
-        self._remote_proxy = object()
+        #: Records selector-style calls made on the remote proxy (extension
+        #: side), so a test can assert the host activated the connection after
+        #: bind without a publish. See _RecordingRemoteProxy.
+        self.remote_calls: list[tuple] = []
+        self._remote_proxy = _RecordingRemoteProxy(self.remote_calls)
 
     def setExportedInterface_(self, interface) -> None:
         self.exported_interface = interface
@@ -60,6 +88,9 @@ class _FakeXPCConnection:
         self.invalidated = True
 
     def remoteObjectProxy(self):
+        return self._remote_proxy
+
+    def remoteObjectProxyWithErrorHandler_(self, _handler):
         return self._remote_proxy
 
 

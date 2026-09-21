@@ -44,6 +44,33 @@ def test_extension_callback_marshals_to_qt_thread(fp_fake_service):
     assert calls == [("open", "abc123", 0)]
 
 
+def test_bind_activates_connection_without_publish(fp_fake_service):
+    """RED (Gate C restart -1004 root cause): after binding the XPC connection,
+    the host MUST proactively send a side-effect-free activation RPC so the
+    extension's NSXPCListener fires ``shouldAcceptNewConnection`` and captures
+    the connection - otherwise, after a Mac restart with NO clipboard
+    publication, the extension never gets a live connection and can never call
+    back for fetches (``hostProxy() == nil`` -> NotConnected -> Finder -1004).
+
+    The activation must NOT be ``publishGeneration`` (that mutates the durable
+    store); it must be a lifecycle-only, side-effect-free call.
+    """
+    from duo_input.transfer.fileprovider_client import FileProviderServiceClient
+
+    client = FileProviderServiceClient()
+    client.set_domain("DuoInput")
+    fp_fake_service.grant_connection(client)  # binds + resumes, NO publish
+
+    calls = [name for (name, *_) in fp_fake_service.connection.remote_calls]
+    assert any(name.startswith("activate") for name in calls), (
+        "host must activate the bound connection with a side-effect-free RPC "
+        f"so the extension accepts it; recorded remote calls: {calls}"
+    )
+    assert not any("publishGeneration" in name for name in calls), (
+        "activation must be side-effect-free, never publishGeneration"
+    )
+
+
 def test_redundant_connect_service_does_not_rebind(fp_fake_service):
     from duo_input.transfer.fileprovider_client import FileProviderServiceClient
 

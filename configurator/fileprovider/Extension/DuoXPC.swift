@@ -28,6 +28,9 @@ enum DuoXPC {
         for selector in ["publishGeneration:reply:", "retireGeneration:reply:", "deleteGeneration:reply:"] {
             whitelist(iface, selector, 1, [NSError.self], ofReply: true)
         }
+        // activateWithReply: → (BOOL ack [scalar], NSError). The reply block is
+        // the only argument (index 0). Side-effect-free connection activation.
+        whitelist(iface, "activateWithReply:", 0, [NSError.self], ofReply: true)
         return iface
     }
 
