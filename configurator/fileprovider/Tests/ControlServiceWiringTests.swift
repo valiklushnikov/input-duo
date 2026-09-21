@@ -82,6 +82,28 @@ final class ControlServiceWiringTests: XCTestCase {
         XCTAssertEqual(signal.signalled, [.workingSet, .rootContainer])
     }
 
+    /// A publish's update change is a visibility optimisation with a backstop
+    /// (enumerateItems lists the record regardless), so a journal write failure
+    /// must NOT turn a successful publish - whose durable record is the host's
+    /// arm contract - into a phantom rejection + orphan visible generation. The
+    /// record is durable and the publish acks true even if the update change
+    /// can't be written. (Delete changes, the only deletion channel, stay
+    /// mandatory - see testDurableJournalFailureBlocksSignalAndAcksFalse.)
+    func testPublishAcksTrueEvenIfUpdateChangeWriteFails() throws {
+        let changesDir = tmpDir.appendingPathComponent("journal/changes")
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: changesDir.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: changesDir.path)
+        }
+        let service = DuoExtensionControlService(store: store, journal: journal, signal: FakeSignal())
+        var ack = false
+
+        service.publishGeneration(try goldenFixtureData()) { gotAck, _ in ack = gotAck }
+
+        XCTAssertTrue(ack, "publish acks on the durable record; the update change is best-effort")
+        XCTAssertNotNil(store.record(for: "abc123"), "the record is durable and visible via enumerateItems")
+    }
+
     /// SIGNAL_ORDERING (rule 6): the durable journal/tombstone write happens
     /// BEFORE any signal. If it fails, the signal is NOT sent, the op acks
     /// false, and nothing is deleted - File Provider is never told about a

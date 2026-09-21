@@ -53,9 +53,18 @@ final class DuoExtensionControlService: NSObject, DuoExtensionControl {
 
     func publishGeneration(_ recordJSON: Data, reply: @escaping (Bool, Error?) -> Void) {
         do {
+            // The publish contract is the DURABLE RECORD (what the host arms the
+            // clipboard on). Ack on that.
             let record = try store.publish(recordJSON: recordJSON)
-            try journal.append(kind: .update, itemIdentifiers: DuoItemModel.namespaceIdentifiers(of: record))
             reply(true, nil)
+            // The working-set update change is a visibility optimisation with a
+            // backstop: enumerateItems lists the record via allActive()/
+            // allRecords() regardless. So it is best-effort - a journal write
+            // failure must NOT turn a successful publish into a phantom rejection
+            // that strands an orphan, still-visible generation the host never
+            // tracks. (Delete changes are the ONLY deletion channel and stay
+            // mandatory - see deleteGeneration.)
+            try? journal.append(kind: .update, itemIdentifiers: DuoItemModel.namespaceIdentifiers(of: record))
             signalWorkingSetAndRoot()
         } catch {
             reply(false, Self.mapError(error))
