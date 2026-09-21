@@ -20,7 +20,9 @@ Invariants proved here:
     EXISTING ``TRANSFER_END`` wire message so the sender frees its fds via
     ``close_descriptors`` - no new ``MessageType`` is introduced.
   * Startup purge: a persisted replica record with no live snapshot in this
-    process is orphaned and permanently removed.
+    process is orphaned and tombstoned via ``deleteGeneration`` (the extension
+    keeps the record; PHYSICAL_REPLICA_DELETE = DISABLED). This path is not
+    wired into app start this phase - see ``purge_stale_generations``.
   * The sender's ``SnapshotRegistry.RETENTION`` is never referenced or modified.
 
 The fake ``remote()`` records the EXACT XPC calls (retire/delete) so the tests
@@ -428,7 +430,8 @@ def test_transfer_end_sent_once_per_generation(qapp):
 def test_startup_purge_deletes_orphaned_persisted_records(qapp):
     backend, _link, remote = _backend(qapp)
     # Fresh process: nothing live. Persisted records from a previous run have
-    # no live snapshot -> orphaned -> permanently removed.
+    # no live snapshot -> orphaned -> tombstoned via deleteGeneration (record
+    # kept by the extension; PHYSICAL_REPLICA_DELETE = DISABLED).
     purged = backend.purge_stale_generations(["stale-1", "stale-2"])
 
     assert set(purged) == {"stale-1", "stale-2"}

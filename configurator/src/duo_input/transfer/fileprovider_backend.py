@@ -212,8 +212,10 @@ class _GenerationState(Enum):
 
     ``IN_USE`` и ``GC_ELIGIBLE`` из брифа - НЕ отдельные enum-состояния, а
     производные условия поверх ``RETIRED``: retired с in-use ref (>0) - это
-    IN_USE (delete заблокирован), retired без in-use ref и за TTL/бюджетом -
-    это GC_ELIGIBLE (delete разрешён). См. ``_gc``.
+    IN_USE (namespace deletion заблокирован), retired без in-use ref и за
+    TTL/бюджетом - это GC_ELIGIBLE, т.е. можно НАЧАТЬ namespace deletion
+    (``deleteGeneration`` -> extension тombstones; durable метаданные реплики
+    сохраняются, PHYSICAL_REPLICA_DELETE = DISABLED). См. ``_gc``.
     """
 
     ACTIVE_CLIPBOARD = auto()
@@ -1454,12 +1456,16 @@ class FileProviderBackend(QObject):
             )
 
     def _gc(self) -> None:
-        """Permanently delete quiesced, unreferenced RETIRED generations that
-        are past TTL or over the count budget - mirrors ``StagingArea.gc``
-        (TTL sweep, then oldest-first budget eviction). ``deleteGeneration``
-        fires ONLY when the generation has no in-use ref AND (past TTL OR over
-        budget); the active generation and any in-use generation are never
-        touched."""
+        """BEGIN NAMESPACE DELETION for quiesced, unreferenced RETIRED
+        generations past TTL or over the count budget - mirrors
+        ``StagingArea.gc`` (TTL sweep, then oldest-first budget eviction). The
+        ``ref==0 AND (past TTL OR over budget)`` condition is unchanged; what
+        changed is its consequence. ``deleteGeneration`` no longer means
+        "physically remove the replica record" - the extension now TOMBSTONES
+        the generation (durable delete journal + working-set signal) and KEEPS
+        the record (PHYSICAL_REPLICA_DELETE = DISABLED this phase; metadata is
+        tiny and retained indefinitely). The active generation and any in-use
+        generation are never touched."""
         now = self._clock()
         retired = sorted(
             (
@@ -1490,11 +1496,14 @@ class FileProviderBackend(QObject):
             over_budget -= 1
 
     def _delete_generation(self, generation_id: str) -> None:
-        """Permanently remove a generation: drop local tracking and ask the
-        extension to remove the replica record + signal the OS to drop the
-        items (``deleteGeneration``). Best-effort like ``StagingArea.gc``: local
-        state is dropped up front, a failed XPC reply is only logged (the next
-        startup purge would reclaim a record the extension failed to remove)."""
+        """Begin namespace deletion for a generation: drop this host's in-memory
+        tracking (it is no longer a GC candidate) and ask the extension to
+        TOMBSTONE it via ``deleteGeneration`` - a durable delete journal entry
+        plus a working-set signal so File Provider drops the items from the
+        namespace. The extension KEEPS the backing replica record
+        (PHYSICAL_REPLICA_DELETE = DISABLED this phase); dropping the host's
+        volatile bookkeeping is not a physical metadata delete. Best-effort like
+        ``StagingArea.gc``: a failed XPC reply is only logged."""
         generation = self._generations.pop(generation_id, None)
         self._gen_in_use.pop(generation_id, None)
         if generation is None:
@@ -1515,10 +1524,15 @@ class FileProviderBackend(QObject):
     def purge_stale_generations(self, persisted_ids) -> list[str]:
         """Startup recovery: any persisted replica record with NO live snapshot
         in this process (not in ``_generations``) is orphaned - a leftover from
-        a previous run - and is permanently removed via ``deleteGeneration``.
-        Returns the ids purged. The real source of ``persisted_ids`` (the
-        extension enumerating its replica) is wired at app start (Step 5,
-        system-manual); this logic is unit-tested directly."""
+        a previous run - and is tombstoned via ``deleteGeneration`` (durable
+        delete journal + working-set signal; the extension KEEPS the record,
+        PHYSICAL_REPLICA_DELETE = DISABLED). Returns the ids acted on.
+
+        NOTE: intentionally NOT wired into app start this phase - after a host
+        restart ``_generations`` is empty, so every persisted record would look
+        "stale" and get tombstoned while File Provider may still hold its item
+        identities. Deciding a safe condition is deferred (Phase 2,
+        FILE_PROVIDER_TOMBSTONE_COMPACTION). Kept + unit-tested directly."""
         purged: list[str] = []
         remote = self._client.remote()
         for generation_id in persisted_ids:
