@@ -80,3 +80,25 @@ def test_resolve_service_keeps_main_run_loop_alive_for_completion(monkeypatch):
     monkeypatch.setattr(module, "_GET_SERVICE_TIMEOUT_S", 0.1)
 
     assert module.FileProviderServiceClient._resolve_service(Manager()) is expected_service
+
+
+def test_resolve_connection_keeps_main_run_loop_alive_for_completion(monkeypatch):
+    """The endpoint-to-connection callback has the same main-queue contract."""
+    from Foundation import NSOperationQueue
+
+    from duo_input.transfer import fileprovider_client as module
+
+    expected_connection = object()
+
+    class Service:
+        def getFileProviderConnectionWithCompletionHandler_(self, completion):
+            NSOperationQueue.mainQueue().addOperationWithBlock_(
+                lambda: completion(expected_connection, None)
+            )
+
+    monkeypatch.setattr(module, "_GET_CONNECTION_TIMEOUT_S", 0.1)
+
+    assert (
+        module.FileProviderServiceClient._resolve_connection(Service())
+        is expected_connection
+    )

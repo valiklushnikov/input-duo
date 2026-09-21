@@ -45,6 +45,22 @@ def _log_service_event(event: str, **fields: object) -> None:
         rendered,
     )
 
+
+def _wait_for_fileprovider_completion(done: threading.Event, timeout: float) -> bool:
+    """Wait without starving callbacks delivered through the main run loop."""
+    if threading.current_thread() is not threading.main_thread():
+        return done.wait(timeout)
+    deadline = time.monotonic() + timeout
+    run_loop = NSRunLoop.currentRunLoop()
+    while not done.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        run_loop.runUntilDate_(
+            NSDate.dateWithTimeIntervalSinceNow_(min(remaining, 0.01))
+        )
+    return done.is_set()
+
 try:
     import objc
     from Foundation import NSDate, NSObject, NSRunLoop
@@ -517,20 +533,7 @@ class FileProviderServiceClient(QObject):
             NSFileProviderRootContainerItemIdentifier,
             handler,
         )
-        if threading.current_thread() is threading.main_thread():
-            deadline = time.monotonic() + _GET_SERVICE_TIMEOUT_S
-            run_loop = NSRunLoop.currentRunLoop()
-            while not done.is_set():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                run_loop.runUntilDate_(
-                    NSDate.dateWithTimeIntervalSinceNow_(min(remaining, 0.01))
-                )
-            completed = done.is_set()
-        else:
-            completed = done.wait(_GET_SERVICE_TIMEOUT_S)
-        if not completed:
+        if not _wait_for_fileprovider_completion(done, _GET_SERVICE_TIMEOUT_S):
             _log_service_event(
                 "fp_host_get_service_timeout", timeout_s=_GET_SERVICE_TIMEOUT_S
             )
@@ -546,12 +549,17 @@ class FileProviderServiceClient(QObject):
         done = threading.Event()
 
         def handler(connection, error):
+            _log_service_event(
+                "fp_host_xpc_connection_completion",
+                connection_present=connection is not None,
+                error=repr(error),
+            )
             outcome["connection"] = connection
             outcome["error"] = error
             done.set()
 
         service.getFileProviderConnectionWithCompletionHandler_(handler)
-        if not done.wait(_GET_CONNECTION_TIMEOUT_S):
+        if not _wait_for_fileprovider_completion(done, _GET_CONNECTION_TIMEOUT_S):
             raise TimeoutError("timed out obtaining the NSXPCConnection")
         error = outcome.get("error")
         if error is not None:
