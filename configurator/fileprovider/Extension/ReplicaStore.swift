@@ -156,6 +156,18 @@ final class ReplicaStore {
         }
     }
 
+    /// Every durable record, active OR retired (parse failures excluded). The
+    /// working-set LIST is built from this minus the journal's tombstoned ids -
+    /// a retired generation is still namespace-live and must appear in the
+    /// working set, unlike in the root LIST (`allActive()`).
+    func allRecords() -> [GenerationRecord] {
+        listGenerationFiles().compactMap { url in
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            guard let (_, record) = try? parseRecord(data) else { return nil }
+            return record
+        }
+    }
+
     /// Scans the live generations directory and moves any file that fails to
     /// parse as a well-formed schema-v1 record into `generations/quarantine/`,
     /// so it stops shadowing `allActive()`/`record(for:)` without silently

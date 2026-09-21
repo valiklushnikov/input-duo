@@ -26,6 +26,7 @@ private final class RecordingChangeObserver: NSObject, NSFileProviderChangeObser
     private(set) var deletedIdentifiers: [NSFileProviderItemIdentifier] = []
     private(set) var finishedAnchor: NSFileProviderSyncAnchor?
     private(set) var moreComing = false
+    private(set) var finishError: Error?
 
     func didUpdate(_ updatedItems: [NSFileProviderItem]) {
         self.updatedItems.append(contentsOf: updatedItems)
@@ -40,7 +41,7 @@ private final class RecordingChangeObserver: NSObject, NSFileProviderChangeObser
         self.moreComing = moreComing
     }
 
-    func finishEnumeratingWithError(_ error: Error) {}
+    func finishEnumeratingWithError(_ error: Error) { finishError = error }
 }
 
 /// `DuoEnumerator` + `FileProviderExtension.item(for:)`/`enumerator(for:)`
@@ -50,17 +51,20 @@ private final class RecordingChangeObserver: NSObject, NSFileProviderChangeObser
 final class EnumeratorTests: XCTestCase {
     private var tmpDir: URL!
     private var store: ReplicaStore!
+    private var journal: ChangeJournal!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("EnumeratorTests-\(UUID().uuidString)", isDirectory: true)
         store = ReplicaStore(baseDirectory: tmpDir)
+        journal = ChangeJournal(baseDirectory: tmpDir)
     }
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: tmpDir)
         store = nil
+        journal = nil
         tmpDir = nil
         try super.tearDownWithError()
     }
@@ -93,7 +97,7 @@ final class EnumeratorTests: XCTestCase {
     }
 
     private func enumerate(_ identifier: NSFileProviderItemIdentifier) -> RecordingEnumerationObserver {
-        let enumerator = DuoEnumerator(enumeratedItemIdentifier: identifier, store: store)
+        let enumerator = DuoEnumerator(enumeratedItemIdentifier: identifier, store: store, journal: journal)
         let observer = RecordingEnumerationObserver()
         enumerator.enumerateItems(for: observer, startingAt: NSFileProviderPage(Data()))
         return observer
@@ -163,20 +167,92 @@ final class EnumeratorTests: XCTestCase {
         XCTAssertEqual(discovered, ["abc123", "abc123:0", "abc123:1", "abc123:2"])
     }
 
-    // MARK: - enumerateChanges / currentSyncAnchor contract
+    // MARK: - enumerateChanges / currentSyncAnchor contract (journal-backed)
 
-    func testEnumerateChangesFinishesWithNoChangesReported() throws {
+    private func workingSetEnumerator() -> DuoEnumerator {
+        DuoEnumerator(enumeratedItemIdentifier: .workingSet, store: store, journal: journal)
+    }
+
+    func testCurrentSyncAnchorReflectsJournalHead() throws {
+        _ = journal.append(kind: .update, itemIdentifiers: ["abc123"])
+        let enumerator = workingSetEnumerator()
+        var reported: NSFileProviderSyncAnchor?
+        enumerator.currentSyncAnchor { reported = $0 }
+        XCTAssertEqual(DuoEnumerator.decodeAnchor(try XCTUnwrap(reported)), journal.headRevision())
+        XCTAssertEqual(journal.headRevision(), 1)
+    }
+
+    /// R3: a tombstone's durable delete change is replayed to the change
+    /// observer as didDeleteItems, finishing at an anchor >= the tombstone
+    /// revision.
+    func testEnumerateChangesReplaysTombstoneDeletes() throws {
         try publishNestedGeneration()
-        let enumerator = DuoEnumerator(enumeratedItemIdentifier: .rootContainer, store: store)
+        let n = journal.recordTombstone(transferId: "abc123", itemIdentifiers: ["abc123", "abc123:0"])
+        let enumerator = workingSetEnumerator()
         let observer = RecordingChangeObserver()
-        let anchor = NSFileProviderSyncAnchor(Data("v1".utf8))
 
-        enumerator.enumerateChanges(for: observer, from: anchor)
+        enumerator.enumerateChanges(for: observer, from: DuoEnumerator.encodeAnchor(n - 1))
 
-        XCTAssertEqual(observer.finishedAnchor, anchor)
-        XCTAssertFalse(observer.moreComing)
-        XCTAssertTrue(observer.updatedItems.isEmpty)
-        XCTAssertTrue(observer.deletedIdentifiers.isEmpty)
+        XCTAssertNil(observer.finishError)
+        XCTAssertEqual(Set(observer.deletedIdentifiers.map(\.rawValue)), ["abc123", "abc123:0"])
+        XCTAssertGreaterThanOrEqual(DuoEnumerator.decodeAnchor(try XCTUnwrap(observer.finishedAnchor)) ?? 0, n)
+    }
+
+    /// R6: the legacy static "v1" anchor no longer decodes as a revision, so the
+    /// provider reports SyncAnchorExpired (-1002) and the system does one clean
+    /// full resync.
+    func testEnumerateChangesLegacyV1AnchorExpires() throws {
+        let enumerator = workingSetEnumerator()
+        let observer = RecordingChangeObserver()
+
+        enumerator.enumerateChanges(for: observer, from: NSFileProviderSyncAnchor(Data("v1".utf8)))
+
+        let nsError = try XCTUnwrap(observer.finishError as NSError?)
+        XCTAssertEqual(nsError.domain, NSFileProviderErrorDomain)
+        XCTAssertEqual(nsError.code, NSFileProviderError.syncAnchorExpired.rawValue)
+        XCTAssertNil(observer.finishedAnchor)
+    }
+
+    /// R4: after a store/journal restart the tombstone deletion is still
+    /// replayable from the persisted journal.
+    func testEnumerateChangesReplaysTombstoneAfterRestart() throws {
+        try publishNestedGeneration()
+        let n = journal.recordTombstone(transferId: "abc123", itemIdentifiers: ["abc123:0"])
+
+        let restartedStore = ReplicaStore(baseDirectory: tmpDir)
+        let restartedJournal = ChangeJournal(baseDirectory: tmpDir)
+        let enumerator = DuoEnumerator(enumeratedItemIdentifier: .workingSet, store: restartedStore, journal: restartedJournal)
+        let observer = RecordingChangeObserver()
+
+        enumerator.enumerateChanges(for: observer, from: DuoEnumerator.encodeAnchor(n - 1))
+
+        XCTAssertEqual(observer.deletedIdentifiers.map(\.rawValue), ["abc123:0"])
+    }
+
+    func testEnumerateChangesNotesObservedHighWaterMark() throws {
+        _ = journal.append(kind: .update, itemIdentifiers: ["abc123"])
+        let enumerator = workingSetEnumerator()
+        enumerator.enumerateChanges(for: RecordingChangeObserver(), from: DuoEnumerator.encodeAnchor(1))
+        XCTAssertEqual(journal.observedRevision(), 1)
+    }
+
+    // MARK: - Working-set LIST = ACTIVE + RETIRED, TOMBSTONED excluded
+
+    func testWorkingSetListsActiveAndRetiredButNotTombstoned() throws {
+        try publishNestedGeneration(transferId: "active1")
+        try publishNestedGeneration(transferId: "retired1")
+        try store.retire("retired1")
+        try publishNestedGeneration(transferId: "tomb1")
+        try store.retire("tomb1")
+        _ = journal.recordTombstone(transferId: "tomb1", itemIdentifiers: ["tomb1", "tomb1:0", "tomb1:1", "tomb1:2"])
+
+        let observer = enumerate(.workingSet)
+
+        let ids = Set(observer.enumeratedItems.map(\.itemIdentifier.rawValue))
+        XCTAssertTrue(ids.contains("active1"), "active generation container is namespace-live")
+        XCTAssertTrue(ids.contains("retired1"), "retired generation stays in the working set")
+        XCTAssertFalse(ids.contains("tomb1"), "tombstoned generation must be excluded from the LIST")
+        XCTAssertFalse(ids.contains(where: { $0.hasPrefix("tomb1:") }))
     }
 
     // MARK: - FileProviderExtension wiring: item(for:) on a leaf
@@ -232,6 +308,32 @@ final class EnumeratorTests: XCTestCase {
         let item = try XCTUnwrap(resultItem)
         XCTAssertEqual(item.itemIdentifier.rawValue, "abc123:2")
         XCTAssertEqual(item.filename, "nested.txt")
+    }
+
+    /// TOMBSTONED direct-request semantics (reconciliation race): even after a
+    /// generation is tombstoned (a durable delete change in the journal), a
+    /// direct item(for:) still resolves while the backing record exists.
+    /// Deletion reaches the daemon through working-set change enumeration, never
+    /// by failing a direct request - that is what keeps the -1005 -> -36 race
+    /// from ever returning.
+    func testTombstonedGenerationStillResolvesByDirectItemRequest() throws {
+        try publishNestedGeneration()
+        try store.retire("abc123")
+        _ = journal.recordTombstone(transferId: "abc123", itemIdentifiers: ["abc123", "abc123:0", "abc123:1", "abc123:2"])
+        let ext = makeExtension()
+
+        let done = expectation(description: "item(for:) completes")
+        var resultItem: NSFileProviderItem?
+        var resultError: Error?
+        _ = ext.item(for: NSFileProviderItemIdentifier("abc123:2"), request: NSFileProviderRequest()) { item, error in
+            resultItem = item
+            resultError = error
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 5)
+
+        XCTAssertNil(resultError)
+        XCTAssertEqual(try XCTUnwrap(resultItem).itemIdentifier.rawValue, "abc123:2")
     }
 
     func testItemForUnknownIdentifierReturnsNoSuchItemError() throws {

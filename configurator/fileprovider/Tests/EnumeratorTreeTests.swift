@@ -32,17 +32,20 @@ private final class TreeRecordingEnumerationObserver: NSObject, NSFileProviderEn
 final class EnumeratorTreeTests: XCTestCase {
     private var tmpDir: URL!
     private var store: ReplicaStore!
+    private var journal: ChangeJournal!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("EnumeratorTreeTests-\(UUID().uuidString)", isDirectory: true)
         store = ReplicaStore(baseDirectory: tmpDir)
+        journal = ChangeJournal(baseDirectory: tmpDir)
     }
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: tmpDir)
         store = nil
+        journal = nil
         tmpDir = nil
         try super.tearDownWithError()
     }
@@ -67,7 +70,7 @@ final class EnumeratorTreeTests: XCTestCase {
     }
 
     private func enumerate(_ identifier: NSFileProviderItemIdentifier) -> TreeRecordingEnumerationObserver {
-        let enumerator = DuoEnumerator(enumeratedItemIdentifier: identifier, store: store)
+        let enumerator = DuoEnumerator(enumeratedItemIdentifier: identifier, store: store, journal: journal)
         let observer = TreeRecordingEnumerationObserver()
         enumerator.enumerateItems(for: observer, startingAt: NSFileProviderPage(Data()))
         return observer

@@ -13,6 +13,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     private let domain: NSFileProviderDomain
     private let manager: NSFileProviderManager?
     private let replicaStore: ReplicaStore
+    /// Durable namespace-change log, co-located with the replica store. Drives
+    /// the working-set sync anchor and deletion reconciliation.
+    private let changeJournal: ChangeJournal
     /// Strong reference: the service source owns the anonymous listener.
     private let serviceSource: DuoServiceSource
     private let fetchController: FetchController
@@ -36,6 +39,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         let manager = NSFileProviderManager(for: domain)
         self.manager = manager
         self.replicaStore = replicaStore
+        self.changeJournal = ChangeJournal(baseDirectory: replicaStore.baseDirectory)
         let source = DuoServiceSource(store: replicaStore)
         self.serviceSource = source
         // The URL handed to fetchContents's completion MUST live on the same
@@ -143,7 +147,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         for containerItemIdentifier: NSFileProviderItemIdentifier,
         request: NSFileProviderRequest
     ) throws -> NSFileProviderEnumerator {
-        return DuoEnumerator(enumeratedItemIdentifier: containerItemIdentifier, store: replicaStore)
+        return DuoEnumerator(enumeratedItemIdentifier: containerItemIdentifier, store: replicaStore, journal: changeJournal)
     }
 
     // MARK: - Mutating operations: read-only backend, all unsupported.
