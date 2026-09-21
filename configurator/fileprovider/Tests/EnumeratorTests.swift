@@ -208,6 +208,32 @@ final class EnumeratorTests: XCTestCase {
         XCTAssertEqual(item.parentItemIdentifier.rawValue, "abc123:1")
     }
 
+    /// Generation-lifetime fix (T1): a RETIRED generation is still resolvable
+    /// by itemIdentifier - `item(for:)` must return the item, not noSuchItem.
+    /// Retire only hides it from the root LIST; namespace deletion is a
+    /// separate lifecycle. Mirrors the Python side, which serves retired
+    /// generations (`_open_fetch`).
+    func testItemForRetiredGenerationStillResolves() throws {
+        try publishNestedGeneration()
+        try store.retire("abc123")
+        let ext = makeExtension()
+
+        let expectation = expectation(description: "item(for:) completes")
+        var resultItem: NSFileProviderItem?
+        var resultError: Error?
+        _ = ext.item(for: NSFileProviderItemIdentifier("abc123:2"), request: NSFileProviderRequest()) { item, error in
+            resultItem = item
+            resultError = error
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 5)
+
+        XCTAssertNil(resultError)
+        let item = try XCTUnwrap(resultItem)
+        XCTAssertEqual(item.itemIdentifier.rawValue, "abc123:2")
+        XCTAssertEqual(item.filename, "nested.txt")
+    }
+
     func testItemForUnknownIdentifierReturnsNoSuchItemError() throws {
         let ext = makeExtension()
 

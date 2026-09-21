@@ -256,11 +256,19 @@ final class FetchControllerTests: XCTestCase {
         }
         wait(for: [done], timeout: 3)
         XCTAssertEqual(connections, 1)
+        // Generation-lifetime fix (T1): a RETIRED generation stays servable by
+        // itemIdentifier - namespace deletion is a separate lifecycle. So a
+        // fetch after retire must still REACH the host (connections == 2) and
+        // deliver bytes, NOT fail with noSuchItem before the host is contacted.
+        host.chunks = [(Data("ab".utf8), false, nil), (Data("c".utf8), true, nil)]
         try store.retire("generation")
+        let retiredDone = expectation(description: "retired fetch reaches host")
         _ = provider.fetchContents(for: NSFileProviderItemIdentifier("generation:0"), version: nil, request: NSFileProviderRequest()) { url, _, error in
-            XCTAssertNil(url)
-            XCTAssertNotNil(error)
+            XCTAssertNil(error)
+            XCTAssertEqual(try? Data(contentsOf: XCTUnwrap(url)), Data("abc".utf8))
+            retiredDone.fulfill()
         }
-        XCTAssertEqual(connections, 1)
+        wait(for: [retiredDone], timeout: 3)
+        XCTAssertEqual(connections, 2)
     }
 }

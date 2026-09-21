@@ -82,8 +82,14 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             return Progress()
         }
 
+        // Resolve on record EXISTENCE, not on `isActive`. A retired (and, later,
+        // tombstoned) generation stays resolvable by itemIdentifier - the record
+        // is still durable, so serving it is strictly safer than a spurious
+        // noSuchItem (-1005) that the daemon turns into Finder -36. Namespace
+        // deletion is propagated through the working-set change channel, never by
+        // failing a direct request. The ONLY -1005 is a genuinely absent record.
         guard let parsed = DuoItemModel.parse(identifier),
-              let record = replicaStore.record(for: parsed.transferId), record.isActive else {
+              let record = replicaStore.record(for: parsed.transferId) else {
             completionHandler(nil, noSuchItem)
             return Progress()
         }
@@ -106,8 +112,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         request: NSFileProviderRequest,
         completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
     ) -> Progress {
+        // Resolve on record EXISTENCE, not `isActive` (see item(for:)): a
+        // retired/tombstoned generation stays fetchable by itemIdentifier while
+        // its durable record exists. The only noSuchItem is a genuinely absent
+        // record.
         guard let parsed = DuoItemModel.parse(itemIdentifier), let index = parsed.index,
-              let record = replicaStore.record(for: parsed.transferId), record.isActive,
+              let record = replicaStore.record(for: parsed.transferId),
               let item = DuoItemFactory.item(for: record, index: index), item.documentSize != nil,
               requestedVersion == nil || requestedVersion == item.itemVersion else {
             completionHandler(nil, nil, NSError(domain: NSFileProviderErrorDomain, code: NSFileProviderError.noSuchItem.rawValue))
