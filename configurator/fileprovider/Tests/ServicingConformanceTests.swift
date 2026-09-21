@@ -21,7 +21,7 @@ final class ServicingConformanceTests: XCTestCase {
     func testServiceSourceVendsAnonymousEndpoint() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let endpoint = try DuoServiceSource(store: ReplicaStore(baseDirectory: directory)).makeListenerEndpoint()
+        let endpoint = try DuoServiceSource(store: ReplicaStore(baseDirectory: directory), journal: ChangeJournal(baseDirectory: directory)).makeListenerEndpoint()
         XCTAssertNotNil(endpoint)
     }
 }

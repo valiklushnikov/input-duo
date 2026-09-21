@@ -66,6 +66,19 @@ enum DuoItemModel {
         NSFileProviderItemIdentifier(transferId)
     }
 
+    /// Every File Provider identifier a generation contributes to the namespace:
+    /// its container plus one per manifest entry. This is exactly the set the
+    /// change journal records on publish (`update`) and on tombstone (`delete`),
+    /// so the daemon learns about every item the generation ever exposed.
+    static func namespaceIdentifiers(of record: GenerationRecord) -> [String] {
+        var ids = [containerIdentifier(transferId: record.transferId).rawValue]
+        let entries = entries(in: record)
+        for index in entries.indices {
+            ids.append(entryIdentifier(transferId: record.transferId, index: index).rawValue)
+        }
+        return ids
+    }
+
     /// Parses `"<transfer_id>:<index>"` (entry) or `"<transfer_id>"`
     /// (generation container) back into its parts. Returns `nil` only for
     /// malformed identifiers (non-numeric suffix) - `.rootContainer` is

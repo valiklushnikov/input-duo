@@ -16,7 +16,7 @@ final class ServiceSourceTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = ReplicaStore(baseDirectory: directory.appendingPathComponent("replica"))
-        let source = DuoServiceSource(store: store, peerVerifier: { _ in true })
+        let source = DuoServiceSource(store: store, journal: ChangeJournal(baseDirectory: store.baseDirectory), peerVerifier: { _ in true })
         defer { source.invalidate() }
         let connection = NSXPCConnection(listenerEndpoint: try source.makeListenerEndpoint())
         connection.exportedInterface = DuoXPC.hostCallbackInterface()
@@ -60,7 +60,7 @@ final class ServiceSourceTests: XCTestCase {
         let connection = NSXPCConnection(listenerEndpoint: listener.endpoint)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let source = DuoServiceSource(store: ReplicaStore(baseDirectory: directory), peerVerifier: { _ in false })
+        let source = DuoServiceSource(store: ReplicaStore(baseDirectory: directory), journal: ChangeJournal(baseDirectory: directory), peerVerifier: { _ in false })
         XCTAssertFalse(source.listener(listener, shouldAcceptNewConnection: connection))
         XCTAssertNil(connection.exportedObject)
     }
@@ -69,7 +69,7 @@ final class ServiceSourceTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = ReplicaStore(baseDirectory: directory)
-        let source = DuoServiceSource(store: store, peerVerifier: { _ in true })
+        let source = DuoServiceSource(store: store, journal: ChangeJournal(baseDirectory: store.baseDirectory), peerVerifier: { _ in true })
         let listener = NSXPCListener.anonymous()
         let connection = NSXPCConnection(listenerEndpoint: listener.endpoint)
         XCTAssertTrue(source.listener(listener, shouldAcceptNewConnection: connection))

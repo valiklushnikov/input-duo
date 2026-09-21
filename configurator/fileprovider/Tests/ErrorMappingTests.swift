@@ -174,7 +174,8 @@ final class ErrorMappingTests: XCTestCase {
                 [.posixPermissions: 0o700], ofItemAtPath: store.generationsDir.path
             )
         }
-        let service = DuoExtensionControlService(store: store)
+        let journal = ChangeJournal(baseDirectory: store.baseDirectory)
+        let service = DuoExtensionControlService(store: store, journal: journal)
         let record = try goldenFixtureData()
 
         var replyAck: Bool?

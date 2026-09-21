@@ -10,17 +10,20 @@ import XCTest
 final class ReplicaStoreTests: XCTestCase {
     private var tmpDir: URL!
     private var store: ReplicaStore!
+    private var journal: ChangeJournal!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("ReplicaStoreTests-\(UUID().uuidString)", isDirectory: true)
         store = ReplicaStore(baseDirectory: tmpDir)
+        journal = ChangeJournal(baseDirectory: tmpDir)
     }
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: tmpDir)
         store = nil
+        journal = nil
         tmpDir = nil
         try super.tearDownWithError()
     }
@@ -185,7 +188,7 @@ final class ReplicaStoreTests: XCTestCase {
     // MARK: - DuoExtensionControlService: ACK strictly after durable write
 
     func testPublishGenerationAcksTrueOnlyAfterDurableWrite() throws {
-        let service = DuoExtensionControlService(store: store)
+        let service = DuoExtensionControlService(store: store, journal: journal)
         let liveURL = tmpDir.appendingPathComponent("generations/abc123.json")
         var observedDurableBeforeAck = false
         var ack = false
@@ -207,7 +210,7 @@ final class ReplicaStoreTests: XCTestCase {
     }
 
     func testPublishGenerationOnInvalidRecordAcksFalseAndWritesNothing() throws {
-        let service = DuoExtensionControlService(store: store)
+        let service = DuoExtensionControlService(store: store, journal: journal)
         var ack = true
         var replyError: Error?
 
@@ -224,7 +227,7 @@ final class ReplicaStoreTests: XCTestCase {
 
     func testRetireGenerationAcksTrueOnlyAfterDurableRewrite() throws {
         try store.publish(recordJSON: try goldenFixtureData())
-        let service = DuoExtensionControlService(store: store)
+        let service = DuoExtensionControlService(store: store, journal: journal)
         let liveURL = tmpDir.appendingPathComponent("generations/abc123.json")
         var observedRetiredBeforeAck = false
         var ack = false
@@ -241,24 +244,33 @@ final class ReplicaStoreTests: XCTestCase {
         XCTAssertTrue(ack)
     }
 
-    func testDeleteGenerationAcksTrueOnlyAfterRemoval() throws {
+    /// R5 (T5): deleteGeneration TOMBSTONES rather than physically deleting.
+    /// PHYSICAL_REPLICA_DELETE = DISABLED this phase, so the backing record STILL
+    /// EXISTS after the op; the deletion is durably recorded in the journal
+    /// (tombstone marker + delete change) to be reconciled through the working
+    /// set. This is intentional - dropping the record would let a live daemon
+    /// item identity outlive its metadata and re-introduce -1005 -> Finder -36.
+    func testDeleteGenerationTombstonesButKeepsRecord() throws {
         try store.publish(recordJSON: try goldenFixtureData())
-        let service = DuoExtensionControlService(store: store)
+        let service = DuoExtensionControlService(store: store, journal: journal)
         let liveURL = tmpDir.appendingPathComponent("generations/abc123.json")
-        var observedRemovedBeforeAck = false
         var ack = false
+        var recordDurableAtAck = false
 
         service.deleteGeneration("abc123") { gotAck, _ in
-            observedRemovedBeforeAck = !FileManager.default.fileExists(atPath: liveURL.path)
+            recordDurableAtAck = FileManager.default.fileExists(atPath: liveURL.path)
             ack = gotAck
         }
 
-        XCTAssertTrue(observedRemovedBeforeAck)
         XCTAssertTrue(ack)
+        XCTAssertTrue(recordDurableAtAck, "record must NOT be physically removed - tombstone only")
+        XCTAssertNotNil(store.record(for: "abc123"), "R5: backing metadata is kept indefinitely this phase")
+        XCTAssertTrue(journal.tombstonedTransferIds().contains("abc123"))
+        XCTAssertEqual(journal.changes(after: 0).map(\.kind), [.delete])
     }
 
     func testRetireGenerationOnMissingIdAcksFalseWithSourceMissingCode() throws {
-        let service = DuoExtensionControlService(store: store)
+        let service = DuoExtensionControlService(store: store, journal: journal)
         var ack = true
         var replyError: Error?
 

@@ -95,9 +95,11 @@ final class ReplicaStore {
     /// overwriting any existing record for that id. Returns only after the
     /// durable write (see type doc) completes; throws on any failure and
     /// never leaves a torn file at the live path.
-    func publish(recordJSON: Data) throws {
+    @discardableResult
+    func publish(recordJSON: Data) throws -> GenerationRecord {
         let (_, record) = try parseRecord(recordJSON)
         try durableWrite(recordJSON, transferId: record.transferId)
+        return record
     }
 
     /// Rewrites the SAME record with `state="retired"`. The record is KEPT -

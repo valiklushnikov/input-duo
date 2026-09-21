@@ -39,8 +39,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         let manager = NSFileProviderManager(for: domain)
         self.manager = manager
         self.replicaStore = replicaStore
-        self.changeJournal = ChangeJournal(baseDirectory: replicaStore.baseDirectory)
-        let source = DuoServiceSource(store: replicaStore)
+        let journal = ChangeJournal(baseDirectory: replicaStore.baseDirectory)
+        self.changeJournal = journal
+        // The control path signals the enumerators after each durable namespace
+        // change; nil in tests / when no manager is available (no-op signalling).
+        let signal = manager.map { ManagerEnumerationSignal(manager: $0) }
+        let source = DuoServiceSource(store: replicaStore, journal: journal, signal: signal)
         self.serviceSource = source
         // The URL handed to fetchContents's completion MUST live on the same
         // volume as the manager's temporaryDirectoryURL(), so the system can

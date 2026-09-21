@@ -1,36 +1,62 @@
 import Foundation
+import FileProvider
 
-/// Wraps a `ReplicaStore` and implements the `DuoExtensionControl` XPC
-/// contract (`DuoFPProto.h`) - the object the host's `publishGeneration:` /
-/// `retireGeneration:` / `deleteGeneration:` calls eventually reach.
+/// Signals the File Provider system to pull namespace changes. Injected so the
+/// control service is unit-testable without a live `NSFileProviderManager`.
+/// A successful signal is NOT a deletion acknowledgement - it only asks the
+/// system to enumerate changes; whether/when it applies them is observed later
+/// through `enumerateChanges` (see the design doc).
+protocol EnumerationSignaling: AnyObject {
+    func signalEnumerator(for container: NSFileProviderItemIdentifier)
+}
+
+/// Production adapter over `NSFileProviderManager.signalEnumerator(for:)`.
+final class ManagerEnumerationSignal: EnumerationSignaling {
+    private let manager: NSFileProviderManager
+    init(manager: NSFileProviderManager) { self.manager = manager }
+    func signalEnumerator(for container: NSFileProviderItemIdentifier) {
+        manager.signalEnumerator(for: container) { _ in }
+    }
+}
+
+/// Wraps a `ReplicaStore` + `ChangeJournal` and implements the
+/// `DuoExtensionControl` XPC contract (`DuoFPProto.h`) - the object the host's
+/// `publishGeneration:` / `retireGeneration:` / `deleteGeneration:` calls reach.
 ///
-/// Kept separate from `FileProviderExtension` (which conforms to the
-/// unrelated `NSFileProviderReplicatedExtension`/`NSFileProviderServicing`
-/// protocols) so the two protocol surfaces never entangle. Wiring this object
-/// into a live `NSXPCConnection.exportedObject` is Task 7's job; here it is
-/// unit-tested directly against a `ReplicaStore`.
+/// Kept separate from `FileProviderExtension` (the unrelated
+/// `NSFileProviderReplicatedExtension`/`NSFileProviderServicing` surface) so the
+/// two protocol surfaces never entangle.
 ///
-/// ## ACK-ordering guarantee
-/// Every method calls the corresponding `ReplicaStore` operation
-/// synchronously and calls `reply` exactly once, strictly after that call
-/// returns: `reply(true, nil)` only on the non-throwing path (i.e. only
-/// after the durable write/rewrite/removal has completed), `reply(false,
-/// error)` on any thrown error. `reply(true, ...)` is never reachable from a
-/// catch block, and the store's own durability guarantee (see
-/// `ReplicaStore` doc) means "returned without throwing" and "durably
-/// persisted" are the same event.
+/// ## ACK-ordering + durable-before-signal guarantee
+/// Every method performs its durable writes FIRST (record write, then the
+/// journal change/tombstone), replies exactly once strictly after those writes
+/// succeed, and only THEN signals the enumerators. If any durable write throws,
+/// the reply is `(false, error)` and NO signal is emitted - File Provider is
+/// never told about a change that did not reach stable storage. `reply(true,
+/// ...)` is unreachable from a catch block.
+///
+/// `deleteGeneration` TOMBSTONES rather than physically deleting the backing
+/// record: this phase keeps generation metadata durable indefinitely
+/// (PHYSICAL_REPLICA_DELETE = DISABLED). The deletion is carried to the daemon
+/// through the working-set change journal.
 final class DuoExtensionControlService: NSObject, DuoExtensionControl {
     private let store: ReplicaStore
+    private let journal: ChangeJournal
+    private let signal: EnumerationSignaling?
 
-    init(store: ReplicaStore) {
+    init(store: ReplicaStore, journal: ChangeJournal, signal: EnumerationSignaling? = nil) {
         self.store = store
+        self.journal = journal
+        self.signal = signal
         super.init()
     }
 
     func publishGeneration(_ recordJSON: Data, reply: @escaping (Bool, Error?) -> Void) {
         do {
-            try store.publish(recordJSON: recordJSON)
+            let record = try store.publish(recordJSON: recordJSON)
+            try journal.append(kind: .update, itemIdentifiers: DuoItemModel.namespaceIdentifiers(of: record))
             reply(true, nil)
+            signalWorkingSetAndRoot()
         } catch {
             reply(false, Self.mapError(error))
         }
@@ -40,6 +66,10 @@ final class DuoExtensionControlService: NSObject, DuoExtensionControl {
         do {
             try store.retire(generationId)
             reply(true, nil)
+            // Retire only removes the generation from the root LIST; it stays in
+            // the working-set LIST (ACTIVE and RETIRED both live there), so only
+            // the root enumerator is signalled and the journal is untouched.
+            signal?.signalEnumerator(for: .rootContainer)
         } catch {
             reply(false, Self.mapError(error))
         }
@@ -47,28 +77,35 @@ final class DuoExtensionControlService: NSObject, DuoExtensionControl {
 
     func deleteGeneration(_ generationId: String, reply: @escaping (Bool, Error?) -> Void) {
         do {
-            try store.delete(generationId)
+            guard let record = store.record(for: generationId) else {
+                throw ReplicaStoreError.notFound(generationId)
+            }
+            // Tombstone: durable delete-changes + marker. The backing record is
+            // intentionally KEPT (PHYSICAL_REPLICA_DELETE = DISABLED).
+            try journal.recordTombstone(
+                transferId: generationId,
+                itemIdentifiers: DuoItemModel.namespaceIdentifiers(of: record)
+            )
             reply(true, nil)
+            signalWorkingSetAndRoot()
         } catch {
             reply(false, Self.mapError(error))
         }
     }
 
-    /// Maps a `ReplicaStoreError` onto the shared `DuoFPErrorDomain` (see
-    /// `Shared/DuoFPErrors.h`) using existing codes only - no new codes are
-    /// introduced here. `.invalidRecord` (a bad/unparseable record) maps to
-    /// `DuoFPErrorProtocol` (7); `.notFound` (retire/delete of an id with no
-    /// replica) maps to `DuoFPErrorSourceMissing` (1), since the thing that's
-    /// missing is precisely the durable source record; `.io` (create/write/
-    /// fsync/rename failure - see `ReplicaStore.durableWrite`/`delete`) maps
-    /// to `DuoFPErrorDiskFull` (6) - task-14 brief ruling #3(b) fixes this
-    /// from the `DuoFPErrorProtocol` (7) fallback it used to fall through to:
-    /// a durable-write failure on this store is overwhelmingly a full disk in
-    /// the extension's own container, not a protocol violation, and Python's
-    /// receiving end (`_xpc_error`) has a specific, more useful code for
-    /// exactly that. The numeric codes are referenced directly (not through
-    /// the Swift-bridged `DuoFPError` enum case names) to avoid depending on
-    /// NS_ERROR_ENUM's exact Swift import shape.
+    /// Durable journal write already happened before this is called; a signal is
+    /// only a request to enumerate, never a deletion ACK.
+    private func signalWorkingSetAndRoot() {
+        signal?.signalEnumerator(for: .workingSet)
+        signal?.signalEnumerator(for: .rootContainer)
+    }
+
+    /// Maps a `ReplicaStoreError`/`ChangeJournalError` onto the shared
+    /// `DuoFPErrorDomain` (see `Shared/DuoFPErrors.h`) using existing codes only.
+    /// `.invalidRecord` -> `DuoFPErrorProtocol` (7); `.notFound` ->
+    /// `DuoFPErrorSourceMissing` (1); `.io` (replica or journal durable-write
+    /// failure) -> `DuoFPErrorDiskFull` (6). Numeric codes are referenced
+    /// directly to avoid depending on NS_ERROR_ENUM's Swift import shape.
     private static func mapError(_ error: Error) -> NSError {
         if let nsError = error as NSError?, nsError.domain == DuoFPErrorDomain {
             return nsError
@@ -77,7 +114,7 @@ final class DuoExtensionControlService: NSObject, DuoExtensionControl {
         switch error {
         case ReplicaStoreError.notFound:
             code = 1 // DuoFPErrorSourceMissing
-        case ReplicaStoreError.io:
+        case ReplicaStoreError.io, ChangeJournalError.io:
             code = 6 // DuoFPErrorDiskFull
         default:
             code = 7 // DuoFPErrorProtocol

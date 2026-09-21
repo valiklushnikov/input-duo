@@ -38,8 +38,9 @@ final class DuoServiceSource: NSObject, NSFileProviderServiceSource, NSXPCListen
     private var listener: NSXPCListener?
     private var connection: NSXPCConnection?
 
-    init(store: ReplicaStore, peerVerifier: @escaping (NSXPCConnection) -> Bool = DuoPeerVerifier.verify) {
-        control = DuoExtensionControlService(store: store)
+    init(store: ReplicaStore, journal: ChangeJournal, signal: EnumerationSignaling? = nil,
+         peerVerifier: @escaping (NSXPCConnection) -> Bool = DuoPeerVerifier.verify) {
+        control = DuoExtensionControlService(store: store, journal: journal, signal: signal)
         self.peerVerifier = peerVerifier
         super.init()
     }

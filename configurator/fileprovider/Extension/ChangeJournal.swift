@@ -13,6 +13,10 @@ struct JournalChange: Equatable {
     let itemIdentifiers: [String]
 }
 
+enum ChangeJournalError: Error, Equatable {
+    case io(String)
+}
+
 /// Extension-private, durable, monotonic change log backing the working-set
 /// sync anchor and namespace-deletion reconciliation (design:
 /// 2026-09-21-fileprovider-generation-lifetime-tombstone-design.md).
@@ -75,13 +79,18 @@ final class ChangeJournal {
     /// file is written and fsync'd before the head is advanced, so a crash
     /// between the two leaves a persisted change the next head simply re-covers
     /// on the following append (the head is the authority for "latest").
+    ///
+    /// Throws `ChangeJournalError.io` if either durable write fails - the caller
+    /// (control path) must treat that as a failed operation and NOT signal the
+    /// enumerators, so File Provider is never told about a change that did not
+    /// reach stable storage.
     @discardableResult
-    func append(kind: JournalChange.Kind, itemIdentifiers: [String]) -> UInt64 {
+    func append(kind: JournalChange.Kind, itemIdentifiers: [String]) throws -> UInt64 {
         lock.lock(); defer { lock.unlock() }
         let next = readRevision(headURL) + 1
         let change = JournalChange(revision: next, kind: kind, itemIdentifiers: itemIdentifiers)
-        writeChange(change)
-        writeRevision(next, to: headURL)
+        try writeChange(change)
+        try writeRevision(next, to: headURL)
         return next
     }
 
@@ -93,16 +102,15 @@ final class ChangeJournal {
     /// which revision, independent of the (still-kept) generation record - this
     /// phase never physically deletes the backing metadata.
     @discardableResult
-    func recordTombstone(transferId: String, itemIdentifiers: [String]) -> UInt64 {
-        let revision = append(kind: .delete, itemIdentifiers: itemIdentifiers)
+    func recordTombstone(transferId: String, itemIdentifiers: [String]) throws -> UInt64 {
+        let revision = try append(kind: .delete, itemIdentifiers: itemIdentifiers)
         let marker: [String: Any] = [
             "transfer_id": transferId,
             "tombstone_revision": revision,
             "item_identifiers": itemIdentifiers,
         ]
-        if let data = try? JSONSerialization.data(withJSONObject: marker, options: [.sortedKeys]) {
-            durableWrite(data, to: tombstonesDir.appendingPathComponent("\(safeName(transferId)).json"))
-        }
+        let data = try JSONSerialization.data(withJSONObject: marker, options: [.sortedKeys])
+        try durableWrite(data, to: tombstonesDir.appendingPathComponent("\(safeName(transferId)).json"))
         return revision
     }
 
@@ -151,7 +159,8 @@ final class ChangeJournal {
     func noteObserved(_ revision: UInt64) {
         lock.lock(); defer { lock.unlock() }
         guard revision > readRevision(observedURL) else { return }
-        writeRevision(revision, to: observedURL)
+        // Telemetry only - a failed write is not worth failing an enumeration.
+        try? writeRevision(revision, to: observedURL)
     }
 
     // MARK: - Internals
@@ -168,14 +177,14 @@ final class ChangeJournal {
         changesDir.appendingPathComponent(String(format: "%020llu.json", revision))
     }
 
-    private func writeChange(_ change: JournalChange) {
+    private func writeChange(_ change: JournalChange) throws {
         let obj: [String: Any] = [
             "revision": change.revision,
             "kind": change.kind.rawValue,
             "item_identifiers": change.itemIdentifiers,
         ]
-        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else { return }
-        durableWrite(data, to: changeURL(for: change.revision))
+        let data = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
+        try durableWrite(data, to: changeURL(for: change.revision))
     }
 
     private func readChange(_ url: URL) -> JournalChange? {
@@ -195,24 +204,26 @@ final class ChangeJournal {
         return revision
     }
 
-    private func writeRevision(_ revision: UInt64, to url: URL) {
-        guard let data = try? JSONSerialization.data(
+    private func writeRevision(_ revision: UInt64, to url: URL) throws {
+        let data = try JSONSerialization.data(
             withJSONObject: ["revision": revision], options: [.sortedKeys]
-        ) else { return }
-        durableWrite(data, to: url)
+        )
+        try durableWrite(data, to: url)
     }
 
     /// Atomic temp-file-then-`rename(2)`, fsync'd before the rename and the
     /// directory fsync'd after - the same guarantee documented on
-    /// `ReplicaStore.durableWrite`.
-    private func durableWrite(_ data: Data, to finalURL: URL) {
+    /// `ReplicaStore.durableWrite`. Throws `ChangeJournalError.io` on any
+    /// failure so the caller never advances the namespace on a write that did
+    /// not reach stable storage.
+    private func durableWrite(_ data: Data, to finalURL: URL) throws {
         let dir = finalURL.deletingLastPathComponent()
         try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
         let tmpURL = dir.appendingPathComponent(".tmp-\(UUID().uuidString)")
         guard fileManager.createFile(atPath: tmpURL.path, contents: nil),
               let handle = try? FileHandle(forWritingTo: tmpURL) else {
             try? fileManager.removeItem(at: tmpURL)
-            return
+            throw ChangeJournalError.io("не удалось создать временный файл журнала")
         }
         do {
             try handle.write(contentsOf: data)
@@ -221,14 +232,15 @@ final class ChangeJournal {
         } catch {
             try? handle.close()
             try? fileManager.removeItem(at: tmpURL)
-            return
+            throw ChangeJournalError.io("не удалось записать/сбросить журнал: \(error)")
         }
         let renamed = tmpURL.path.withCString { t in
             finalURL.path.withCString { f in rename(t, f) }
         }
         if renamed != 0 {
+            let savedErrno = errno
             try? fileManager.removeItem(at: tmpURL)
-            return
+            throw ChangeJournalError.io("rename журнала не удался: \(String(cString: strerror(savedErrno)))")
         }
         fsyncDirectory(dir)
     }

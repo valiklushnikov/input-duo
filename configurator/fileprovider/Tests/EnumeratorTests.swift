@@ -174,7 +174,7 @@ final class EnumeratorTests: XCTestCase {
     }
 
     func testCurrentSyncAnchorReflectsJournalHead() throws {
-        _ = journal.append(kind: .update, itemIdentifiers: ["abc123"])
+        _ = try journal.append(kind: .update, itemIdentifiers: ["abc123"])
         let enumerator = workingSetEnumerator()
         var reported: NSFileProviderSyncAnchor?
         enumerator.currentSyncAnchor { reported = $0 }
@@ -187,7 +187,7 @@ final class EnumeratorTests: XCTestCase {
     /// revision.
     func testEnumerateChangesReplaysTombstoneDeletes() throws {
         try publishNestedGeneration()
-        let n = journal.recordTombstone(transferId: "abc123", itemIdentifiers: ["abc123", "abc123:0"])
+        let n = try journal.recordTombstone(transferId: "abc123", itemIdentifiers: ["abc123", "abc123:0"])
         let enumerator = workingSetEnumerator()
         let observer = RecordingChangeObserver()
 
@@ -217,7 +217,7 @@ final class EnumeratorTests: XCTestCase {
     /// replayable from the persisted journal.
     func testEnumerateChangesReplaysTombstoneAfterRestart() throws {
         try publishNestedGeneration()
-        let n = journal.recordTombstone(transferId: "abc123", itemIdentifiers: ["abc123:0"])
+        let n = try journal.recordTombstone(transferId: "abc123", itemIdentifiers: ["abc123:0"])
 
         let restartedStore = ReplicaStore(baseDirectory: tmpDir)
         let restartedJournal = ChangeJournal(baseDirectory: tmpDir)
@@ -230,7 +230,7 @@ final class EnumeratorTests: XCTestCase {
     }
 
     func testEnumerateChangesNotesObservedHighWaterMark() throws {
-        _ = journal.append(kind: .update, itemIdentifiers: ["abc123"])
+        _ = try journal.append(kind: .update, itemIdentifiers: ["abc123"])
         let enumerator = workingSetEnumerator()
         enumerator.enumerateChanges(for: RecordingChangeObserver(), from: DuoEnumerator.encodeAnchor(1))
         XCTAssertEqual(journal.observedRevision(), 1)
@@ -244,7 +244,7 @@ final class EnumeratorTests: XCTestCase {
         try store.retire("retired1")
         try publishNestedGeneration(transferId: "tomb1")
         try store.retire("tomb1")
-        _ = journal.recordTombstone(transferId: "tomb1", itemIdentifiers: ["tomb1", "tomb1:0", "tomb1:1", "tomb1:2"])
+        _ = try journal.recordTombstone(transferId: "tomb1", itemIdentifiers: ["tomb1", "tomb1:0", "tomb1:1", "tomb1:2"])
 
         let observer = enumerate(.workingSet)
 
@@ -319,7 +319,7 @@ final class EnumeratorTests: XCTestCase {
     func testTombstonedGenerationStillResolvesByDirectItemRequest() throws {
         try publishNestedGeneration()
         try store.retire("abc123")
-        _ = journal.recordTombstone(transferId: "abc123", itemIdentifiers: ["abc123", "abc123:0", "abc123:1", "abc123:2"])
+        _ = try journal.recordTombstone(transferId: "abc123", itemIdentifiers: ["abc123", "abc123:0", "abc123:1", "abc123:2"])
         let ext = makeExtension()
 
         let done = expectation(description: "item(for:) completes")
