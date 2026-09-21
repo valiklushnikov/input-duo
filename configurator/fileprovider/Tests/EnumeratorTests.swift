@@ -358,6 +358,30 @@ final class EnumeratorTests: XCTestCase {
         XCTAssertNotNil(observer.nextPage, "a large snapshot must hand back a continuation page")
     }
 
+    /// A page boundary must also bound the work needed to build that page.
+    /// Materializing every durable identity before slicing starves the same
+    /// serial FPX queue that routes `fetchServicesForItemID`, so the service
+    /// lookup cannot reach `supportedServiceSources` within its 5s deadline.
+    func testWorkingSetFirstPageDoesNotStarveServiceLookup() throws {
+        try publishGeneration(transferId: "large", fileEntries: 6_200)
+        let observer = RecordingEnumerationObserver()
+
+        let started = CFAbsoluteTimeGetCurrent()
+        workingSetEnumerator().enumerateItems(
+            for: observer,
+            startingAt: NSFileProviderPage(Data())
+        )
+        let elapsed = CFAbsoluteTimeGetCurrent() - started
+
+        XCTAssertEqual(observer.enumeratedItems.count, DuoEnumerator.workingSetPageSize)
+        XCTAssertNotNil(observer.nextPage)
+        XCTAssertLessThan(
+            elapsed,
+            2.0,
+            "one 128-item page must leave the serial FPX queue available for service routing"
+        )
+    }
+
     /// R12: the continuation token is identifier-based, so it stays correct
     /// across a store/journal restart - page 2 continues after page 1 with no
     /// overlap.

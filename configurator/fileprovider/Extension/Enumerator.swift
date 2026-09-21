@@ -28,6 +28,12 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
     private let store: ReplicaStore
     private let journal: ChangeJournal
 
+    private struct WorkingSetCandidate {
+        let identifier: String
+        let record: GenerationRecord
+        let entryIndex: Int?
+    }
+
     init(enumeratedItemIdentifier: NSFileProviderItemIdentifier, store: ReplicaStore, journal: ChangeJournal) {
         self.enumeratedItemIdentifier = enumeratedItemIdentifier
         self.store = store
@@ -107,19 +113,38 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
     /// identifier cursor in `page`. Membership is unchanged (all ACTIVE+RETIRED,
     /// excluding tombstoned); only the delivery is paginated.
     private func enumerateWorkingSetPage(for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage) {
-        let all = workingSetItems() // sorted by identifier
+        let all = workingSetCandidates() // lightweight, sorted by identifier
         let startIndex: Int
         if let cursor = DuoEnumerator.decodeWorkingSetPage(page) {
-            startIndex = all.firstIndex { $0.itemIdentifier.rawValue > cursor } ?? all.count
+            startIndex = all.firstIndex { $0.identifier > cursor } ?? all.count
         } else {
             startIndex = 0
         }
         let endIndex = min(startIndex + DuoEnumerator.workingSetPageSize, all.count)
-        let slice = startIndex < endIndex ? Array(all[startIndex..<endIndex]) : []
-        enumeratorLog.info("fp_enumerate_workingset start=\(startIndex, privacy: .public) count=\(slice.count, privacy: .public) total=\(all.count, privacy: .public)")
-        observer.didEnumerate(slice)
-        if endIndex < all.count, let last = slice.last {
-            observer.finishEnumerating(upTo: DuoEnumerator.encodeWorkingSetPage(after: last.itemIdentifier.rawValue))
+        let selected = startIndex < endIndex ? all[startIndex..<endIndex] : all[all.endIndex..<all.endIndex]
+        var decodedEntries: [String: [DuoManifestEntry]] = [:]
+        let items: [NSFileProviderItem] = selected.compactMap { candidate in
+            guard let entryIndex = candidate.entryIndex else {
+                return DuoItemFactory.containerItem(for: candidate.record)
+            }
+            let entries: [DuoManifestEntry]
+            if let cached = decodedEntries[candidate.record.transferId] {
+                entries = cached
+            } else {
+                let decoded = DuoItemModel.entries(in: candidate.record)
+                decodedEntries[candidate.record.transferId] = decoded
+                entries = decoded
+            }
+            return DuoItemFactory.item(
+                for: candidate.record,
+                entries: entries,
+                index: entryIndex
+            )
+        }
+        enumeratorLog.info("fp_enumerate_workingset start=\(startIndex, privacy: .public) count=\(items.count, privacy: .public) total=\(all.count, privacy: .public)")
+        observer.didEnumerate(items)
+        if endIndex < all.count, let last = selected.last {
+            observer.finishEnumerating(upTo: DuoEnumerator.encodeWorkingSetPage(after: last.identifier))
         } else {
             observer.finishEnumerating(upTo: nil)
         }
@@ -210,23 +235,29 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
             .compactMap { DuoItemFactory.item(for: record, index: $0) }
     }
 
-    /// Working-set LIST: every namespace-live item = ACTIVE + RETIRED
-    /// generations (minus tombstoned), flattened to container + all entries,
-    /// SORTED by identifier so pagination has a deterministic, restart-stable
-    /// order (the continuation cursor is the last identifier of the previous
-    /// page). Membership is unchanged; delivery is paginated by the caller.
-    private func workingSetItems() -> [NSFileProviderItem] {
+    /// Lightweight working-set index. It preserves the exact namespace-live
+    /// membership and deterministic identifier order while deferring expensive
+    /// `NSFileProviderItem` construction until after the page has been selected.
+    private func workingSetCandidates() -> [WorkingSetCandidate] {
         let tombstoned = journal.tombstonedTransferIds()
-        var items: [NSFileProviderItem] = []
+        var candidates: [WorkingSetCandidate] = []
         for record in store.allRecords() where !tombstoned.contains(record.transferId) {
-            items.append(DuoItemFactory.containerItem(for: record))
-            let entries = DuoItemModel.entries(in: record)
-            for index in entries.indices {
-                if let item = DuoItemFactory.item(for: record, index: index) {
-                    items.append(item)
-                }
+            candidates.append(WorkingSetCandidate(
+                identifier: DuoItemModel.containerIdentifier(transferId: record.transferId).rawValue,
+                record: record,
+                entryIndex: nil
+            ))
+            for index in 0..<DuoItemModel.entryCount(in: record) {
+                candidates.append(WorkingSetCandidate(
+                    identifier: DuoItemModel.entryIdentifier(
+                        transferId: record.transferId,
+                        index: index
+                    ).rawValue,
+                    record: record,
+                    entryIndex: index
+                ))
             }
         }
-        return items.sorted { $0.itemIdentifier.rawValue < $1.itemIdentifier.rawValue }
+        return candidates.sorted { $0.identifier < $1.identifier }
     }
 }

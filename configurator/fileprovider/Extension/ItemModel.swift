@@ -58,6 +58,13 @@ enum DuoItemModel {
         }
     }
 
+    /// Number of manifest entries without constructing their File Provider
+    /// item objects. Working-set pagination uses this to build a lightweight
+    /// identifier cursor before materializing only the selected page.
+    static func entryCount(in record: GenerationRecord) -> Int {
+        (record.manifest["entries"] as? [[String: Any]])?.count ?? 0
+    }
+
     static func entryIdentifier(transferId: String, index: Int) -> NSFileProviderItemIdentifier {
         NSFileProviderItemIdentifier("\(transferId):\(index)")
     }
@@ -216,6 +223,16 @@ enum DuoItemFactory {
     /// `index` is out of range.
     static func item(for record: GenerationRecord, index: Int) -> DuoItem? {
         let entries = DuoItemModel.entries(in: record)
+        return item(for: record, entries: entries, index: index)
+    }
+
+    /// Page-building overload: callers that need several entries from the
+    /// same generation decode its manifest once instead of once per item.
+    static func item(
+        for record: GenerationRecord,
+        entries: [DuoManifestEntry],
+        index: Int
+    ) -> DuoItem? {
         guard entries.indices.contains(index) else { return nil }
         let entry = entries[index]
         return DuoItem(
