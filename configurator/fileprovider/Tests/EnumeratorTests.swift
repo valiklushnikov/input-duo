@@ -5,15 +5,21 @@ import FileProvider
 /// tests can assert on the resulting tree without a real File Provider host.
 private final class RecordingEnumerationObserver: NSObject, NSFileProviderEnumerationObserver {
     private(set) var enumeratedItems: [NSFileProviderItem] = []
+    /// Per-`didEnumerate` batch sizes, so pagination tests can assert no single
+    /// callback exceeds the page size.
+    private(set) var batchSizes: [Int] = []
     private(set) var finished = false
+    private(set) var nextPage: NSFileProviderPage?
     private(set) var finishError: Error?
 
     func didEnumerate(_ items: [NSFileProviderItem]) {
         enumeratedItems.append(contentsOf: items)
+        batchSizes.append(items.count)
     }
 
     func finishEnumerating(upTo nextPage: NSFileProviderPage?) {
         finished = true
+        self.nextPage = nextPage
     }
 
     func finishEnumeratingWithError(_ error: Error) {
@@ -198,14 +204,33 @@ final class EnumeratorTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(DuoEnumerator.decodeAnchor(try XCTUnwrap(observer.finishedAnchor)) ?? 0, n)
     }
 
-    /// R6: the legacy static "v1" anchor no longer decodes as a revision, so the
-    /// provider reports SyncAnchorExpired (-1002) and the system does one clean
-    /// full resync.
-    func testEnumerateChangesLegacyV1AnchorExpires() throws {
+    /// R8: the KNOWN legacy static "v1" anchor is SOFT-MIGRATED to baseline
+    /// revision 0 - journal changes are replayed and enumeration finishes at the
+    /// current head, WITHOUT SyncAnchorExpired. Returning -1002 here forced
+    /// fileproviderd into a full working-set resync over every persisted orphan
+    /// identity, saturating the extension session and starving getService (real
+    /// E2E A evidence). This replaces the old R6 expectation on purpose.
+    func testEnumerateChangesLegacyV1AnchorMigratesToBaselineNotExpired() throws {
+        try publishNestedGeneration()
+        _ = try journal.recordTombstone(transferId: "abc123", itemIdentifiers: ["abc123:0"])
         let enumerator = workingSetEnumerator()
         let observer = RecordingChangeObserver()
 
         enumerator.enumerateChanges(for: observer, from: NSFileProviderSyncAnchor(Data("v1".utf8)))
+
+        XCTAssertNil(observer.finishError, "legacy v1 must NOT expire - it migrates to baseline 0")
+        XCTAssertEqual(observer.deletedIdentifiers.map(\.rawValue), ["abc123:0"], "journal replayed from 0")
+        XCTAssertEqual(DuoEnumerator.decodeAnchor(try XCTUnwrap(observer.finishedAnchor)), journal.headRevision())
+    }
+
+    /// R9: a malformed/unknown anchor (neither a valid 8-byte revision nor the
+    /// known legacy "v1") still reports SyncAnchorExpired (-1002). Corruption
+    /// must NOT be silently masked as a migration to revision 0.
+    func testEnumerateChangesMalformedAnchorStillExpires() throws {
+        let enumerator = workingSetEnumerator()
+        let observer = RecordingChangeObserver()
+
+        enumerator.enumerateChanges(for: observer, from: NSFileProviderSyncAnchor(Data("garbage-anchor".utf8)))
 
         let nsError = try XCTUnwrap(observer.finishError as NSError?)
         XCTAssertEqual(nsError.domain, NSFileProviderErrorDomain)
@@ -253,6 +278,108 @@ final class EnumeratorTests: XCTestCase {
         XCTAssertTrue(ids.contains("retired1"), "retired generation stays in the working set")
         XCTAssertFalse(ids.contains("tomb1"), "tombstoned generation must be excluded from the LIST")
         XCTAssertFalse(ids.contains(where: { $0.hasPrefix("tomb1:") }))
+    }
+
+    // MARK: - Working-set pagination (Fix 2: never one-shot thousands of items)
+
+    /// Publishes a generation with `fileEntries` top-level file entries.
+    private func publishGeneration(transferId: String, fileEntries: Int) throws {
+        var entries: [[String: Any]] = []
+        for i in 0..<fileEntries {
+            entries.append(["path": "f\(i).txt", "kind": "file", "size": 10, "mtime_ns": 100])
+        }
+        let record: [String: Any] = [
+            "schema": 1, "transfer_id": transferId, "state": "active",
+            "created_ns": 1, "lease_deadline_ns": 2,
+            "manifest": ["transfer_id": transferId, "drop_effect": 1, "total_bytes": 0,
+                         "skipped": [], "entries": entries],
+        ]
+        try store.publish(recordJSON: try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]))
+    }
+
+    /// Walk the working set page by page (fresh enumerator per page, as the
+    /// system does), following the continuation token until nextPage is nil.
+    private func walkWorkingSet(store s: ReplicaStore, journal j: ChangeJournal)
+        -> (ids: [String], batchSizes: [Int], pages: Int) {
+        var ids: [String] = []
+        var batchSizes: [Int] = []
+        var page = NSFileProviderPage(Data()) // initial
+        var pages = 0
+        while true {
+            let observer = RecordingEnumerationObserver()
+            DuoEnumerator(enumeratedItemIdentifier: .workingSet, store: s, journal: j)
+                .enumerateItems(for: observer, startingAt: page)
+            ids.append(contentsOf: observer.enumeratedItems.map(\.itemIdentifier.rawValue))
+            batchSizes.append(contentsOf: observer.batchSizes)
+            pages += 1
+            guard let next = observer.nextPage else { break }
+            page = next
+            if pages > 10_000 { XCTFail("pagination did not terminate"); break }
+        }
+        return (ids, batchSizes, pages)
+    }
+
+    /// R10: ~2000 items across 5 generations enumerate correctly across pages -
+    /// each page <= PAGE_SIZE, every live id exactly once, tombstoned excluded,
+    /// no duplicates, eventual nextPage nil.
+    func testWorkingSetPaginationCoversAllLiveIdsExactlyOnce() throws {
+        for g in 0..<5 { try publishGeneration(transferId: "gen\(g)", fileEntries: 400) }
+        try store.retire("gen1") // retired stays in the working set
+        _ = try journal.recordTombstone(
+            transferId: "gen2",
+            itemIdentifiers: ["gen2"] + (0..<400).map { "gen2:\($0)" }
+        )
+
+        let (ids, batchSizes, pages) = walkWorkingSet(store: store, journal: journal)
+
+        XCTAssertGreaterThan(pages, 1, "2000 items must span multiple pages")
+        for size in batchSizes { XCTAssertLessThanOrEqual(size, DuoEnumerator.workingSetPageSize) }
+        XCTAssertEqual(ids.count, Set(ids).count, "no duplicates across pages")
+        XCTAssertFalse(ids.contains(where: { $0 == "gen2" || $0.hasPrefix("gen2:") }), "tombstoned excluded")
+        // Expected live: gen0, gen1, gen3, gen4 (container + 400 entries each = 401)
+        var expected: Set<String> = []
+        for g in [0, 1, 3, 4] {
+            expected.insert("gen\(g)")
+            for i in 0..<400 { expected.insert("gen\(g):\(i)") }
+        }
+        XCTAssertEqual(Set(ids), expected, "every namespace-live id returned exactly once")
+    }
+
+    /// R11: the first callback of a large snapshot must NOT receive all items -
+    /// it gets at most PAGE_SIZE and a continuation page.
+    func testWorkingSetLargeSnapshotIsNotOneShot() throws {
+        for g in 0..<5 { try publishGeneration(transferId: "gen\(g)", fileEntries: 400) }
+
+        let observer = RecordingEnumerationObserver()
+        workingSetEnumerator().enumerateItems(for: observer, startingAt: NSFileProviderPage(Data()))
+
+        XCTAssertLessThanOrEqual(observer.enumeratedItems.count, DuoEnumerator.workingSetPageSize,
+                                 "first page must not one-shot thousands of items")
+        XCTAssertNotNil(observer.nextPage, "a large snapshot must hand back a continuation page")
+    }
+
+    /// R12: the continuation token is identifier-based, so it stays correct
+    /// across a store/journal restart - page 2 continues after page 1 with no
+    /// overlap.
+    func testWorkingSetPaginationContinuationSurvivesRestart() throws {
+        for g in 0..<3 { try publishGeneration(transferId: "gen\(g)", fileEntries: 200) }
+
+        let page1 = RecordingEnumerationObserver()
+        workingSetEnumerator().enumerateItems(for: page1, startingAt: NSFileProviderPage(Data()))
+        let token = try XCTUnwrap(page1.nextPage, "first page must hand back a token")
+
+        // Restart backing store + journal, then continue from the token.
+        let store2 = ReplicaStore(baseDirectory: tmpDir)
+        let journal2 = ChangeJournal(baseDirectory: tmpDir)
+        let page2 = RecordingEnumerationObserver()
+        DuoEnumerator(enumeratedItemIdentifier: .workingSet, store: store2, journal: journal2)
+            .enumerateItems(for: page2, startingAt: token)
+
+        let firstIds = Set(page1.enumeratedItems.map(\.itemIdentifier.rawValue))
+        let secondIds = page2.enumeratedItems.map(\.itemIdentifier.rawValue)
+        XCTAssertFalse(secondIds.isEmpty, "continuation after restart must still yield items")
+        XCTAssertTrue(firstIds.isDisjoint(with: Set(secondIds)),
+                      "restart continuation must not overlap page 1 (deterministic identifier cursor)")
     }
 
     // MARK: - FileProviderExtension wiring: item(for:) on a leaf

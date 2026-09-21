@@ -53,9 +53,49 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
         return data.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self).bigEndian }
     }
 
+    /// The one KNOWN legacy anchor from before the journal existed (the old
+    /// static `currentSyncAnchor`). It is soft-migrated to baseline revision 0,
+    /// never expired - see `enumerateChanges`.
+    static let legacyV1Anchor = Data("v1".utf8)
+
+    static func isLegacyV1Anchor(_ anchor: NSFileProviderSyncAnchor) -> Bool {
+        anchor.rawValue == legacyV1Anchor
+    }
+
+    // MARK: - Working-set pagination
+
+    /// Conservative page size: never hand fileproviderd thousands of items in a
+    /// single `didEnumerate`. A one-shot full-namespace working set saturated the
+    /// extension session and starved getService (real E2E A regression).
+    static let workingSetPageSize = 128
+
+    /// Continuation-token prefix. The token is the LAST item identifier yielded
+    /// on the previous page; the next page returns identifiers strictly greater
+    /// (identifiers are sorted). This is deterministic and restart-safe (it lives
+    /// in the page data, not in memory), and an initial/system page - which lacks
+    /// this prefix - decodes to nil, i.e. start from the beginning.
+    private static let workingSetPagePrefix = "wsp:"
+
+    static func encodeWorkingSetPage(after identifier: String) -> NSFileProviderPage {
+        NSFileProviderPage(Data((workingSetPagePrefix + identifier).utf8))
+    }
+
+    static func decodeWorkingSetPage(_ page: NSFileProviderPage) -> String? {
+        guard let text = String(data: page.rawValue, encoding: .utf8),
+              text.hasPrefix(workingSetPagePrefix) else { return nil }
+        return String(text.dropFirst(workingSetPagePrefix.count))
+    }
+
     // MARK: - Item enumeration
 
     func enumerateItems(for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage) {
+        // The working set can be large (all namespace-live items); paginate it so
+        // no single callback overwhelms the session. Root/generation containers
+        // are small and enumerated in one page as before.
+        if enumeratedItemIdentifier == .workingSet {
+            enumerateWorkingSetPage(for: observer, startingAt: page)
+            return
+        }
         let items = children()
         let parsed = DuoItemModel.parse(enumeratedItemIdentifier)
         enumeratorLog.info("fp_enumerate transfer_id=\(parsed?.transferId ?? "root", privacy: .public) entry_index=\(parsed?.index ?? -1, privacy: .public) count=\(items.count, privacy: .public)")
@@ -63,12 +103,46 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
         observer.finishEnumerating(upTo: nil)
     }
 
+    /// Emit one page (<= `workingSetPageSize`) of the working set, following the
+    /// identifier cursor in `page`. Membership is unchanged (all ACTIVE+RETIRED,
+    /// excluding tombstoned); only the delivery is paginated.
+    private func enumerateWorkingSetPage(for observer: NSFileProviderEnumerationObserver, startingAt page: NSFileProviderPage) {
+        let all = workingSetItems() // sorted by identifier
+        let startIndex: Int
+        if let cursor = DuoEnumerator.decodeWorkingSetPage(page) {
+            startIndex = all.firstIndex { $0.itemIdentifier.rawValue > cursor } ?? all.count
+        } else {
+            startIndex = 0
+        }
+        let endIndex = min(startIndex + DuoEnumerator.workingSetPageSize, all.count)
+        let slice = startIndex < endIndex ? Array(all[startIndex..<endIndex]) : []
+        enumeratorLog.info("fp_enumerate_workingset start=\(startIndex, privacy: .public) count=\(slice.count, privacy: .public) total=\(all.count, privacy: .public)")
+        observer.didEnumerate(slice)
+        if endIndex < all.count, let last = slice.last {
+            observer.finishEnumerating(upTo: DuoEnumerator.encodeWorkingSetPage(after: last.itemIdentifier.rawValue))
+        } else {
+            observer.finishEnumerating(upTo: nil)
+        }
+    }
+
     // MARK: - Change enumeration (journal-backed)
 
     func enumerateChanges(for observer: NSFileProviderChangeObserver, from anchor: NSFileProviderSyncAnchor) {
-        guard let from = DuoEnumerator.decodeAnchor(anchor) else {
-            // Legacy/unknown anchor (e.g. the old "v1"): force one clean full
-            // resync via enumerateItems. No changes are applied against it.
+        let from: UInt64
+        if let decoded = DuoEnumerator.decodeAnchor(anchor) {
+            from = decoded
+        } else if DuoEnumerator.isLegacyV1Anchor(anchor) {
+            // SOFT MIGRATION of the KNOWN legacy "v1" anchor: treat it as baseline
+            // revision 0, replay the journal, and finish at the current head - do
+            // NOT return SyncAnchorExpired. Expiring it forced fileproviderd into
+            // a full working-set resync over every persisted orphan identity,
+            // saturating the extension session and starving getService (real E2E
+            // A evidence). Only the journal (small) is replayed; no full snapshot.
+            from = 0
+            enumeratorLog.info("fp_legacy_anchor_migrated from=v1 to=\(self.journal.headRevision(), privacy: .public)")
+        } else {
+            // Malformed/unknown anchor: explicit error per contract. Corruption
+            // must never be silently masked as a migration to revision 0.
             observer.finishEnumeratingWithError(
                 NSError(domain: NSFileProviderErrorDomain, code: NSFileProviderError.syncAnchorExpired.rawValue)
             )
@@ -115,10 +189,6 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
             return store.allActive().map { DuoItemFactory.containerItem(for: $0) }
         }
 
-        if enumeratedItemIdentifier == .workingSet {
-            return workingSetItems()
-        }
-
         guard let parsed = DuoItemModel.parse(enumeratedItemIdentifier),
               let record = store.record(for: parsed.transferId), record.isActive else {
             return []
@@ -141,9 +211,10 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
     }
 
     /// Working-set LIST: every namespace-live item = ACTIVE + RETIRED
-    /// generations (minus tombstoned), flattened to container + all entries.
-    /// Small volume by design (metadata only), so no materialized-only
-    /// optimisation.
+    /// generations (minus tombstoned), flattened to container + all entries,
+    /// SORTED by identifier so pagination has a deterministic, restart-stable
+    /// order (the continuation cursor is the last identifier of the previous
+    /// page). Membership is unchanged; delivery is paginated by the caller.
     private func workingSetItems() -> [NSFileProviderItem] {
         let tombstoned = journal.tombstonedTransferIds()
         var items: [NSFileProviderItem] = []
@@ -156,6 +227,6 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
                 }
             }
         }
-        return items
+        return items.sorted { $0.itemIdentifier.rawValue < $1.itemIdentifier.rawValue }
     }
 }
