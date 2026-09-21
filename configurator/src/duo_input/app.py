@@ -418,7 +418,20 @@ class _ClipboardRuntime(QObject):
             # started, so that is here, not at process launch, and only when
             # the flag is actually on. Both calls are idempotent/non-blocking
             # (QTimer-driven backoff, no sleep) - see their own docstrings.
-            domain.ensure_domain()
+            import os as _os
+
+            if _os.environ.get("DUO_FP_RESET") == "1":
+                # One-shot manual cleanup: remove the domain (reclaims the whole
+                # mount + its materialized blobs via public API) then re-add it
+                # after a short pause so the removal finishes first. Diagnostic /
+                # emergency reset only - NOT production GC.
+                from PySide6.QtCore import QTimer as _QTimer
+
+                logger.warning("DUO_FP_RESET=1: recreating File Provider domain to reclaim the mount")
+                domain.remove_domain()
+                _QTimer.singleShot(8000, domain.ensure_domain)
+            else:
+                domain.ensure_domain()
             client.connect_service()
         except Exception:  # noqa: BLE001 - best-effort optional subsystem
             logger.exception(
