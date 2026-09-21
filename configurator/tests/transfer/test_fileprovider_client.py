@@ -59,3 +59,24 @@ def test_redundant_connect_service_does_not_rebind(fp_fake_service):
     client.connect_service()
     assert connects == [1]
     assert client._connection is bound
+
+
+def test_resolve_service_keeps_main_run_loop_alive_for_completion(monkeypatch):
+    """A File Provider completion queued to main must not be starved by wait()."""
+    from Foundation import NSOperationQueue
+
+    from duo_input.transfer import fileprovider_client as module
+
+    expected_service = object()
+
+    class Manager:
+        def getServiceWithName_itemIdentifier_completionHandler_(
+            self, service_name, item_identifier, completion
+        ):
+            NSOperationQueue.mainQueue().addOperationWithBlock_(
+                lambda: completion(expected_service, None)
+            )
+
+    monkeypatch.setattr(module, "_GET_SERVICE_TIMEOUT_S", 0.1)
+
+    assert module.FileProviderServiceClient._resolve_service(Manager()) is expected_service

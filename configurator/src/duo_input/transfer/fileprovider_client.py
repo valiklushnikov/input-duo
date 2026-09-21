@@ -47,7 +47,7 @@ def _log_service_event(event: str, **fields: object) -> None:
 
 try:
     import objc
-    from Foundation import NSObject
+    from Foundation import NSDate, NSObject, NSRunLoop
     from FileProvider import (
         NSFileProviderManager,
         NSFileProviderRootContainerItemIdentifier,
@@ -64,7 +64,9 @@ try:
     _XPC_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised implicitly on non-darwin
     objc = None
+    NSDate = None
     NSObject = object
+    NSRunLoop = None
     NSFileProviderManager = None
     NSFileProviderRootContainerItemIdentifier = None
     extension_interface = None
@@ -515,7 +517,20 @@ class FileProviderServiceClient(QObject):
             NSFileProviderRootContainerItemIdentifier,
             handler,
         )
-        if not done.wait(_GET_SERVICE_TIMEOUT_S):
+        if threading.current_thread() is threading.main_thread():
+            deadline = time.monotonic() + _GET_SERVICE_TIMEOUT_S
+            run_loop = NSRunLoop.currentRunLoop()
+            while not done.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                run_loop.runUntilDate_(
+                    NSDate.dateWithTimeIntervalSinceNow_(min(remaining, 0.01))
+                )
+            completed = done.is_set()
+        else:
+            completed = done.wait(_GET_SERVICE_TIMEOUT_S)
+        if not completed:
             _log_service_event(
                 "fp_host_get_service_timeout", timeout_s=_GET_SERVICE_TIMEOUT_S
             )
