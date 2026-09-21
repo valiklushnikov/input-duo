@@ -1,6 +1,12 @@
 import Foundation
 import FileProvider
+import os
 import Security
+
+private let serviceSourceLog = Logger(
+    subsystem: "com.duoinput.configurator.fileprovider",
+    category: "service"
+)
 
 /// The XPC service name the host uses with `getServiceWithName:`. It is an NSXPC
 /// service *label*, not a Mach service registration — the endpoint is anonymous
@@ -40,20 +46,43 @@ final class DuoServiceSource: NSObject, NSFileProviderServiceSource, NSXPCListen
 
     init(store: ReplicaStore, journal: ChangeJournal, signal: EnumerationSignaling? = nil,
          peerVerifier: @escaping (NSXPCConnection) -> Bool = DuoPeerVerifier.verify) {
+        serviceSourceLog.info(
+            "fp_service_source_init_enter thread=\(Thread.current.description, privacy: .public) timestamp=\(Date().timeIntervalSince1970, privacy: .public)"
+        )
+        serviceSourceLog.info("fp_service_dependency_ready dependency=ReplicaStore")
+        serviceSourceLog.info("fp_service_dependency_ready dependency=ChangeJournal")
+        serviceSourceLog.info("fp_service_dependency_ready dependency=ManagerEnumerationSignal present=\(signal != nil, privacy: .public)")
         control = DuoExtensionControlService(store: store, journal: journal, signal: signal)
         self.peerVerifier = peerVerifier
         super.init()
+        serviceSourceLog.info(
+            "fp_service_source_init_success thread=\(Thread.current.description, privacy: .public) timestamp=\(Date().timeIntervalSince1970, privacy: .public)"
+        )
     }
 
     func makeListenerEndpoint() throws -> NSXPCListenerEndpoint {
+        serviceSourceLog.info(
+            "fp_service_endpoint_request thread=\(Thread.current.description, privacy: .public) timestamp=\(Date().timeIntervalSince1970, privacy: .public)"
+        )
         lock.lock()
         defer { lock.unlock() }
-        if let listener { return listener.endpoint }
+        if let listener {
+            let endpoint = listener.endpoint
+            serviceSourceLog.info("fp_service_listener_reused")
+            serviceSourceLog.info("fp_service_endpoint_created listener=persistent")
+            serviceSourceLog.info("fp_service_endpoint_returned listener=persistent")
+            return endpoint
+        }
         let anonymous = NSXPCListener.anonymous()
+        serviceSourceLog.info("fp_service_listener_created")
         anonymous.delegate = self
         anonymous.resume()
+        serviceSourceLog.info("fp_service_listener_resumed")
         listener = anonymous
-        return anonymous.endpoint
+        let endpoint = anonymous.endpoint
+        serviceSourceLog.info("fp_service_endpoint_created listener=new")
+        serviceSourceLog.info("fp_service_endpoint_returned listener=new")
+        return endpoint
     }
 
     func hostProxy(errorHandler: @escaping (Error) -> Void) -> DuoHostCallback? {
@@ -78,9 +107,19 @@ final class DuoServiceSource: NSObject, NSFileProviderServiceSource, NSXPCListen
         _ listener: NSXPCListener,
         shouldAcceptNewConnection newConnection: NSXPCConnection
     ) -> Bool {
-        guard peerVerifier(newConnection) else { return false }
-        newConnection.exportedInterface = DuoXPC.extensionControlInterface()
-        newConnection.remoteObjectInterface = DuoXPC.hostCallbackInterface()
+        serviceSourceLog.info(
+            "fp_service_should_accept_connection pid=\(newConnection.processIdentifier, privacy: .public) thread=\(Thread.current.description, privacy: .public) timestamp=\(Date().timeIntervalSince1970, privacy: .public)"
+        )
+        guard peerVerifier(newConnection) else {
+            serviceSourceLog.error("fp_service_connection_rejected pid=\(newConnection.processIdentifier, privacy: .public) reason=peer_verification")
+            return false
+        }
+        let exportedInterface = DuoXPC.extensionControlInterface()
+        serviceSourceLog.info("fp_service_dependency_ready dependency=NSXPCInterface direction=exported")
+        let remoteInterface = DuoXPC.hostCallbackInterface()
+        serviceSourceLog.info("fp_service_dependency_ready dependency=NSXPCInterface direction=remote")
+        newConnection.exportedInterface = exportedInterface
+        newConnection.remoteObjectInterface = remoteInterface
         newConnection.exportedObject = control
         let disconnected = { [weak self, weak newConnection] in
             guard let self, let newConnection else { return }
@@ -95,7 +134,9 @@ final class DuoServiceSource: NSObject, NSFileProviderServiceSource, NSXPCListen
         connection = newConnection
         lock.unlock()
         previous?.invalidate()
+        serviceSourceLog.info("fp_service_connection_configured pid=\(newConnection.processIdentifier, privacy: .public)")
         newConnection.resume()
+        serviceSourceLog.info("fp_service_connection_resumed pid=\(newConnection.processIdentifier, privacy: .public)")
         return true
     }
 }

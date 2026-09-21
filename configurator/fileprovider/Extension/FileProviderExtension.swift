@@ -1,5 +1,11 @@
 import FileProvider
+import os
 import UniformTypeIdentifiers
+
+private let serviceDiscoveryLog = Logger(
+    subsystem: "com.duoinput.configurator.fileprovider",
+    category: "service"
+)
 
 /// Production File Provider extension for Duo Input (lazy Windows→macOS transfer).
 ///
@@ -72,6 +78,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         for itemIdentifier: NSFileProviderItemIdentifier,
         completionHandler: @escaping ([NSFileProviderServiceSource]?, Error?) -> Void
     ) -> Progress {
+        serviceDiscoveryLog.info(
+            "fp_service_sources_enter service_name=\(duoFileProviderServiceName.rawValue, privacy: .public) item_identifier=\(itemIdentifier.rawValue, privacy: .public) thread=\(Thread.current.description, privacy: .public) timestamp=\(Date().timeIntervalSince1970, privacy: .public)"
+        )
+        serviceDiscoveryLog.info(
+            "fp_service_sources_result count=1 source_names=\(duoFileProviderServiceName.rawValue, privacy: .public) thread=\(Thread.current.description, privacy: .public) timestamp=\(Date().timeIntervalSince1970, privacy: .public)"
+        )
         completionHandler([serviceSource], nil)
         return Progress()
     }

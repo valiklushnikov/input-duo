@@ -26,11 +26,24 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 
 from PySide6.QtCore import QMetaObject, QObject, Qt, Q_ARG, Signal, Slot
 
 logger = logging.getLogger(__name__)
+
+
+def _log_service_event(event: str, **fields: object) -> None:
+    """Emit one timestamped service-discovery boundary without user data."""
+    rendered = " ".join(f"{key}={value}" for key, value in fields.items())
+    logger.info(
+        "%s timestamp_ns=%d thread=%s %s",
+        event,
+        time.time_ns(),
+        threading.current_thread().name,
+        rendered,
+    )
 
 try:
     import objc
@@ -359,6 +372,7 @@ class FileProviderServiceClient(QObject):
         connection.setInvalidationHandler_(self._on_invalidated)
         connection.setInterruptionHandler_(self._on_interrupted)
         connection.resume()
+        _log_service_event("fp_host_xpc_connection_resumed")
         with self._lock:
             self._disconnect_emitted = False
             self._exported = exported
@@ -480,16 +494,31 @@ class FileProviderServiceClient(QObject):
         done = threading.Event()
 
         def handler(service, error):
+            _log_service_event(
+                "fp_host_get_service_completion",
+                service_present=service is not None,
+                error=repr(error),
+            )
             outcome["service"] = service
             outcome["error"] = error
+            if service is not None:
+                _log_service_event("fp_host_endpoint_received")
             done.set()
 
+        _log_service_event(
+            "fp_host_get_service_begin",
+            service_name=SERVICE_NAME,
+            item_identifier=NSFileProviderRootContainerItemIdentifier,
+        )
         manager.getServiceWithName_itemIdentifier_completionHandler_(
             NSFileProviderServiceName(SERVICE_NAME),
             NSFileProviderRootContainerItemIdentifier,
             handler,
         )
         if not done.wait(_GET_SERVICE_TIMEOUT_S):
+            _log_service_event(
+                "fp_host_get_service_timeout", timeout_s=_GET_SERVICE_TIMEOUT_S
+            )
             raise TimeoutError("timed out requesting the File Provider service")
         error = outcome.get("error")
         if error is not None:

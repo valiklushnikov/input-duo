@@ -24,4 +24,35 @@ final class ServicingConformanceTests: XCTestCase {
         let endpoint = try DuoServiceSource(store: ReplicaStore(baseDirectory: directory), journal: ChangeJournal(baseDirectory: directory)).makeListenerEndpoint()
         XCTAssertNotNil(endpoint)
     }
+
+    func testExtensionReturnsExpectedServiceSourceWithCurrentDependencies() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let domain = NSFileProviderDomain(
+            identifier: NSFileProviderDomainIdentifier("com.duoinput.configurator.fileprovider.tests.servicing"),
+            displayName: "Duo Input Tests"
+        )
+        let provider = FileProviderExtension(
+            domain: domain,
+            replicaStore: ReplicaStore(baseDirectory: directory),
+            temporaryDirectory: directory
+        )
+        defer { provider.invalidate() }
+
+        var returnedSources: [NSFileProviderServiceSource]?
+        var returnedError: Error?
+        _ = provider.supportedServiceSources(for: .rootContainer) { sources, error in
+            returnedSources = sources
+            returnedError = error
+        }
+
+        XCTAssertNil(returnedError)
+        let source = try XCTUnwrap(returnedSources?.only)
+        XCTAssertTrue(source is DuoServiceSource)
+        XCTAssertEqual(source.serviceName, duoFileProviderServiceName)
+    }
+}
+
+private extension Collection {
+    var only: Element? { count == 1 ? first : nil }
 }
