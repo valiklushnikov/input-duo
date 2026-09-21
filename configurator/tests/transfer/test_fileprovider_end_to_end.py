@@ -42,11 +42,12 @@ def test_real_snapshot_bytes_are_read_only_after_fetch_and_explicit_pull(
     source.write_bytes(contents)
     sender = FileTransferService()
     client = FileProviderServiceClient()
-    client.remote = lambda: type(
+    remote = type(
         "Remote",
         (),
         {"publishGeneration_reply_": lambda self, record, reply: reply(True, None)},
     )()
+    client.remote_with_error_handler = lambda _error_handler: remote
     armed = []
     backend = FileProviderBackend(
         client,
