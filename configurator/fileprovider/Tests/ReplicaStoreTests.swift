@@ -137,6 +137,35 @@ final class ReplicaStoreTests: XCTestCase {
         XCTAssertEqual(record.state, "retired")
     }
 
+    /// Generation-lifetime fix (T2): there is NO arbitrary "keep newest N"
+    /// pruning. Many generations (well past any old keeping:2 cap), some
+    /// retired, must ALL survive a store restart and stay resolvable by id -
+    /// File Provider may still address any item identity it once enumerated, so
+    /// physically dropping records by recency would re-introduce the -1005 -> -36
+    /// bug. Records are only ever removed by an explicit host-driven lifecycle,
+    /// never by init.
+    func testManyGenerationsAllSurviveRestartWithNoArbitraryPrune() throws {
+        let ids = ["gen0", "gen1", "gen2", "gen3", "gen4"]
+        for (offset, id) in ids.enumerated() {
+            var dict = try goldenFixtureDict()
+            dict["transfer_id"] = id
+            dict["created_ns"] = 1_000 + offset // strictly increasing "age"
+            var manifest = try XCTUnwrap(dict["manifest"] as? [String: Any])
+            manifest["transfer_id"] = id
+            dict["manifest"] = manifest
+            try store.publish(recordJSON: try encode(dict))
+        }
+        // Retire the three oldest - retired records are KEPT, not deleted.
+        for id in ["gen0", "gen1", "gen2"] { try store.retire(id) }
+
+        let restarted = ReplicaStore(baseDirectory: tmpDir)
+
+        for id in ids {
+            XCTAssertNotNil(restarted.record(for: id), "\(id) must still resolve after restart")
+        }
+        XCTAssertEqual(restarted.allActive().map(\.transferId).sorted(), ["gen3", "gen4"])
+    }
+
     func testRecoverRunsAutomaticallyOnInit() throws {
         // Drop a corrupt file directly (no store involved yet), then
         // construct a store on that directory: startup recovery, not just
