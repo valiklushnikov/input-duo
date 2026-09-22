@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import sys
 import time
 
@@ -20,6 +21,7 @@ from duo_input.transfer.model import (
     TransferEntry,
     TransferManifest,
 )
+from duo_input.transfer.fileprovider_perf import PerfEmitter
 from duo_input.transfer.source import (
     RETENTION,
     SnapshotRegistry,
@@ -71,6 +73,22 @@ def test_reading_an_offset_range_returns_exactly_those_bytes(tmp_path):
     _publish(registry, tmp_path)
 
     assert registry.read("t-1", 0, 3, 4) == b"3456"
+
+
+def test_read_correlation_id_is_logging_only(tmp_path, caplog):
+    logger = logging.getLogger("duo_input.transfer.source")
+    ticks = iter(range(100, 1000))
+    registry = SnapshotRegistry(
+        perf=PerfEmitter(logger, "windows_python_monotonic", clock=lambda: next(ticks))
+    )
+    _publish(registry, tmp_path)
+    caplog.set_level(logging.INFO, logger=logger.name)
+
+    assert registry.read("t-1", 0, 3, 4, read_id=42) == b"3456"
+
+    perf_lines = [record.getMessage() for record in caplog.records if "fp_perf " in record.getMessage()]
+    assert perf_lines
+    assert all("read_id=42" in line for line in perf_lines)
 
 
 def test_reads_are_idempotent_so_the_same_range_twice_returns_the_same_bytes(tmp_path):

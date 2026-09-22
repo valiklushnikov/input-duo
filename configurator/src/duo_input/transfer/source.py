@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from .model import ENTRY_FILE, TransferManifest
+from .fileprovider_perf import PerfEmitter
 
 logger = logging.getLogger(__name__)
 
@@ -78,9 +80,13 @@ class _Snapshot:
 class SnapshotRegistry:
     """Снимки по transfer_id. Живёт в GUI-потоке и только в нём."""
 
-    def __init__(self) -> None:
+    def __init__(self, perf: PerfEmitter | None = None) -> None:
         self._snapshots: dict[str, _Snapshot] = {}
         self._order: list[str] = []
+        clock_domain = (
+            "windows_python_monotonic" if sys.platform == "win32" else "python_monotonic"
+        )
+        self._perf = perf or PerfEmitter(logger, clock_domain)
 
     @property
     def transfer_ids(self) -> tuple[str, ...]:
@@ -110,8 +116,22 @@ class SnapshotRegistry:
         self._order.append(manifest.transfer_id)
         self._evict()
 
-    def read(self, transfer_id: str, entry_index: int, offset: int, length: int) -> bytes:
+    def read(
+        self,
+        transfer_id: str,
+        entry_index: int,
+        offset: int,
+        length: int,
+        *,
+        read_id: int | None = None,
+    ) -> bytes:
         """Байты из удерживаемого дескриптора, со сверкой на каждом чтении."""
+        correlation = {
+            "transfer_id": transfer_id,
+            "entry_index": entry_index,
+            "read_id": read_id,
+        }
+        self._perf.emit("snapshot_lookup_begin", **correlation)
         snapshot = self._snapshots.get(transfer_id)
         if snapshot is None:
             raise SourceMissing(f"снимок {transfer_id!r} неизвестен или вытеснен")
@@ -127,15 +147,31 @@ class SnapshotRegistry:
             # OverflowError мимо всех протокольных веток.
             raise ValueError("смещение за пределами файла")
         length = min(length, entry.size - offset)
+        self._perf.emit("snapshot_lookup_end", **correlation)
+        self._perf.emit(
+            "source_read_begin", offset=offset, length=length, **correlation
+        )
+        try:
+            descriptor = snapshot.handles.get(entry_index)
+            if descriptor is None:
+                descriptor = self._open_and_verify(snapshot, entry_index, entry)
+                snapshot.handles[entry_index] = descriptor
+                snapshot.serving = True
 
-        descriptor = snapshot.handles.get(entry_index)
-        if descriptor is None:
-            descriptor = self._open_and_verify(snapshot, entry_index, entry)
-            snapshot.handles[entry_index] = descriptor
-            snapshot.serving = True
-
-        self._verify_unchanged(descriptor, entry)
-        return self._read_at(descriptor, offset, length)
+            self._verify_unchanged(descriptor, entry)
+            payload = self._read_at(descriptor, offset, length)
+        except (SourceChanged, SourceMissing, OSError) as error:
+            status = (
+                REASON_SOURCE_CHANGED
+                if isinstance(error, SourceChanged)
+                else REASON_SOURCE_MISSING
+            )
+            self._perf.emit("source_read_end", status=status, **correlation)
+            raise
+        self._perf.emit(
+            "source_read_end", status="ok", bytes=len(payload), **correlation
+        )
+        return payload
 
     def release(self, transfer_id: str) -> None:
         snapshot = self._snapshots.pop(transfer_id, None)

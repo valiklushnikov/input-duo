@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import time
 
 import pytest
@@ -16,6 +17,7 @@ from duo_input.clipboard.wire import (
     MessageType,
 )
 from duo_input.transfer.model import MAX_MANIFEST_BYTES, TransferManifest, decode_manifest
+from duo_input.transfer.fileprovider_perf import PerfEmitter
 from duo_input.transfer.service import FileTransferService
 
 
@@ -43,6 +45,19 @@ def sender(qapp):
     return service, link
 
 
+@pytest.fixture
+def sender_with_perf(qapp, caplog):
+    logger = logging.getLogger("duo_input.transfer.service")
+    ticks = iter(range(100, 10_000))
+    perf = PerfEmitter(logger, "windows_python_monotonic", clock=lambda: next(ticks))
+    caplog.set_level(logging.INFO, logger=logger.name)
+    service = FileTransferService(perf=perf)
+    link = _FakeLink()
+    service.attach_link(link)
+    service.set_peer_capabilities(frozenset({CAPABILITY_CLIPBOARD, CAPABILITY_FILES}))
+    return service, link, caplog
+
+
 def _sent(link, kind):
     return [message for message in link.sent if message.type is kind]
 
@@ -63,6 +78,66 @@ def _read(transfer_id, entry_index=0, offset=0, length=4, read_id=7):
 
 def _offered_manifest(offer: Message) -> TransferManifest:
     return decode_manifest(offer.blob)
+
+
+def _perf_events(caplog) -> list[dict[str, str]]:
+    events = []
+    for record in caplog.records:
+        message = record.getMessage()
+        if "fp_perf " not in message:
+            continue
+        atoms = message[message.index("fp_perf ") + len("fp_perf ") :].split()
+        events.append(dict(atom.split("=", 1) for atom in atoms))
+    return events
+
+
+def test_sender_records_lookup_read_and_send_for_one_read(sender_with_perf, tmp_path):
+    service, link, records = sender_with_perf
+    source = tmp_path / "a.bin"
+    source.write_bytes(b"0123456789")
+    transfer_id = service.offer_local_files([source])
+
+    service.handle_message(_read(transfer_id, offset=3, length=4, read_id=7))
+
+    events = _perf_events(records)
+    assert [event["event"] for event in events] == [
+        "file_read_receive",
+        "snapshot_lookup_begin",
+        "snapshot_lookup_end",
+        "source_read_begin",
+        "source_read_end",
+        "file_chunk_send",
+    ]
+    assert all(event["read_id"] == "7" for event in events)
+    assert events[-1]["bytes"] == "4"
+    assert _sent(link, MessageType.FILE_CHUNK)[0].blob == b"3456"
+
+
+def test_changed_source_records_failed_read_without_chunk_send(
+    sender_with_perf, tmp_path
+):
+    service, link, records = sender_with_perf
+    source = tmp_path / "a.bin"
+    source.write_bytes(b"0123456789")
+    transfer_id = service.offer_local_files([source])
+    service.handle_message(_read(transfer_id, length=2, read_id=6))
+    baseline = source.stat().st_mtime_ns
+    deadline = time.monotonic() + 2
+    while source.stat().st_mtime_ns == baseline:
+        with open(source, "r+b") as handle:
+            handle.write(b"X")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if time.monotonic() >= deadline:
+            pytest.fail("source mtime_ns did not advance before the bounded deadline")
+
+    service.handle_message(_read(transfer_id, offset=2, length=2, read_id=7))
+
+    events = [event for event in _perf_events(records) if event.get("read_id") == "7"]
+    assert next(event for event in events if event["event"] == "source_read_end")[
+        "status"
+    ] == "source_changed"
+    assert not any(event["event"] == "file_chunk_send" for event in events)
 
 
 def test_copying_a_file_sends_one_offer_describing_it(sender, tmp_path):

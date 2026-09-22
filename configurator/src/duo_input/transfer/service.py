@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import logging
 import re
+import sys
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from .model import (
     require_transfer_id,
 )
 from .paths import MAX_ENTRIES, UnsafePath, sanitize_manifest
+from .fileprovider_perf import PerfEmitter
 from .pipe import ChunkPipe, PipeClosed, PipeOverflow
 from .scanner import scan
 from .source import (
@@ -149,13 +151,21 @@ class FileTransferService(QObject):
     transfer_cancelled = Signal()
 
     def __init__(
-        self, parent: QObject | None = None, idle_timeout_ms: int = SESSION_IDLE_TIMEOUT_MS
+        self,
+        parent: QObject | None = None,
+        idle_timeout_ms: int = SESSION_IDLE_TIMEOUT_MS,
+        *,
+        perf: PerfEmitter | None = None,
     ) -> None:
         super().__init__(parent)
+        clock_domain = (
+            "windows_python_monotonic" if sys.platform == "win32" else "python_monotonic"
+        )
+        self._perf = perf or PerfEmitter(logger, clock_domain)
         self._link = None
         self._link_lost_slot = None
         self._peer_capabilities: frozenset[str] = frozenset()
-        self._snapshots = SnapshotRegistry()
+        self._snapshots = SnapshotRegistry(perf=self._perf)
         self._state = TransferState.IDLE
         self._offered: TransferManifest | None = None
         self._session_id: str | None = None
@@ -315,6 +325,7 @@ class FileTransferService(QObject):
             self._on_file_error(message)
 
     def _answer_read(self, message: Message) -> None:
+        received_ns = self._perf.now()
         header = message.header
         try:
             transfer_id = require_transfer_id(header.get("transfer_id"))
@@ -333,8 +344,20 @@ class FileTransferService(QObject):
             self._send_error(header, REASON_BAD_REQUEST)
             return
 
+        self._perf.emit_at(
+            received_ns,
+            "file_read_receive",
+            transfer_id=transfer_id,
+            entry_index=entry_index,
+            read_id=read_id,
+            offset=offset,
+            length=length,
+        )
+
         try:
-            payload = self._snapshots.read(transfer_id, entry_index, offset, length)
+            payload = self._snapshots.read(
+                transfer_id, entry_index, offset, length, read_id=read_id
+            )
         except SourceChanged as error:
             logger.warning("source changed: %s", error)
             self._send_error(header, REASON_SOURCE_CHANGED)
@@ -348,6 +371,14 @@ class FileTransferService(QObject):
             self._send_error(header, REASON_BAD_REQUEST)
             return
 
+        self._perf.emit(
+            "file_chunk_send",
+            transfer_id=transfer_id,
+            entry_index=entry_index,
+            read_id=read_id,
+            offset=offset,
+            bytes=len(payload),
+        )
         self._send(
             Message(
                 MessageType.FILE_CHUNK,
