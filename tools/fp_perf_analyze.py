@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--windows-log", action="append", nargs="+")
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--correctness", type=Path)
+    parser.add_argument("--transfer-id")
     parser.add_argument("--output-dir", type=Path, required=True)
     return parser
 
@@ -44,6 +45,28 @@ def main(argv: list[str] | None = None) -> int:
     ):
         all_events.extend(parsed)
         all_events.parse_errors.extend(parsed.parse_errors)
+    if args.transfer_id:
+        matching_tokens = {
+            event.fields["fetch_token"]
+            for event in all_events
+            if (
+                event.fields.get("transfer_id") == args.transfer_id
+                or event.fields.get("generation_id") == args.transfer_id
+                or event.fields.get("item_identifier", "").startswith(args.transfer_id + ":")
+            )
+            and event.fields.get("fetch_token") not in (None, "none")
+        }
+        all_events = ParsedEvents(
+            (
+                event
+                for event in all_events
+                if event.fields.get("transfer_id") == args.transfer_id
+                or event.fields.get("generation_id") == args.transfer_id
+                or event.fields.get("item_identifier", "").startswith(args.transfer_id + ":")
+                or event.fields.get("fetch_token") in matching_tokens
+            ),
+            all_events.parse_errors,
+        )
     dataset = json.loads(args.dataset.read_text())
     correctness = json.loads(args.correctness.read_text()) if args.correctness else {}
     result = analyze(all_events, dataset, correctness)
