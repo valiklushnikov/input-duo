@@ -1,0 +1,6 @@
+INFO fp_perf event=file_read_receive mono_ns=3000000000 clock=windows_python_monotonic entry_index=0 length=3 offset=0 read_id=1 transfer_id=gen
+INFO fp_perf event=snapshot_lookup_begin mono_ns=3001000000 clock=windows_python_monotonic entry_index=0 read_id=1 transfer_id=gen
+INFO fp_perf event=snapshot_lookup_end mono_ns=3002000000 clock=windows_python_monotonic entry_index=0 read_id=1 transfer_id=gen
+INFO fp_perf event=source_read_begin mono_ns=3002000000 clock=windows_python_monotonic entry_index=0 length=3 offset=0 read_id=1 transfer_id=gen
+INFO fp_perf event=source_read_end mono_ns=3004000000 clock=windows_python_monotonic bytes=3 entry_index=0 read_id=1 status=ok transfer_id=gen
+INFO fp_perf event=file_chunk_send mono_ns=3005000000 clock=windows_python_monotonic bytes=3 entry_index=0 offset=0 read_id=1 transfer_id=gen

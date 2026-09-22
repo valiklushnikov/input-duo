@@ -1,0 +1,6 @@
+INFO fp_perf event=open_fetch_enter mono_ns=2000000000 clock=mac_python_monotonic entry_index=0 generation_id=gen
+INFO fp_perf event=slot_acquired mono_ns=2001000000 clock=mac_python_monotonic entry_index=0 fetch_token=tok0 generation_id=gen queued=false
+INFO fp_perf event=open_fetch_reply mono_ns=2002000000 clock=mac_python_monotonic entry_index=0 fetch_token=tok0 generation_id=gen size=3 status=ok
+INFO fp_perf event=file_read_send mono_ns=2003000000 clock=mac_python_monotonic entry_index=0 fetch_token=tok0 generation_id=gen length=3 offset=0 read_id=1
+INFO fp_perf event=file_chunk_receive mono_ns=2008000000 clock=mac_python_monotonic bytes=3 entry_index=0 fetch_token=tok0 generation_id=gen offset=0 read_id=1
+INFO fp_perf event=slot_released mono_ns=2009000000 clock=mac_python_monotonic entry_index=0 fetch_token=tok0 generation_id=gen state=done

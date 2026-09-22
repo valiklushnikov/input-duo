@@ -1,0 +1,12 @@
+2026-09-22 12:00:00.000 extension[1] [perf] fp_perf event=fetch_enter mono_ns=1000000000 clock=swift_uptime entry_index=0 item_identifier=gen:0 transfer_id=gen
+2026-09-22 12:00:00.001 extension[1] [perf] fp_perf event=open_fetch_call_begin mono_ns=1001000000 clock=swift_uptime attempt=1 entry_index=0 fetch_token=none item_identifier=gen:0 transfer_id=gen
+2026-09-22 12:00:00.003 extension[1] [perf] fp_perf event=open_fetch_reply mono_ns=1003000000 clock=swift_uptime attempt=1 entry_index=0 fetch_token=tok0 item_identifier=gen:0 status=ok transfer_id=gen
+2026-09-22 12:00:00.004 extension[1] [perf] fp_perf event=pull_call_begin mono_ns=1004000000 clock=swift_uptime attempt=1 entry_index=0 fetch_token=tok0 item_identifier=gen:0 pull_sequence=1 transfer_id=gen
+2026-09-22 12:00:00.006 extension[1] [perf] fp_perf event=pull_reply mono_ns=1006000000 clock=swift_uptime attempt=1 bytes=3 entry_index=0 eof=true fetch_token=tok0 item_identifier=gen:0 pull_sequence=1 status=ok transfer_id=gen
+2026-09-22 12:00:00.007 extension[1] [perf] fp_perf event=chunk_write_complete mono_ns=1007000000 clock=swift_uptime attempt=1 bytes=3 entry_index=0 fetch_token=tok0 item_identifier=gen:0 pull_sequence=1 transfer_id=gen
+2026-09-22 12:00:00.007 extension[1] [perf] fp_perf event=first_write_complete mono_ns=1007000000 clock=swift_uptime attempt=1 bytes=3 entry_index=0 fetch_token=tok0 item_identifier=gen:0 transfer_id=gen
+2026-09-22 12:00:00.007 extension[1] [perf] fp_perf event=last_write_complete mono_ns=1007000000 clock=swift_uptime attempt=1 bytes=3 entry_index=0 fetch_token=tok0 item_identifier=gen:0 transfer_id=gen
+2026-09-22 12:00:00.009 extension[1] [perf] fp_perf event=fsync_complete mono_ns=1009000000 clock=swift_uptime attempt=1 entry_index=0 fetch_token=tok0 item_identifier=gen:0 transfer_id=gen
+2026-09-22 12:00:00.010 extension[1] [perf] fp_perf event=close_complete mono_ns=1010000000 clock=swift_uptime attempt=1 entry_index=0 fetch_token=tok0 item_identifier=gen:0 transfer_id=gen
+2026-09-22 12:00:00.011 extension[1] [perf] fp_perf event=finalize_complete mono_ns=1011000000 clock=swift_uptime attempt=1 entry_index=0 fetch_token=tok0 item_identifier=gen:0 transfer_id=gen
+2026-09-22 12:00:00.012 extension[1] [perf] fp_perf event=completion_call mono_ns=1012000000 clock=swift_uptime attempt=1 entry_index=0 fetch_token=tok0 item_identifier=gen:0 status=ok transfer_id=gen
