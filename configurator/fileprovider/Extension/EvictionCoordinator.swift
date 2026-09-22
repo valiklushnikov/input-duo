@@ -105,6 +105,7 @@ final class EvictionCoordinator {
     private let env: EvictionEnvironment
     private let config: Config
     private let exec: Executor
+    private let perf: PerfTrace
     private let log = Logger(subsystem: "com.duoinput.configurator.fileprovider", category: "cleanup")
     private var jobs: [String: Job] = [:]
     /// Test hook: fired when a job reaches a terminal state (evicted/abandoned).
@@ -115,9 +116,11 @@ final class EvictionCoordinator {
 
     init(environment: EvictionEnvironment,
          config: Config = Config(),
-         executor: Executor? = nil) {
+         executor: Executor? = nil,
+         perf: PerfTrace = .live) {
         self.env = environment
         self.config = config
+        self.perf = perf
         if let executor {
             self.exec = executor
         } else {
@@ -134,6 +137,7 @@ final class EvictionCoordinator {
             let job = Job(itemIdentifier: itemIdentifier, transferId: transferId)
             self.jobs[itemIdentifier] = job
             self.event("fp_cleanup_scheduled", job)
+            self.perfEvent("cleanup_scheduled", job)
             self.pollMaterialization(job)
         }
     }
@@ -144,6 +148,7 @@ final class EvictionCoordinator {
                 guard self.jobs[job.itemIdentifier] === job else { return }
                 if materialized.contains(job.itemIdentifier) {
                     self.event("fp_materialization_observed", job)
+                    self.perfEvent("materialization_observed", job)
                     job.state = .grace
                     self.env.schedule(after: self.config.grace) {
                         self.exec { self.startEvict(job) }
@@ -167,6 +172,7 @@ final class EvictionCoordinator {
         job.state = .evicting
         job.evictAttempts += 1
         self.event("fp_eviction_started", job)
+        self.perfEvent("eviction_attempt", job)
         env.evict(job.itemIdentifier) { error in
             self.exec {
                 guard self.jobs[job.itemIdentifier] === job else { return }
@@ -192,6 +198,7 @@ final class EvictionCoordinator {
                     return
                 }
                 self.event("fp_eviction_success", job)
+                self.perfEvent("eviction_success", job)
                 self.env.queryMaterialized { materialized in
                     self.exec {
                         guard self.jobs[job.itemIdentifier] === job else { return }
@@ -213,6 +220,7 @@ final class EvictionCoordinator {
                             }
                         } else {
                             self.event("fp_eviction_verified", job)
+                            self.perfEvent("eviction_verified", job)
                             self.finish(job, .evicted, reason: nil)
                         }
                     }
@@ -251,6 +259,7 @@ final class EvictionCoordinator {
                     self.startEvict(job)
                 } else {
                     self.event("fp_eviction_verified", job)
+                    self.perfEvent("eviction_verified", job)
                     self.finish(job, .evicted, reason: nil)
                 }
             }
@@ -261,6 +270,7 @@ final class EvictionCoordinator {
         job.state = state
         if state == .abandoned {
             self.event("fp_cleanup_abandoned", job, reasonText: reason)
+            self.perfEvent("cleanup_abandoned", job, reason: reason)
             onAbandoned?(job.itemIdentifier, reason)
         }
         jobs[job.itemIdentifier] = nil
@@ -294,5 +304,31 @@ final class EvictionCoordinator {
     private func eventDeferred(_ job: Job, error: Error, elapsed: TimeInterval, nextRetry: TimeInterval) {
         let ns = error as NSError
         log.log("fp_eviction_deferred_non_evictable transfer_id=\(job.transferId, privacy: .public) item=\(job.itemIdentifier, privacy: .public) attempt=\(job.evictAttempts, privacy: .public) elapsed_ms=\(Int(elapsed * 1000), privacy: .public) next_retry_ms=\(Int(nextRetry * 1000), privacy: .public) error=\(ns.domain, privacy: .public):\(ns.code, privacy: .public)")
+        perfEvent(
+            "eviction_deferred", job, error: error,
+            extra: [
+                ("elapsed_ms", String(Int(elapsed * 1000))),
+                ("next_retry_ms", String(Int(nextRetry * 1000)))
+            ]
+        )
+    }
+
+    private func perfEvent(
+        _ name: String,
+        _ job: Job,
+        error: Error? = nil,
+        reason: String? = nil,
+        extra: [(String, String)] = []
+    ) {
+        let nsError = error.map { $0 as NSError }
+        perf.mark(name, fields: [
+            ("transfer_id", job.transferId),
+            ("item_identifier", job.itemIdentifier),
+            ("attempt", String(job.evictAttempts)),
+            ("retry_count", String(job.nonEvictableRetries)),
+            ("error_domain", nsError?.domain ?? "none"),
+            ("error_code", String(nsError?.code ?? 0)),
+            ("reason", reason ?? "none")
+        ] + extra)
     }
 }

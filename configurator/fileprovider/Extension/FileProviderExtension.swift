@@ -66,7 +66,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             ?? FileManager.default.temporaryDirectory
         self.fetchController = FetchController(hostProvider: hostProvider ?? { source.hostProxy(errorHandler: $0) },
                                                temporaryDirectory: tempDir, perf: perf)
-        self.cleanup = manager.map { EvictionCoordinator(environment: ManagerEvictionEnvironment(manager: $0)) }
+        self.cleanup = manager.map {
+            EvictionCoordinator(
+                environment: ManagerEvictionEnvironment(manager: $0), perf: perf
+            )
+        }
         super.init()
     }
 

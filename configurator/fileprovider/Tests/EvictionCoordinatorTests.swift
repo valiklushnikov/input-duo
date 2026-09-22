@@ -50,12 +50,67 @@ private final class FakeEvictionEnvironment: EvictionEnvironment {
 
 final class EvictionCoordinatorTests: XCTestCase {
     private func makeCoordinator(_ env: FakeEvictionEnvironment,
-                                 config: EvictionCoordinator.Config = .init(pollInterval: 0.5, materializationTimeout: 120, grace: 2, maxEvictAttempts: 3, evictRetryDelay: 2))
+                                 config: EvictionCoordinator.Config = .init(pollInterval: 0.5, materializationTimeout: 120, grace: 2, maxEvictAttempts: 3, evictRetryDelay: 2),
+                                 perf: PerfTrace = .live)
         -> (EvictionCoordinator, () -> EvictionState?) {
         var terminal: EvictionState?
-        let coord = EvictionCoordinator(environment: env, config: config, executor: { $0() })
+        let coord = EvictionCoordinator(
+            environment: env, config: config, executor: { $0() }, perf: perf
+        )
         coord.onTerminal = { _, state in terminal = state }
         return (coord, { terminal })
+    }
+
+    private func recordingTrace() -> (PerfTrace, () -> [String]) {
+        var tick: UInt64 = 100
+        var lines: [String] = []
+        return (
+            PerfTrace(clock: { tick += 10; return tick }, emit: { lines.append($0) }),
+            { lines }
+        )
+    }
+
+    private func eventNames(_ lines: [String]) -> [String] {
+        lines.compactMap { line in
+            line.split(separator: " ").first(where: { $0.hasPrefix("event=") })
+                .map { String($0.dropFirst("event=".count)) }
+        }
+    }
+
+    func testMaterializationEvictionAndVerificationCarryMonotonicItemTimeline() {
+        let env = FakeEvictionEnvironment()
+        let (perf, captured) = recordingTrace()
+        let (coord, terminal) = makeCoordinator(env, perf: perf)
+        env.materialized = ["gen:0"]
+
+        coord.schedule(itemIdentifier: "gen:0", transferId: "gen")
+        env.drain()
+        env.materialized = []
+        env.drainAll()
+
+        XCTAssertEqual(eventNames(captured()), [
+            "cleanup_scheduled", "materialization_observed", "eviction_attempt",
+            "eviction_success", "eviction_verified"
+        ])
+        XCTAssertTrue(captured().allSatisfy { $0.contains("item_identifier=gen:0") })
+        XCTAssertEqual(terminal(), .evicted)
+    }
+
+    func testNonEvictableTraceCarriesAttemptAndRetryCounts() {
+        let env = FakeEvictionEnvironment()
+        let (perf, captured) = recordingTrace()
+        let (coord, _) = makeCoordinator(env, perf: perf)
+        env.materialized = ["gen:0"]
+        env.evictError = nonEvictable()
+
+        coord.schedule(itemIdentifier: "gen:0", transferId: "gen")
+        env.drain()
+        env.drain()
+
+        let events = captured()
+        XCTAssertTrue(events.contains { $0.contains("event=eviction_attempt") && $0.contains("attempt=1") })
+        XCTAssertTrue(events.contains { $0.contains("event=eviction_deferred") && $0.contains("retry_count=0") })
+        XCTAssertEqual(env.scheduledDelays, [2, 1], "grace and existing first backoff stay unchanged")
     }
 
     /// THE regression for the measured bug: at fetch completion the item is not
