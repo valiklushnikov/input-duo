@@ -153,7 +153,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
               let item = DuoItemFactory.item(for: record, index: index), item.documentSize != nil,
               requestedVersion == nil || requestedVersion == item.itemVersion else {
             perf.mark("completion_call", fields: [
-                ("item_identifier", itemIdentifier.rawValue), ("status", "error")
+                ("item_identifier", itemIdentifier.rawValue),
+                ("status", "error"),
+                ("error_code", String(NSFileProviderError.noSuchItem.rawValue))
             ])
             completionHandler(nil, nil, NSError(domain: NSFileProviderErrorDomain, code: NSFileProviderError.noSuchItem.rawValue))
             return Progress()

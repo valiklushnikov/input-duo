@@ -49,7 +49,10 @@ def main(argv: list[str] | None = None) -> int:
     result = analyze(all_events, dataset, correctness)
     paths = write_artifacts(result, args.output_dir)
     print(paths.report)
-    return 0 if result.performance_baseline_valid else 2
+    # A first pass without correctness is intentional: its run.json supplies
+    # measured refetch/error counts to fp_perf_run verify. The second pass,
+    # with --correctness, enforces the final baseline status via exit code.
+    return 0 if args.correctness is None or result.performance_baseline_valid else 2
 
 
 if __name__ == "__main__":

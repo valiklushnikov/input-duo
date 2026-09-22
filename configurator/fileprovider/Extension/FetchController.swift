@@ -415,7 +415,9 @@ private final class FetchOperation {
             fetchLog.info("\(event, privacy: .public) transfer_id=\(self.transferId ?? "?", privacy: .public) entry_index=\(self.entryIndex ?? -1, privacy: .public) fetch_token=\(self.token ?? "?", privacy: .public) code=\(mapped.code, privacy: .public)")
             if let token { host?.cancelFetch(token) }
             if let url { try? FileManager.default.removeItem(at: url) }
-            perf.mark("completion_call", fields: traceFields(attempt: attempt) + [("status", "error")])
+            perf.mark("completion_call", fields: traceFields(attempt: attempt) + [
+                ("status", "error"), ("error_code", String(mapped.code))
+            ])
             completion(nil, nil, mapped)
         } else {
             fetchLog.info("fp_fetch_completed transfer_id=\(self.transferId ?? "?", privacy: .public) entry_index=\(self.entryIndex ?? -1, privacy: .public) fetch_token=\(self.token ?? "?", privacy: .public)")

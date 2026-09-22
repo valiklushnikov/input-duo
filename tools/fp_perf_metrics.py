@@ -449,6 +449,15 @@ def analyze(events: Iterable[PerfEvent], dataset: dict, correctness: dict) -> Ru
     chunk_counts = [float(metric.chunks) for metric in per_file]
     sizes = [float(metric.size) for metric in per_file]
     refetch_count = max(0, successful_completions - len(interval_by_item))
+    fp_error_counts = {
+        code: sum(
+            event.name == "completion_call"
+            and event.fields.get("status") == "error"
+            and event.fields.get("error_code") == code
+            for event in event_list
+        )
+        for code in ("-1005", "-1004", "-1000")
+    }
     complete_fetches = len(extension_intervals) == expected_count == len(per_file)
     trace_complete = all(
         metric.fetch_total_ms is not None
@@ -613,6 +622,7 @@ def analyze(events: Iterable[PerfEvent], dataset: dict, correctness: dict) -> Ru
         "FINDER_REQUEST_CONCURRENCY": available(concurrency["max"]),
         "INTERNAL_FETCH_CONCURRENCY": available(internal_concurrency["max"]),
         "REFETCH_COUNT": refetch_count,
+        **fp_error_counts,
         "FETCH_STARTUP_P50": available(startup_p50), "FETCH_STARTUP_P95": available(startup_p95),
         "POST_OPEN_WAIT_P50": available(post_open_p50), "POST_OPEN_WAIT_P95": available(post_open_p95),
         "CLOSE_P50": available(close_p50), "CLOSE_P95": available(close_p95),
