@@ -345,6 +345,17 @@ def test_store_skips_wrong_schema_version(tmp_path):
     assert len(skipped) == 1
 
 
+def test_store_skips_deeply_nested_corrupt_record(tmp_path):
+    directory = tmp_path / "gens"
+    directory.mkdir(parents=True)
+    (directory / "A.json").write_text("[" * 100_000, encoding="utf-8")
+
+    loaded, skipped = GenerationRegistryStore(directory).load_all()
+
+    assert loaded == []
+    assert len(skipped) == 1
+
+
 def test_store_rejects_path_traversal_id(tmp_path):
     store = GenerationRegistryStore(tmp_path / "gens")
     import pytest

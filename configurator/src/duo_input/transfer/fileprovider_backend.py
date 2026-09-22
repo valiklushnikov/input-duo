@@ -51,11 +51,10 @@ from ..clipboard.wire import MAX_FILE_CHUNK_BYTES, Message, MessageType
 from .fileprovider_client import FileProviderServiceClient, _xpc_error
 from .fileprovider_domain import FileProviderDomainManager
 from .fileprovider_generation_store import (
-    STATE_RETIRED,
     GenerationRegistryStore,
     PersistedGeneration,
 )
-from .fileprovider_replica import STATE_ACTIVE, build_generation_record
+from .fileprovider_replica import STATE_ACTIVE, STATE_RETIRED, build_generation_record
 from .model import ENTRY_FILE, TransferManifest
 
 logger = logging.getLogger(__name__)

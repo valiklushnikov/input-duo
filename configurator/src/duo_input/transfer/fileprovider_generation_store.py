@@ -154,7 +154,10 @@ class GenerationRegistryStore:
         for path in sorted(self._dir.glob("*.json")):
             try:
                 record = self._parse(path.read_bytes())
-            except (OSError, ValueError) as error:
+            except (OSError, ValueError, RecursionError) as error:
+                # RecursionError: a pathologically nested corrupt file. Mirrors
+                # model.decode_manifest, which guards json parsing the same way -
+                # one bad record must never abort the whole rehydrate.
                 skipped.append((path.stem, str(error)))
                 continue
             loaded.append(record)
