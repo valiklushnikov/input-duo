@@ -25,6 +25,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     /// Strong reference: the service source owns the anonymous listener.
     private let serviceSource: DuoServiceSource
     private let fetchController: FetchController
+    private let burstDownloads = FinderBurstDownloadCoordinator()
     private let perf: PerfTrace
     /// Post-fetch cache cleanup (materialize→grace→evict→verify). nil only when
     /// no manager is available (tests / degraded host).
@@ -159,6 +160,33 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             ])
             completionHandler(nil, nil, NSError(domain: NSFileProviderErrorDomain, code: NSFileProviderError.noSuchItem.rawValue))
             return Progress()
+        }
+        let burstIdentifiers = burstDownloads.downloadsAfterFetch(
+            transferId: parsed.transferId,
+            index: index,
+            entries: DuoItemModel.entries(in: record),
+            isFileViewerRequest: request.isFileViewerRequest
+        )
+        if !burstIdentifiers.isEmpty {
+            perf.mark("finder_burst_triggered", fields: [
+                ("entry_index", String(index)),
+                ("request_count", String(burstIdentifiers.count)),
+                ("transfer_id", parsed.transferId)
+            ])
+            for identifier in burstIdentifiers {
+                manager?.requestDownloadForItem(
+                    withIdentifier: identifier,
+                    requestedRange: NSRange(location: NSNotFound, length: 0)
+                ) { [perf] error in
+                    let nsError = error as NSError?
+                    perf.mark("finder_burst_download_ack", fields: [
+                        ("error_code", String(nsError?.code ?? 0)),
+                        ("item_identifier", identifier.rawValue),
+                        ("status", error == nil ? "ok" : "error"),
+                        ("transfer_id", parsed.transferId)
+                    ])
+                }
+            }
         }
         // Post-fetch cache cleanup: fetchContents completion means "content
         // supplied to File Provider", NOT "materialized into the mount" - the
