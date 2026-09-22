@@ -99,26 +99,38 @@ final class FetchController {
     private let temporaryDirectory: URL
     private let retry: RetryPolicy
     private let scheduler: Scheduler
+    private let perf: PerfTrace
 
     init(hostProvider: @escaping HostProvider,
          temporaryDirectory: URL = FileManager.default.temporaryDirectory,
          retry: RetryPolicy = RetryPolicy(),
-         scheduler: Scheduler? = nil) {
+         scheduler: Scheduler? = nil,
+         perf: PerfTrace = .live) {
         self.hostProvider = hostProvider
         self.temporaryDirectory = temporaryDirectory
         self.retry = retry
+        self.perf = perf
         self.scheduler = scheduler ?? { delay, work in
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay, execute: work)
         }
     }
 
     func fetch(_ item: DuoItem, request: NSFileProviderRequest,
+               fetchStartedAt: UInt64? = nil,
                completion: @escaping (URL?, NSFileProviderItem?, Error?) -> Void) -> Progress {
         let parsed = DuoItemModel.parse(item.itemIdentifier)
+        if fetchStartedAt == nil {
+            perf.mark("fetch_enter", fields: [
+                ("item_identifier", item.itemIdentifier.rawValue),
+                ("transfer_id", parsed?.transferId ?? "unknown"),
+                ("entry_index", String(parsed?.index ?? -1))
+            ])
+        }
         fetchLog.info("FETCH_ENTER transfer_id=\(parsed?.transferId ?? "?", privacy: .public) entry_index=\(parsed?.index ?? -1, privacy: .public)")
         let operation = FetchOperation(item: item, directory: temporaryDirectory,
                                        hostProvider: hostProvider, retry: retry,
-                                       scheduler: scheduler, completion: completion)
+                                       scheduler: scheduler, perf: perf,
+                                       completion: completion)
         operation.start()
         return operation.progress
     }
@@ -131,6 +143,7 @@ private final class FetchOperation {
     private let hostProvider: FetchController.HostProvider
     private let retry: FetchController.RetryPolicy
     private let scheduler: FetchController.Scheduler
+    private let perf: PerfTrace
     private let completion: (URL?, NSFileProviderItem?, Error?) -> Void
     private let queue = DispatchQueue(label: "com.duoinput.fileprovider.fetch")
     private var host: DuoHostCallback?
@@ -141,6 +154,7 @@ private final class FetchOperation {
     private var opened = false
     private var pullSequence = 0
     private var offset: Int64 = 0
+    private var wroteFirstChunk = false
     //: 1-based fetch attempt. Bumped on every (re)start and captured by each
     //: async callback, so a superseded attempt's late callback (e.g. the old
     //: host's connection-lost handler firing after we already retried) is
@@ -159,12 +173,14 @@ private final class FetchOperation {
          hostProvider: @escaping FetchController.HostProvider,
          retry: FetchController.RetryPolicy,
          scheduler: @escaping FetchController.Scheduler,
+         perf: PerfTrace,
          completion: @escaping (URL?, NSFileProviderItem?, Error?) -> Void) {
         self.item = item
         self.directory = directory
         self.hostProvider = hostProvider
         self.retry = retry
         self.scheduler = scheduler
+        self.perf = perf
         self.completion = completion
         let progress = Progress(totalUnitCount: item.documentSize?.int64Value ?? 0)
         // Classify the fetch as a file DOWNLOAD so Finder/fileproviderd render a
@@ -209,7 +225,15 @@ private final class FetchOperation {
             self.entryIndex = index
             self.host = self.hostProvider { error in self.queue.async { self.settle(error, attempt: attempt) } }
             guard let host = self.host else { self.settle(self.error(8), attempt: attempt); return }
+            let openFields = self.baseTraceFields(attempt: attempt)
+            self.perf.mark(
+                "open_fetch_call_begin", fields: openFields + [("fetch_token", "none")]
+            )
             host.openFetch(parsed.transferId, entryId: NSNumber(value: index)) { token, total, error in
+                self.perf.mark("open_fetch_reply", fields: openFields + [
+                    ("fetch_token", token ?? "none"),
+                    ("status", error == nil ? "ok" : "error")
+                ])
                 self.queue.async {
                     guard self.attempt == attempt, !self.opened else {
                         // Superseded attempt (we already retried): drop it, but
@@ -239,8 +263,11 @@ private final class FetchOperation {
                             // Zero-byte fetch: the empty temp IS the whole
                             // contents - no pullChunk round trip needed.
                             try self.file?.synchronize()
+                            self.perf.mark("fsync_complete", fields: self.traceFields(attempt: attempt))
                             try self.file?.close()
+                            self.perf.mark("close_complete", fields: self.traceFields(attempt: attempt))
                             self.file = nil
+                            self.perf.mark("finalize_complete", fields: self.traceFields(attempt: attempt))
                             self.finish(nil)
                         } else {
                             self.startNs = DispatchTime.now().uptimeNanoseconds
@@ -256,7 +283,14 @@ private final class FetchOperation {
         guard !finished, self.attempt == attempt, let token, let host else { return }
         pullSequence += 1
         let sequence = pullSequence
+        let pullFields = traceFields(attempt: attempt) + [("pull_sequence", String(sequence))]
+        perf.mark("pull_call_begin", fields: pullFields)
         host.pullChunk(token) { chunk, eof, error in
+            self.perf.mark("pull_reply", fields: pullFields + [
+                ("bytes", String(chunk?.count ?? 0)),
+                ("eof", eof ? "true" : "false"),
+                ("status", error == nil ? "ok" : "error")
+            ])
             self.queue.async {
                 guard !self.finished, self.attempt == attempt, self.pullSequence == sequence else { return }
                 self.pullSequence += 1
@@ -269,6 +303,24 @@ private final class FetchOperation {
                 }
                 do {
                     try self.file?.write(contentsOf: chunk)
+                    if !self.wroteFirstChunk {
+                        let writeDoneNs = self.perf.mark(
+                            "first_write_complete",
+                            fields: self.traceFields(attempt: attempt) + [("bytes", String(chunk.count))]
+                        )
+                        self.wroteFirstChunk = true
+                        if eof {
+                            self.perf.mark(
+                                "last_write_complete", at: writeDoneNs,
+                                fields: self.traceFields(attempt: attempt) + [("bytes", String(chunk.count))]
+                            )
+                        }
+                    } else if eof {
+                        self.perf.mark(
+                            "last_write_complete",
+                            fields: self.traceFields(attempt: attempt) + [("bytes", String(chunk.count))]
+                        )
+                    }
                     self.offset += Int64(chunk.count)
                     self.progress.completedUnitCount = self.offset
                     // Feed throughput + estimated time remaining so the system
@@ -287,8 +339,11 @@ private final class FetchOperation {
                     fetchLog.info("fp_bytes_received transfer_id=\(self.transferId ?? "?", privacy: .public) entry_index=\(self.entryIndex ?? -1, privacy: .public) fetch_token=\(token, privacy: .public) bytes=\(chunk.count, privacy: .public)")
                     if eof {
                         try self.file?.synchronize()
+                        self.perf.mark("fsync_complete", fields: self.traceFields(attempt: attempt))
                         try self.file?.close()
+                        self.perf.mark("close_complete", fields: self.traceFields(attempt: attempt))
                         self.file = nil
+                        self.perf.mark("finalize_complete", fields: self.traceFields(attempt: attempt))
                         self.finish(nil)
                     } else { self.pull(attempt: attempt) }
                 } catch { self.finish(error) }  // local write error: never retried
@@ -328,6 +383,7 @@ private final class FetchOperation {
         token = nil
         opened = false
         offset = 0
+        wroteFirstChunk = false
         pullSequence = 0
         host = nil
         progress.completedUnitCount = 0
@@ -352,11 +408,28 @@ private final class FetchOperation {
             fetchLog.info("\(event, privacy: .public) transfer_id=\(self.transferId ?? "?", privacy: .public) entry_index=\(self.entryIndex ?? -1, privacy: .public) fetch_token=\(self.token ?? "?", privacy: .public) code=\(mapped.code, privacy: .public)")
             if let token { host?.cancelFetch(token) }
             if let url { try? FileManager.default.removeItem(at: url) }
+            perf.mark("completion_call", fields: traceFields(attempt: attempt) + [("status", "error")])
             completion(nil, nil, mapped)
         } else {
             fetchLog.info("fp_fetch_completed transfer_id=\(self.transferId ?? "?", privacy: .public) entry_index=\(self.entryIndex ?? -1, privacy: .public) fetch_token=\(self.token ?? "?", privacy: .public)")
+            perf.mark("completion_call", fields: traceFields(attempt: attempt) + [("status", "ok")])
             completion(url, item, nil)
         }
         host = nil
+    }
+
+    private func traceFields(attempt: Int) -> [(String, String)] {
+        baseTraceFields(attempt: attempt) + [
+            ("fetch_token", token ?? "none")
+        ]
+    }
+
+    private func baseTraceFields(attempt: Int) -> [(String, String)] {
+        [
+            ("item_identifier", item.itemIdentifier.rawValue),
+            ("transfer_id", transferId ?? "unknown"),
+            ("entry_index", String(entryIndex ?? -1)),
+            ("attempt", String(attempt))
+        ]
     }
 }

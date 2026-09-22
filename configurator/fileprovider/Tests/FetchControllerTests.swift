@@ -57,6 +57,73 @@ final class FetchControllerTests: XCTestCase {
                 contentVersion: Data(), metadataVersion: Data())
     }
 
+    private func trace() -> (PerfTrace, () -> [String]) {
+        var tick: UInt64 = 100
+        var lines: [String] = []
+        let trace = PerfTrace(clock: { tick += 10; return tick }, emit: { lines.append($0) })
+        return (trace, { lines })
+    }
+
+    private func eventNames(_ lines: [String]) -> [String] {
+        lines.compactMap { line in
+            line.split(separator: " ").first(where: { $0.hasPrefix("event=") })
+                .map { String($0.dropFirst("event=".count)) }
+        }
+    }
+
+    func testSingleChunkFetchRecordsOrderedStagesWithoutChangingBytes() throws {
+        let host = CannedHost()
+        host.chunks = [(Data("abc".utf8), true, nil)]
+        let (perf, captured) = trace()
+        let controller = FetchController(
+            hostProvider: { _ in host }, temporaryDirectory: directory, perf: perf
+        )
+        let done = expectation(description: "traced fetch")
+        var resultURL: URL?
+
+        _ = controller.fetch(item(), request: NSFileProviderRequest()) { url, _, error in
+            XCTAssertNil(error)
+            resultURL = url
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 3)
+
+        XCTAssertEqual(eventNames(captured()), [
+            "fetch_enter", "open_fetch_call_begin", "open_fetch_reply",
+            "pull_call_begin", "pull_reply", "first_write_complete",
+            "last_write_complete", "fsync_complete", "close_complete",
+            "finalize_complete", "completion_call"
+        ])
+        let writes = captured().filter {
+            $0.contains("event=first_write_complete") || $0.contains("event=last_write_complete")
+        }
+        let writeStamps = writes.compactMap { line in
+            line.split(separator: " ").first(where: { $0.hasPrefix("mono_ns=") })
+        }
+        XCTAssertEqual(Set(writeStamps).count, 1)
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(resultURL)), Data("abc".utf8))
+    }
+
+    func testMultiChunkFetchMarksOnlyTheFirstAndLastWrites() throws {
+        let host = CannedHost()
+        let (perf, captured) = trace()
+        let controller = FetchController(
+            hostProvider: { _ in host }, temporaryDirectory: directory, perf: perf
+        )
+        let done = expectation(description: "multi chunk traced")
+
+        _ = controller.fetch(item(), request: NSFileProviderRequest()) { _, _, error in
+            XCTAssertNil(error)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 3)
+
+        let events = eventNames(captured())
+        XCTAssertEqual(events.filter { $0 == "pull_reply" }.count, 2)
+        XCTAssertEqual(events.filter { $0 == "first_write_complete" }.count, 1)
+        XCTAssertEqual(events.filter { $0 == "last_write_complete" }.count, 1)
+    }
+
     func testFetchWritesExactBytesAndCompletesWithOriginalItem() throws {
         let host = CannedHost()
         let controller = FetchController(hostProvider: { _ in host }, temporaryDirectory: directory)
@@ -132,7 +199,10 @@ final class FetchControllerTests: XCTestCase {
     func testZeroByteFetchSkipsPullChunkAndCompletesWithEmptyTemp() throws {
         let host = CannedHost()
         host.totalSize = 0
-        let controller = FetchController(hostProvider: { _ in host }, temporaryDirectory: directory)
+        let (perf, captured) = trace()
+        let controller = FetchController(
+            hostProvider: { _ in host }, temporaryDirectory: directory, perf: perf
+        )
         let original = item(size: 0)
         let done = expectation(description: "zero byte completed")
         let progress = controller.fetch(original, request: NSFileProviderRequest()) { url, returned, error in
@@ -145,6 +215,8 @@ final class FetchControllerTests: XCTestCase {
         XCTAssertEqual(progress.completedUnitCount, 0)
         XCTAssertEqual(host.pullCallCount, 0, "zero-byte fetches must never call pullChunk")
         XCTAssertTrue(host.cancelled.isEmpty)
+        XCTAssertFalse(eventNames(captured()).contains("pull_call_begin"))
+        XCTAssertTrue(eventNames(captured()).contains("finalize_complete"))
     }
 
     func testDirectoryCreationFailureSurfacesErrorAndCancelsFetch() throws {
@@ -163,7 +235,10 @@ final class FetchControllerTests: XCTestCase {
         let blockedPath = directory.appendingPathComponent("blocked")
         try Data().write(to: blockedPath)
         let host = CannedHost()
-        let controller = FetchController(hostProvider: { _ in host }, temporaryDirectory: blockedPath)
+        let (perf, captured) = trace()
+        let controller = FetchController(
+            hostProvider: { _ in host }, temporaryDirectory: blockedPath, perf: perf
+        )
         let done = expectation(description: "disk write error")
         _ = controller.fetch(item(), request: NSFileProviderRequest()) { url, item, error in
             XCTAssertNil(url)
@@ -173,6 +248,9 @@ final class FetchControllerTests: XCTestCase {
         }
         wait(for: [done], timeout: 3)
         XCTAssertEqual(host.cancelled, ["token"])
+        let completions = captured().filter { $0.contains("event=completion_call") }
+        XCTAssertEqual(completions.count, 1)
+        XCTAssertTrue(completions[0].contains("status=error"))
     }
 
     // MARK: - Transient host-unreachable retry (peer link drop mid-transfer)
@@ -182,8 +260,9 @@ final class FetchControllerTests: XCTestCase {
     /// instead of surfacing a failure that would abort a Finder folder copy.
     func testTransientHostErrorRetriesThenSucceeds() throws {
         let host = FlakyHost(failOpenTimes: 1, code: 8)  // notConnected once
+        let (perf, captured) = trace()
         let controller = FetchController(hostProvider: { _ in host }, temporaryDirectory: directory,
-                                         scheduler: now)
+                                         scheduler: now, perf: perf)
         let done = expectation(description: "retried then completed")
         _ = controller.fetch(item(), request: NSFileProviderRequest()) { url, _, error in
             XCTAssertNil(error)
@@ -192,6 +271,8 @@ final class FetchControllerTests: XCTestCase {
         }
         wait(for: [done], timeout: 3)
         XCTAssertEqual(host.openCalls, 2, "one retry after the transient failure")
+        XCTAssertEqual(eventNames(captured()).filter { $0 == "open_fetch_call_begin" }.count, 2)
+        XCTAssertEqual(eventNames(captured()).filter { $0 == "completion_call" }.count, 1)
     }
 
     /// A host that never becomes reachable retries up to the budget, then fails

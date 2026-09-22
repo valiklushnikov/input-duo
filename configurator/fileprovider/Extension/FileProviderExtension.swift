@@ -25,6 +25,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     /// Strong reference: the service source owns the anonymous listener.
     private let serviceSource: DuoServiceSource
     private let fetchController: FetchController
+    private let perf: PerfTrace
     /// Post-fetch cache cleanup (materialize→grace→evict→verify). nil only when
     /// no manager is available (tests / degraded host).
     private let cleanup: EvictionCoordinator?
@@ -40,8 +41,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     /// `~/Library` (the test bundle itself is not sandboxed).
     init(domain: NSFileProviderDomain, replicaStore: ReplicaStore,
          hostProvider: FetchController.HostProvider? = nil,
-         temporaryDirectory: URL? = nil) {
+         temporaryDirectory: URL? = nil,
+         perf: PerfTrace = .live) {
         self.domain = domain
+        self.perf = perf
         let manager = NSFileProviderManager(for: domain)
         self.manager = manager
         self.replicaStore = replicaStore
@@ -62,7 +65,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             ?? (try? manager?.temporaryDirectoryURL())
             ?? FileManager.default.temporaryDirectory
         self.fetchController = FetchController(hostProvider: hostProvider ?? { source.hostProxy(errorHandler: $0) },
-                                               temporaryDirectory: tempDir)
+                                               temporaryDirectory: tempDir, perf: perf)
         self.cleanup = manager.map { EvictionCoordinator(environment: ManagerEvictionEnvironment(manager: $0)) }
         super.init()
     }
@@ -132,6 +135,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         request: NSFileProviderRequest,
         completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
     ) -> Progress {
+        let fetchStartedAt = perf.mark("fetch_enter", fields: [
+            ("item_identifier", itemIdentifier.rawValue),
+            ("transfer_id", DuoItemModel.parse(itemIdentifier)?.transferId ?? "unknown"),
+            ("entry_index", String(DuoItemModel.parse(itemIdentifier)?.index ?? -1))
+        ])
         // Resolve on record EXISTENCE, not `isActive` (see item(for:)): a
         // retired/tombstoned generation stays fetchable by itemIdentifier while
         // its durable record exists. The only noSuchItem is a genuinely absent
@@ -140,6 +148,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
               let record = replicaStore.record(for: parsed.transferId),
               let item = DuoItemFactory.item(for: record, index: index), item.documentSize != nil,
               requestedVersion == nil || requestedVersion == item.itemVersion else {
+            perf.mark("completion_call", fields: [
+                ("item_identifier", itemIdentifier.rawValue), ("status", "error")
+            ])
             completionHandler(nil, nil, NSError(domain: NSFileProviderErrorDomain, code: NSFileProviderError.noSuchItem.rawValue))
             return Progress()
         }
@@ -156,7 +167,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             guard error == nil else { return }
             cleanup?.schedule(itemIdentifier: itemIdentifier.rawValue, transferId: transferId)
         }
-        return fetchController.fetch(item, request: request, completion: scheduling)
+        return fetchController.fetch(
+            item, request: request, fetchStartedAt: fetchStartedAt, completion: scheduling
+        )
     }
 
     func enumerator(
