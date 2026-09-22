@@ -50,6 +50,11 @@ from PySide6.QtCore import QMetaObject, QObject, QTimer, Q_ARG, Qt, Signal, Slot
 from ..clipboard.wire import MAX_FILE_CHUNK_BYTES, Message, MessageType
 from .fileprovider_client import FileProviderServiceClient, _xpc_error
 from .fileprovider_domain import FileProviderDomainManager
+from .fileprovider_generation_store import (
+    STATE_RETIRED,
+    GenerationRegistryStore,
+    PersistedGeneration,
+)
 from .fileprovider_replica import STATE_ACTIVE, build_generation_record
 from .model import ENTRY_FILE, TransferManifest
 
@@ -285,6 +290,7 @@ class FileProviderBackend(QObject):
         max_generations: int = MAX_GENERATIONS,
         timer_factory: Callable[[], object] | None = None,
         read_timeout_ms: int = FETCH_READ_TIMEOUT_MS,
+        generation_store: GenerationRegistryStore | None = None,
     ) -> None:
         super().__init__(parent)
         # --- Task 17: observability - a plain dict, not a metrics framework
@@ -345,6 +351,11 @@ class FileProviderBackend(QObject):
         #: transfer_id -> учётная запись жизненного цикла (active/retired).
         #: Retired-запись КЕПТ здесь (реплика тоже кепт), пока GC её не удалит.
         self._generations: dict[str, _Generation] = {}
+        #: Host-owned durable mirror of _generations (metadata only). Written on
+        #: every lifecycle transition and rehydrated at construction so an old
+        #: RETIRED generation stays fetchable across a host restart with no new
+        #: publish. None disables persistence (test fakes / non-FP hosts).
+        self._generation_store = generation_store
         #: transfer_id -> число ACTIVE fetch'ей, привязанных к generation
         #: (in-use ref). ЯВНЫЙ счётчик, а не скан by_token: даже после Task 19
         #: (settled-записи больше не задерживаются в by_token - см.
@@ -393,8 +404,90 @@ class FileProviderBackend(QObject):
             state_changed_signal.connect(self._on_domain_state_changed)
         if getattr(domain, "is_ready", False):
             self.on_domain_ready()
+        # Rehydrate durable generations BEFORE the backend is exposed for XPC
+        # open_fetch (set_callbacks below): there must be no window where a fetch
+        # can arrive while _generations is still empty after a restart.
+        self._rehydrate_generations()
         if hasattr(client, "set_callbacks"):
             client.set_callbacks(self.open_fetch, self.pull_chunk, self.cancel_fetch)
+
+    def _rehydrate_generations(self) -> None:
+        """Reconstruct runtime ``_generations`` from the durable host store.
+
+        Only metadata is restored; runtime-only state (``_gen_in_use``, fetch
+        counters, pending replies) starts fresh at zero. A single corrupt record
+        is skipped and logged, never aborting the whole rehydrate. A restored
+        ACTIVE generation re-becomes the tracked active clipboard for serving and
+        for the retire-on-next-publish handoff, but is NOT re-armed (arming needs
+        a fresh ack+domain-ready latch, which only a new publish drives)."""
+        store = self._generation_store
+        if store is None:
+            return
+        loaded, skipped = store.load_all()
+        for record in loaded:
+            state = (
+                _GenerationState.RETIRED
+                if record.state == STATE_RETIRED
+                else _GenerationState.ACTIVE_CLIPBOARD
+            )
+            self._generations[record.transfer_id] = _Generation(
+                transfer_id=record.transfer_id,
+                manifest=record.manifest,
+                state=state,
+                created_ns=record.created_ns,
+                quiesced=record.quiesced,
+            )
+            self._gen_in_use.setdefault(record.transfer_id, 0)
+            if state is _GenerationState.ACTIVE_CLIPBOARD:
+                self._active_transfer_id = record.transfer_id
+                self._active_manifest = record.manifest
+                self._generation_state = _GenerationState.ACTIVE_CLIPBOARD
+            _log_event(
+                "fp_generation_rehydrate_loaded",
+                transfer_id=record.transfer_id,
+                state=record.state,
+            )
+        for identifier, reason in skipped:
+            self._bump("fp_generation_rehydrate_skipped")
+            _log_event(
+                "fp_generation_rehydrate_skipped",
+                transfer_id=identifier,
+                reason=reason,
+            )
+        self._sync_generation_gauge()
+        _log_event(
+            "fp_generation_rehydrate_complete",
+            loaded=len(loaded),
+            skipped=len(skipped),
+        )
+
+    def _persist_generation(self, generation: _Generation) -> None:
+        """Atomically write ``generation``'s durable record. Best-effort: a disk
+        error degrades to "not durable across restart" (the pre-store behaviour),
+        never breaks live serving. Callers invoke this BEFORE exposing the
+        generation as serviceable / acknowledging a state change."""
+        store = self._generation_store
+        if store is None:
+            return
+        state = (
+            STATE_RETIRED
+            if generation.state is _GenerationState.RETIRED
+            else STATE_ACTIVE
+        )
+        try:
+            store.save(
+                PersistedGeneration(
+                    transfer_id=generation.transfer_id,
+                    manifest=generation.manifest,
+                    state=state,
+                    created_ns=generation.created_ns,
+                    quiesced=generation.quiesced,
+                )
+            )
+        except OSError:
+            logger.exception(
+                "could not persist generation %s durably", generation.transfer_id
+            )
 
     # --- проводка
     def attach_link(self, link) -> None:
@@ -1406,12 +1499,17 @@ class FileProviderBackend(QObject):
         """Record a freshly-acked generation as the active clipboard. Its
         ``created_ns`` (from the injectable clock) is the TTL/eviction anchor."""
         transfer_id = manifest.transfer_id
-        self._generations[transfer_id] = _Generation(
+        generation = _Generation(
             transfer_id=transfer_id,
             manifest=manifest,
             state=_GenerationState.ACTIVE_CLIPBOARD,
             created_ns=self._clock(),
         )
+        # Durable-first: commit the record before it becomes serviceable in
+        # runtime state, so a crash can never surface an in-memory generation
+        # whose metadata was never written.
+        self._persist_generation(generation)
+        self._generations[transfer_id] = generation
         self._gen_in_use.setdefault(transfer_id, 0)
         self._sync_generation_gauge()
 
@@ -1426,6 +1524,10 @@ class FileProviderBackend(QObject):
         if generation is None or generation.state is _GenerationState.RETIRED:
             return
         generation.state = _GenerationState.RETIRED
+        # Durable-first: commit RETIRED locally before acknowledging it over XPC,
+        # so the state that survives a crash is never "more active" than the one
+        # the extension was told about.
+        self._persist_generation(generation)
         self._sync_generation_gauge()
         remote = self._client.remote()
         if remote is not None:
@@ -1461,6 +1563,7 @@ class FileProviderBackend(QObject):
         if generation.quiesced or self._gen_in_use.get(generation_id, 0) != 0:
             return
         generation.quiesced = True
+        self._persist_generation(generation)
         self._send_transfer_end(generation_id)
 
     def _send_transfer_end(self, generation_id: str) -> None:
@@ -1540,6 +1643,12 @@ class FileProviderBackend(QObject):
         ``StagingArea.gc``: a failed XPC reply is only logged."""
         generation = self._generations.pop(generation_id, None)
         self._gen_in_use.pop(generation_id, None)
+        # The generation is no longer serviceable by the host (its runtime
+        # bookkeeping is gone), so drop the durable record too - it must not
+        # rehydrate on the next restart. The extension keeps its own replica
+        # record (PHYSICAL_REPLICA_DELETE = DISABLED); this is host bookkeeping.
+        if self._generation_store is not None:
+            self._generation_store.delete(generation_id)
         if generation is None:
             return
         self._sync_generation_gauge()

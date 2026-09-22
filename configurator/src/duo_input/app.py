@@ -405,13 +405,27 @@ class _ClipboardRuntime(QObject):
             )
             from duo_input.transfer.fileprovider_client import FileProviderServiceClient
             from duo_input.transfer.fileprovider_domain import FileProviderDomainManager
+            from duo_input.transfer.fileprovider_generation_store import (
+                GenerationRegistryStore,
+            )
             from duo_input.transfer.macos_pasteboard import arm_urls
+            from duo_input.persistence.locations import application_directory
 
             domain = FileProviderDomainManager(parent=self._application)
             client = FileProviderServiceClient(parent=self._application)
             client.set_domain(domain.domain_identifier)
+            # Host-owned durable generation registry: rehydrated at construction
+            # so an old RETIRED generation stays fetchable after a Mac app restart
+            # with no new publish (see fileprovider_generation_store).
+            generation_store = GenerationRegistryStore(
+                application_directory() / "fileprovider" / "generations"
+            )
             fp_backend = FileProviderBackend(
-                client, domain, arm_urls, parent=self._application
+                client,
+                domain,
+                arm_urls,
+                parent=self._application,
+                generation_store=generation_store,
             )
             # "Domain is ensured at app startup" (Task 6) - this is the first
             # point the file-transfer subsystem (and thus the FP feature) is
