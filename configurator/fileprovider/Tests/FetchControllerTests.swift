@@ -90,7 +90,7 @@ final class FetchControllerTests: XCTestCase {
 
         XCTAssertEqual(eventNames(captured()), [
             "fetch_enter", "open_fetch_call_begin", "open_fetch_reply",
-            "pull_call_begin", "pull_reply", "first_write_complete",
+            "pull_call_begin", "pull_reply", "chunk_write_complete", "first_write_complete",
             "last_write_complete", "fsync_complete", "close_complete",
             "finalize_complete", "completion_call"
         ])

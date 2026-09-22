@@ -303,9 +303,16 @@ private final class FetchOperation {
                 }
                 do {
                     try self.file?.write(contentsOf: chunk)
+                    let writeDoneNs = self.perf.mark(
+                        "chunk_write_complete",
+                        fields: self.traceFields(attempt: attempt) + [
+                            ("pull_sequence", String(sequence)),
+                            ("bytes", String(chunk.count))
+                        ]
+                    )
                     if !self.wroteFirstChunk {
-                        let writeDoneNs = self.perf.mark(
-                            "first_write_complete",
+                        self.perf.mark(
+                            "first_write_complete", at: writeDoneNs,
                             fields: self.traceFields(attempt: attempt) + [("bytes", String(chunk.count))]
                         )
                         self.wroteFirstChunk = true
