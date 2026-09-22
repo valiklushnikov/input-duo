@@ -1226,6 +1226,22 @@ def test_capabilities_known_carries_the_frozenset_the_peer_announced(coordinator
     assert isinstance(heard[0], frozenset), "получатель не должен уметь править объявление пира"
 
 
+def test_hello_and_capability_boundaries_are_logged(coordinator_with_link, caplog):
+    coordinator, link = coordinator_with_link
+    caplog.set_level("INFO", logger="duo_input.clipboard.coordinator")
+
+    link.deliver(_hello({"capabilities": [CAPABILITY_CLIPBOARD, CAPABILITY_FILES]}))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("peer_hello_received" in message for message in messages)
+    assert any(
+        "peer_capabilities_known" in message
+        and "clipboard/1" in message
+        and "files/2" in message
+        for message in messages
+    )
+
+
 def test_a_hello_on_the_wrong_major_version_never_reaches_the_parser(coordinator_with_link):
     coordinator, link = coordinator_with_link
     heard: list = []

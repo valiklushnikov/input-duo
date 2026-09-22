@@ -25,6 +25,7 @@ Objective-C runtime is gated on ``_XPC_AVAILABLE``.
 from __future__ import annotations
 
 import logging
+import platform
 import threading
 import time
 from collections.abc import Callable
@@ -32,6 +33,22 @@ from collections.abc import Callable
 from PySide6.QtCore import QMetaObject, QObject, Qt, Q_ARG, Signal, Slot
 
 logger = logging.getLogger(__name__)
+
+
+def _outgoing_objc_bool_encoding(machine: str | None = None) -> bytes:
+    """Concrete Objective-C ``BOOL`` encoding for an outgoing block.
+
+    PyObjC's abstract ``_C_NSBOOL`` marker is not accepted by
+    ``NSGetSizeAndAlignment`` when PyObjC constructs a block. The ABI is
+    architecture-specific: C99 ``_Bool`` on Apple Silicon and signed char on
+    Intel macOS.
+    """
+    architecture = (machine or platform.machine()).lower()
+    if architecture in {"arm64", "aarch64"}:
+        return b"B"
+    if architecture in {"x86_64", "amd64"}:
+        return b"c"
+    raise RuntimeError(f"unsupported macOS architecture: {architecture}")
 
 
 def _log_service_event(event: str, **fields: object) -> None:
@@ -164,8 +181,9 @@ if _XPC_AVAILABLE:
     # The clang protocol carries the method encoding but NOT the inner block
     # argument types, so without this metadata NSXPCConnection rejects the call
     # with "Block was not compiled using a compiler that inserts type information
-    # about arguments". Each reply is void(^)(BOOL ack, NSError *error); the
-    # block sits at method argument index 3 (self, _cmd, id/record, reply).
+    # about arguments". Each reply is void(^)(BOOL ack, NSError *error). The
+    # publish/retire/delete reply sits at argument index 3; activate's reply is
+    # at index 2 because that selector has no value argument.
     # PyObjC resolves an outgoing call by the proxy's ACTUAL class. The proxy
     # NSXPCConnection.remoteObjectProxy() returns is a runtime-generated
     # __NSXPCInterfaceProxy_<ProtocolName> (verified at runtime:
@@ -178,48 +196,56 @@ if _XPC_AVAILABLE:
         b"__NSXPCInterfaceProxy_DuoExtensionControl",
         b"DuoExtensionControl",
     ):
-      for _control_selector in (
-        b"publishGeneration:reply:",
-        b"retireGeneration:reply:",
-        b"deleteGeneration:reply:",
-      ):
-        objc.registerMetaDataForSelector(
-            _control_class,
-            _control_selector,
-            {
-                "arguments": {
-                    3: {
-                        "type": b"@?",
-                        "callable": {
-                            "retval": {"type": b"v"},
-                            "arguments": {
-                                # Block self. For an OUTGOING block (one PyObjC
-                                # CREATES and sends over NSXPC), the remote side
-                                # verifies our block's NSMethodSignature against
-                                # the clang-derived one, whose arg 0 is the real
-                                # block type '@?' ({isObject,isBlock}). PyObjC's
-                                # '^v' (opaque void*) works for the INCOMING
-                                # fetch blocks above (received, not created) but
-                                # here makes the wire sig arg0='^v' mismatch the
-                                # extension's local '@?', so NSXPC rejects the
-                                # message as undecodable ("incompatible reply
-                                # block signature") and publishGeneration is
-                                # never even invoked. Same INCOMING-vs-OUTGOING
-                                # asymmetry as the BOOL 'Z' vs 'B' fix below.
-                                0: {"type": b"@?"},
-                                # BOOL ack. For an OUTGOING block PyObjC feeds
-                                # the arg encoding to NSGetSizeAndAlignment,
-                                # which rejects PyObjC's 'Z' (_C_NSBOOL) alias
-                                # ("unsupported type encoding spec 'Z'"). Use the
-                                # real ARM64 BOOL=_Bool encoding 'B' (_C_BOOL).
-                                1: {"type": objc._C_BOOL},
-                                2: {"type": b"@"},
+        for _control_selector, _reply_index in (
+            (b"publishGeneration:reply:", 3),
+            (b"retireGeneration:reply:", 3),
+            (b"deleteGeneration:reply:", 3),
+            # activateWithReply: has no value argument, so its block is ObjC
+            # argument 2 (self, _cmd, reply). Without this entry the fake proxy
+            # works but the real PyObjC NSXPC proxy cannot reliably construct
+            # the outgoing block, and the first message never reaches the
+            # extension.
+            (b"activateWithReply:", 2),
+        ):
+            objc.registerMetaDataForSelector(
+                _control_class,
+                _control_selector,
+                {
+                    "arguments": {
+                        _reply_index: {
+                            "type": b"@?",
+                            "callable": {
+                                "retval": {"type": b"v"},
+                                "arguments": {
+                                    # Block self. For an OUTGOING block (one
+                                    # PyObjC CREATES and sends over NSXPC), the
+                                    # remote side verifies our block's
+                                    # NSMethodSignature against the clang-derived
+                                    # one, whose arg 0 is the real block type '@?'
+                                    # ({isObject,isBlock}). PyObjC's '^v' (opaque
+                                    # void*) works for the INCOMING fetch blocks
+                                    # above (received, not created) but here makes
+                                    # the wire sig arg0='^v' mismatch the
+                                    # extension's local '@?', so NSXPC rejects the
+                                    # message as undecodable ("incompatible reply
+                                    # block signature") and publishGeneration is
+                                    # never even invoked. Same INCOMING-vs-OUTGOING
+                                    # asymmetry as the BOOL 'Z' vs 'B' fix below.
+                                    0: {"type": b"@?"},
+                                    # BOOL ack. For an OUTGOING block PyObjC feeds
+                                    # the arg encoding to NSGetSizeAndAlignment,
+                                    # which rejects PyObjC's 'Z' (_C_NSBOOL) alias
+                                    # ("unsupported type encoding spec 'Z'"). Use
+                                    # the concrete native ABI encoding rather
+                                    # than PyObjC's abstract NSBOOL marker.
+                                    1: {"type": _outgoing_objc_bool_encoding()},
+                                    2: {"type": b"@"},
+                                },
                             },
-                        },
+                        }
                     }
-                }
-            },
-        )
+                },
+            )
 
     class _ExtensionCallbackAdapter(NSObject):
         """Exported ``DuoHostCallback`` object - what the extension calls.
@@ -292,6 +318,7 @@ class FileProviderServiceClient(QObject):
         #: must not both pass the guard and double-bind (leaking the first
         #: connection and emitting `connected` twice).
         self._connecting = False
+        self._connection_generation = 0
 
     # -------------------------------------------------------------- configuration
 
@@ -392,14 +419,18 @@ class FileProviderServiceClient(QObject):
         connection.resume()
         _log_service_event("fp_host_xpc_connection_resumed")
         with self._lock:
+            self._connection_generation += 1
+            generation = self._connection_generation
             self._disconnect_emitted = False
             self._exported = exported
             self._connection = connection
             self._connected = True
+        _log_service_event("fp_host_connected_emit_begin", xpc_generation=generation)
         self.connected.emit()
-        self._activate_connection(connection)
+        _log_service_event("fp_host_connected_emit_complete", xpc_generation=generation)
+        self._activate_connection(connection, generation)
 
-    def _activate_connection(self, connection) -> None:
+    def _activate_connection(self, connection, generation: int | None = None) -> None:
         """Send one side-effect-free ``activate`` RPC right after binding.
 
         NSXPC does not fire the extension listener's ``shouldAcceptNewConnection``
@@ -416,17 +447,55 @@ class FileProviderServiceClient(QObject):
         a failed activation is logged, never fatal.
         """
         def _on_error(error) -> None:
-            logger.warning("file provider connection activation error: %r", error)
+            _log_service_event(
+                "fp_host_activate_error",
+                xpc_generation=generation,
+                error=repr(error),
+            )
 
-        proxy = connection.remoteObjectProxyWithErrorHandler_(_on_error)
+        _log_service_event("fp_host_activate_enter", xpc_generation=generation)
+        try:
+            proxy = connection.remoteObjectProxyWithErrorHandler_(_on_error)
+        except Exception as error:
+            _log_service_event(
+                "fp_host_activate_proxy_failed",
+                xpc_generation=generation,
+                error=repr(error),
+            )
+            return
+        _log_service_event(
+            "fp_host_activate_proxy",
+            xpc_generation=generation,
+            proxy_present=proxy is not None,
+        )
         if proxy is None:
+            _log_service_event(
+                "fp_host_activate_proxy_unavailable",
+                xpc_generation=generation,
+            )
             return
 
-        def _reply(_ack, error) -> None:
+        def _reply(ack, error) -> None:
+            _log_service_event(
+                "fp_host_activate_reply",
+                xpc_generation=generation,
+                ack=bool(ack),
+                error_present=error is not None,
+            )
             if error is not None:
                 logger.warning("file provider activate reply error: %r", error)
 
-        proxy.activateWithReply_(_reply)
+        _log_service_event("fp_host_activate_send_begin", xpc_generation=generation)
+        try:
+            proxy.activateWithReply_(_reply)
+        except Exception as error:
+            _log_service_event(
+                "fp_host_activate_send_failed",
+                xpc_generation=generation,
+                error=repr(error),
+            )
+            return
+        _log_service_event("fp_host_activate_send_return", xpc_generation=generation)
         _log_service_event("fp_host_connection_activate")
 
     def _on_invalidated(self) -> None:

@@ -123,6 +123,39 @@ def test_the_listener_accepts_a_client_whose_fingerprint_it_expects(qtbot, ident
     client.close()
 
 
+def test_inbound_tls_boundaries_keep_one_connection_generation(
+    qtbot, identities, caplog
+):
+    server_identity, client_identity = identities
+    listener = PeerListener(server_identity)
+    listener.expect(client_identity.fingerprint)
+    assert listener.listen(0) is True
+    incoming: list[PeerLink] = []
+    listener.link_ready.connect(incoming.append)
+    caplog.set_level("INFO", logger="duo_input.clipboard.listener")
+    caplog.set_level("INFO", logger="duo_input.clipboard.peer")
+
+    client = PeerLink(client_identity)
+    with qtbot.waitSignal(client.connected, timeout=5000):
+        client.connect_to("127.0.0.1", listener.port, server_identity.fingerprint)
+    qtbot.waitUntil(lambda: bool(incoming), timeout=5000)
+
+    inbound_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "direction=inbound" in record.getMessage()
+    ]
+    generations = {
+        message.split("connection_generation=", 1)[1].split()[0]
+        for message in inbound_messages
+        if "connection_generation=" in message
+    }
+    assert len(generations) == 1, inbound_messages
+
+    listener.stop()
+    client.close()
+
+
 def test_the_listener_forgets_a_link_once_it_disconnects(qtbot, identities):
     """M4: список принятых связей не должен расти без границы.
 
@@ -174,6 +207,50 @@ def test_the_listener_refuses_a_client_whose_fingerprint_it_does_not_expect(qtbo
 
     listener.stop()
     client.close()
+
+
+def test_listener_logs_a_pinned_fingerprint_rejection_without_full_fingerprint(
+    identities, caplog
+):
+    """An inbound identity rejection must not remain invisible or leak identity."""
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtNetwork import QSslCertificate
+
+    server_identity, client_identity = identities
+    listener = PeerListener(server_identity)
+    listener.expect("f" * 64)
+    socket = _FakeSocket(QSslCertificate(QByteArray(client_identity.certificate_pem)))
+    caplog.set_level("INFO", logger="duo_input.clipboard.listener")
+
+    listener._on_server_ssl_errors(socket, [])
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("peer_identity_rejected" in message and "reason=fingerprint_mismatch" in message for message in messages)
+    assert client_identity.fingerprint not in "\n".join(messages)
+
+
+def test_encrypted_link_logs_one_connection_generation(identities, caplog):
+    """TLS completion and identity verification need one correlation key."""
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtNetwork import QSslCertificate
+
+    server_identity, client_identity = identities
+    link = PeerLink(client_identity)
+    socket = _FakeSocket(QSslCertificate(QByteArray(server_identity.certificate_pem)))
+    link._socket = socket
+    link._expected_fingerprint = server_identity.fingerprint
+    caplog.set_level("INFO", logger="duo_input.clipboard.peer")
+
+    link._on_encrypted()
+
+    messages = [record.getMessage() for record in caplog.records]
+    tls = next(message for message in messages if "peer_tls_complete" in message)
+    identity = next(message for message in messages if "peer_identity_verified" in message)
+    tls_generation = tls.split("connection_generation=", 1)[1].split()[0]
+    identity_generation = identity.split("connection_generation=", 1)[1].split()[0]
+    assert tls_generation
+    assert identity_generation == tls_generation
+    assert server_identity.fingerprint not in "\n".join(messages)
 
 
 def test_fingerprint_of_socket_is_empty_without_a_certificate():

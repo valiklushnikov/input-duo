@@ -568,13 +568,14 @@ class ClipboardCoordinator(QObject):
 
     def _on_connected(self, link: PeerLink) -> None:
         self._link = link
+        generation = getattr(link, "connection_generation", "unknown")
         # Переподключение может привести на другую сборку пира - забыть, что
         # умел прежний пир, чтобы не унести его возможности на нового.
         self._peer_capabilities = frozenset()
         self._attempt = 0
         self._retry.stop()
         self._discovery.stop()
-        link.send(
+        sent = link.send(
             Message(
                 MessageType.HELLO,
                 {
@@ -587,14 +588,29 @@ class ClipboardCoordinator(QObject):
                 b"",
             )
         )
+        logger.info(
+            "peer_hello_sent connection_generation=%s success=%s",
+            generation,
+            sent is not False,
+        )
         link.message_received.connect(self._on_message)
         self._service.attach_link(link)
+        logger.info(
+            "coordinator_link_attached connection_generation=%s",
+            generation,
+        )
         self._silence.start()
         self._set_state(LinkState.CONNECTED)
 
     def _on_message(self, message: Message) -> None:
         self._silence.start()
         if message.type is MessageType.HELLO:
+            generation = getattr(self._link, "connection_generation", "unknown")
+            logger.info(
+                "peer_hello_received connection_generation=%s protocol_major=%s",
+                generation,
+                message.header.get("protocol_major"),
+            )
             if int(message.header.get("protocol_major", -1)) != PROTOCOL_MAJOR:
                 self._drop(
                     "вторая машина говорит на другой версии протокола",
@@ -602,6 +618,11 @@ class ClipboardCoordinator(QObject):
                 )
                 return
             self._peer_capabilities = _capabilities_from(message.header)
+            logger.info(
+                "peer_capabilities_known connection_generation=%s capabilities=%s",
+                generation,
+                ",".join(sorted(self._peer_capabilities)),
+            )
             self.capabilities_known.emit(self._peer_capabilities)
 
     def _on_disconnected(self, reason: str) -> None:

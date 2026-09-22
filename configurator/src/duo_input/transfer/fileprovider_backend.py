@@ -502,7 +502,10 @@ class FileProviderBackend(QObject):
         self._release_link_lost_slot()
         self._link = link
         self._bump("fp_ipc_connect")
-        _log_event("fp_ipc_connect")
+        _log_event(
+            "fp_ipc_connect",
+            connection_generation=getattr(link, "connection_generation", "unknown"),
+        )
         disconnected = getattr(link, "disconnected", None)
         if disconnected is None:
             return

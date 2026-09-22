@@ -10,11 +10,16 @@
 
 from __future__ import annotations
 
+import logging
+import uuid
+
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtNetwork import QHostAddress, QSslServer, QSslSocket
 
 from .identity import NodeIdentity
 from .peer import PeerLink, fingerprint_of_socket, ssl_configuration
+
+logger = logging.getLogger(__name__)
 
 
 class PeerListener(QObject):
@@ -29,8 +34,45 @@ class PeerListener(QObject):
         self._server = QSslServer(self)
         self._server.setSslConfiguration(ssl_configuration(identity))
         self._server.sslErrors.connect(self._on_server_ssl_errors)
+        self._server.startedEncryptionHandshake.connect(self._on_tls_started)
+        self._server.errorOccurred.connect(self._on_server_error)
         self._server.pendingConnectionAvailable.connect(self._on_pending)
         self._links: list[PeerLink] = []
+
+    @staticmethod
+    def _connection_generation(socket: QSslSocket) -> str:
+        # QSslServer signals can expose distinct Python wrappers for the same
+        # underlying QSslSocket. A Python attribute therefore does not survive
+        # across startedEncryptionHandshake -> sslErrors -> pendingConnection.
+        # Store the correlation key as a Qt dynamic property on the C++ QObject
+        # itself; every wrapper then observes the same value.
+        property_getter = getattr(socket, "property", None)
+        generation = (
+            property_getter("duo_connection_generation")
+            if callable(property_getter)
+            else getattr(socket, "_duo_connection_generation", None)
+        )
+        if generation is None:
+            generation = uuid.uuid4().hex
+            property_setter = getattr(socket, "setProperty", None)
+            if callable(property_setter):
+                property_setter("duo_connection_generation", generation)
+            else:
+                socket._duo_connection_generation = generation
+        return str(generation)
+
+    def _on_tls_started(self, socket: QSslSocket) -> None:
+        logger.info(
+            "peer_tls_start connection_generation=%s direction=inbound",
+            self._connection_generation(socket),
+        )
+
+    def _on_server_error(self, socket: QSslSocket, error) -> None:
+        logger.info(
+            "peer_tls_failed connection_generation=%s direction=inbound socket_error=%s",
+            self._connection_generation(socket),
+            getattr(error, "name", str(error)),
+        )
 
     @property
     def port(self) -> int:
@@ -60,13 +102,30 @@ class PeerListener(QObject):
         так и не станет доступен через nextPendingConnection.
         """
         fingerprint = fingerprint_of_socket(socket)
+        generation = self._connection_generation(socket)
         if self._expected_fingerprint is None and fingerprint:
             # Парринг: доверие ещё не выдано, его сейчас выдаст человек.
+            logger.info(
+                "peer_tls_errors connection_generation=%s direction=inbound decision=ignored mode=pairing error_count=%d",
+                generation,
+                len(errors),
+            )
             socket.ignoreSslErrors()
             return
         if fingerprint and fingerprint == self._expected_fingerprint:
+            logger.info(
+                "peer_tls_errors connection_generation=%s direction=inbound decision=ignored mode=pinned error_count=%d",
+                generation,
+                len(errors),
+            )
             socket.ignoreSslErrors()
             return
+        logger.info(
+            "peer_identity_rejected connection_generation=%s direction=inbound reason=fingerprint_mismatch presented_short=%s expected_short=%s",
+            generation,
+            fingerprint[:12],
+            (self._expected_fingerprint or "")[:12],
+        )
         # Ничего не делаем: Qt сам оборвёт рукопожатие с чужим сертификатом.
 
     def _on_pending(self) -> None:
@@ -74,7 +133,17 @@ class PeerListener(QObject):
             socket = self._server.nextPendingConnection()
             if socket is None:
                 return
-            link = PeerLink(self._identity, self)
+            generation = self._connection_generation(socket)
+            logger.info(
+                "peer_tls_pending_available connection_generation=%s direction=inbound",
+                generation,
+            )
+            link = PeerLink(
+                self._identity,
+                self,
+                connection_generation=generation,
+                direction="inbound",
+            )
             link.adopt(socket, self._expected_fingerprint)
             self._links.append(link)
             # Без этого список растёт без границы: с резидентностью процесс

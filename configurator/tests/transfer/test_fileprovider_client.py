@@ -71,6 +71,116 @@ def test_bind_activates_connection_without_publish(fp_fake_service):
     )
 
 
+def test_activate_reply_block_has_outgoing_pyobjc_metadata():
+    """The real NSXPC proxy must be able to encode activate's reply block.
+
+    The fake connection accepts any Python callable, so the ordinary lifecycle
+    test cannot catch a selector that was omitted from PyObjC's outgoing block
+    metadata.  The production bridge registry is the real boundary here: if
+    this entry disappears, ``activateWithReply_`` can fail before NSXPC sends
+    the first message and the extension listener is never accepted.
+    """
+    import objc
+
+    # Importing the production client performs the selector registrations.
+    from duo_input.transfer import fileprovider_client as client_module
+
+    registrations = objc._copyMetadataRegistry()[b"activateWithReply:"]
+    registered_classes = {class_name for class_name, _metadata in registrations}
+
+    assert registered_classes == {
+        b"__NSXPCInterfaceProxy_DuoExtensionControl",
+        b"DuoExtensionControl",
+    }
+    for _class_name, metadata in registrations:
+        reply = metadata["arguments"][2]
+        assert reply["type"] == b"@?"
+        assert [argument["type"] for argument in reply["callable"]["arguments"]] == [
+            b"@?",
+            client_module._outgoing_objc_bool_encoding(),
+            b"@",
+        ]
+
+
+@pytest.mark.parametrize(
+    ("machine", "expected"),
+    [("arm64", b"B"), ("aarch64", b"B"), ("x86_64", b"c")],
+)
+def test_outgoing_objc_bool_encoding_matches_architecture(machine, expected):
+    from duo_input.transfer.fileprovider_client import _outgoing_objc_bool_encoding
+
+    assert _outgoing_objc_bool_encoding(machine) == expected
+
+
+def test_activation_logs_proxy_send_and_reply_boundaries(fp_fake_service, caplog):
+    from duo_input.transfer.fileprovider_client import FileProviderServiceClient
+
+    caplog.set_level("INFO", logger="duo_input.transfer.fileprovider_client")
+    client = FileProviderServiceClient()
+    fp_fake_service.grant_connection(client)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("fp_host_activate_proxy" in message and "proxy_present=True" in message for message in messages)
+    assert any("fp_host_activate_send_return" in message for message in messages)
+    assert any("fp_host_activate_reply" in message and "ack=True" in message for message in messages)
+
+
+def test_activation_logs_missing_proxy_without_crashing(caplog):
+    from duo_input.transfer.fileprovider_client import FileProviderServiceClient
+
+    class MissingProxyConnection:
+        @staticmethod
+        def remoteObjectProxyWithErrorHandler_(_handler):
+            return None
+
+    caplog.set_level("INFO", logger="duo_input.transfer.fileprovider_client")
+    client = FileProviderServiceClient()
+
+    client._activate_connection(MissingProxyConnection(), generation=7)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "fp_host_activate_proxy_unavailable" in message
+        and "xpc_generation=7" in message
+        for message in messages
+    )
+
+
+@pytest.mark.parametrize("failure_boundary", ["proxy", "send"])
+def test_activation_sync_failures_are_logged_without_crashing(
+    failure_boundary, caplog
+):
+    from duo_input.transfer.fileprovider_client import FileProviderServiceClient
+
+    class RaisingProxy:
+        @staticmethod
+        def activateWithReply_(_reply):
+            raise RuntimeError("send failed")
+
+    class RaisingConnection:
+        @staticmethod
+        def remoteObjectProxyWithErrorHandler_(_handler):
+            if failure_boundary == "proxy":
+                raise RuntimeError("proxy failed")
+            return RaisingProxy()
+
+    caplog.set_level("INFO", logger="duo_input.transfer.fileprovider_client")
+    client = FileProviderServiceClient()
+
+    client._activate_connection(RaisingConnection(), generation=9)
+
+    messages = [record.getMessage() for record in caplog.records]
+    expected_event = (
+        "fp_host_activate_proxy_failed"
+        if failure_boundary == "proxy"
+        else "fp_host_activate_send_failed"
+    )
+    assert any(
+        expected_event in message and "xpc_generation=9" in message
+        for message in messages
+    )
+
+
 def test_redundant_connect_service_does_not_rebind(fp_fake_service):
     from duo_input.transfer.fileprovider_client import FileProviderServiceClient
 

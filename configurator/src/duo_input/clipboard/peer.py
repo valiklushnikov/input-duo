@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 
 from PySide6.QtCore import QByteArray, QCryptographicHash, QObject, Signal
 from PySide6.QtNetwork import (
@@ -93,9 +94,18 @@ class PeerLink(QObject):
     disconnected = Signal(str)
     congestion_changed = Signal(bool)
 
-    def __init__(self, identity: NodeIdentity, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        identity: NodeIdentity,
+        parent: QObject | None = None,
+        *,
+        connection_generation: str | None = None,
+        direction: str = "unknown",
+    ) -> None:
         super().__init__(parent)
         self._identity = identity
+        self._connection_generation = connection_generation or uuid.uuid4().hex
+        self._direction = direction
         self._socket: QSslSocket | None = None
         self._assembler = FrameAssembler()
         self._expected_fingerprint: str | None = None
@@ -105,6 +115,10 @@ class PeerLink(QObject):
     @property
     def peer_fingerprint(self) -> str:
         return self._peer_fingerprint
+
+    @property
+    def connection_generation(self) -> str:
+        return self._connection_generation
 
     @property
     def peer_address(self) -> str:
@@ -124,7 +138,15 @@ class PeerLink(QObject):
         return self._socket is not None and self._socket.isEncrypted()
 
     def connect_to(self, address: str, port: int, expected_fingerprint: str | None) -> None:
+        self._direction = "outbound"
         self._expected_fingerprint = expected_fingerprint
+        logger.info(
+            "peer_socket_created connection_generation=%s direction=%s remote=%s:%d",
+            self._connection_generation,
+            self._direction,
+            address,
+            port,
+        )
         socket = QSslSocket(self)
         socket.setSslConfiguration(ssl_configuration(self._identity))
         self._wire_up(socket)
@@ -132,6 +154,7 @@ class PeerLink(QObject):
 
     def adopt(self, socket: QSslSocket, expected_fingerprint: str | None) -> None:
         """Принять уже зашифрованный входящий сокет."""
+        self._direction = "inbound"
         self._expected_fingerprint = expected_fingerprint
         self._wire_up(socket)
         self._on_encrypted()
@@ -190,6 +213,7 @@ class PeerLink(QObject):
         socket.setParent(self)
         socket.setReadBufferSize(READ_BUFFER_BYTES)
         socket.bytesWritten.connect(lambda _count: self._check_congestion())
+        socket.connected.connect(self._on_tcp_connected)
         socket.sslErrors.connect(self._on_ssl_errors)
         socket.encrypted.connect(self._on_encrypted)
         socket.readyRead.connect(self._on_ready_read)
@@ -199,6 +223,13 @@ class PeerLink(QObject):
         # свежий сокет ещё ничего не поставил в очередь, и _congested не
         # должен нести старое True дальше.
         self._check_congestion()
+
+    def _on_tcp_connected(self) -> None:
+        logger.info(
+            "peer_tcp_connected connection_generation=%s direction=%s",
+            self._connection_generation,
+            self._direction,
+        )
 
     def _check_congestion(self) -> None:
         """Сообщать о ПЕРЕХОДАХ, а не о состоянии на каждый записанный байт.
@@ -227,11 +258,28 @@ class PeerLink(QObject):
         fingerprint = fingerprint_of_socket(socket)
         if self._expected_fingerprint is None and fingerprint:
             # Парринг: доверие ещё не выдано, его сейчас выдаст человек.
+            logger.info(
+                "peer_tls_errors connection_generation=%s direction=%s decision=ignored mode=pairing error_count=%d",
+                self._connection_generation,
+                self._direction,
+                len(errors),
+            )
             socket.ignoreSslErrors()
             return
         if fingerprint and fingerprint == self._expected_fingerprint:
+            logger.info(
+                "peer_tls_errors connection_generation=%s direction=%s decision=ignored mode=pinned error_count=%d",
+                self._connection_generation,
+                self._direction,
+                len(errors),
+            )
             socket.ignoreSslErrors()
             return
+        logger.info(
+            "peer_identity_rejected connection_generation=%s direction=%s reason=fingerprint_mismatch",
+            self._connection_generation,
+            self._direction,
+        )
         self._fail("сертификат не тот, что был закреплён")
 
     def _on_encrypted(self) -> None:
@@ -247,10 +295,26 @@ class PeerLink(QObject):
         # к реконнекту (Swift FetchController): keepalive снижает частоту
         # разрывов, retry переживает те, что всё же случаются.
         socket.setSocketOption(QAbstractSocket.SocketOption.KeepAliveOption, 1)
+        logger.info(
+            "peer_tls_complete connection_generation=%s direction=%s",
+            self._connection_generation,
+            self._direction,
+        )
         self._peer_fingerprint = fingerprint_of_socket(socket)
         if self._expected_fingerprint is not None and self._peer_fingerprint != self._expected_fingerprint:
+            logger.info(
+                "peer_identity_rejected connection_generation=%s direction=%s reason=fingerprint_mismatch",
+                self._connection_generation,
+                self._direction,
+            )
             self._fail("сертификат не тот, что был закреплён")
             return
+        logger.info(
+            "peer_identity_verified connection_generation=%s direction=%s fingerprint_short=%s",
+            self._connection_generation,
+            self._direction,
+            self._peer_fingerprint[:12],
+        )
         self.connected.emit(self._peer_fingerprint)
 
     def _on_ready_read(self) -> None:
