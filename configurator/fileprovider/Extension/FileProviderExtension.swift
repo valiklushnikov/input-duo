@@ -68,7 +68,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                                                temporaryDirectory: tempDir, perf: perf)
         self.cleanup = manager.map {
             EvictionCoordinator(
-                environment: ManagerEvictionEnvironment(manager: $0), perf: perf
+                environment: ManagerEvictionEnvironment(manager: $0, perf: perf), perf: perf
             )
         }
         super.init()
