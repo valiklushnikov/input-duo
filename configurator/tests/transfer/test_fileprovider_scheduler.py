@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 
 import pytest
 
 from duo_input.clipboard.wire import MAX_FILE_CHUNK_BYTES, Message, MessageType
 from duo_input.transfer.fileprovider_backend import FileProviderBackend
+from duo_input.transfer.fileprovider_perf import PerfEmitter
 from duo_input.transfer.model import ENTRY_FILE, TransferEntry, TransferManifest
 
 
@@ -89,10 +91,13 @@ def _backend(
     *,
     deferred=False,
     link: FakeLink | None = None,
+    perf: PerfEmitter | None = None,
 ):
     remote = FakeRemote(deferred=deferred)
     link = link or FakeLink()
-    backend = FileProviderBackend(FakeClient(remote), object(), lambda _urls: None)
+    backend = FileProviderBackend(
+        FakeClient(remote), object(), lambda _urls: None, perf=perf
+    )
     backend.attach_link(link)
     if isinstance(link, SynchronouslyCompletingLink):
         link.backend = backend
@@ -112,6 +117,25 @@ def _open_all(backend: FileProviderBackend, manifest: TransferManifest):
 
 def _reply(read: Message, blob: bytes, message_type=MessageType.FILE_CHUNK) -> Message:
     return Message(message_type, dict(read.header), blob)
+
+
+def _perf_events(caplog) -> list[dict[str, str]]:
+    events = []
+    for record in caplog.records:
+        message = record.getMessage()
+        if "fp_perf " not in message:
+            continue
+        atoms = message[message.index("fp_perf ") + len("fp_perf ") :].split()
+        events.append(dict(atom.split("=", 1) for atom in atoms))
+    return events
+
+
+def _event_names_for_entry(caplog, entry_index: int) -> list[str]:
+    return [
+        event["event"]
+        for event in _perf_events(caplog)
+        if event.get("entry_index") == str(entry_index)
+    ]
 
 
 def _error_code(error) -> int:
@@ -165,6 +189,63 @@ def test_opening_six_fetches_admits_four_and_queues_two_without_reading(qapp):
     assert backend._active == set(tokens[:4])
     assert list(backend._queue) == tokens[4:]
     assert link.sent == []
+
+
+def test_six_fetches_measure_four_immediate_slots_and_two_queue_waits(qapp, caplog):
+    logger = logging.getLogger("duo_input.transfer.fileprovider_backend")
+    ticks = iter(range(100, 10_000))
+    perf = PerfEmitter(logger, "mac_python_monotonic", clock=lambda: next(ticks))
+    caplog.set_level(logging.INFO, logger=logger.name)
+    backend, link, _remote, manifest = _backend(qapp, _manifest(), perf=perf)
+
+    tokens = _open_all(backend, manifest)
+
+    assert _event_names_for_entry(caplog, 0)[:2] == [
+        "open_fetch_enter",
+        "slot_acquired",
+    ]
+    assert _event_names_for_entry(caplog, 4)[:2] == [
+        "open_fetch_enter",
+        "queue_enter",
+    ]
+
+    backend.pull_chunk(tokens[0])
+    backend.handle_message(_reply(link.sent[-1], b"abc"))
+
+    assert "slot_acquired" in _event_names_for_entry(caplog, 4)
+    assert backend.counters["fp_active_fetches"] == 4
+
+
+def test_one_pull_logs_send_and_matching_receive_with_sizes(qapp, caplog):
+    logger = logging.getLogger("duo_input.transfer.fileprovider_backend")
+    ticks = iter(range(100, 10_000))
+    perf = PerfEmitter(logger, "mac_python_monotonic", clock=lambda: next(ticks))
+    caplog.set_level(logging.INFO, logger=logger.name)
+    backend, link, _remote, manifest = _backend(
+        qapp, _manifest(sizes=(3,)), perf=perf
+    )
+    [token] = _open_all(backend, manifest)
+
+    backend.pull_chunk(token)
+    read = link.sent[-1]
+    backend.handle_message(_reply(read, b"abc"))
+
+    read_id = str(read.header["read_id"])
+    send = next(
+        event
+        for event in _perf_events(caplog)
+        if event["event"] == "file_read_send" and event["read_id"] == read_id
+    )
+    receive = next(
+        event
+        for event in _perf_events(caplog)
+        if event["event"] == "file_chunk_receive" and event["read_id"] == read_id
+    )
+    assert {"offset": send["offset"], "length": send["length"]} == {
+        "offset": "0",
+        "length": "3",
+    }
+    assert receive["bytes"] == "3"
 
 
 def test_completing_fetch_admits_fifo_successor(qapp):

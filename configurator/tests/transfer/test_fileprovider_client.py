@@ -11,11 +11,19 @@ darwin-only: exercises PyObjC + FileProvider + the compiled protocol dylib
 """
 from __future__ import annotations
 
+import logging
 import sys
 
 import pytest
 
 pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="darwin only")
+
+
+def _perf_event_names(records: list[str]) -> list[str]:
+    return [
+        next(atom.removeprefix("event=") for atom in line.split() if atom.startswith("event="))
+        for line in records
+    ]
 
 
 def test_invalidation_emits_disconnected_once(fp_fake_service):
@@ -42,6 +50,44 @@ def test_extension_callback_marshals_to_qt_thread(fp_fake_service):
     fp_fake_service.grant_connection(client)
     fp_fake_service.simulate_extension_call("open", "abc123", 0)
     assert calls == [("open", "abc123", 0)]
+
+
+def test_open_callback_preserves_arguments_and_records_receive_dispatch_reply(qapp, caplog):
+    from duo_input.transfer.fileprovider_client import FileProviderServiceClient
+    from duo_input.transfer.fileprovider_perf import PerfEmitter
+
+    ticks = iter([100, 120, 150])
+    perf = PerfEmitter(
+        logging.getLogger("duo_input.transfer.fileprovider_client"),
+        "mac_python_monotonic",
+        clock=lambda: next(ticks),
+    )
+    replies = []
+    client = FileProviderServiceClient(perf=perf)
+
+    with caplog.at_level(
+        logging.INFO, logger="duo_input.transfer.fileprovider_client"
+    ):
+        client.set_callbacks(
+            open_fetch=lambda generation, index, reply: reply("tok", 3, None)
+        )
+        client._dispatch_extension_call(
+            "open", "generation", 2, lambda *values: replies.append(values)
+        )
+
+    records = [
+        record.getMessage()
+        for record in caplog.records
+        if "fp_perf" in record.getMessage()
+    ]
+    assert replies == [("tok", 3, None)]
+    assert _perf_event_names(records) == [
+        "xpc_call_received",
+        "xpc_dispatch_enter",
+        "xpc_reply_invoke",
+    ]
+    assert all("clock=mac_python_monotonic" in line for line in records)
+    assert all("/Users/" not in line and "payload" not in line for line in records)
 
 
 def test_bind_activates_connection_without_publish(fp_fake_service):

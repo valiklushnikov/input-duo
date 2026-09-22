@@ -32,6 +32,8 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QMetaObject, QObject, Qt, Q_ARG, Signal, Slot
 
+from .fileprovider_perf import PerfEmitter
+
 logger = logging.getLogger(__name__)
 
 
@@ -293,8 +295,14 @@ class FileProviderServiceClient(QObject):
     connected = Signal()
     disconnected = Signal(str)
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        parent: QObject | None = None,
+        *,
+        perf: PerfEmitter | None = None,
+    ) -> None:
         super().__init__(parent)
+        self._perf = perf or PerfEmitter(logger, "mac_python_monotonic")
         self._domain_identifier: str | None = None
         self._connection = None
         self._exported = None
@@ -529,11 +537,17 @@ class FileProviderServiceClient(QObject):
         decision 4 in the task-3 brief. Marshals onto this object's Qt
         thread via ``QMetaObject.invokeMethod`` with ``Qt.AutoConnection``.
         """
+        fields: dict[str, object] = {"kind": kind}
+        if kind == "open" and len(args) >= 2:
+            fields.update(generation_id=str(args[0]), entry_index=int(args[1]))
+        elif kind in ("pull", "cancel") and args:
+            fields["fetch_token"] = str(args[0])
+        received_ns = self._perf.emit("xpc_call_received", **fields)
         delivered = QMetaObject.invokeMethod(
             self,
             "_run_dispatch",
             Qt.ConnectionType.AutoConnection,
-            Q_ARG("QVariant", (kind, args)),
+            Q_ARG("QVariant", (kind, args, received_ns)),
         )
         if not delivered:
             logger.error("failed to marshal extension call %r onto the Qt thread", kind)
@@ -542,8 +556,19 @@ class FileProviderServiceClient(QObject):
     def _run_dispatch(self, payload) -> None:
         # PySide6 boxes tuples handed through QVariant as lists; unpacking
         # below is agnostic to that (list and tuple unpack identically).
-        kind, args = payload
+        kind, args, received_ns = payload
         args = list(args)
+        dispatch_fields: dict[str, object] = {
+            "kind": kind,
+            "received_ns": int(received_ns),
+        }
+        if kind == "open" and len(args) >= 2:
+            dispatch_fields.update(
+                generation_id=str(args[0]), entry_index=int(args[1])
+            )
+        elif kind in ("pull", "cancel") and args:
+            dispatch_fields["fetch_token"] = str(args[0])
+        self._perf.emit("xpc_dispatch_enter", **dispatch_fields)
         reply = args[-1] if kind in ("open", "pull") and callable(args[-1]) else None
         settled = False
 
@@ -551,6 +576,7 @@ class FileProviderServiceClient(QObject):
             nonlocal settled
             if not settled:
                 settled = True
+                self._perf.emit("xpc_reply_invoke", **dispatch_fields)
                 reply(*values)
 
         if reply is not None:

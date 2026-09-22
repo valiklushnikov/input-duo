@@ -54,6 +54,7 @@ from .fileprovider_generation_store import (
     GenerationRegistryStore,
     PersistedGeneration,
 )
+from .fileprovider_perf import PerfEmitter
 from .fileprovider_replica import STATE_ACTIVE, STATE_RETIRED, build_generation_record
 from .model import ENTRY_FILE, TransferManifest
 
@@ -204,6 +205,8 @@ class Fetch:
     #: _finish_fetch/_decrement_in_use) - гарантия "decrement exactly once"
     #: даже если cancel гонится с завершением (settle-once).
     in_use_counted: bool = False
+    #: Diagnostic-only guard for the first admitted unit of useful work.
+    work_started: bool = False
 
 
 class _GenerationState(Enum):
@@ -290,6 +293,7 @@ class FileProviderBackend(QObject):
         timer_factory: Callable[[], object] | None = None,
         read_timeout_ms: int = FETCH_READ_TIMEOUT_MS,
         generation_store: GenerationRegistryStore | None = None,
+        perf: PerfEmitter | None = None,
     ) -> None:
         super().__init__(parent)
         # --- Task 17: observability - a plain dict, not a metrics framework
@@ -297,6 +301,7 @@ class FileProviderBackend(QObject):
         # fp_active_fetches) are overwritten wherever the quantity they track
         # changes. Readable directly by tests via ``backend.counters``.
         self.counters: dict[str, int | str] = {}
+        self._perf = perf or PerfEmitter(logger, "mac_python_monotonic")
         # --- Task 17 (ruling #3, carried from Task 14): per-outstanding-read
         # watchdog. ``timer_factory`` defaults to a real QTimer bound to this
         # backend; tests inject a fake factory so expiry never waits on a real
@@ -1087,6 +1092,11 @@ class FileProviderBackend(QObject):
 
     # --- Task 9: bounded per-fetch scheduler
     def open_fetch(self, generation_id: str, entry_index: int, reply=None):
+        self._perf.emit(
+            "open_fetch_enter",
+            generation_id=generation_id,
+            entry_index=entry_index,
+        )
         # Task 14: host-down (no peer link at all, e.g. never attached or
         # already disconnected - see _on_link_lost) must reply NotConnected,
         # not silently admit a fetch that can never actually read a byte
@@ -1106,6 +1116,14 @@ class FileProviderBackend(QObject):
             reply(None, None, _xpc_error(4))
             return None
         if reply is not None:
+            self._perf.emit(
+                "open_fetch_reply",
+                generation_id=generation_id,
+                entry_index=entry_index,
+                fetch_token=token,
+                size=size,
+                status="ok",
+            )
             reply(token, size, None)
         return token, size
 
@@ -1154,8 +1172,21 @@ class FileProviderBackend(QObject):
         self.by_token[fetch_token] = fetch
         if state is FetchState.REQUESTING:
             self._active.add(fetch_token)
+            self._perf.emit(
+                "slot_acquired",
+                generation_id=generation_id,
+                entry_index=entry_index,
+                fetch_token=fetch_token,
+                queued=False,
+            )
         else:
             self._queue.append(fetch_token)
+            self._perf.emit(
+                "queue_enter",
+                generation_id=generation_id,
+                entry_index=entry_index,
+                fetch_token=fetch_token,
+            )
         self._sync_active_gauges()
         self._bump("fp_fetch_started")
         _log_event(
@@ -1255,6 +1286,14 @@ class FileProviderBackend(QObject):
             or fetch.read_id is not None
         ):
             return
+        if not fetch.work_started:
+            fetch.work_started = True
+            self._perf.emit(
+                "work_start",
+                generation_id=fetch.generation_id,
+                entry_index=fetch.entry_index,
+                fetch_token=fetch_token,
+            )
         if fetch.offset >= fetch.size:
             reply, fetch.reply = fetch.reply, None
             self._finish_fetch(fetch, FetchState.DONE)
@@ -1288,6 +1327,15 @@ class FileProviderBackend(QObject):
             b"",
         )
         try:
+            self._perf.emit(
+                "file_read_send",
+                generation_id=fetch.generation_id,
+                entry_index=fetch.entry_index,
+                fetch_token=fetch_token,
+                read_id=read_id,
+                offset=fetch.offset,
+                length=expected,
+            )
             sent = self._link.send(message)
         except Exception as error:  # noqa: BLE001 - external transport boundary
             logger.warning(
@@ -1312,6 +1360,13 @@ class FileProviderBackend(QObject):
                 continue
             fetch.state = FetchState.REQUESTING
             self._active.add(fetch_token)
+            self._perf.emit(
+                "slot_acquired",
+                generation_id=fetch.generation_id,
+                entry_index=fetch.entry_index,
+                fetch_token=fetch.fetch_token,
+                queued=True,
+            )
             if fetch.reply is not None:
                 # Promotion out of the slot queue must still pass through
                 # the byte-budget gate (Task 11) - not bypass it.
@@ -1361,7 +1416,16 @@ class FileProviderBackend(QObject):
         read_id = fetch.read_id
         self._clear_read(fetch)
         fetch.state = state
+        held_slot = fetch.fetch_token in self._active
         self._active.discard(fetch.fetch_token)
+        if held_slot:
+            self._perf.emit(
+                "slot_released",
+                generation_id=fetch.generation_id,
+                entry_index=fetch.entry_index,
+                fetch_token=fetch.fetch_token,
+                state=state.value,
+            )
         self._sync_active_gauges()
         counter_name = self._TERMINAL_COUNTERS.get(state)
         if counter_name is not None:
@@ -1422,6 +1486,7 @@ class FileProviderBackend(QObject):
         self._finish_fetch(fetch, FetchState.CANCELLED, _xpc_error(3))
 
     def _on_chunk(self, message: Message) -> None:
+        received_ns = self._perf.now()
         fetch = self._pending_fetch(message)
         if fetch is None:
             # No outstanding read matches this message - it settled/moved on
@@ -1431,6 +1496,16 @@ class FileProviderBackend(QObject):
             _log_event("fp_late_chunk", read_id=message.header.get("read_id"))
             return
         chunk_size = len(message.blob)
+        self._perf.emit_at(
+            received_ns,
+            "file_chunk_receive",
+            generation_id=fetch.generation_id,
+            entry_index=fetch.entry_index,
+            fetch_token=fetch.fetch_token,
+            read_id=fetch.read_id,
+            offset=fetch.offset,
+            bytes=chunk_size,
+        )
         if chunk_size != fetch.expected or fetch.offset + chunk_size > fetch.size:
             if chunk_size > fetch.expected or fetch.offset + chunk_size > fetch.size:
                 event = "fp_oversized_chunk"
@@ -1464,6 +1539,15 @@ class FileProviderBackend(QObject):
         else:
             fetch.state = FetchState.REQUESTING
         if reply is not None:
+            self._perf.emit(
+                "xpc_chunk_reply",
+                generation_id=fetch.generation_id,
+                entry_index=fetch.entry_index,
+                fetch_token=fetch.fetch_token,
+                read_id=read_id,
+                bytes=chunk_size,
+                eof=fetch.offset >= fetch.size,
+            )
             reply(message.blob, fetch.offset >= fetch.size, None)
         # Clearing this read (above) may have freed enough budget for a
         # byte-budget-queued pull elsewhere - harmless no-op if not, and if
