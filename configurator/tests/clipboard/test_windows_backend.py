@@ -410,13 +410,15 @@ def test_a_file_only_copy_produces_a_snapshot_carrying_the_paths(qapp, tmp_path)
     assert snapshot.file_paths == (str(source),)
 
 
-def test_a_file_only_copy_is_emitted_rather_than_retried_into_silence(qapp, tmp_path):
+def test_a_file_only_copy_is_emitted_rather_than_retried_into_silence(
+    real_clipboard, tmp_path
+):
     # До этой правки _take_snapshot возвращался на `not snapshot.payloads`,
     # трижды пробовал заново и замолкал: копирование файла не порождало
     # ни одного события.
     source = tmp_path / "notes.txt"
     source.write_bytes(b"x")
-    clipboard = qapp.clipboard()
+    clipboard = real_clipboard
     mime_data = QMimeData()
     mime_data.setUrls([QUrl.fromLocalFile(str(source))])
     clipboard.setMimeData(mime_data)

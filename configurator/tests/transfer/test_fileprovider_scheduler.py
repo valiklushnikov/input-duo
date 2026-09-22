@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -111,6 +112,41 @@ def _open_all(backend: FileProviderBackend, manifest: TransferManifest):
 
 def _reply(read: Message, blob: bytes, message_type=MessageType.FILE_CHUNK) -> Message:
     return Message(message_type, dict(read.header), blob)
+
+
+def _error_code(error) -> int:
+    """DuoFPErrorDomain code from either a real NSError (darwin) or the
+    ``RuntimeError('DuoFPErrorDomain:<n>')`` fallback ``_xpc_error`` returns
+    off darwin. Asserting ``error.code()`` directly makes a test darwin-only
+    without saying so: off darwin it does not fail on the wrong code, it
+    fails with AttributeError on every code alike."""
+    code = getattr(error, "code", None)
+    if callable(code):
+        return int(code())
+    return int(str(error).rsplit(":", 1)[1])
+
+
+#: What ``_error_domain`` should return for an error ``_xpc_error`` produced.
+#: Deliberately platform-dependent rather than one constant the fallback is
+#: massaged into: off darwin the error really does not carry the reverse-DNS
+#: domain, and pretending it does would turn the assertion into one that
+#: passes no matter what ``_xpc_error`` builds.
+_DUOFP_ERROR_DOMAIN = (
+    "com.duoinput.configurator.fileprovider.error"
+    if sys.platform == "darwin"
+    else "DuoFPErrorDomain"
+)
+
+
+def _error_domain(error) -> str:
+    """The error's DuoFPErrorDomain marker, in whichever form the platform
+    produced: ``NSError.domain()`` on darwin, and off darwin the prefix of
+    the fallback's ``'DuoFPErrorDomain:<n>'`` message - the only domain it
+    carries. Compare against ``_DUOFP_ERROR_DOMAIN``."""
+    domain = getattr(error, "domain", None)
+    if callable(domain):
+        return str(domain())
+    return str(error).rsplit(":", 1)[0]
 
 
 def test_opening_six_fetches_admits_four_and_queues_two_without_reading(qapp):

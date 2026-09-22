@@ -34,7 +34,16 @@ class LoopLink(QObject):
         return True
 
 
-@pytest.mark.parametrize("contents", [b"abc", b"a" * 1_048_576 + b"bc"])
+# Explicit ids: pytest derives an id from the parameter's own bytes, so the
+# multi-chunk case would otherwise name itself with a megabyte of 'a'. That id
+# goes into PYTEST_CURRENT_TEST, and on Windows an environment variable longer
+# than 32767 characters cannot be set - the run errors in teardown before the
+# skip mark is even consulted.
+@pytest.mark.parametrize(
+    "contents",
+    [b"abc", b"a" * 1_048_576 + b"bc"],
+    ids=["three-bytes", "one-mib-plus-two"],
+)
 def test_real_snapshot_bytes_are_read_only_after_fetch_and_explicit_pull(
     qapp, tmp_path, contents
 ):

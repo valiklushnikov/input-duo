@@ -20,7 +20,13 @@ from __future__ import annotations
 
 import duo_input.transfer.fileprovider_backend as fp_backend
 from duo_input.clipboard.wire import MAX_FILE_CHUNK_BYTES
-from test_fileprovider_scheduler import _backend, _manifest, _open_all, _reply
+from test_fileprovider_scheduler import (
+    _backend,
+    _error_code,
+    _manifest,
+    _open_all,
+    _reply,
+)
 
 
 def test_zero_byte_fetch_completes_without_any_read(qapp):
@@ -107,7 +113,7 @@ def test_oversized_reply_is_a_protocol_error(qapp):
     assert len(replies) == 1
     chunk, ok, error = replies[0]
     assert chunk is None and ok is False
-    assert error.code() == 7
+    assert _error_code(error) == 7
     assert fetch.state == "failed"
 
 
@@ -124,7 +130,7 @@ def test_truncated_reply_is_a_protocol_error(qapp):
     assert len(replies) == 1
     chunk, ok, error = replies[0]
     assert chunk is None and ok is False
-    assert error.code() == 7
+    assert _error_code(error) == 7
     assert fetch.state == "failed"
 
 

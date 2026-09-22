@@ -37,6 +37,7 @@ from PySide6.QtCore import QObject, Signal
 from duo_input.clipboard.wire import Message, MessageType
 from duo_input.transfer.fileprovider_backend import FileProviderBackend
 from duo_input.transfer.model import ENTRY_FILE, TransferEntry, TransferManifest
+from test_fileprovider_scheduler import _error_code
 
 _DAY_NS = 24 * 60 * 60 * 1_000_000_000
 _LOGGER_NAME = "duo_input.transfer.fileprovider_backend"
@@ -471,7 +472,7 @@ def test_watchdog_expiry_fails_exactly_the_stalled_fetch_with_timeout(qapp):
     chunk, ok, error = replies[tokens[0]][0]
     assert chunk is None
     assert ok is False
-    assert error.code() == 5  # DuoFPErrorTimeout
+    assert _error_code(error) == 5  # DuoFPErrorTimeout
     assert fetches[tokens[0]].state == "failed"
     assert backend.counters["fp_fetch_timeout"] == 1
     assert backend.counters["fp_fetch_failed"] == 1

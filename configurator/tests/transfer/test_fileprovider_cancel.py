@@ -22,7 +22,13 @@ dropped), and cancel-vs-completion (settle-once, whichever wins).
 from __future__ import annotations
 
 from duo_input.clipboard.wire import MessageType
-from test_fileprovider_scheduler import _backend, _manifest, _open_all, _reply
+from test_fileprovider_scheduler import (
+    _backend,
+    _error_code,
+    _manifest,
+    _open_all,
+    _reply,
+)
 
 
 # --- ruling: no FILE_CANCEL, ever -------------------------------------------
@@ -112,7 +118,7 @@ def test_cancelling_active_fetch_before_any_pull_stops_further_file_read(qapp):
     replies = []
     backend.pull_chunk(token, lambda *a: replies.append(a))
     assert replies == [(None, False, replies[0][2])]
-    assert replies[0][2].code() == 7  # unknown/settled token -> generic error
+    assert _error_code(replies[0][2]) == 7  # unknown/settled token -> generic error
     assert link.sent == []
 
 

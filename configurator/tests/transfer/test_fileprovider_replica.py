@@ -5,6 +5,12 @@ from duo_input.transfer.model import TransferManifest, TransferEntry
 from duo_input.transfer.fileprovider_replica import build_generation_record
 
 
+#: Anchored to this file, not to the process's working directory: the build
+#: script runs ``pytest configurator/tests`` from the repository root, where a
+#: path relative to CWD does not resolve.
+_FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
 def _manifest():
     return TransferManifest("abc123", (TransferEntry("a.txt", "file", 3, 111),))
 
@@ -12,7 +18,7 @@ def _manifest():
 def test_record_matches_golden_vector():
     rec = json.loads(build_generation_record(_manifest(), state="active",
                                              created_ns=1, lease_deadline_ns=2))
-    golden = json.loads(Path("tests/transfer/fixtures/generation_record.json").read_text())
+    golden = json.loads((_FIXTURES / "generation_record.json").read_text())
     assert rec == golden
 
 

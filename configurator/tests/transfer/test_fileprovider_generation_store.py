@@ -29,6 +29,7 @@ from duo_input.transfer.fileprovider_generation_store import (
     PersistedGeneration,
 )
 from duo_input.transfer.model import ENTRY_FILE, TransferEntry, TransferManifest
+from test_fileprovider_scheduler import _error_code
 
 
 class FakeRemote:
@@ -77,15 +78,6 @@ def _manifest(transfer_id: str, sizes: tuple[int, ...] = (3,)) -> TransferManife
         skipped=(),
         drop_effect=1,
     )
-
-
-def _error_code(error) -> int:
-    """DuoFPErrorDomain code from either a real NSError (darwin) or the
-    RuntimeError('DuoFPErrorDomain:<n>') fallback used off darwin."""
-    code = getattr(error, "code", None)
-    if callable(code):
-        return int(code())
-    return int(str(error).rsplit(":", 1)[1])
 
 
 def _backend(store, *, link=None, clock=None, generation_ttl_ns=None, max_generations=None):

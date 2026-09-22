@@ -22,7 +22,15 @@ import pytest
 from PySide6.QtCore import QObject, Signal
 
 from duo_input.clipboard.wire import Message, MessageType
-from test_fileprovider_scheduler import _backend, _manifest, _open_all, _reply
+from test_fileprovider_scheduler import (
+    _DUOFP_ERROR_DOMAIN,
+    _backend,
+    _error_code,
+    _error_domain,
+    _manifest,
+    _open_all,
+    _reply,
+)
 
 
 class DisconnectableLink(QObject):
@@ -77,10 +85,10 @@ def test_disconnect_fails_every_active_fetch_with_peer_lost(qapp):
         assert len(replies[token]) == 1, token
         chunk, ok, error = replies[token][0]
         assert chunk is None and ok is False
-        assert error.domain() == "com.duoinput.configurator.fileprovider.error"
-        assert error.code() in (3, 8)  # DuoFPErrorPeerLost / DuoFPErrorNotConnected
+        assert _error_domain(error) == _DUOFP_ERROR_DOMAIN
+        assert _error_code(error) in (3, 8)  # DuoFPErrorPeerLost / DuoFPErrorNotConnected
         assert fetches[token].state == "failed"
-    assert [replies[t][0][2].code() for t in tokens[:4]] == [3, 3, 3, 3]
+    assert [_error_code(replies[t][0][2]) for t in tokens[:4]] == [3, 3, 3, 3]
 
 
 def test_disconnect_is_local_only_no_wire_message_sent(qapp):
@@ -105,7 +113,7 @@ def test_disconnect_clears_the_link_so_new_fetches_see_not_connected(qapp):
     replies = []
     backend.open_fetch(manifest.transfer_id, 0, lambda *a: replies.append(a))
     assert replies == [(None, None, replies[0][2])]
-    assert replies[0][2].code() == 8  # DuoFPErrorNotConnected
+    assert _error_code(replies[0][2]) == 8  # DuoFPErrorNotConnected
 
 
 def test_disconnect_twice_is_a_harmless_no_op(qapp):
@@ -149,7 +157,7 @@ def test_open_fetch_without_any_link_replies_not_connected(qapp):
 
     assert result is None
     assert replies == [(None, None, replies[0][2])]
-    assert replies[0][2].code() == 8  # DuoFPErrorNotConnected
+    assert _error_code(replies[0][2]) == 8  # DuoFPErrorNotConnected
     assert backend.by_token == {}  # never admitted - no orphaned fetch state
 
 
@@ -175,7 +183,7 @@ def test_pull_chunk_with_link_down_after_open_replies_not_connected(qapp):
     backend.pull_chunk(token, lambda *a: replies.append(a))
 
     assert replies == [(None, False, replies[0][2])]
-    assert replies[0][2].code() == 8  # DuoFPErrorNotConnected
+    assert _error_code(replies[0][2]) == 8  # DuoFPErrorNotConnected
     assert fetch.state == "failed"
 
 
@@ -206,7 +214,7 @@ def test_file_error_reason_maps_to_the_correct_duofperror_code(qapp, reason, exp
     backend.handle_message(_file_error(read, reason))
 
     assert replies == [(None, False, replies[0][2])]
-    assert replies[0][2].code() == expected_code
+    assert _error_code(replies[0][2]) == expected_code
     assert fetch.state == "failed"
 
 
@@ -226,7 +234,7 @@ def test_session_timeout_fails_every_active_fetch_with_timeout(qapp):
 
     for token in tokens:
         assert len(replies[token]) == 1, token
-        assert replies[token][0][2].code() == 5  # DuoFPErrorTimeout
+        assert _error_code(replies[token][0][2]) == 5  # DuoFPErrorTimeout
         assert fetches[token].state == "failed"
     assert link.sent, "the active fetches really had reads in flight, not just queued"
 
@@ -268,5 +276,5 @@ def test_truncated_final_chunk_yields_protocol_code(qapp):
     backend.handle_message(Message(MessageType.FILE_CHUNK, dict(read.header), b"ab"))
 
     assert replies == [(None, False, replies[0][2])]
-    assert replies[0][2].code() == 7  # DuoFPErrorProtocol
+    assert _error_code(replies[0][2]) == 7  # DuoFPErrorProtocol
     assert fetch.state == "failed"

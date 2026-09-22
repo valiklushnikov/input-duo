@@ -42,6 +42,7 @@ from test_fileprovider_scheduler import (
     FakeLink as _SchedLink,
     FakeRemote as _SchedRemote,
     _backend as _sched_backend,
+    _error_code,
     _manifest as _sched_manifest,
     _open_all,
     _reply as _sched_reply,
@@ -194,7 +195,7 @@ def row_source_changed(qapp, qtbot, tmp_path):
     backend.handle_message(_file_error(read, "source_changed"))
 
     assert replies[0][:2] == (None, False)
-    assert replies[0][2].code() == 2  # DuoFPErrorSourceChanged
+    assert _error_code(replies[0][2]) == 2  # DuoFPErrorSourceChanged
 
 
 def row_source_missing(qapp, qtbot, tmp_path):
@@ -207,7 +208,7 @@ def row_source_missing(qapp, qtbot, tmp_path):
     backend.handle_message(_file_error(read, "source_missing"))
 
     assert replies[0][:2] == (None, False)
-    assert replies[0][2].code() == 1  # DuoFPErrorSourceMissing
+    assert _error_code(replies[0][2]) == 1  # DuoFPErrorSourceMissing
 
 
 def row_peer_disconnect(qapp, qtbot, tmp_path):
@@ -222,7 +223,7 @@ def row_peer_disconnect(qapp, qtbot, tmp_path):
     link.disconnected.emit("peer socket closed")
 
     assert len(replies) == 1
-    assert replies[0][2].code() in (3, 8)  # PeerLost or NotConnected
+    assert _error_code(replies[0][2]) in (3, 8)  # PeerLost or NotConnected
 
 
 def row_repeated_paste_of_completed_generation(qapp, qtbot, tmp_path):
