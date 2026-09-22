@@ -1,4 +1,5 @@
 .superpowers/
+.worktrees/
 /build/
 .python312/
 .venv/
