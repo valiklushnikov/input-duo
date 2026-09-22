@@ -54,6 +54,54 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
         )
     }
 
+    func testCompletedFinderPasteRearmsBurstForSameGeneration() {
+        let coordinator = FinderBurstDownloadCoordinator()
+
+        XCTAssertEqual(
+            coordinator.downloadsAfterFetch(
+                transferId: "generation", index: 0, entries: entries,
+                isFileViewerRequest: true
+            ),
+            []
+        )
+        XCTAssertEqual(
+            coordinator.downloadsAfterFetch(
+                transferId: "generation", index: 1, entries: entries,
+                isFileViewerRequest: true
+            ).map(\.rawValue),
+            ["generation:2", "generation:4"]
+        )
+        XCTAssertEqual(
+            coordinator.downloadsAfterFetch(
+                transferId: "generation", index: 2, entries: entries,
+                isFileViewerRequest: true
+            ),
+            []
+        )
+        XCTAssertEqual(
+            coordinator.downloadsAfterFetch(
+                transferId: "generation", index: 4, entries: entries,
+                isFileViewerRequest: true
+            ),
+            []
+        )
+
+        XCTAssertEqual(
+            coordinator.downloadsAfterFetch(
+                transferId: "generation", index: 0, entries: entries,
+                isFileViewerRequest: true
+            ),
+            []
+        )
+        XCTAssertEqual(
+            coordinator.downloadsAfterFetch(
+                transferId: "generation", index: 1, entries: entries,
+                isFileViewerRequest: true
+            ).map(\.rawValue),
+            ["generation:2", "generation:4"]
+        )
+    }
+
     func testNonFinderFetchDoesNotCountTowardBurstThreshold() {
         let coordinator = FinderBurstDownloadCoordinator()
 
