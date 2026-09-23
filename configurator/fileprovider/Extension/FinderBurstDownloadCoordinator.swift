@@ -5,10 +5,10 @@ import Foundation
 /// materialization waves. Requests created by a wave are explicitly tracked so
 /// their fetch callbacks can never be mistaken for new Finder demand.
 final class FinderBurstDownloadCoordinator {
-    /// Diagnostic producer bound. Run 2 proved that even wave position 2 can
-    /// be evicted before Finder's CopyEngine consumes it, so keep at most one
-    /// speculative successor ahead of externally initiated demand.
-    static let burstWaveSize = 1
+    /// Diagnostic producer bound. A one-item speculative wave still produced
+    /// eviction -> refetch, including for Finder-origin fetches. Disable our
+    /// producer entirely to isolate the native Finder/File Provider pipeline.
+    static let experimentalBurstWaveSize = 0
 
     enum FetchOrigin: String {
         case finder = "FINDER"
@@ -58,7 +58,13 @@ final class FinderBurstDownloadCoordinator {
     }
 
     private let lock = NSLock()
+    private let burstWaveSize: Int
     private var transfers: [String: TransferState] = [:]
+
+    init(burstWaveSize: Int = FinderBurstDownloadCoordinator.experimentalBurstWaveSize) {
+        precondition(burstWaveSize >= 0)
+        self.burstWaveSize = burstWaveSize
+    }
 
     func beginFetch(
         transferId: String,
@@ -110,7 +116,7 @@ final class FinderBurstDownloadCoordinator {
                         && !state.seenIndices.contains(candidate)
                         && state.assignments[candidate] == nil
                         && state.activeBurst[candidate] == nil
-                }.prefix(Self.burstWaveSize)
+                }.prefix(burstWaveSize)
                 if !candidates.isEmpty {
                     let waveId = state.nextWaveId
                     state.nextWaveId += 1

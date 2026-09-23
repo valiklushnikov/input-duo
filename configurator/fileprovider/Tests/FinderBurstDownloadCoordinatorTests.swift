@@ -16,7 +16,7 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
         }
     }
 
-    func testFinderWaveNeverSchedulesASecondSpeculativeItem() {
+    func testProductionConfigurationNeverSchedulesSpeculativeItems() {
         let coordinator = FinderBurstDownloadCoordinator()
         let manyEntries = fileEntries(20)
 
@@ -27,16 +27,31 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
             ),
             []
         )
-        let downloads = coordinator.downloadsAfterFetch(
-            transferId: "generation", index: 1, entries: manyEntries,
-            isFileViewerRequest: true
+        XCTAssertEqual(
+            coordinator.downloadsAfterFetch(
+                transferId: "generation", index: 1, entries: manyEntries,
+                isFileViewerRequest: true
+            ),
+            []
         )
-
-        XCTAssertEqual(downloads.map(\.rawValue), ["generation:2"])
+        XCTAssertEqual(
+            coordinator.downloadsAfterFetch(
+                transferId: "generation", index: 2, entries: manyEntries,
+                isFileViewerRequest: true
+            ),
+            []
+        )
+        XCTAssertEqual(
+            coordinator.downloadsAfterFetch(
+                transferId: "generation", index: 3, entries: manyEntries,
+                isFileViewerRequest: true
+            ),
+            []
+        )
     }
 
     func testGenuineDemandAfterFirstWaveAdvancesOneMoreBoundedWave() {
-        let coordinator = FinderBurstDownloadCoordinator()
+        let coordinator = FinderBurstDownloadCoordinator(burstWaveSize: 1)
         let manyEntries = fileEntries(20)
 
         _ = coordinator.downloadsAfterFetch(
@@ -64,7 +79,7 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
     }
 
     func testBurstFetchesCannotRecursivelyTriggerAnotherWave() {
-        let coordinator = FinderBurstDownloadCoordinator()
+        let coordinator = FinderBurstDownloadCoordinator(burstWaveSize: 1)
         let manyEntries = fileEntries(20)
 
         _ = coordinator.beginFetch(
@@ -101,7 +116,7 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
     }
 
     func testOverlappingGenuineDemandCannotOpenAnotherWave() {
-        let coordinator = FinderBurstDownloadCoordinator()
+        let coordinator = FinderBurstDownloadCoordinator(burstWaveSize: 1)
         let manyEntries = fileEntries(24)
         _ = coordinator.beginFetch(
             transferId: "generation", index: 0, entries: manyEntries,
@@ -136,7 +151,7 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
     }
 
     func testFinderDemandTakesOwnershipBeforeBurstRequestIsIssued() {
-        let coordinator = FinderBurstDownloadCoordinator()
+        let coordinator = FinderBurstDownloadCoordinator(burstWaveSize: 1)
         let manyEntries = fileEntries(20)
         _ = coordinator.beginFetch(
             transferId: "generation", index: 0, entries: manyEntries,
@@ -159,7 +174,7 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
     }
 
     func testSecondDistinctFinderFetchRequestsOnlyNextFile() {
-        let coordinator = FinderBurstDownloadCoordinator()
+        let coordinator = FinderBurstDownloadCoordinator(burstWaveSize: 1)
 
         XCTAssertEqual(
             coordinator.downloadsAfterFetch(
@@ -184,7 +199,7 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
     }
 
     func testRepeatedFetchOfSameItemDoesNotTriggerBurst() {
-        let coordinator = FinderBurstDownloadCoordinator()
+        let coordinator = FinderBurstDownloadCoordinator(burstWaveSize: 1)
 
         XCTAssertEqual(
             coordinator.downloadsAfterFetch(
@@ -203,7 +218,7 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
     }
 
     func testCompletedFinderPasteRearmsBurstForSameGeneration() {
-        let coordinator = FinderBurstDownloadCoordinator()
+        let coordinator = FinderBurstDownloadCoordinator(burstWaveSize: 1)
 
         XCTAssertEqual(
             coordinator.downloadsAfterFetch(
@@ -251,7 +266,7 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
     }
 
     func testNonFinderFetchDoesNotCountTowardBurstThreshold() {
-        let coordinator = FinderBurstDownloadCoordinator()
+        let coordinator = FinderBurstDownloadCoordinator(burstWaveSize: 1)
 
         XCTAssertEqual(
             coordinator.downloadsAfterFetch(
