@@ -98,7 +98,11 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
         for context in burstContexts {
             coordinator.completeFetch(context)
         }
-        XCTAssertEqual(coordinator.waveCount(transferId: "generation"), 1)
+        let nextGenuineDemand = coordinator.beginFetch(
+            transferId: "generation", index: 10, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+        XCTAssertEqual(nextGenuineDemand.downloads.first?.waveId, 2)
     }
 
     func testOverlappingGenuineDemandCannotOpenAnotherWave() {

@@ -145,19 +145,26 @@ final class FetchControllerTests: XCTestCase {
 
     func testSimultaneousFetchesForSameItemShareOneUnderlyingRead() {
         let host = DeferredOpenHost()
+        let (perf, captured) = trace()
         let firstOpen = expectation(description: "first underlying open")
         host.onFirstOpen = { firstOpen.fulfill() }
         let controller = FetchController(
-            hostProvider: { _ in host }, temporaryDirectory: directory
+            hostProvider: { _ in host }, temporaryDirectory: directory, perf: perf
         )
         let completions = expectation(description: "both logical fetches complete")
         completions.expectedFulfillmentCount = 2
 
-        _ = controller.fetch(item(), request: NSFileProviderRequest()) { _, _, error in
+        _ = controller.fetch(
+            item(), request: NSFileProviderRequest(),
+            extraTraceFields: [("perf_fetch_id", "first"), ("origin", "BURST")]
+        ) { _, _, error in
             XCTAssertNil(error)
             completions.fulfill()
         }
-        _ = controller.fetch(item(), request: NSFileProviderRequest()) { _, _, error in
+        _ = controller.fetch(
+            item(), request: NSFileProviderRequest(),
+            extraTraceFields: [("perf_fetch_id", "second"), ("origin", "FINDER")]
+        ) { _, _, error in
             XCTAssertNil(error)
             completions.fulfill()
         }
@@ -165,6 +172,10 @@ final class FetchControllerTests: XCTestCase {
         wait(for: [firstOpen], timeout: 3)
         Thread.sleep(forTimeInterval: 0.05)
         XCTAssertEqual(host.openCalls, 1)
+        let coalesced = captured().filter { $0.contains("event=fetch_coalesced") }
+        XCTAssertEqual(coalesced.count, 1)
+        XCTAssertTrue(coalesced[0].contains("origin=FINDER"))
+        XCTAssertTrue(coalesced[0].contains("perf_fetch_id=second"))
         host.releaseAll()
         wait(for: [completions], timeout: 3)
     }

@@ -200,12 +200,6 @@ final class FinderBurstDownloadCoordinator {
         }
     }
 
-    func waveCount(transferId: String) -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return transfers[transferId]?.openedWaveCount ?? 0
-    }
-
     /// Compatibility wrapper for the previous API. Production uses the
     /// explicit begin/claim/complete lifecycle above.
     func downloadsAfterFetch(

@@ -142,7 +142,7 @@ final class FetchController {
                 ("item_identifier", key),
                 ("transfer_id", parsed?.transferId ?? "unknown"),
                 ("entry_index", String(parsed?.index ?? -1))
-            ])
+            ] + extraTraceFields)
             return progress
         }
         if fetchStartedAt == nil {
