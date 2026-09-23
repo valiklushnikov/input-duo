@@ -1,6 +1,13 @@
 import XCTest
 
 final class DownloadPipelineConfigurationTests: XCTestCase {
+    func testProductionExtensionDoesNotExposeExperimentalPrefetchMode() {
+        XCTAssertNil(
+            Bundle(for: FileProviderExtension.self)
+                .object(forInfoDictionaryKey: "DuoSiblingPrefetchExperimentMode")
+        )
+    }
+
     func testExtensionAdvertisesFourConcurrentDownloadPipelines() throws {
         let extensionInfo = try XCTUnwrap(
             Bundle(for: FileProviderExtension.self)

@@ -144,15 +144,16 @@ def test_parser_collects_malformed_perf_lines():
 
 def test_burst_accounting_keeps_physical_fetches_and_eviction_refetch_visible():
     events = [
-        event("extension", "fetch_enter", 0, "swift_uptime", item_identifier="gen:0", transfer_id="gen", entry_index=0, perf_fetch_id="a", origin="FINDER", wave_id="none"),
+        event("extension", "fetch_enter", 0, "swift_uptime", item_identifier="gen:0", transfer_id="gen", entry_index=0, perf_fetch_id="a", scheduler_origin="FINDER", fetch_classification="NO_PREFETCH_REQUEST_RECORDED", duplicate_active="false", wave_id="none"),
         event("extension", "open_fetch_reply", 1, "swift_uptime", item_identifier="gen:0", transfer_id="gen", entry_index=0, perf_fetch_id="a", origin="FINDER", fetch_token="t0", status="ok"),
-        event("extension", "fetch_enter", 2, "swift_uptime", item_identifier="gen:1", transfer_id="gen", entry_index=1, perf_fetch_id="b", origin="FINDER", wave_id="none"),
+        event("extension", "fetch_enter", 2, "swift_uptime", item_identifier="gen:1", transfer_id="gen", entry_index=1, perf_fetch_id="b", scheduler_origin="FINDER", fetch_classification="NO_PREFETCH_REQUEST_RECORDED", duplicate_active="false", wave_id="none"),
         event("extension", "finder_burst_triggered", 3, "swift_uptime", transfer_id="gen", perf_fetch_id="b", trigger_item="gen:1", wave_id=1, request_count=2),
+        event("extension", "request_download_call", 4, "swift_uptime", item_identifier="gen:2", transfer_id="gen", trigger_item="gen:1", wave_id=1, wave_position=1),
         event("extension", "open_fetch_reply", 4, "swift_uptime", item_identifier="gen:1", transfer_id="gen", entry_index=1, perf_fetch_id="b", origin="FINDER", fetch_token="t1", status="ok"),
-        event("extension", "fetch_enter", 5, "swift_uptime", item_identifier="gen:2", transfer_id="gen", entry_index=2, perf_fetch_id="c", origin="BURST", wave_id=1, wave_position=1, trigger_item="gen:1"),
+        event("extension", "fetch_enter", 5, "swift_uptime", item_identifier="gen:2", transfer_id="gen", entry_index=2, perf_fetch_id="c", scheduler_origin="BURST", fetch_classification="KNOWN_PREFETCH_REQUESTED", duplicate_active="false", wave_id=1, wave_position=1, trigger_item="gen:1"),
         event("extension", "open_fetch_reply", 6, "swift_uptime", item_identifier="gen:2", transfer_id="gen", entry_index=2, perf_fetch_id="c", origin="BURST", fetch_token="t2", status="ok"),
         event("extension", "eviction_success", 7, "swift_uptime", item_identifier="gen:2", transfer_id="gen"),
-        event("extension", "fetch_enter", 8, "swift_uptime", item_identifier="gen:2", transfer_id="gen", entry_index=2, perf_fetch_id="d", origin="FINDER", wave_id="none"),
+        event("extension", "fetch_enter", 8, "swift_uptime", item_identifier="gen:2", transfer_id="gen", entry_index=2, perf_fetch_id="d", scheduler_origin="FINDER", fetch_classification="NO_PREFETCH_REQUEST_RECORDED", duplicate_active="true", wave_id="none"),
         event("extension", "open_fetch_reply", 9, "swift_uptime", item_identifier="gen:2", transfer_id="gen", entry_index=2, perf_fetch_id="d", origin="FINDER", fetch_token="t3", status="ok"),
     ]
 
@@ -160,8 +161,11 @@ def test_burst_accounting_keeps_physical_fetches_and_eviction_refetch_visible():
         "UNIQUE_ITEMS": 3,
         "FETCH_CONTENTS_INVOCATIONS": 4,
         "FILE_READ_SEQUENCES": 4,
-        "FINDER_ORIGIN_FETCHES": 3,
-        "BURST_ORIGIN_FETCHES": 1,
+        "KNOWN_PREFETCH_REQUESTED_FETCHES": 1,
+        "NO_PREFETCH_REQUEST_RECORDED_FETCHES": 3,
+        "AMBIGUOUS_FETCHES": 0,
+        "REQUEST_DOWNLOAD_CALLS": 1,
+        "DUPLICATE_FETCH_ITEMS": 1,
         "REFETCHED_ITEMS": 1,
         "EXTRA_FILE_READS": 1,
         "EVICTION_SUCCESS_THEN_REFETCH": 1,
@@ -170,6 +174,23 @@ def test_burst_accounting_keeps_physical_fetches_and_eviction_refetch_visible():
         "MAX_SPECULATIVE_LEAD_ITEMS": 1,
         "BURST_COMPLETION_TRIGGERED_NEXT_WAVE": "NO",
     }
+
+
+def test_speculative_lead_counts_wave_positions_not_sparse_manifest_distance():
+    events = [
+        event(
+            "extension", "fetch_enter", position, "swift_uptime",
+            item_identifier=f"gen:{index}", transfer_id="gen", entry_index=index,
+            perf_fetch_id=f"burst-{position}", scheduler_origin="BURST",
+            fetch_classification="KNOWN_PREFETCH_REQUESTED", duplicate_active="false",
+            wave_id=1, wave_position=position, trigger_item="gen:27",
+        )
+        for position, index in enumerate(
+            [28, 29, 30, 31, 33, 34, 35, 36], start=1
+        )
+    ]
+
+    assert burst_accounting(events)["MAX_SPECULATIVE_LEAD_ITEMS"] == 8
 
 
 def test_analyzer_never_subtracts_different_clock_domains():
@@ -201,6 +222,20 @@ def test_concurrency_integral_and_distribution_are_time_weighted():
     assert result.avg_active_fetches == pytest.approx(5 / 3)
     direct = concurrency_sweep([(0, 10 * MS), (20 * MS, 30 * MS)])
     assert direct["time_ms"][0] == 10.0
+
+
+def test_comparison_totals_measure_idle_and_sum_active_transfer_time():
+    events = [
+        PerfEvent(item.source, item.name, item.mono_ns + 5 * MS, item.clock, item.fields)
+        if item.name == "last_write_complete"
+        and item.fields.get("entry_index") in {"0", "1"}
+        else item
+        for item in synthetic_events()
+    ]
+    result = analyze(events, dataset(), correctness_ok())
+
+    assert result.aggregates["INTER_FETCH_IDLE_TOTAL"] == 0.0
+    assert result.aggregates["ACTIVE_BYTE_TRANSFER_TOTAL"] == 10.0
 
 
 def test_chunks_windows_queue_eviction_and_top_five_are_measured():

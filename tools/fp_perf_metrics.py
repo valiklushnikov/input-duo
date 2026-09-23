@@ -270,13 +270,11 @@ def burst_accounting(events: Iterable[PerfEvent]) -> dict[str, object]:
 
     leads: list[int] = []
     for fetch in fetches:
-        if fetch.fields.get("origin") != "BURST":
+        if (fetch.fields.get("scheduler_origin") or fetch.fields.get("origin")) != "BURST":
             continue
-        index = _int(fetch.fields.get("entry_index"))
-        trigger = fetch.fields.get("trigger_item", "")
-        trigger_index = _int(trigger.rsplit(":", 1)[-1]) if ":" in trigger else None
-        if index is not None and trigger_index is not None:
-            leads.append(index - trigger_index)
+        wave_position = _int(fetch.fields.get("wave_position"))
+        if wave_position is not None:
+            leads.append(wave_position)
 
     eviction_refetch_items = 0
     for item, item_fetches in by_item.items():
@@ -298,22 +296,31 @@ def burst_accounting(events: Iterable[PerfEvent]) -> dict[str, object]:
     recursive = "NO"
     for wave in wave_events:
         trigger_fetch = by_fetch_id.get(wave.fields.get("perf_fetch_id", ""))
-        if trigger_fetch is None or trigger_fetch.fields.get("origin") != "FINDER":
+        if trigger_fetch is None or (
+            trigger_fetch.fields.get("scheduler_origin") or trigger_fetch.fields.get("origin")
+        ) != "FINDER":
             recursive = "YES"
             break
 
     unique_items = len(by_item)
     refetched_items = sum(len(item_fetches) > 1 for item_fetches in by_item.values())
+    duplicate_items = {
+        _item_id(event)
+        for event in fetches
+        if event.fields.get("duplicate_active") == "true" and _item_id(event) is not None
+    }
+    classifications = [event.fields.get("fetch_classification") for event in fetches]
     return {
         "UNIQUE_ITEMS": unique_items,
         "FETCH_CONTENTS_INVOCATIONS": len(fetches),
         "FILE_READ_SEQUENCES": len(tokens),
-        "FINDER_ORIGIN_FETCHES": sum(
-            event.fields.get("origin") == "FINDER" for event in fetches
-        ),
-        "BURST_ORIGIN_FETCHES": sum(
-            event.fields.get("origin") == "BURST" for event in fetches
-        ),
+        "KNOWN_PREFETCH_REQUESTED_FETCHES": classifications.count("KNOWN_PREFETCH_REQUESTED")
+            or sum(event.fields.get("origin") == "BURST" for event in fetches),
+        "NO_PREFETCH_REQUEST_RECORDED_FETCHES": classifications.count("NO_PREFETCH_REQUEST_RECORDED")
+            or sum(event.fields.get("origin") == "FINDER" for event in fetches),
+        "AMBIGUOUS_FETCHES": classifications.count("AMBIGUOUS"),
+        "REQUEST_DOWNLOAD_CALLS": sum(event.name == "request_download_call" for event in extension),
+        "DUPLICATE_FETCH_ITEMS": len(duplicate_items),
         "REFETCHED_ITEMS": refetched_items,
         "EXTRA_FILE_READS": max(0, len(tokens) - unique_items),
         "EVICTION_SUCCESS_THEN_REFETCH": eviction_refetch_items,
@@ -686,6 +693,8 @@ def analyze(events: Iterable[PerfEvent], dataset: dict, correctness: dict) -> Ru
         "FINALIZATION_P50": available(final_p50), "FINALIZATION_P95": available(final_p95),
         "LOCAL_FINALIZE_P50": available(local_p50), "LOCAL_FINALIZE_P95": available(local_p95),
         "INTER_FILE_IDLE_P50": available(idle_p50), "INTER_FILE_IDLE_P95": available(idle_p95), "INTER_FILE_IDLE_MAX": available(idle_max),
+        "INTER_FETCH_IDLE_TOTAL": sum(inter_file_idle),
+        "ACTIVE_BYTE_TRANSFER_TOTAL": sum(transfer_values),
         "QUEUE_WAIT_P50": available(queue_p50), "QUEUE_WAIT_P95": available(queue_p95), "QUEUE_WAIT_MAX": available(queue_max),
         "MAX_ACTIVE_FETCHES": available(concurrency["max"]), "AVG_ACTIVE_FETCHES": available(concurrency["average"]),
         "TIME_WITH_0_ACTIVE": concurrency["time_ms"][0], "TIME_WITH_1_ACTIVE": concurrency["time_ms"][1],

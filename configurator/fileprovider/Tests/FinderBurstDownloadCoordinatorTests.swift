@@ -16,6 +16,44 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
         }
     }
 
+    func testZeroBoundRemainsAvailableForSchedulerIsolationTests() {
+        let coordinator = FinderBurstDownloadCoordinator(burstWaveSize: 0)
+        let manyEntries = fileEntries(20)
+
+        for index in 0..<10 {
+            let decision = coordinator.beginFetch(
+                transferId: "generation", index: index, entries: manyEntries,
+                isFileViewerRequest: true
+            )
+            XCTAssertTrue(decision.downloads.isEmpty)
+            XCTAssertEqual(decision.context.classification, .noPrefetchRequestRecorded)
+            coordinator.completeFetch(decision.context)
+        }
+    }
+
+    func testProductionDefaultKeepsEightItemBoundAndClassifiesIssuedRequest() {
+        let coordinator = FinderBurstDownloadCoordinator()
+        let manyEntries = fileEntries(20)
+        let first = coordinator.beginFetch(
+            transferId: "generation", index: 0, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+        coordinator.completeFetch(first.context)
+        let trigger = coordinator.beginFetch(
+            transferId: "generation", index: 1, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+
+        XCTAssertEqual(trigger.downloads.count, 8)
+        let requested = trigger.downloads[0]
+        XCTAssertTrue(coordinator.markBurstRequestIssued(requested))
+        let callback = coordinator.beginFetch(
+            transferId: "generation", index: requested.index, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+        XCTAssertEqual(callback.context.classification, .knownPrefetchRequested)
+    }
+
     func testProductionConfigurationOpensAtMostEightSpeculativeItems() {
         let coordinator = FinderBurstDownloadCoordinator()
         let manyEntries = fileEntries(20)

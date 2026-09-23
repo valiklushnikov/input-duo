@@ -5,13 +5,19 @@ import Foundation
 /// materialization waves. Requests created by a wave are explicitly tracked so
 /// their fetch callbacks can never be mistaken for new Finder demand.
 final class FinderBurstDownloadCoordinator {
-    /// Experimental producer bound. Completion of these requests never opens
+    /// Production producer bound. Completion of these requests never opens
     /// another wave; only later genuine Finder demand can advance the frontier.
-    static let experimentalBurstWaveSize = 8
+    static let productionPrefetchWaveSize = 8
 
     enum FetchOrigin: String {
         case finder = "FINDER"
         case burst = "BURST"
+    }
+
+    enum FetchClassification: String {
+        case knownPrefetchRequested = "KNOWN_PREFETCH_REQUESTED"
+        case noPrefetchRequestRecorded = "NO_PREFETCH_REQUEST_RECORDED"
+        case ambiguous = "AMBIGUOUS"
     }
 
     struct Download: Equatable {
@@ -27,6 +33,7 @@ final class FinderBurstDownloadCoordinator {
         let itemIdentifier: String
         let index: Int
         let origin: FetchOrigin
+        let classification: FetchClassification
         let waveId: Int?
         let wavePosition: Int?
         let triggerItem: String?
@@ -60,7 +67,7 @@ final class FinderBurstDownloadCoordinator {
     private let burstWaveSize: Int
     private var transfers: [String: TransferState] = [:]
 
-    init(burstWaveSize: Int = FinderBurstDownloadCoordinator.experimentalBurstWaveSize) {
+    init(burstWaveSize: Int = FinderBurstDownloadCoordinator.productionPrefetchWaveSize) {
         precondition(burstWaveSize >= 0)
         self.burstWaveSize = burstWaveSize
     }
@@ -81,6 +88,7 @@ final class FinderBurstDownloadCoordinator {
         ).rawValue
         let alreadyActive = (state.activeFetchCounts[index] ?? 0) > 0
         var origin: FetchOrigin = .finder
+        var classification: FetchClassification = .noPrefetchRequestRecorded
         var wave: Download?
         var isGenuineDemand = isFileViewerRequest
 
@@ -88,6 +96,7 @@ final class FinderBurstDownloadCoordinator {
             state.assignments[index] = nil
             if assignment.state == .issued {
                 origin = .burst
+                classification = .knownPrefetchRequested
                 wave = assignment.download
                 state.activeBurst[index] = assignment.download
                 isGenuineDemand = false
@@ -103,6 +112,7 @@ final class FinderBurstDownloadCoordinator {
             // File Provider independently delivered a second callback while the
             // burst fetch is active. It must not advance the burst frontier.
             isGenuineDemand = false
+            classification = .ambiguous
         }
 
         state.seenIndices.insert(index)
@@ -152,6 +162,7 @@ final class FinderBurstDownloadCoordinator {
                 itemIdentifier: itemIdentifier,
                 index: index,
                 origin: origin,
+                classification: classification,
                 waveId: wave?.waveId,
                 wavePosition: wave?.wavePosition,
                 triggerItem: wave?.triggerItem,

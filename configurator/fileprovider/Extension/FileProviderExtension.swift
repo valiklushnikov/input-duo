@@ -25,7 +25,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     /// Strong reference: the service source owns the anonymous listener.
     private let serviceSource: DuoServiceSource
     private let fetchController: FetchController
-    private let burstDownloads = FinderBurstDownloadCoordinator()
+    private let burstDownloads: FinderBurstDownloadCoordinator
     private let perf: PerfTrace
 
     required convenience init(domain: NSFileProviderDomain) {
@@ -43,6 +43,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
          perf: PerfTrace = .live) {
         self.domain = domain
         self.perf = perf
+        self.burstDownloads = FinderBurstDownloadCoordinator()
         let manager = NSFileProviderManager(for: domain)
         self.manager = manager
         self.replicaStore = replicaStore
@@ -65,6 +66,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         self.fetchController = FetchController(hostProvider: hostProvider ?? { source.hostProxy(errorHandler: $0) },
                                                temporaryDirectory: tempDir, perf: perf)
         super.init()
+        perf.mark("production_configuration", fields: [
+            ("content_policy", "INHERITED_EFFECTIVE_DOWNLOAD_LAZILY"),
+            ("pipeline_depth", "4"),
+            ("post_fetch_eviction", "OFF"),
+            ("request_download_prefetch", "ON"),
+            ("sibling_prefetch_wave_size", String(FinderBurstDownloadCoordinator.productionPrefetchWaveSize))
+        ])
     }
 
     func invalidate() {
@@ -165,7 +173,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         let context = decision.context
         let traceFields = [
             ("perf_fetch_id", perfFetchId),
-            ("origin", context.origin.rawValue),
+            ("scheduler_origin", context.origin.rawValue),
+            ("fetch_classification", context.classification.rawValue),
             ("wave_id", context.waveId.map(String.init) ?? "none"),
             ("wave_position", context.wavePosition.map(String.init) ?? "none"),
             ("trigger_item", context.triggerItem ?? "none"),
@@ -198,6 +207,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                     ])
                     continue
                 }
+                perf.mark("request_download_call", fields: [
+                    ("item_identifier", download.identifier.rawValue),
+                    ("transfer_id", parsed.transferId),
+                    ("trigger_item", download.triggerItem),
+                    ("wave_id", String(download.waveId)),
+                    ("wave_position", String(download.wavePosition))
+                ])
                 manager.requestDownloadForItem(
                     withIdentifier: download.identifier,
                     requestedRange: NSRange(location: NSNotFound, length: 0)
