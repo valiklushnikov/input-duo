@@ -27,9 +27,6 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     private let fetchController: FetchController
     private let burstDownloads = FinderBurstDownloadCoordinator()
     private let perf: PerfTrace
-    /// Post-fetch cache cleanup (materialize→grace→evict→verify). nil only when
-    /// no manager is available (tests / degraded host).
-    private let cleanup: EvictionCoordinator?
 
     required convenience init(domain: NSFileProviderDomain) {
         self.init(domain: domain, replicaStore: ReplicaStore())
@@ -67,16 +64,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             ?? FileManager.default.temporaryDirectory
         self.fetchController = FetchController(hostProvider: hostProvider ?? { source.hostProxy(errorHandler: $0) },
                                                temporaryDirectory: tempDir, perf: perf)
-        self.cleanup = manager.map {
-            EvictionCoordinator(
-                environment: ManagerEvictionEnvironment(manager: $0, perf: perf), perf: perf
-            )
-        }
         super.init()
     }
 
     func invalidate() {
-        cleanup?.shutdown()
         serviceSource.invalidate()
     }
 
@@ -225,13 +216,10 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 }
             }
         }
-        // Post-fetch cache cleanup: fetchContents completion means "content
-        // supplied to File Provider", NOT "materialized into the mount" - the
-        // system clones the temp into the mount asynchronously ~after
-        // completion. So we only SCHEDULE cleanup; the coordinator waits for the
-        // exact item to appear in the materialized set, then (grace) evicts and
-        // verifies. Never evict at completion (proven no-op race).
-        let cleanup = self.cleanup
+        // fetchContents completion transfers ownership of the local copy to
+        // File Provider. It is not a consumer-completion signal: Finder may
+        // start a later coordinated read after this callback returns. Keep the
+        // item purgeable, but leave dehydration to the system cache policy.
         let transferId = parsed.transferId
         let scheduling: (URL?, NSFileProviderItem?, Error?) -> Void = { url, fetchedItem, error in
             self.burstDownloads.completeFetch(context)
@@ -241,8 +229,6 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 ("status", error == nil ? "ok" : "error")
             ] + traceFields)
             completionHandler(url, fetchedItem, error)
-            guard error == nil else { return }
-            cleanup?.schedule(itemIdentifier: itemIdentifier.rawValue, transferId: transferId)
         }
         return fetchController.fetch(
             item, request: request, fetchStartedAt: fetchStartedAt,

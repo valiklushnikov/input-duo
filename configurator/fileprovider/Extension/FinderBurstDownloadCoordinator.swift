@@ -5,10 +5,9 @@ import Foundation
 /// materialization waves. Requests created by a wave are explicitly tracked so
 /// their fetch callbacks can never be mistaken for new Finder demand.
 final class FinderBurstDownloadCoordinator {
-    /// Diagnostic producer bound. A one-item speculative wave still produced
-    /// eviction -> refetch, including for Finder-origin fetches. Disable our
-    /// producer entirely to isolate the native Finder/File Provider pipeline.
-    static let experimentalBurstWaveSize = 0
+    /// Experimental producer bound. Completion of these requests never opens
+    /// another wave; only later genuine Finder demand can advance the frontier.
+    static let experimentalBurstWaveSize = 8
 
     enum FetchOrigin: String {
         case finder = "FINDER"
@@ -92,9 +91,14 @@ final class FinderBurstDownloadCoordinator {
                 wave = assignment.download
                 state.activeBurst[index] = assignment.download
                 isGenuineDemand = false
+            } else {
+                // Finder won the race before requestDownloadForItem was issued.
+                // It owns this fetch, but the item was already inside the
+                // current wave and therefore cannot advance the frontier.
+                isGenuineDemand = false
             }
-            // If only scheduled, no internal requestDownload call existed yet:
-            // genuine Finder demand takes ownership and the later claim fails.
+            // If only scheduled, no internal requestDownload call existed yet;
+            // the later claim fails and no duplicate request is issued.
         } else if state.activeBurst[index] != nil {
             // File Provider independently delivered a second callback while the
             // burst fetch is active. It must not advance the burst frontier.

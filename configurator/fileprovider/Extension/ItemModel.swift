@@ -191,9 +191,8 @@ final class DuoItem: NSObject, NSFileProviderItem {
 /// decides capabilities/contentType/version-string shape, so every call
 /// site (the extension's `item(for:)` and the enumerator) stays consistent.
 enum DuoItemFactory {
-    // `.allowsEvicting` marks the materialized blob purgeable so post-fetch
-    // cache cleanup can dehydrate it; without it `evictItem` fails with -2008
-    // (NSFileProviderErrorNonEvictable). `.allowsWriting` is retained (Phase 9.6:
+    // `.allowsEvicting` marks the materialized blob purgeable so File Provider's
+    // cache policy may dehydrate it. `.allowsWriting` is retained (Phase 9.6:
     // makes user copies mutable / kills `uchg`); no other capability is added.
     private static let fileCapabilities: NSFileProviderItemCapabilities = [.allowsReading, .allowsWriting, .allowsEvicting]
     private static let directoryCapabilities: NSFileProviderItemCapabilities = [

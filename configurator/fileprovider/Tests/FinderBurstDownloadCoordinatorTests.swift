@@ -16,7 +16,7 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
         }
     }
 
-    func testProductionConfigurationNeverSchedulesSpeculativeItems() {
+    func testProductionConfigurationOpensAtMostEightSpeculativeItems() {
         let coordinator = FinderBurstDownloadCoordinator()
         let manyEntries = fileEntries(20)
 
@@ -27,27 +27,15 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
             ),
             []
         )
-        XCTAssertEqual(
-            coordinator.downloadsAfterFetch(
-                transferId: "generation", index: 1, entries: manyEntries,
-                isFileViewerRequest: true
-            ),
-            []
+        let wave = coordinator.downloadsAfterFetch(
+            transferId: "generation", index: 1, entries: manyEntries,
+            isFileViewerRequest: true
         )
-        XCTAssertEqual(
-            coordinator.downloadsAfterFetch(
-                transferId: "generation", index: 2, entries: manyEntries,
-                isFileViewerRequest: true
-            ),
-            []
-        )
-        XCTAssertEqual(
-            coordinator.downloadsAfterFetch(
-                transferId: "generation", index: 3, entries: manyEntries,
-                isFileViewerRequest: true
-            ),
-            []
-        )
+
+        XCTAssertEqual(wave.map(\.rawValue), [
+            "generation:2", "generation:3", "generation:4", "generation:5",
+            "generation:6", "generation:7", "generation:8", "generation:9",
+        ])
     }
 
     func testGenuineDemandAfterFirstWaveAdvancesOneMoreBoundedWave() {
@@ -150,7 +138,7 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
         XCTAssertEqual(later.downloads.map(\.index), [5])
     }
 
-    func testFinderDemandTakesOwnershipBeforeBurstRequestIsIssued() {
+    func testFinderDemandTakesOwnershipBeforeBurstRequestIsIssuedWithoutAdvancingWave() {
         let coordinator = FinderBurstDownloadCoordinator(burstWaveSize: 1)
         let manyEntries = fileEntries(20)
         _ = coordinator.beginFetch(
@@ -169,7 +157,7 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
         )
 
         XCTAssertEqual(finder.context.origin, .finder)
-        XCTAssertEqual(finder.downloads.map(\.index), [3])
+        XCTAssertTrue(finder.downloads.isEmpty)
         XCTAssertFalse(coordinator.markBurstRequestIssued(raced))
     }
 

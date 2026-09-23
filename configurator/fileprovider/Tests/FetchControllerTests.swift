@@ -428,4 +428,42 @@ final class FetchControllerTests: XCTestCase {
         wait(for: [retiredDone], timeout: 3)
         XCTAssertEqual(connections, 2)
     }
+
+    func testSuccessfulExtensionFetchLeavesMaterializedCacheUnderSystemControl() throws {
+        let store = ReplicaStore(baseDirectory: directory.appendingPathComponent("replica-system-cache"))
+        let record: [String: Any] = ["schema": 1, "transfer_id": "generation", "state": "active",
+            "created_ns": 1, "lease_deadline_ns": 2,
+            "manifest": ["transfer_id": "generation", "entries": [
+                ["path": "file.bin", "kind": "file", "size": 3, "mtime_ns": 0]],
+                "skipped": [], "total_bytes": 3, "drop_effect": 1]]
+        try store.publish(recordJSON: JSONSerialization.data(withJSONObject: record))
+        let host = CannedHost()
+        let eagerCleanup = expectation(description: "no eager post-fetch cleanup")
+        eagerCleanup.isInverted = true
+        let perf = PerfTrace(clock: { 1 }, emit: { line in
+            if line.contains("event=cleanup_scheduled") { eagerCleanup.fulfill() }
+        })
+        let provider = FileProviderExtension(
+            domain: NSFileProviderDomain(
+                identifier: NSFileProviderDomainIdentifier("test-system-cache"),
+                displayName: "test-system-cache"
+            ),
+            replicaStore: store,
+            hostProvider: { _ in host },
+            temporaryDirectory: directory,
+            perf: perf
+        )
+        let fetched = expectation(description: "fetch completed")
+
+        _ = provider.fetchContents(
+            for: NSFileProviderItemIdentifier("generation:0"), version: nil,
+            request: NSFileProviderRequest()
+        ) { url, _, error in
+            XCTAssertNil(error)
+            XCTAssertEqual(try? Data(contentsOf: XCTUnwrap(url)), Data("abc".utf8))
+            fetched.fulfill()
+        }
+
+        wait(for: [fetched, eagerCleanup], timeout: 0.25)
+    }
 }
