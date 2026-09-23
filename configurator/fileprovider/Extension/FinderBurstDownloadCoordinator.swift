@@ -5,7 +5,10 @@ import Foundation
 /// materialization waves. Requests created by a wave are explicitly tracked so
 /// their fetch callbacks can never be mistaken for new Finder demand.
 final class FinderBurstDownloadCoordinator {
-    static let burstWaveSize = 8
+    /// Diagnostic producer bound. Run 2 proved that even wave position 2 can
+    /// be evicted before Finder's CopyEngine consumes it, so keep at most one
+    /// speculative successor ahead of externally initiated demand.
+    static let burstWaveSize = 1
 
     enum FetchOrigin: String {
         case finder = "FINDER"
