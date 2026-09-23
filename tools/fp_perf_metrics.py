@@ -12,6 +12,7 @@ from typing import Iterable, Sequence
 
 
 UNAVAILABLE = "UNAVAILABLE"
+NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,7 @@ class RunAnalysis:
     top_five: list[FetchMetrics]
     contributions: dict[str, str]
     optimization_candidates: list[dict[str, str]]
+    transport: dict[str, object]
 
 
 def parse_perf_lines(lines: Iterable[str], source: str) -> ParsedEvents:
@@ -329,6 +331,343 @@ def burst_accounting(events: Iterable[PerfEvent]) -> dict[str, object]:
         "MAX_SPECULATIVE_LEAD_ITEMS": max(leads, default=0),
         "BURST_COMPLETION_TRIGGERED_NEXT_WAVE": recursive,
     }
+
+
+def transport_breakdown(
+    events: Iterable[PerfEvent], *, total_bytes: int = 0
+) -> dict[str, object]:
+    """Decompose FILE_READ/FILE_CHUNK without crossing clock domains.
+
+    Windows stage durations use only Windows events. Mac RTT and inflight
+    concurrency use only Mac events. The two timelines are joined solely by
+    the existing ``(transfer_id, read_id)`` identity.
+    """
+    event_list = list(events)
+    groups: dict[tuple[str, str], list[PerfEvent]] = {}
+    for perf_event in event_list:
+        transfer = perf_event.fields.get("transfer_id") or perf_event.fields.get(
+            "generation_id"
+        )
+        read_id = perf_event.fields.get("read_id")
+        if transfer is not None and read_id is not None:
+            groups.setdefault((transfer, read_id), []).append(perf_event)
+
+    stage_names = {
+        "DECODE": ("file_read_bytes_available", "file_read_decode_complete"),
+        "DISPATCH": ("file_read_decode_complete", "file_read_handler_enter"),
+        "SNAPSHOT_LOOKUP": ("snapshot_lookup_begin", "snapshot_lookup_end"),
+        "SOURCE_OPEN": ("source_open_begin", "source_open_end"),
+        "SOURCE_READ": ("source_read_begin", "source_read_end"),
+        "CHUNK_ENCODE": ("source_read_end", "file_chunk_encode_complete"),
+        "WINDOWS_PROCESSING": ("file_read_bytes_available", "outbound_enqueue"),
+        "OUTBOUND_QUEUE_WAIT": ("outbound_enqueue", "outbound_plaintext_dequeue"),
+        "SOCKET_WRITE": ("socket_write_begin", "socket_write_complete"),
+        "ENCRYPTION_TIME": (
+            "outbound_plaintext_dequeue",
+            "outbound_frame_encrypted",
+        ),
+        "INBOUND_QUEUE_WAIT": ("file_read_bytes_available", "file_read_handler_enter"),
+    }
+    samples: dict[str, list[float]] = {name: [] for name in stage_names}
+    mac_rtts: list[float] = []
+    first_mac_rtts: list[float] = []
+    subsequent_mac_rtts: list[float] = []
+    first_windows: list[float] = []
+    first_open: list[float] = []
+    first_read: list[float] = []
+    first_outbound_queue_wait: list[float] = []
+    approximate_transport_residual: list[float] = []
+    event_loop_lag: list[float] = []
+    request_sizes: list[int] = []
+    chunk_sizes: list[int] = []
+    source_bytes = 0
+    fd_open_count = 0
+    fd_reuse_count = 0
+    mac_intervals: list[tuple[int, int]] = []
+    mac_intervals_by_file: dict[str, list[tuple[int, int]]] = {}
+    windows_intervals: list[tuple[int, int]] = []
+    source_intervals: list[tuple[int, int]] = []
+    writer_intervals: list[tuple[int, int]] = []
+    slow_reads: list[dict[str, object]] = []
+
+    def stage(windows: Sequence[PerfEvent], name: str) -> float | None:
+        start_name, end_name = stage_names[name]
+        status = "ok" if end_name in {"source_open_end", "source_read_end"} else None
+        return _duration_ms(
+            _first(windows, start_name), _first(windows, end_name, status=status)
+        )
+
+    for (transfer, read_id), group in groups.items():
+        mac = [item for item in group if item.source == "mac"]
+        windows = [item for item in group if item.source == "windows"]
+        mac_send = _first(mac, "file_read_send")
+        mac_receive = _first(mac, "file_chunk_receive")
+        mac_rtt = _duration_ms(mac_send, mac_receive)
+        if mac_rtt is not None:
+            mac_rtts.append(mac_rtt)
+            interval = (mac_send.mono_ns, mac_receive.mono_ns)
+            mac_intervals.append(interval)
+            file_key = f"{transfer}:{mac_send.fields.get('entry_index', 'unknown')}"
+            mac_intervals_by_file.setdefault(file_key, []).append(interval)
+
+        offset_event = mac_send or _first(windows, "file_read_bytes_available")
+        offset = _int(offset_event.fields.get("offset")) if offset_event else None
+        requested = _int(mac_send.fields.get("length")) if mac_send else None
+        returned = _int(mac_receive.fields.get("bytes")) if mac_receive else None
+        if requested is not None:
+            request_sizes.append(requested)
+        if returned is not None:
+            chunk_sizes.append(returned)
+
+        measured = {name: stage(windows, name) for name in stage_names}
+        for name, value in measured.items():
+            if value is not None:
+                samples[name].append(value)
+
+        windows_start = _first(windows, "file_read_handler_enter")
+        windows_end = _first(windows, "file_read_handler_exit") or _first(
+            windows, "outbound_enqueue"
+        )
+        source_start = _first(windows, "source_read_begin")
+        source_end = _first(windows, "source_read_end", status="ok")
+        writer_start = _first(windows, "socket_write_begin")
+        writer_end = _first(windows, "socket_write_complete")
+        for target, start, end in (
+            (windows_intervals, windows_start, windows_end),
+            (source_intervals, source_start, source_end),
+            (writer_intervals, writer_start, writer_end),
+        ):
+            if (
+                start is not None
+                and end is not None
+                and start.source == end.source
+                and start.clock == end.clock
+                and end.mono_ns >= start.mono_ns
+            ):
+                target.append((start.mono_ns, end.mono_ns))
+
+        open_end = _first(windows, "source_open_end", status="ok")
+        if open_end is not None:
+            if open_end.fields.get("fd_reused") == "true":
+                fd_reuse_count += 1
+            elif open_end.fields.get("fd_reused") == "false":
+                fd_open_count += 1
+        if source_end is not None:
+            source_bytes += _int(source_end.fields.get("bytes")) or 0
+        lag = _first(windows, "event_loop_lag")
+        if lag is not None:
+            lag_ns = _int(lag.fields.get("lag_ns"))
+            if lag_ns is not None and lag_ns >= 0:
+                event_loop_lag.append(lag_ns / 1_000_000)
+
+        first = offset == 0
+        if mac_rtt is not None:
+            (first_mac_rtts if first else subsequent_mac_rtts).append(mac_rtt)
+        if first:
+            for target, name in (
+                (first_windows, "WINDOWS_PROCESSING"),
+                (first_open, "SOURCE_OPEN"),
+                (first_read, "SOURCE_READ"),
+            ):
+                value = measured[name]
+                if value is not None:
+                    target.append(value)
+
+        if mac_rtt is not None:
+            queue_event = _first(windows, "outbound_enqueue")
+            slow_reads.append(
+                {
+                    "file": f"{transfer}:{offset_event.fields.get('entry_index', 'unknown')}",
+                    "read_id": _int(read_id),
+                    "offset": offset,
+                    "length": requested,
+                    "mac_rtt_ms": mac_rtt,
+                    "decode_ms": measured["DECODE"],
+                    "dispatch_ms": measured["DISPATCH"],
+                    "lookup_ms": measured["SNAPSHOT_LOOKUP"],
+                    "open_ms": measured["SOURCE_OPEN"],
+                    "read_ms": measured["SOURCE_READ"],
+                    "encode_ms": measured["CHUNK_ENCODE"],
+                    "queue_wait_ms": measured["OUTBOUND_QUEUE_WAIT"],
+                    "socket_write_ms": measured["SOCKET_WRITE"],
+                    "encryption_ms": measured["ENCRYPTION_TIME"],
+                    "concurrent_active_files": None,
+                    "outbound_queue_depth_bytes": (
+                        _int(queue_event.fields.get("queue_depth_bytes"))
+                        if queue_event is not None
+                        else None
+                    ),
+                }
+            )
+
+            slow_reads[-1]["_mac_start_ns"] = mac_send.mono_ns
+
+        if first and measured["OUTBOUND_QUEUE_WAIT"] is not None:
+            first_outbound_queue_wait.append(measured["OUTBOUND_QUEUE_WAIT"])
+        if mac_rtt is not None and measured["WINDOWS_PROCESSING"] is not None:
+            approximate_transport_residual.append(
+                max(0.0, mac_rtt - measured["WINDOWS_PROCESSING"])
+            )
+
+    for row in slow_reads:
+        mac_start_ns = row.pop("_mac_start_ns", None)
+        if isinstance(mac_start_ns, int):
+            row["concurrent_active_files"] = sum(
+                start <= mac_start_ns < end for start, end in mac_intervals
+            )
+
+    def distribution_fields(prefix: str, values: Sequence[float]) -> dict[str, object]:
+        p50, p95, maximum = _distribution(values)
+        return {
+            f"{prefix}_P50": UNAVAILABLE if p50 is None else p50,
+            f"{prefix}_P95": UNAVAILABLE if p95 is None else p95,
+            f"{prefix}_MAX": UNAVAILABLE if maximum is None else maximum,
+        }
+
+    aggregates: dict[str, object] = {}
+    for name, values in samples.items():
+        aggregates.update(distribution_fields(name, values))
+    aggregates.update(distribution_fields("MAC_READ_TO_CHUNK", mac_rtts))
+    aggregates.update(distribution_fields("FIRST_READ_WINDOWS_PROCESSING", first_windows))
+    aggregates.update(distribution_fields("FIRST_SOURCE_OPEN", first_open))
+    aggregates.update(distribution_fields("FIRST_SOURCE_READ", first_read))
+    aggregates.update(
+        distribution_fields(
+            "FIRST_OUTBOUND_QUEUE_WAIT", first_outbound_queue_wait
+        )
+    )
+    aggregates.update(distribution_fields("FIRST_MAC_RTT", first_mac_rtts))
+    aggregates.update(distribution_fields("SUBSEQUENT_MAC_RTT", subsequent_mac_rtts))
+    aggregates.update(distribution_fields("EVENT_LOOP_LAG", event_loop_lag))
+    aggregates.update(
+        distribution_fields(
+            "APPROXIMATE_TRANSPORT_RESIDUAL", approximate_transport_residual
+        )
+    )
+    aggregates.update(distribution_fields("READ_SIZE", [float(value) for value in request_sizes]))
+    aggregates.update(distribution_fields("CHUNK_SIZE", [float(value) for value in chunk_sizes]))
+    queue_depths = [
+        float(depth)
+        for event in event_list
+        if event.source == "windows" and event.name == "outbound_enqueue"
+        for depth in [_int(event.fields.get("queue_depth_bytes"))]
+        if depth is not None
+    ]
+    aggregates.update(distribution_fields("OUTBOUND_QUEUE_DEPTH_BYTES", queue_depths))
+
+    windows_processing_total = sum(samples["WINDOWS_PROCESSING"])
+    for name in (
+        "DECODE",
+        "DISPATCH",
+        "SNAPSHOT_LOOKUP",
+        "SOURCE_OPEN",
+        "SOURCE_READ",
+        "CHUNK_ENCODE",
+        "OUTBOUND_QUEUE_WAIT",
+        "SOCKET_WRITE",
+        "ENCRYPTION_TIME",
+    ):
+        aggregates[f"{name}_PCT_WINDOWS_PROCESSING"] = (
+            100 * sum(samples[name]) / windows_processing_total
+            if windows_processing_total > 0
+            else UNAVAILABLE
+        )
+
+    windows_events = [event for event in event_list if event.source == "windows"]
+    first_windows_read = _first(windows_events, "file_read_bytes_available")
+    configurations = [
+        event
+        for event in windows_events
+        if event.name == "transport_configuration"
+        and (
+            first_windows_read is None
+            or event.clock != first_windows_read.clock
+            or event.mono_ns <= first_windows_read.mono_ns
+        )
+    ]
+    configuration = (
+        max(configurations, key=lambda event: event.mono_ns)
+        if configurations
+        else None
+    )
+    for report_name, field_name in (
+        ("TCP_NODELAY", "tcp_nodelay"),
+        ("SO_SNDBUF", "so_sndbuf"),
+        ("SO_RCVBUF", "so_rcvbuf"),
+        ("SO_KEEPALIVE", "so_keepalive"),
+        ("TLS_BACKEND", "tls_backend"),
+        ("TLS_LIBRARY", "tls_library"),
+    ):
+        aggregates[report_name] = (
+            configuration.fields.get(field_name, UNAVAILABLE)
+            if configuration is not None
+            else UNAVAILABLE
+        )
+
+    chunk_counts: dict[str, int] = {}
+    for perf_event in event_list:
+        if perf_event.source != "mac" or perf_event.name != "file_chunk_receive":
+            continue
+        transfer = perf_event.fields.get("transfer_id") or perf_event.fields.get(
+            "generation_id", "unknown"
+        )
+        key = f"{transfer}:{perf_event.fields.get('entry_index', 'unknown')}"
+        chunk_counts[key] = chunk_counts.get(key, 0) + 1
+    aggregates.update(
+        distribution_fields(
+            "CHUNKS_PER_FILE", [float(value) for value in chunk_counts.values()]
+        )
+    )
+
+    per_file_max = max(
+        (
+            concurrency_sweep(intervals)["max"] or 0
+            for intervals in mac_intervals_by_file.values()
+        ),
+        default=0,
+    )
+    global_max = concurrency_sweep(mac_intervals)["max"] or 0
+    aggregates.update(
+        {
+            "TOTAL_FILE_READS": sum(
+                event.source == "mac" and event.name == "file_read_send"
+                for event in event_list
+            ),
+            "TOTAL_FILE_CHUNKS": sum(
+                event.source == "mac" and event.name == "file_chunk_receive"
+                for event in event_list
+            ),
+            "PER_FILE_MAX_INFLIGHT_READS": per_file_max,
+            "GLOBAL_MAX_INFLIGHT_READS": global_max,
+            "WINDOWS_MAX_LOGICAL_READ_CONCURRENCY": concurrency_sweep(
+                windows_intervals
+            )["max"]
+            or 0,
+            "WINDOWS_MAX_SOURCE_READ_CONCURRENCY": concurrency_sweep(source_intervals)[
+                "max"
+            ]
+            or 0,
+            "WINDOWS_OUTBOUND_WRITER_CONCURRENCY": concurrency_sweep(
+                writer_intervals
+            )["max"]
+            or 0,
+            "FD_OPEN_COUNT": fd_open_count,
+            "FD_REUSE_COUNT": fd_reuse_count,
+            "SOURCE_READ_THROUGHPUT": (
+                source_bytes * 1000 / sum(samples["SOURCE_READ"])
+                if samples["SOURCE_READ"] and sum(samples["SOURCE_READ"]) > 0
+                else UNAVAILABLE
+            ),
+            "SOURCE_QUEUE_WAIT_P50": NOT_APPLICABLE,
+            "SOURCE_QUEUE_WAIT_P95": NOT_APPLICABLE,
+            "SOURCE_QUEUE_WAIT_MAX": NOT_APPLICABLE,
+            "PER_FILE_STOP_AND_WAIT": "YES" if per_file_max <= 1 and mac_intervals else "NO",
+            "CHUNK_SIZE": max(request_sizes) if request_sizes else UNAVAILABLE,
+            "TOTAL_BYTES": total_bytes,
+        }
+    )
+    slow_reads.sort(key=lambda row: float(row["mac_rtt_ms"]), reverse=True)
+    return {"aggregates": aggregates, "slowest_reads": slow_reads[:10]}
 
 
 def analyze(events: Iterable[PerfEvent], dataset: dict, correctness: dict) -> RunAnalysis:
@@ -742,6 +1081,10 @@ def analyze(events: Iterable[PerfEvent], dataset: dict, correctness: dict) -> Ru
         key=lambda metric: metric.fetch_total_ms or 0,
         reverse=True,
     )[:5]
+    transport = transport_breakdown(
+        event_list,
+        total_bytes=int(dataset.get("TOTAL_BYTES", sum(metric.size for metric in per_file))),
+    )
     return RunAnalysis(
         events=event_list, parse_errors=parsed_errors, dataset=dataset, correctness=correctness,
         per_file=per_file, aggregates=aggregates, xpc_open_fetch_ms=xpc_open,
@@ -760,6 +1103,7 @@ def analyze(events: Iterable[PerfEvent], dataset: dict, correctness: dict) -> Ru
         secondary_bottleneck=secondary, classification_evidence=evidence,
         top_five=top_five, contributions=contributions,
         optimization_candidates=candidates,
+        transport=transport,
     )
 
 
@@ -816,6 +1160,7 @@ def _jsonable(analysis: RunAnalysis) -> dict:
         "events": [asdict(event) for event in analysis.events],
         "per_file": [asdict(metric) for metric in analysis.per_file],
         "aggregates": analysis.aggregates,
+        "transport": analysis.transport,
         "availability": {
             "WINDOWS_INTERNAL_BREAKDOWN": analysis.windows_internal_breakdown,
             "NETWORK_PLUS_DISPATCH": analysis.network_plus_dispatch,
@@ -865,6 +1210,37 @@ def render_report(analysis: RunAnalysis) -> str:
         "", "## Correctness guard", "",
     ])
     lines.extend(f"{name} = {_fmt(value)}" for name, value in analysis.correctness.items())
+    transport_aggregates = analysis.transport.get("aggregates", {})
+    slowest_reads = analysis.transport.get("slowest_reads", [])
+    lines.extend(["", "## Windows FILE_READ transport", ""])
+    if isinstance(transport_aggregates, dict):
+        lines.extend(
+            f"{name} = {_fmt(value)}"
+            for name, value in transport_aggregates.items()
+        )
+    lines.extend([
+        "",
+        "### TOP 10 slowest Mac FILE_READ to FILE_CHUNK",
+        "",
+        "| file | offset | length | mac_rtt_ms | decode_ms | dispatch_ms | lookup_ms | open_ms | read_ms | encode_ms | queue_wait_ms | socket_write_ms | encryption_ms | active_files | queue_depth_bytes |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ])
+    if isinstance(slowest_reads, list):
+        for row in slowest_reads:
+            if not isinstance(row, dict):
+                continue
+            columns = (
+                "file", "offset", "length", "mac_rtt_ms", "decode_ms",
+                "dispatch_ms", "lookup_ms", "open_ms", "read_ms", "encode_ms",
+                "queue_wait_ms", "socket_write_ms", "encryption_ms",
+                "concurrent_active_files",
+                "outbound_queue_depth_bytes",
+            )
+            lines.append(
+                "| "
+                + " | ".join(_fmt(row.get(column, UNAVAILABLE)) for column in columns)
+                + " |"
+            )
     lines.extend([
         "", "## Per-file representative rows", "", _table(analysis.per_file[:5]),
         "", "## TOP 5 slowest", "", _table(analysis.top_five),
@@ -916,7 +1292,7 @@ def write_artifacts(analysis: RunAnalysis, output_dir: Path | str) -> ArtifactPa
 
 __all__ = [
     "ArtifactPaths", "FetchMetrics", "ParsedEvents", "PerfEvent", "RunAnalysis",
-    "UNAVAILABLE", "analyze", "classify_bottleneck", "concurrency_sweep",
+    "NOT_APPLICABLE", "UNAVAILABLE", "analyze", "classify_bottleneck", "concurrency_sweep",
     "burst_accounting", "interval_union_ns", "nearest_rank", "parse_perf_lines", "render_report",
-    "write_artifacts",
+    "transport_breakdown", "write_artifacts",
 ]

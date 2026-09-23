@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import logging
+import sys
 import uuid
+from collections import deque
 
 from PySide6.QtCore import QByteArray, QCryptographicHash, QObject, Signal
 from PySide6.QtNetwork import (
@@ -26,7 +28,16 @@ from PySide6.QtNetwork import (
 )
 
 from .identity import NodeIdentity
-from .wire import MAX_FILE_CHUNK_BYTES, MAX_FRAME_BYTES, FrameAssembler, Message, WireError, encode
+from .wire import (
+    MAX_FILE_CHUNK_BYTES,
+    MAX_FRAME_BYTES,
+    FrameAssembler,
+    Message,
+    MessageType,
+    WireError,
+    encode,
+)
+from ..transfer.fileprovider_perf import PerfEmitter
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +112,7 @@ class PeerLink(QObject):
         *,
         connection_generation: str | None = None,
         direction: str = "unknown",
+        perf: PerfEmitter | None = None,
     ) -> None:
         super().__init__(parent)
         self._identity = identity
@@ -111,6 +123,70 @@ class PeerLink(QObject):
         self._expected_fingerprint: str | None = None
         self._peer_fingerprint = ""
         self._congested = False
+        self._pending_write_frames: deque[dict[str, object]] = deque()
+        clock_domain = (
+            "windows_python_monotonic" if sys.platform == "win32" else "python_monotonic"
+        )
+        self._perf = perf or PerfEmitter(logger, clock_domain)
+
+    @staticmethod
+    def _file_perf_fields(message: Message) -> dict[str, object]:
+        """Return bounded, path-free correlation safe for diagnostic logging."""
+        header = message.header
+        transfer_id = header.get("transfer_id")
+        if (
+            not isinstance(transfer_id, str)
+            or not transfer_id
+            or any(character.isspace() for character in transfer_id)
+        ):
+            transfer_id = "invalid"
+
+        def integer(name: str) -> int:
+            value = header.get(name)
+            return value if isinstance(value, int) and not isinstance(value, bool) else -1
+
+        return {
+            "transfer_id": transfer_id,
+            "entry_index": integer("entry_index"),
+            "read_id": integer("read_id"),
+            "offset": integer("offset"),
+            "length": integer("length"),
+        }
+
+    @staticmethod
+    def _compact_perf_text(value: object) -> str:
+        rendered = str(value).strip()
+        if not rendered:
+            return "unknown"
+        return "_".join(rendered.split())
+
+    def _emit_transport_configuration(self, socket: QSslSocket) -> None:
+        def option(name: QAbstractSocket.SocketOption) -> object:
+            try:
+                value = socket.socketOption(name)
+                return int(value)
+            except (AttributeError, TypeError, ValueError, RuntimeError):
+                return "unavailable"
+
+        try:
+            tls_backend = QSslSocket.activeBackend()
+        except (AttributeError, RuntimeError):
+            tls_backend = "unavailable"
+        try:
+            tls_library = QSslSocket.sslLibraryVersionString()
+        except (AttributeError, RuntimeError):
+            tls_library = "unavailable"
+        self._perf.emit(
+            "transport_configuration",
+            connection_generation=self._connection_generation,
+            direction=self._direction,
+            tcp_nodelay=option(QAbstractSocket.SocketOption.LowDelayOption),
+            so_sndbuf=option(QAbstractSocket.SocketOption.SendBufferSizeSocketOption),
+            so_rcvbuf=option(QAbstractSocket.SocketOption.ReceiveBufferSizeSocketOption),
+            so_keepalive=option(QAbstractSocket.SocketOption.KeepAliveOption),
+            tls_backend=self._compact_perf_text(tls_backend),
+            tls_library=self._compact_perf_text(tls_library),
+        )
 
     @property
     def peer_fingerprint(self) -> str:
@@ -168,11 +244,24 @@ class PeerLink(QObject):
         """
         if self._socket is None:
             return False
+        file_chunk = message.type is MessageType.FILE_CHUNK
+        correlation = self._file_perf_fields(message) if file_chunk else {}
+        if file_chunk:
+            self._perf.emit(
+                "file_chunk_encode_begin", bytes=len(message.blob), **correlation
+            )
         try:
             frame = encode(message)
         except WireError as error:
             logger.error("кадр %s не отправлен: %s", message.type.name, error)
             return False
+        if file_chunk:
+            self._perf.emit(
+                "file_chunk_encode_complete",
+                bytes=len(message.blob),
+                frame_bytes=len(frame),
+                **correlation,
+            )
         if self.bytes_to_write + len(frame) > WRITE_LIMIT_BYTES:
             logger.warning(
                 "очередь записи превысила бы %d байт - соединение разорвано",
@@ -180,13 +269,44 @@ class PeerLink(QObject):
             )
             self._fail("очередь записи переполнена")
             return False
-        self._socket.write(frame)
+        if file_chunk:
+            self._perf.emit(
+                "outbound_enqueue",
+                frame_bytes=len(frame),
+                queue_depth_bytes=self.bytes_to_write,
+                **correlation,
+            )
+            self._perf.emit(
+                "socket_write_begin",
+                frame_bytes=len(frame),
+                queue_depth_bytes=self.bytes_to_write,
+                **correlation,
+            )
+        accepted = self._socket.write(frame)
+        if accepted > 0:
+            self._pending_write_frames.append(
+                {
+                    "remaining": min(int(accepted), len(frame)),
+                    "frame_bytes": len(frame),
+                    "correlation": correlation if file_chunk else None,
+                    "started": False,
+                }
+            )
+        if file_chunk:
+            self._perf.emit(
+                "socket_write_complete",
+                accepted_bytes=int(accepted),
+                frame_bytes=len(frame),
+                queue_depth_bytes=self.bytes_to_write,
+                **correlation,
+            )
         return True
 
     def close(self) -> None:
         if self._socket is not None:
             self._socket.abort()
             self._socket = None
+        self._pending_write_frames.clear()
         # Закрытие обязано означать "не в заторе". Без этой проверки
         # _congested остался бы устаревшим True (write_congested уже вернул
         # бы False, потому что self._socket теперь None, но никто об этом не
@@ -210,9 +330,14 @@ class PeerLink(QObject):
 
     def _wire_up(self, socket: QSslSocket) -> None:
         self._socket = socket
+        self._pending_write_frames.clear()
         socket.setParent(self)
         socket.setReadBufferSize(READ_BUFFER_BYTES)
-        socket.bytesWritten.connect(lambda _count: self._check_congestion())
+        socket.bytesWritten.connect(
+            lambda count, bound_socket=socket: self._on_bytes_written(
+                bound_socket, int(count)
+            )
+        )
         socket.connected.connect(self._on_tcp_connected)
         socket.sslErrors.connect(self._on_ssl_errors)
         socket.encrypted.connect(self._on_encrypted)
@@ -222,6 +347,41 @@ class PeerLink(QObject):
         # предыдущем сокете (например, повторно связана без явного close()),
         # свежий сокет ещё ничего не поставил в очередь, и _congested не
         # должен нести старое True дальше.
+        self._check_congestion()
+
+    def _on_bytes_written(self, socket: QSslSocket, count: int) -> None:
+        """Attribute FIFO drain notifications to frames already accepted by Qt.
+
+        ``QSslSocket.write`` only means that Qt accepted plaintext into its
+        internal writer. ``bytesWritten`` is the nearest public boundary for
+        observing that those bytes subsequently left that queue. It does not
+        claim remote receipt or expose TLS-record/socket internals.
+        """
+        if self._socket is not socket:
+            return
+        remaining_written = max(0, count)
+        while remaining_written and self._pending_write_frames:
+            pending = self._pending_write_frames[0]
+            correlation = pending["correlation"]
+            if correlation is not None and not pending["started"]:
+                pending["started"] = True
+                self._perf.emit(
+                    "outbound_plaintext_dequeue",
+                    frame_bytes=pending["frame_bytes"],
+                    **correlation,
+                )
+            consumed = min(remaining_written, int(pending["remaining"]))
+            pending["remaining"] = int(pending["remaining"]) - consumed
+            remaining_written -= consumed
+            if int(pending["remaining"]) != 0:
+                break
+            self._pending_write_frames.popleft()
+            if correlation is not None:
+                self._perf.emit(
+                    "outbound_frame_encrypted",
+                    frame_bytes=pending["frame_bytes"],
+                    **correlation,
+                )
         self._check_congestion()
 
     def _on_tcp_connected(self) -> None:
@@ -295,6 +455,7 @@ class PeerLink(QObject):
         # к реконнекту (Swift FetchController): keepalive снижает частоту
         # разрывов, retry переживает те, что всё же случаются.
         socket.setSocketOption(QAbstractSocket.SocketOption.KeepAliveOption, 1)
+        self._emit_transport_configuration(socket)
         logger.info(
             "peer_tls_complete connection_generation=%s direction=%s",
             self._connection_generation,
@@ -321,6 +482,7 @@ class PeerLink(QObject):
         socket = self._socket
         if socket is None:
             return
+        available_ns = self._perf.now()
         try:
             messages = self._assembler.feed(bytes(socket.readAll()))
         except WireError as error:
@@ -331,12 +493,19 @@ class PeerLink(QObject):
                 # Обработчик предыдущего кадра разорвал соединение: кадры,
                 # пришедшие тем же чтением, принадлежат уже мёртвой связи.
                 return
+            if message.type is MessageType.FILE_READ:
+                correlation = self._file_perf_fields(message)
+                self._perf.emit_at(
+                    available_ns, "file_read_bytes_available", **correlation
+                )
+                self._perf.emit("file_read_decode_complete", **correlation)
             self.message_received.emit(message)
 
     def _fail(self, reason: str) -> None:
         if self._socket is not None:
             self._socket.abort()
             self._socket = None
+        self._pending_write_frames.clear()
         self.disconnected.emit(reason)
 
 

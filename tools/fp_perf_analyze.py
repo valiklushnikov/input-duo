@@ -10,6 +10,9 @@ from pathlib import Path
 from fp_perf_metrics import ParsedEvents, analyze, parse_perf_lines, write_artifacts
 
 
+_CONNECTION_LEVEL_EVENTS = frozenset({"transport_configuration"})
+
+
 def _paths(groups: list[list[str]] | None) -> list[Path]:
     return [Path(value) for group in (groups or []) for value in group]
 
@@ -21,6 +24,31 @@ def _load_events(groups: list[list[str]] | None, source: str) -> ParsedEvents:
         combined.extend(parsed)
         combined.parse_errors.extend(parsed.parse_errors)
     return combined
+
+
+def filter_transfer_events(events: ParsedEvents, transfer_id: str) -> ParsedEvents:
+    matching_tokens = {
+        event.fields["fetch_token"]
+        for event in events
+        if (
+            event.fields.get("transfer_id") == transfer_id
+            or event.fields.get("generation_id") == transfer_id
+            or event.fields.get("item_identifier", "").startswith(transfer_id + ":")
+        )
+        and event.fields.get("fetch_token") not in (None, "none")
+    }
+    return ParsedEvents(
+        (
+            event
+            for event in events
+            if event.name in _CONNECTION_LEVEL_EVENTS
+            or event.fields.get("transfer_id") == transfer_id
+            or event.fields.get("generation_id") == transfer_id
+            or event.fields.get("item_identifier", "").startswith(transfer_id + ":")
+            or event.fields.get("fetch_token") in matching_tokens
+        ),
+        events.parse_errors,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,27 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         all_events.extend(parsed)
         all_events.parse_errors.extend(parsed.parse_errors)
     if args.transfer_id:
-        matching_tokens = {
-            event.fields["fetch_token"]
-            for event in all_events
-            if (
-                event.fields.get("transfer_id") == args.transfer_id
-                or event.fields.get("generation_id") == args.transfer_id
-                or event.fields.get("item_identifier", "").startswith(args.transfer_id + ":")
-            )
-            and event.fields.get("fetch_token") not in (None, "none")
-        }
-        all_events = ParsedEvents(
-            (
-                event
-                for event in all_events
-                if event.fields.get("transfer_id") == args.transfer_id
-                or event.fields.get("generation_id") == args.transfer_id
-                or event.fields.get("item_identifier", "").startswith(args.transfer_id + ":")
-                or event.fields.get("fetch_token") in matching_tokens
-            ),
-            all_events.parse_errors,
-        )
+        all_events = filter_transfer_events(all_events, args.transfer_id)
     dataset = json.loads(args.dataset.read_text())
     correctness = json.loads(args.correctness.read_text()) if args.correctness else {}
     result = analyze(all_events, dataset, correctness)

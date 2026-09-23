@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import logging
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -13,6 +14,18 @@ from duo_input.clipboard.identity import load_or_create
 from duo_input.clipboard.listener import PeerListener
 from duo_input.clipboard.peer import PeerLink, fingerprint_of_socket
 from duo_input.clipboard.wire import MAX_FILE_CHUNK_BYTES, MAX_FRAME_BYTES, Message, MessageType
+from duo_input.transfer.fileprovider_perf import PerfEmitter
+
+
+def _perf_events(caplog) -> list[dict[str, str]]:
+    events = []
+    for record in caplog.records:
+        message = record.getMessage()
+        if "fp_perf " not in message:
+            continue
+        atoms = message[message.index("fp_perf ") + len("fp_perf ") :].split()
+        events.append(dict(atom.split("=", 1) for atom in atoms))
+    return events
 
 
 @pytest.fixture
@@ -410,6 +423,37 @@ def test_encrypted_enables_tcp_keepalive(qapp, tmp_path, monkeypatch):
     assert (QAbstractSocket.SocketOption.KeepAliveOption, 1) in calls
 
 
+def test_encrypted_records_runtime_socket_and_tls_configuration(
+    qapp, tmp_path, caplog
+):
+    logger = logging.getLogger("duo_input.clipboard.peer")
+    ticks = iter(range(300, 10_000))
+    perf = PerfEmitter(logger, "windows_python_monotonic", clock=lambda: next(ticks))
+    caplog.set_level(logging.INFO, logger=logger.name)
+    link = PeerLink(load_or_create(tmp_path), perf=perf)
+    socket = QSslSocket(link)
+    link._socket = socket
+    link._expected_fingerprint = None
+
+    link._on_encrypted()
+
+    [configuration] = [
+        event
+        for event in _perf_events(caplog)
+        if event["event"] == "transport_configuration"
+    ]
+    assert set(
+        (
+            "tcp_nodelay",
+            "so_sndbuf",
+            "so_rcvbuf",
+            "so_keepalive",
+            "tls_backend",
+            "tls_library",
+        )
+    ).issubset(configuration)
+
+
 def test_the_read_buffer_leaves_room_for_several_chunks_but_not_for_a_flood():
     assert READ_BUFFER_BYTES >= MAX_FILE_CHUNK_BYTES, (
         "буфер меньше одного чанка заставил бы Qt резать каждый кадр"
@@ -604,6 +648,128 @@ def test_a_send_within_the_write_limit_is_written(qapp, tmp_path, monkeypatch):
 
     assert link.send(Message(MessageType.PING, {}, b"")) is True
     assert len(written) == 1
+
+
+def test_file_chunk_send_records_encode_enqueue_and_socket_write_boundaries(
+    qapp, tmp_path, monkeypatch, caplog
+):
+    logger = logging.getLogger("duo_input.clipboard.peer")
+    ticks = iter(range(100, 10_000))
+    perf = PerfEmitter(logger, "windows_python_monotonic", clock=lambda: next(ticks))
+    caplog.set_level(logging.INFO, logger=logger.name)
+    link = PeerLink(load_or_create(tmp_path), perf=perf)
+    socket = QSslSocket(link)
+    link._wire_up(socket)
+    monkeypatch.setattr(type(socket), "bytesToWrite", lambda _self: 17)
+    monkeypatch.setattr(type(socket), "write", lambda _self, data: len(data))
+
+    assert link.send(
+        Message(
+            MessageType.FILE_CHUNK,
+            {"transfer_id": "generation", "entry_index": 2, "read_id": 7, "offset": 0},
+            b"payload",
+        )
+    ) is True
+
+    events = _perf_events(caplog)
+    assert [event["event"] for event in events] == [
+        "file_chunk_encode_begin",
+        "file_chunk_encode_complete",
+        "outbound_enqueue",
+        "socket_write_begin",
+        "socket_write_complete",
+    ]
+    assert all(event["read_id"] == "7" for event in events)
+    assert events[2]["queue_depth_bytes"] == "17"
+    assert events[-1]["accepted_bytes"] != "0"
+
+
+def test_file_chunk_records_fifo_writer_dequeue_and_drain(
+    qapp, tmp_path, monkeypatch, caplog
+):
+    logger = logging.getLogger("duo_input.clipboard.peer")
+    ticks = iter(range(150, 10_000))
+    perf = PerfEmitter(logger, "windows_python_monotonic", clock=lambda: next(ticks))
+    caplog.set_level(logging.INFO, logger=logger.name)
+    link = PeerLink(load_or_create(tmp_path), perf=perf)
+    socket = QSslSocket(link)
+    link._wire_up(socket)
+    frames: list[bytes] = []
+    monkeypatch.setattr(type(socket), "bytesToWrite", lambda _self: 0)
+    monkeypatch.setattr(
+        type(socket), "write", lambda _self, data: frames.append(bytes(data)) or len(data)
+    )
+
+    link.send(Message(MessageType.PING, {}, b"before"))
+    link.send(
+        Message(
+            MessageType.FILE_CHUNK,
+            {
+                "transfer_id": "generation",
+                "entry_index": 2,
+                "read_id": 7,
+                "offset": 0,
+            },
+            b"payload",
+        )
+    )
+
+    socket.bytesWritten.emit(len(frames[0]) + 1)
+    assert not any(
+        event["event"] == "outbound_frame_encrypted" for event in _perf_events(caplog)
+    )
+    socket.bytesWritten.emit(len(frames[1]) - 1)
+
+    events = _perf_events(caplog)
+    [dequeue] = [
+        event for event in events if event["event"] == "outbound_plaintext_dequeue"
+    ]
+    [drained] = [
+        event for event in events if event["event"] == "outbound_frame_encrypted"
+    ]
+    assert dequeue["read_id"] == "7"
+    assert drained["read_id"] == "7"
+    assert drained["frame_bytes"] == str(len(frames[1]))
+
+
+def test_file_read_receive_records_bytes_available_and_decode_complete(
+    qapp, tmp_path, monkeypatch, caplog
+):
+    from duo_input.clipboard.wire import encode
+
+    logger = logging.getLogger("duo_input.clipboard.peer")
+    ticks = iter(range(200, 10_000))
+    perf = PerfEmitter(logger, "windows_python_monotonic", clock=lambda: next(ticks))
+    caplog.set_level(logging.INFO, logger=logger.name)
+    link = PeerLink(load_or_create(tmp_path), perf=perf)
+    socket = QSslSocket(link)
+    link._wire_up(socket)
+    frame = encode(
+        Message(
+            MessageType.FILE_READ,
+            {
+                "transfer_id": "generation",
+                "entry_index": 2,
+                "read_id": 7,
+                "offset": 0,
+                "length": 1024,
+            },
+            b"",
+        )
+    )
+    monkeypatch.setattr(type(socket), "readAll", lambda _self: frame)
+    delivered = []
+    link.message_received.connect(delivered.append)
+
+    link._on_ready_read()
+
+    events = _perf_events(caplog)
+    assert [event["event"] for event in events] == [
+        "file_read_bytes_available",
+        "file_read_decode_complete",
+    ]
+    assert all(event["read_id"] == "7" for event in events)
+    assert len(delivered) == 1
 
 
 def test_a_message_whose_header_cannot_be_framed_is_refused_without_raising(

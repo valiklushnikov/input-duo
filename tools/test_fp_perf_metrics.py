@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 
 import pytest
+import fp_perf_metrics as metrics_module
+from fp_perf_analyze import filter_transfer_events
 
 from fp_perf_metrics import (
     PerfEvent,
@@ -289,6 +291,8 @@ def test_report_contains_required_stop_fields_and_unavailable_markers(tmp_path: 
     assert len(list(csv.DictReader(paths.csv.open()))) == 3
     payload = json.loads(paths.json.read_text())
     assert payload["aggregates"]["FILES"] == 3
+    assert "transport" in payload
+    assert "Windows FILE_READ transport" in report
 
 
 def test_checked_in_fixture_logs_parse_without_errors():
@@ -299,3 +303,117 @@ def test_checked_in_fixture_logs_parse_without_errors():
         )
         assert parsed
         assert parsed.parse_errors == []
+
+
+def test_transport_breakdown_uses_only_same_clock_stages_and_proves_stop_and_wait():
+    events: list[PerfEvent] = [
+        event(
+            "windows",
+            "transport_configuration",
+            50,
+            "win",
+            tcp_nodelay=1,
+            so_sndbuf=262_144,
+            so_rcvbuf=131_072,
+            so_keepalive=1,
+            tls_backend="openssl",
+            tls_library="OpenSSL_3",
+        )
+    ]
+
+    def add_read(
+        read_id: int,
+        entry_index: int,
+        offset: int,
+        mac_start: int,
+        mac_end: int,
+        windows_start: int,
+        requested: int = 1_048_576,
+        returned: int = 1_048_576,
+        reused: str = "false",
+    ) -> None:
+        common = {
+            "transfer_id": "gen",
+            "entry_index": entry_index,
+            "read_id": read_id,
+            "offset": offset,
+        }
+        events.extend(
+            [
+                event("mac", "file_read_send", mac_start, "mac", length=requested, **common),
+                event("mac", "file_chunk_receive", mac_end, "mac", bytes=returned, **common),
+                event("windows", "file_read_bytes_available", windows_start, "win", length=requested, **common),
+                event("windows", "file_read_decode_complete", windows_start + 1, "win", length=requested, **common),
+                event("windows", "file_read_handler_enter", windows_start + 3, "win", active_handlers=1, **common),
+                event("windows", "snapshot_lookup_begin", windows_start + 4, "win", **common),
+                event("windows", "snapshot_lookup_end", windows_start + 5, "win", **common),
+                event("windows", "source_open_begin", windows_start + 5, "win", fd_reused=reused, **common),
+                event("windows", "source_open_end", windows_start + 7, "win", fd_reused=reused, status="ok", **common),
+                event("windows", "source_read_begin", windows_start + 8, "win", active_source_reads=1, **common),
+                event("windows", "source_read_end", windows_start + 12, "win", status="ok", bytes=returned, **common),
+                event("windows", "file_chunk_encode_complete", windows_start + 14, "win", bytes=returned, **common),
+                event("windows", "outbound_enqueue", windows_start + 15, "win", queue_depth_bytes=17, **common),
+                event("windows", "socket_write_begin", windows_start + 16, "win", **common),
+                event("windows", "socket_write_complete", windows_start + 17, "win", accepted_bytes=returned, **common),
+                event("windows", "outbound_plaintext_dequeue", windows_start + 19, "win", **common),
+                event("windows", "outbound_frame_encrypted", windows_start + 20, "win", **common),
+                event("windows", "event_loop_lag", windows_start + 21, "win", lag_ns=5 * MS, **common),
+            ]
+        )
+
+    add_read(1, 0, 0, 0, 30, 100)
+    add_read(2, 1, 0, 5, 35, 200)
+    add_read(3, 0, 1_048_576, 31, 81, 300, requested=512, returned=512, reused="true")
+
+    result = metrics_module.transport_breakdown(events, total_bytes=2_097_664)
+    aggregate = result["aggregates"]
+
+    assert aggregate["DECODE_P50"] == 1.0
+    assert aggregate["DISPATCH_P50"] == 2.0
+    assert aggregate["SNAPSHOT_LOOKUP_P50"] == 1.0
+    assert aggregate["SOURCE_OPEN_P50"] == 2.0
+    assert aggregate["SOURCE_READ_P50"] == 4.0
+    assert aggregate["CHUNK_ENCODE_P50"] == 2.0
+    assert aggregate["WINDOWS_PROCESSING_P50"] == 15.0
+    assert aggregate["SOCKET_WRITE_P50"] == 1.0
+    assert aggregate["MAC_READ_TO_CHUNK_P50"] == 30.0
+    assert aggregate["FIRST_MAC_RTT_P50"] == 30.0
+    assert aggregate["SUBSEQUENT_MAC_RTT_P50"] == 50.0
+    assert aggregate["PER_FILE_MAX_INFLIGHT_READS"] == 1
+    assert aggregate["GLOBAL_MAX_INFLIGHT_READS"] == 2
+    assert aggregate["WINDOWS_MAX_LOGICAL_READ_CONCURRENCY"] == 1
+    assert aggregate["WINDOWS_MAX_SOURCE_READ_CONCURRENCY"] == 1
+    assert aggregate["WINDOWS_OUTBOUND_WRITER_CONCURRENCY"] == 1
+    assert aggregate["FD_OPEN_COUNT"] == 2
+    assert aggregate["FD_REUSE_COUNT"] == 1
+    assert aggregate["TOTAL_FILE_READS"] == 3
+    assert aggregate["TOTAL_FILE_CHUNKS"] == 3
+    assert aggregate["PER_FILE_STOP_AND_WAIT"] == "YES"
+    assert aggregate["OUTBOUND_QUEUE_WAIT_P50"] == 4.0
+    assert aggregate["ENCRYPTION_TIME_P50"] == 1.0
+    assert aggregate["APPROXIMATE_TRANSPORT_RESIDUAL_P50"] == 15.0
+    assert aggregate["SOURCE_READ_THROUGHPUT"] == pytest.approx(174_805_333.33333334)
+    assert aggregate["SOURCE_READ_PCT_WINDOWS_PROCESSING"] == pytest.approx(
+        26.666666666666668
+    )
+    assert aggregate["TCP_NODELAY"] == "1"
+    assert aggregate["SO_SNDBUF"] == "262144"
+    assert aggregate["TLS_BACKEND"] == "openssl"
+    assert result["slowest_reads"][0]["read_id"] == 3
+
+
+def test_transfer_filter_retains_connection_level_transport_configuration():
+    events = metrics_module.ParsedEvents(
+        [
+            event("windows", "transport_configuration", 1, "win", tcp_nodelay=1),
+            event("windows", "file_read_bytes_available", 2, "win", transfer_id="keep", read_id=1),
+            event("windows", "file_read_bytes_available", 3, "win", transfer_id="drop", read_id=2),
+        ]
+    )
+
+    filtered = filter_transfer_events(events, "keep")
+
+    assert [item.name for item in filtered] == [
+        "transport_configuration",
+        "file_read_bytes_available",
+    ]

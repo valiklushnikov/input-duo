@@ -6,6 +6,7 @@ import itertools
 import logging
 import re
 import sys
+import threading
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -180,6 +181,7 @@ class FileTransferService(QObject):
         self._reads: dict[int, _Stream] = {}
         self._read_ids = itertools.count(1)
         self._received_bytes = 0
+        self._active_read_handlers = 0
         self._watchdog = QTimer(self)
         self._watchdog.setSingleShot(True)
         self._watchdog.setInterval(idle_timeout_ms)
@@ -325,7 +327,18 @@ class FileTransferService(QObject):
             self._on_file_error(message)
 
     def _answer_read(self, message: Message) -> None:
-        received_ns = self._perf.now()
+        handler_enter_ns = self._perf.now()
+        self._active_read_handlers += 1
+        try:
+            self._answer_read_active(
+                message, handler_enter_ns, self._active_read_handlers
+            )
+        finally:
+            self._active_read_handlers -= 1
+
+    def _answer_read_active(
+        self, message: Message, handler_enter_ns: int, active_handlers: int
+    ) -> None:
         header = message.header
         try:
             transfer_id = require_transfer_id(header.get("transfer_id"))
@@ -344,15 +357,37 @@ class FileTransferService(QObject):
             self._send_error(header, REASON_BAD_REQUEST)
             return
 
+        correlation = {
+            "transfer_id": transfer_id,
+            "entry_index": entry_index,
+            "read_id": read_id,
+            "offset": offset,
+            "length": length,
+        }
         self._perf.emit_at(
-            received_ns,
-            "file_read_receive",
-            transfer_id=transfer_id,
-            entry_index=entry_index,
-            read_id=read_id,
-            offset=offset,
-            length=length,
+            handler_enter_ns,
+            "file_read_handler_enter",
+            active_handlers=active_handlers,
+            thread_id=threading.get_ident(),
+            **correlation,
         )
+        self._perf.emit_at(
+            handler_enter_ns,
+            "file_read_receive",
+            **correlation,
+        )
+        lag_probe_ns = self._perf.now()
+
+        def report_event_loop_lag() -> None:
+            completed_ns = self._perf.now()
+            self._perf.emit_at(
+                completed_ns,
+                "event_loop_lag",
+                lag_ns=max(0, completed_ns - lag_probe_ns),
+                **correlation,
+            )
+
+        QTimer.singleShot(0, report_event_loop_lag)
 
         try:
             payload = self._snapshots.read(
@@ -371,25 +406,25 @@ class FileTransferService(QObject):
             self._send_error(header, REASON_BAD_REQUEST)
             return
 
-        self._perf.emit(
-            "file_chunk_send",
-            transfer_id=transfer_id,
-            entry_index=entry_index,
-            read_id=read_id,
-            offset=offset,
-            bytes=len(payload),
+        chunk = Message(
+            MessageType.FILE_CHUNK,
+            {
+                "transfer_id": transfer_id,
+                "entry_index": entry_index,
+                "offset": offset,
+                "read_id": read_id,
+            },
+            payload,
         )
-        self._send(
-            Message(
-                MessageType.FILE_CHUNK,
-                {
-                    "transfer_id": transfer_id,
-                    "entry_index": entry_index,
-                    "offset": offset,
-                    "read_id": read_id,
-                },
-                payload,
-            )
+        self._perf.emit("file_chunk_constructed", bytes=len(payload), **correlation)
+        self._perf.emit("file_chunk_send", bytes=len(payload), **correlation)
+        self._send(chunk)
+        self._perf.emit(
+            "file_read_handler_exit",
+            bytes=len(payload),
+            active_handlers=active_handlers,
+            thread_id=threading.get_ident(),
+            **correlation,
         )
 
     def _send_error(self, header: dict, reason: str) -> None:

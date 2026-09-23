@@ -87,6 +87,7 @@ class SnapshotRegistry:
             "windows_python_monotonic" if sys.platform == "win32" else "python_monotonic"
         )
         self._perf = perf or PerfEmitter(logger, clock_domain)
+        self._active_source_reads = 0
 
     @property
     def transfer_ids(self) -> tuple[str, ...]:
@@ -148,26 +149,56 @@ class SnapshotRegistry:
             raise ValueError("смещение за пределами файла")
         length = min(length, entry.size - offset)
         self._perf.emit("snapshot_lookup_end", **correlation)
+        descriptor = snapshot.handles.get(entry_index)
+        reused = descriptor is not None
         self._perf.emit(
-            "source_read_begin", offset=offset, length=length, **correlation
+            "source_open_begin", fd_reused=reused, **correlation
         )
         try:
-            descriptor = snapshot.handles.get(entry_index)
             if descriptor is None:
                 descriptor = self._open_and_verify(snapshot, entry_index, entry)
                 snapshot.handles[entry_index] = descriptor
                 snapshot.serving = True
 
             self._verify_unchanged(descriptor, entry)
-            payload = self._read_at(descriptor, offset, length)
         except (SourceChanged, SourceMissing, OSError) as error:
             status = (
                 REASON_SOURCE_CHANGED
                 if isinstance(error, SourceChanged)
                 else REASON_SOURCE_MISSING
             )
-            self._perf.emit("source_read_end", status=status, **correlation)
+            self._perf.emit(
+                "source_open_end",
+                status=status,
+                fd_reused=reused,
+                seek_required=True,
+                **correlation,
+            )
             raise
+        self._perf.emit(
+            "source_open_end",
+            status="ok",
+            fd_reused=reused,
+            seek_required=True,
+            **correlation,
+        )
+        self._active_source_reads += 1
+        self._perf.emit(
+            "source_read_begin",
+            offset=offset,
+            length=length,
+            active_source_reads=self._active_source_reads,
+            **correlation,
+        )
+        try:
+            payload = self._read_at(descriptor, offset, length)
+        except OSError:
+            self._perf.emit(
+                "source_read_end", status=REASON_SOURCE_MISSING, **correlation
+            )
+            raise
+        finally:
+            self._active_source_reads -= 1
         self._perf.emit(
             "source_read_end", status="ok", bytes=len(payload), **correlation
         )
