@@ -9,6 +9,7 @@ import pytest
 from fp_perf_metrics import (
     PerfEvent,
     analyze,
+    burst_accounting,
     concurrency_sweep,
     interval_union_ns,
     nearest_rank,
@@ -139,6 +140,36 @@ def test_parser_collects_malformed_perf_lines():
     parsed = parse_perf_lines(["prefix fp_perf event=broken clock=x"], source="mac")
     assert parsed == []
     assert len(parsed.parse_errors) == 1
+
+
+def test_burst_accounting_keeps_physical_fetches_and_eviction_refetch_visible():
+    events = [
+        event("extension", "fetch_enter", 0, "swift_uptime", item_identifier="gen:0", transfer_id="gen", entry_index=0, perf_fetch_id="a", origin="FINDER", wave_id="none"),
+        event("extension", "open_fetch_reply", 1, "swift_uptime", item_identifier="gen:0", transfer_id="gen", entry_index=0, perf_fetch_id="a", origin="FINDER", fetch_token="t0", status="ok"),
+        event("extension", "fetch_enter", 2, "swift_uptime", item_identifier="gen:1", transfer_id="gen", entry_index=1, perf_fetch_id="b", origin="FINDER", wave_id="none"),
+        event("extension", "finder_burst_triggered", 3, "swift_uptime", transfer_id="gen", perf_fetch_id="b", trigger_item="gen:1", wave_id=1, request_count=2),
+        event("extension", "open_fetch_reply", 4, "swift_uptime", item_identifier="gen:1", transfer_id="gen", entry_index=1, perf_fetch_id="b", origin="FINDER", fetch_token="t1", status="ok"),
+        event("extension", "fetch_enter", 5, "swift_uptime", item_identifier="gen:2", transfer_id="gen", entry_index=2, perf_fetch_id="c", origin="BURST", wave_id=1, wave_position=1, trigger_item="gen:1"),
+        event("extension", "open_fetch_reply", 6, "swift_uptime", item_identifier="gen:2", transfer_id="gen", entry_index=2, perf_fetch_id="c", origin="BURST", fetch_token="t2", status="ok"),
+        event("extension", "eviction_success", 7, "swift_uptime", item_identifier="gen:2", transfer_id="gen"),
+        event("extension", "fetch_enter", 8, "swift_uptime", item_identifier="gen:2", transfer_id="gen", entry_index=2, perf_fetch_id="d", origin="FINDER", wave_id="none"),
+        event("extension", "open_fetch_reply", 9, "swift_uptime", item_identifier="gen:2", transfer_id="gen", entry_index=2, perf_fetch_id="d", origin="FINDER", fetch_token="t3", status="ok"),
+    ]
+
+    assert burst_accounting(events) == {
+        "UNIQUE_ITEMS": 3,
+        "FETCH_CONTENTS_INVOCATIONS": 4,
+        "FILE_READ_SEQUENCES": 4,
+        "FINDER_ORIGIN_FETCHES": 3,
+        "BURST_ORIGIN_FETCHES": 1,
+        "REFETCHED_ITEMS": 1,
+        "EXTRA_FILE_READS": 1,
+        "EVICTION_SUCCESS_THEN_REFETCH": 1,
+        "WAVES": 1,
+        "MAX_WAVE_SIZE": 2,
+        "MAX_SPECULATIVE_LEAD_ITEMS": 1,
+        "BURST_COMPLETION_TRIGGERED_NEXT_WAVE": "NO",
+    }
 
 
 def test_analyzer_never_subtracts_different_clock_domains():

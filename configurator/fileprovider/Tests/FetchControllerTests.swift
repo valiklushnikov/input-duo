@@ -42,6 +42,45 @@ private final class FlakyHost: NSObject, DuoHostCallback {
     func cancelFetch(_ fetchToken: String) { cancelled.append(fetchToken) }
 }
 
+private final class DeferredOpenHost: NSObject, DuoHostCallback {
+    private let lock = NSLock()
+    private var replies: [(String?, NSNumber?, Error?) -> Void] = []
+    var onFirstOpen: (() -> Void)?
+    private(set) var openCalls = 0
+
+    func openFetch(
+        _ generationId: String,
+        entryId: NSNumber,
+        reply: @escaping (String?, NSNumber?, Error?) -> Void
+    ) {
+        lock.lock()
+        openCalls += 1
+        replies.append(reply)
+        let first = openCalls == 1
+        lock.unlock()
+        if first { onFirstOpen?() }
+    }
+
+    func releaseAll() {
+        lock.lock()
+        let pending = replies
+        replies.removeAll()
+        lock.unlock()
+        for (position, reply) in pending.enumerated() {
+            reply("token-\(position)", 3, nil)
+        }
+    }
+
+    func pullChunk(
+        _ fetchToken: String,
+        reply: @escaping (Data?, Bool, Error?) -> Void
+    ) {
+        reply(Data("abc".utf8), true, nil)
+    }
+
+    func cancelFetch(_ fetchToken: String) {}
+}
+
 final class FetchControllerTests: XCTestCase {
     /// Runs the scheduled retry immediately - deterministic, no real waiting.
     private let now: FetchController.Scheduler = { _, work in work() }
@@ -102,6 +141,32 @@ final class FetchControllerTests: XCTestCase {
         }
         XCTAssertEqual(Set(writeStamps).count, 1)
         XCTAssertEqual(try Data(contentsOf: XCTUnwrap(resultURL)), Data("abc".utf8))
+    }
+
+    func testSimultaneousFetchesForSameItemShareOneUnderlyingRead() {
+        let host = DeferredOpenHost()
+        let firstOpen = expectation(description: "first underlying open")
+        host.onFirstOpen = { firstOpen.fulfill() }
+        let controller = FetchController(
+            hostProvider: { _ in host }, temporaryDirectory: directory
+        )
+        let completions = expectation(description: "both logical fetches complete")
+        completions.expectedFulfillmentCount = 2
+
+        _ = controller.fetch(item(), request: NSFileProviderRequest()) { _, _, error in
+            XCTAssertNil(error)
+            completions.fulfill()
+        }
+        _ = controller.fetch(item(), request: NSFileProviderRequest()) { _, _, error in
+            XCTAssertNil(error)
+            completions.fulfill()
+        }
+
+        wait(for: [firstOpen], timeout: 3)
+        Thread.sleep(forTimeInterval: 0.05)
+        XCTAssertEqual(host.openCalls, 1)
+        host.releaseAll()
+        wait(for: [completions], timeout: 3)
     }
 
     func testMultiChunkFetchMarksOnlyTheFirstAndLastWrites() throws {

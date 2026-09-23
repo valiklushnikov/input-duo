@@ -236,6 +236,94 @@ def _correctness_valid(correctness: dict, expected: int, refetch: int) -> bool:
     )
 
 
+def burst_accounting(events: Iterable[PerfEvent]) -> dict[str, object]:
+    """Account for logical fetches, physical reads, waves, and eviction refetches.
+
+    This intentionally does not merge by item: every fetchContents invocation
+    remains visible through its logging-only perf_fetch_id.
+    """
+    extension = [event for event in events if event.source == "extension"]
+    fetches = [event for event in extension if event.name == "fetch_enter"]
+    by_item: dict[str, list[PerfEvent]] = {}
+    by_fetch_id: dict[str, PerfEvent] = {}
+    for fetch in fetches:
+        item = _item_id(fetch)
+        if item is not None:
+            by_item.setdefault(item, []).append(fetch)
+        fetch_id = fetch.fields.get("perf_fetch_id")
+        if fetch_id:
+            by_fetch_id[fetch_id] = fetch
+
+    tokens = {
+        (event.fields.get("transfer_id", ""), token)
+        for event in extension
+        if event.name == "open_fetch_reply"
+        and event.fields.get("status") == "ok"
+        and (token := event.fields.get("fetch_token")) not in (None, "none")
+    }
+    wave_events = [event for event in extension if event.name == "finder_burst_triggered"]
+    waves = {
+        (event.fields.get("transfer_id", ""), event.fields.get("wave_id", ""))
+        for event in wave_events
+    }
+    wave_sizes = [_int(event.fields.get("request_count")) or 0 for event in wave_events]
+
+    leads: list[int] = []
+    for fetch in fetches:
+        if fetch.fields.get("origin") != "BURST":
+            continue
+        index = _int(fetch.fields.get("entry_index"))
+        trigger = fetch.fields.get("trigger_item", "")
+        trigger_index = _int(trigger.rsplit(":", 1)[-1]) if ":" in trigger else None
+        if index is not None and trigger_index is not None:
+            leads.append(index - trigger_index)
+
+    eviction_refetch_items = 0
+    for item, item_fetches in by_item.items():
+        ordered_fetches = sorted(event.mono_ns for event in item_fetches)
+        if len(ordered_fetches) < 2:
+            continue
+        evictions = sorted(
+            event.mono_ns
+            for event in extension
+            if event.name == "eviction_success" and _item_id(event) == item
+        )
+        if any(
+            earlier < eviction < later
+            for earlier, later in zip(ordered_fetches, ordered_fetches[1:])
+            for eviction in evictions
+        ):
+            eviction_refetch_items += 1
+
+    recursive = "NO"
+    for wave in wave_events:
+        trigger_fetch = by_fetch_id.get(wave.fields.get("perf_fetch_id", ""))
+        if trigger_fetch is None or trigger_fetch.fields.get("origin") != "FINDER":
+            recursive = "YES"
+            break
+
+    unique_items = len(by_item)
+    refetched_items = sum(len(item_fetches) > 1 for item_fetches in by_item.values())
+    return {
+        "UNIQUE_ITEMS": unique_items,
+        "FETCH_CONTENTS_INVOCATIONS": len(fetches),
+        "FILE_READ_SEQUENCES": len(tokens),
+        "FINDER_ORIGIN_FETCHES": sum(
+            event.fields.get("origin") == "FINDER" for event in fetches
+        ),
+        "BURST_ORIGIN_FETCHES": sum(
+            event.fields.get("origin") == "BURST" for event in fetches
+        ),
+        "REFETCHED_ITEMS": refetched_items,
+        "EXTRA_FILE_READS": max(0, len(tokens) - unique_items),
+        "EVICTION_SUCCESS_THEN_REFETCH": eviction_refetch_items,
+        "WAVES": len(waves),
+        "MAX_WAVE_SIZE": max(wave_sizes, default=0),
+        "MAX_SPECULATIVE_LEAD_ITEMS": max(leads, default=0),
+        "BURST_COMPLETION_TRIGGERED_NEXT_WAVE": recursive,
+    }
+
+
 def analyze(events: Iterable[PerfEvent], dataset: dict, correctness: dict) -> RunAnalysis:
     parsed_errors = list(getattr(events, "parse_errors", []))
     event_list = list(events)
@@ -629,6 +717,7 @@ def analyze(events: Iterable[PerfEvent], dataset: dict, correctness: dict) -> Ru
         "HOST_OPEN_PROCESSING_P50": available(host_open_p50), "HOST_OPEN_PROCESSING_P95": available(host_open_p95),
         "XPC_REPLY_TO_EXTENSION": UNAVAILABLE,
     }
+    aggregates.update(burst_accounting(event_list))
 
     finder_pct = zero_active_ms / (wall_ns / 1_000_000) * 100 if wall_ns else 0
     contributions = {
@@ -819,6 +908,6 @@ def write_artifacts(analysis: RunAnalysis, output_dir: Path | str) -> ArtifactPa
 __all__ = [
     "ArtifactPaths", "FetchMetrics", "ParsedEvents", "PerfEvent", "RunAnalysis",
     "UNAVAILABLE", "analyze", "classify_bottleneck", "concurrency_sweep",
-    "interval_union_ns", "nearest_rank", "parse_perf_lines", "render_report",
+    "burst_accounting", "interval_union_ns", "nearest_rank", "parse_perf_lines", "render_report",
     "write_artifacts",
 ]

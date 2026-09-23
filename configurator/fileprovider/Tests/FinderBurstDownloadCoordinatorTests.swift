@@ -10,6 +10,155 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
         DuoManifestEntry(path: "folder/d.txt", kind: "file", size: 1, mtimeNs: 1),
     ]
 
+    private func fileEntries(_ count: Int) -> [DuoManifestEntry] {
+        (0..<count).map {
+            DuoManifestEntry(path: "\($0).txt", kind: "file", size: 1, mtimeNs: 1)
+        }
+    }
+
+    func testFinderWaveSchedulesAtMostEightSpeculativeItems() {
+        let coordinator = FinderBurstDownloadCoordinator()
+        let manyEntries = fileEntries(20)
+
+        XCTAssertEqual(
+            coordinator.downloadsAfterFetch(
+                transferId: "generation", index: 0, entries: manyEntries,
+                isFileViewerRequest: true
+            ),
+            []
+        )
+        let downloads = coordinator.downloadsAfterFetch(
+            transferId: "generation", index: 1, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+
+        XCTAssertEqual(
+            downloads.map(\.rawValue),
+            (2...9).map { "generation:\($0)" }
+        )
+    }
+
+    func testGenuineDemandAfterFirstWaveAdvancesOneMoreBoundedWave() {
+        let coordinator = FinderBurstDownloadCoordinator()
+        let manyEntries = fileEntries(20)
+
+        _ = coordinator.downloadsAfterFetch(
+            transferId: "generation", index: 0, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+        let firstWave = coordinator.downloadsAfterFetch(
+            transferId: "generation", index: 1, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+        XCTAssertEqual(firstWave.map(\.rawValue), (2...9).map { "generation:\($0)" })
+        for index in 2...9 {
+            XCTAssertEqual(
+                coordinator.downloadsAfterFetch(
+                    transferId: "generation", index: index, entries: manyEntries,
+                    isFileViewerRequest: true
+                ),
+                []
+            )
+        }
+
+        let secondWave = coordinator.downloadsAfterFetch(
+            transferId: "generation", index: 10, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+        XCTAssertEqual(secondWave.map(\.rawValue), (11...18).map { "generation:\($0)" })
+    }
+
+    func testBurstFetchesCannotRecursivelyTriggerAnotherWave() {
+        let coordinator = FinderBurstDownloadCoordinator()
+        let manyEntries = fileEntries(20)
+
+        _ = coordinator.beginFetch(
+            transferId: "generation", index: 0, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+        let trigger = coordinator.beginFetch(
+            transferId: "generation", index: 1, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+        XCTAssertEqual(trigger.downloads.count, 8)
+
+        var burstContexts: [FinderBurstDownloadCoordinator.FetchContext] = []
+        for download in trigger.downloads {
+            XCTAssertTrue(coordinator.markBurstRequestIssued(download))
+            let callback = coordinator.beginFetch(
+                transferId: "generation", index: download.index, entries: manyEntries,
+                isFileViewerRequest: true
+            )
+            XCTAssertEqual(callback.context.origin, .burst)
+            XCTAssertEqual(callback.context.waveId, trigger.downloads.first?.waveId)
+            XCTAssertTrue(callback.downloads.isEmpty)
+            burstContexts.append(callback.context)
+        }
+
+        for context in burstContexts {
+            coordinator.completeFetch(context)
+        }
+        XCTAssertEqual(coordinator.waveCount(transferId: "generation"), 1)
+    }
+
+    func testOverlappingGenuineDemandCannotOpenAnotherWave() {
+        let coordinator = FinderBurstDownloadCoordinator()
+        let manyEntries = fileEntries(24)
+        _ = coordinator.beginFetch(
+            transferId: "generation", index: 0, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+        let trigger = coordinator.beginFetch(
+            transferId: "generation", index: 1, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+        var active: [FinderBurstDownloadCoordinator.FetchContext] = []
+        for download in trigger.downloads {
+            XCTAssertTrue(coordinator.markBurstRequestIssued(download))
+            active.append(coordinator.beginFetch(
+                transferId: "generation", index: download.index, entries: manyEntries,
+                isFileViewerRequest: true
+            ).context)
+        }
+
+        let overlapping = coordinator.beginFetch(
+            transferId: "generation", index: 10, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+        XCTAssertTrue(overlapping.downloads.isEmpty)
+
+        coordinator.completeFetch(overlapping.context)
+        for context in active { coordinator.completeFetch(context) }
+        let later = coordinator.beginFetch(
+            transferId: "generation", index: 11, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+        XCTAssertEqual(later.downloads.map(\.index), Array(12...19))
+    }
+
+    func testFinderDemandTakesOwnershipBeforeBurstRequestIsIssued() {
+        let coordinator = FinderBurstDownloadCoordinator()
+        let manyEntries = fileEntries(20)
+        _ = coordinator.beginFetch(
+            transferId: "generation", index: 0, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+        let trigger = coordinator.beginFetch(
+            transferId: "generation", index: 1, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+        let raced = trigger.downloads[0]
+
+        let finder = coordinator.beginFetch(
+            transferId: "generation", index: raced.index, entries: manyEntries,
+            isFileViewerRequest: true
+        )
+
+        XCTAssertEqual(finder.context.origin, .finder)
+        XCTAssertTrue(finder.downloads.isEmpty)
+        XCTAssertFalse(coordinator.markBurstRequestIssued(raced))
+    }
+
     func testSecondDistinctFinderFetchRequestsEveryRemainingFileOnce() {
         let coordinator = FinderBurstDownloadCoordinator()
 
@@ -124,7 +273,7 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
                 transferId: "generation", index: 2, entries: entries,
                 isFileViewerRequest: true
             ).map(\.rawValue),
-            ["generation:0", "generation:4"]
+            ["generation:4"]
         )
     }
 }

@@ -140,11 +140,8 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         request: NSFileProviderRequest,
         completionHandler: @escaping (URL?, NSFileProviderItem?, Error?) -> Void
     ) -> Progress {
-        let fetchStartedAt = perf.mark("fetch_enter", fields: [
-            ("item_identifier", itemIdentifier.rawValue),
-            ("transfer_id", DuoItemModel.parse(itemIdentifier)?.transferId ?? "unknown"),
-            ("entry_index", String(DuoItemModel.parse(itemIdentifier)?.index ?? -1))
-        ])
+        let fetchStartedAt = DispatchTime.now().uptimeNanoseconds
+        let perfFetchId = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         // Resolve on record EXISTENCE, not `isActive` (see item(for:)): a
         // retired/tombstoned generation stays fetchable by itemIdentifier while
         // its durable record exists. The only noSuchItem is a genuinely absent
@@ -153,37 +150,77 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
               let record = replicaStore.record(for: parsed.transferId),
               let item = DuoItemFactory.item(for: record, index: index), item.documentSize != nil,
               requestedVersion == nil || requestedVersion == item.itemVersion else {
+            perf.mark("fetch_enter", at: fetchStartedAt, fields: [
+                ("item_identifier", itemIdentifier.rawValue),
+                ("perf_fetch_id", perfFetchId),
+                ("origin", "FINDER")
+            ])
             perf.mark("completion_call", fields: [
                 ("item_identifier", itemIdentifier.rawValue),
+                ("perf_fetch_id", perfFetchId),
+                ("origin", "FINDER"),
                 ("status", "error"),
                 ("error_code", String(NSFileProviderError.noSuchItem.rawValue))
             ])
             completionHandler(nil, nil, NSError(domain: NSFileProviderErrorDomain, code: NSFileProviderError.noSuchItem.rawValue))
             return Progress()
         }
-        let burstIdentifiers = burstDownloads.downloadsAfterFetch(
+        let decision = burstDownloads.beginFetch(
             transferId: parsed.transferId,
             index: index,
             entries: DuoItemModel.entries(in: record),
             isFileViewerRequest: request.isFileViewerRequest
         )
-        if !burstIdentifiers.isEmpty {
+        let context = decision.context
+        let traceFields = [
+            ("perf_fetch_id", perfFetchId),
+            ("origin", context.origin.rawValue),
+            ("wave_id", context.waveId.map(String.init) ?? "none"),
+            ("wave_position", context.wavePosition.map(String.init) ?? "none"),
+            ("trigger_item", context.triggerItem ?? "none"),
+            ("duplicate_active", context.duplicateOfActiveFetch ? "true" : "false")
+        ]
+        perf.mark("fetch_enter", at: fetchStartedAt, fields: [
+            ("item_identifier", itemIdentifier.rawValue),
+            ("transfer_id", parsed.transferId),
+            ("entry_index", String(index))
+        ] + traceFields)
+        if !decision.downloads.isEmpty {
+            let waveId = decision.downloads[0].waveId
             perf.mark("finder_burst_triggered", fields: [
                 ("entry_index", String(index)),
-                ("request_count", String(burstIdentifiers.count)),
+                ("perf_fetch_id", perfFetchId),
+                ("request_count", String(decision.downloads.count)),
+                ("trigger_item", itemIdentifier.rawValue),
+                ("wave_id", String(waveId)),
                 ("transfer_id", parsed.transferId)
             ])
-            for identifier in burstIdentifiers {
-                manager?.requestDownloadForItem(
-                    withIdentifier: identifier,
+            for download in decision.downloads {
+                guard burstDownloads.markBurstRequestIssued(download), let manager else {
+                    burstDownloads.burstRequestFailed(download)
+                    perf.mark("finder_burst_download_suppressed", fields: [
+                        ("item_identifier", download.identifier.rawValue),
+                        ("reason", manager == nil ? "manager_unavailable" : "finder_took_ownership"),
+                        ("transfer_id", parsed.transferId),
+                        ("wave_id", String(download.waveId)),
+                        ("wave_position", String(download.wavePosition))
+                    ])
+                    continue
+                }
+                manager.requestDownloadForItem(
+                    withIdentifier: download.identifier,
                     requestedRange: NSRange(location: NSNotFound, length: 0)
-                ) { [perf] error in
+                ) { [perf, burstDownloads] error in
+                    if error != nil { burstDownloads.burstRequestFailed(download) }
                     let nsError = error as NSError?
                     perf.mark("finder_burst_download_ack", fields: [
                         ("error_code", String(nsError?.code ?? 0)),
-                        ("item_identifier", identifier.rawValue),
+                        ("item_identifier", download.identifier.rawValue),
                         ("status", error == nil ? "ok" : "error"),
-                        ("transfer_id", parsed.transferId)
+                        ("transfer_id", parsed.transferId),
+                        ("trigger_item", download.triggerItem),
+                        ("wave_id", String(download.waveId)),
+                        ("wave_position", String(download.wavePosition))
                     ])
                 }
             }
@@ -197,12 +234,19 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         let cleanup = self.cleanup
         let transferId = parsed.transferId
         let scheduling: (URL?, NSFileProviderItem?, Error?) -> Void = { url, fetchedItem, error in
+            self.burstDownloads.completeFetch(context)
+            self.perf.mark("fetch_contents_complete", fields: [
+                ("item_identifier", itemIdentifier.rawValue),
+                ("transfer_id", transferId),
+                ("status", error == nil ? "ok" : "error")
+            ] + traceFields)
             completionHandler(url, fetchedItem, error)
             guard error == nil else { return }
             cleanup?.schedule(itemIdentifier: itemIdentifier.rawValue, transferId: transferId)
         }
         return fetchController.fetch(
-            item, request: request, fetchStartedAt: fetchStartedAt, completion: scheduling
+            item, request: request, fetchStartedAt: fetchStartedAt,
+            extraTraceFields: traceFields, completion: scheduling
         )
     }
 

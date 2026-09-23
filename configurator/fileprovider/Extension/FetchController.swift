@@ -100,6 +100,18 @@ final class FetchController {
     private let retry: RetryPolicy
     private let scheduler: Scheduler
     private let perf: PerfTrace
+    private let inFlightLock = NSLock()
+    private var inFlight: [String: SharedFetch] = [:]
+
+    private final class SharedFetch {
+        let progress: Progress
+        var completions: [(URL?, NSFileProviderItem?, Error?) -> Void]
+
+        init(progress: Progress, completion: @escaping (URL?, NSFileProviderItem?, Error?) -> Void) {
+            self.progress = progress
+            self.completions = [completion]
+        }
+    }
 
     init(hostProvider: @escaping HostProvider,
          temporaryDirectory: URL = FileManager.default.temporaryDirectory,
@@ -117,8 +129,22 @@ final class FetchController {
 
     func fetch(_ item: DuoItem, request: NSFileProviderRequest,
                fetchStartedAt: UInt64? = nil,
+               extraTraceFields: [(String, String)] = [],
                completion: @escaping (URL?, NSFileProviderItem?, Error?) -> Void) -> Progress {
         let parsed = DuoItemModel.parse(item.itemIdentifier)
+        let key = item.itemIdentifier.rawValue
+        inFlightLock.lock()
+        if let shared = inFlight[key] {
+            shared.completions.append(completion)
+            let progress = shared.progress
+            inFlightLock.unlock()
+            perf.mark("fetch_coalesced", fields: [
+                ("item_identifier", key),
+                ("transfer_id", parsed?.transferId ?? "unknown"),
+                ("entry_index", String(parsed?.index ?? -1))
+            ])
+            return progress
+        }
         if fetchStartedAt == nil {
             perf.mark("fetch_enter", fields: [
                 ("item_identifier", item.itemIdentifier.rawValue),
@@ -130,9 +156,30 @@ final class FetchController {
         let operation = FetchOperation(item: item, directory: temporaryDirectory,
                                        hostProvider: hostProvider, retry: retry,
                                        scheduler: scheduler, perf: perf,
-                                       completion: completion)
+                                       extraTraceFields: extraTraceFields,
+                                       completion: { [weak self] url, fetchedItem, error in
+                                           self?.completeSharedFetch(
+                                               key: key, url: url, item: fetchedItem, error: error
+                                           )
+                                       })
+        inFlight[key] = SharedFetch(progress: operation.progress, completion: completion)
+        inFlightLock.unlock()
         operation.start()
         return operation.progress
+    }
+
+    private func completeSharedFetch(
+        key: String,
+        url: URL?,
+        item: NSFileProviderItem?,
+        error: Error?
+    ) {
+        inFlightLock.lock()
+        let completions = inFlight.removeValue(forKey: key)?.completions ?? []
+        inFlightLock.unlock()
+        for completion in completions {
+            completion(url, item, error)
+        }
     }
 }
 
@@ -144,6 +191,7 @@ private final class FetchOperation {
     private let retry: FetchController.RetryPolicy
     private let scheduler: FetchController.Scheduler
     private let perf: PerfTrace
+    private let extraTraceFields: [(String, String)]
     private let completion: (URL?, NSFileProviderItem?, Error?) -> Void
     private let queue = DispatchQueue(label: "com.duoinput.fileprovider.fetch")
     private var host: DuoHostCallback?
@@ -174,6 +222,7 @@ private final class FetchOperation {
          retry: FetchController.RetryPolicy,
          scheduler: @escaping FetchController.Scheduler,
          perf: PerfTrace,
+         extraTraceFields: [(String, String)] = [],
          completion: @escaping (URL?, NSFileProviderItem?, Error?) -> Void) {
         self.item = item
         self.directory = directory
@@ -181,6 +230,7 @@ private final class FetchOperation {
         self.retry = retry
         self.scheduler = scheduler
         self.perf = perf
+        self.extraTraceFields = extraTraceFields
         self.completion = completion
         let progress = Progress(totalUnitCount: item.documentSize?.int64Value ?? 0)
         // Classify the fetch as a file DOWNLOAD so Finder/fileproviderd render a
@@ -439,6 +489,6 @@ private final class FetchOperation {
             ("transfer_id", transferId ?? "unknown"),
             ("entry_index", String(entryIndex ?? -1)),
             ("attempt", String(attempt))
-        ]
+        ] + extraTraceFields
     }
 }
