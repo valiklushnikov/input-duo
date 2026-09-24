@@ -186,6 +186,11 @@ class PeerLink(QObject):
             so_keepalive=option(QAbstractSocket.SocketOption.KeepAliveOption),
             tls_backend=self._compact_perf_text(tls_backend),
             tls_library=self._compact_perf_text(tls_library),
+            perf_clock=self._perf.clock_name,
+            perf_clock_resolution_ns=self._perf.clock_resolution_ns,
+            perf_clock_implementation=self._compact_perf_text(
+                self._perf.clock_implementation
+            ),
         )
 
     @property

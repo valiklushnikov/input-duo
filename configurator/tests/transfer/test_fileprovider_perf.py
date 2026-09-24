@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 
 from duo_input.transfer.fileprovider_perf import PerfEmitter
+from duo_input.transfer import fileprovider_perf as perf_module
 
 
 def test_emitter_records_injected_monotonic_time_and_sorted_fields(caplog):
@@ -50,3 +52,22 @@ def test_emit_uses_exactly_one_clock_sample(caplog):
         assert perf.emit("open_fetch_enter") == 41
 
     assert perf.now() == 42
+
+
+def test_windows_default_uses_high_resolution_performance_counter(monkeypatch):
+    monkeypatch.setattr(perf_module.sys, "platform", "win32")
+    monkeypatch.setattr(perf_module.time, "perf_counter_ns", lambda: 987_654_321)
+    monkeypatch.setattr(
+        perf_module.time,
+        "get_clock_info",
+        lambda name: SimpleNamespace(resolution=1e-7, implementation="QueryPerformanceCounter")
+        if name == "perf_counter"
+        else SimpleNamespace(resolution=0.015625, implementation="GetTickCount64"),
+    )
+
+    perf = PerfEmitter(logging.getLogger("test"), "windows_python_monotonic")
+
+    assert perf.now() == 987_654_321
+    assert perf.clock_name == "perf_counter_ns"
+    assert perf.clock_resolution_ns == 100
+    assert perf.clock_implementation == "QueryPerformanceCounter"

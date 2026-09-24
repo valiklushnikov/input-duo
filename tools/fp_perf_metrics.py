@@ -151,9 +151,22 @@ def interval_union_ns(intervals: Iterable[tuple[int, int]]) -> int:
 
 
 def concurrency_sweep(intervals: Iterable[tuple[int, int]]) -> dict[str, object]:
-    valid = [(start, end) for start, end in intervals if end >= start]
-    if not valid:
+    observed = [(start, end) for start, end in intervals if end >= start]
+    if not observed:
         return {"max": None, "average": None, "time_ms": {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, "ge4": 0.0}}
+    # Windows' monotonic clock can legitimately quantize a short synchronous
+    # handler to start == end. Such an interval contributes no measurable
+    # duration and cannot overlap another half-open interval, but it still
+    # proves that one operation ran. Excluding it from the boundary sweep also
+    # prevents the usual "end before start at equal timestamps" ordering from
+    # temporarily producing an impossible active count of -1.
+    valid = [(start, end) for start, end in observed if end > start]
+    if not valid:
+        return {
+            "max": 1,
+            "average": 1.0,
+            "time_ms": {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, "ge4": 0.0},
+        }
     boundaries: list[tuple[int, int]] = []
     for start, end in valid:
         boundaries.extend(((start, 1), (end, -1)))
@@ -597,6 +610,9 @@ def transport_breakdown(
         ("SO_KEEPALIVE", "so_keepalive"),
         ("TLS_BACKEND", "tls_backend"),
         ("TLS_LIBRARY", "tls_library"),
+        ("PERF_CLOCK", "perf_clock"),
+        ("PERF_CLOCK_RESOLUTION_NS", "perf_clock_resolution_ns"),
+        ("PERF_CLOCK_IMPLEMENTATION", "perf_clock_implementation"),
     ):
         aggregates[report_name] = (
             configuration.fields.get(field_name, UNAVAILABLE)

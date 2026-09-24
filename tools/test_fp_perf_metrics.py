@@ -226,6 +226,16 @@ def test_concurrency_integral_and_distribution_are_time_weighted():
     assert direct["time_ms"][0] == 10.0
 
 
+def test_concurrency_sweep_handles_intervals_below_clock_resolution():
+    zero_only = concurrency_sweep([(10, 10)])
+    assert zero_only["max"] == 1
+    assert zero_only["average"] == 1.0
+
+    adjacent = concurrency_sweep([(0, 10), (10, 10), (10, 20)])
+    assert adjacent["max"] == 1
+    assert adjacent["average"] == 1.0
+
+
 def test_comparison_totals_measure_idle_and_sum_active_transfer_time():
     events = [
         PerfEvent(item.source, item.name, item.mono_ns + 5 * MS, item.clock, item.fields)

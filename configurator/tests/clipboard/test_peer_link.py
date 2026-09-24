@@ -450,6 +450,9 @@ def test_encrypted_records_runtime_socket_and_tls_configuration(
             "so_keepalive",
             "tls_backend",
             "tls_library",
+            "perf_clock",
+            "perf_clock_resolution_ns",
+            "perf_clock_implementation",
         )
     ).issubset(configuration)
 
