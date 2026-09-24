@@ -125,8 +125,32 @@ MAX_ACTIVE_FETCHES = 4
 #: though the XPC ``pullChunk`` contract (and the Swift consumer) remain strictly
 #: sequential - the host prefetches ahead of the consumer cursor and serves each
 #: sequential pull from a bounded in-order reorder buffer. WINDOW=4 is the
-#: measured configuration; this is NOT an adaptive window (spec §20/§32).
-PER_FILE_READ_WINDOW = 4
+#: measured/production configuration; this is NOT an adaptive window (spec §20/§32).
+#:
+#: Runtime acceptance selector (spec §3 "only runtime comparison variable"): the
+#: SAME code path runs at either window; ``DUO_FP_READ_WINDOW`` overrides the value
+#: at import so W1 vs W4 is chosen by relaunching the host app with that env var,
+#: with no rebuild and no second implementation. Unset/invalid -> production 4.
+#: Only 1..MAX_ACTIVE_FETCHES-derived sizes are sensible; a value <1 falls back to
+#: 4. This is the ONLY knob the acceptance experiment flips.
+def _read_window_from_env() -> int:
+    import os
+
+    raw = os.environ.get("DUO_FP_READ_WINDOW")
+    if raw is None:
+        return 4
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("ignoring non-integer DUO_FP_READ_WINDOW=%r; using 4", raw)
+        return 4
+    if value < 1:
+        logger.warning("ignoring DUO_FP_READ_WINDOW=%d (<1); using 4", value)
+        return 4
+    return value
+
+
+PER_FILE_READ_WINDOW = _read_window_from_env()
 #: Global read-ahead budget: file-level pipeline (MAX_ACTIVE_FETCHES=4) times the
 #: per-file window (4) times one 1-MiB chunk = 16 MiB conceptual maximum payload
 #: outstanding (spec §8). Bytes are only briefly held in the per-fetch reorder
@@ -344,6 +368,12 @@ class FileProviderBackend(QObject):
         # fp_active_fetches) are overwritten wherever the quantity they track
         # changes. Readable directly by tests via ``backend.counters``.
         self.counters: dict[str, int | str] = {}
+        # Runtime-acceptance breadcrumb: record which read window this process is
+        # actually running (spec §3 selector), so the operator can confirm the
+        # live W1/W4 variant from the log BEFORE a measured run instead of
+        # discovering a "wrong window configured" invalid run afterwards.
+        self.counters["fp_read_window"] = PER_FILE_READ_WINDOW
+        _log_event("fp_read_window_selected", window=PER_FILE_READ_WINDOW)
         # --- Task 17 (ruling #3, carried from Task 14): per-outstanding-read
         # watchdog. ``timer_factory`` defaults to a real QTimer bound to this
         # backend; tests inject a fake factory so expiry never waits on a real

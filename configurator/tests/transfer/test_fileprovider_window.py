@@ -513,3 +513,28 @@ def test_zero_byte_queued_fetch_completes_only_after_admission(qapp):
 
     assert c.calls == [(b"", True, None)]
     assert zero not in backend.by_token
+
+
+# --- runtime acceptance selector (DUO_FP_READ_WINDOW) ------------------------
+import pytest
+
+from duo_input.transfer.fileprovider_backend import _read_window_from_env
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        (None, 4),      # unset -> production default
+        ("1", 1),       # W1 acceptance variant
+        ("4", 4),       # W4 acceptance variant
+        ("0", 4),       # <1 -> fallback
+        ("-3", 4),      # <1 -> fallback
+        ("abc", 4),     # non-integer -> fallback
+    ],
+)
+def test_read_window_from_env_selector(monkeypatch, env, expected):
+    if env is None:
+        monkeypatch.delenv("DUO_FP_READ_WINDOW", raising=False)
+    else:
+        monkeypatch.setenv("DUO_FP_READ_WINDOW", env)
+    assert _read_window_from_env() == expected
