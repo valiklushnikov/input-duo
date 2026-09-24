@@ -93,9 +93,7 @@ def requested_buffers_for(
     run: BufferRunSpec, baseline: SocketBufferConfiguration
 ) -> tuple[int | None, int | None]:
     if run.profile == "current":
-        if run.name == "A1":
-            return None, None
-        return baseline.sndbuf_effective, baseline.rcvbuf_effective
+        return None, None
     if run.profile == "1m":
         return MIB, MIB
     if run.profile == "4m":
@@ -446,11 +444,21 @@ def serve(args: argparse.Namespace) -> int:
         "max_application_outbound_queue": 0,
     }
     services: list[FileTransferService] = []
+    connection_count = {"value": 0}
 
     def on_link(link: PeerLink) -> None:
+        connection_count["value"] += 1
+        connection_number = connection_count["value"]
+        if connection_number > 2:
+            link.close()
+            return
         initial_configuration = configure_socket_buffers(link, None, None)
         control_baseline = {"value": initial_configuration}
-        state["initial_socket_configuration"] = initial_configuration.to_dict()
+        state.setdefault("initial_socket_configurations", {})[str(connection_number)] = (
+            initial_configuration.to_dict()
+        )
+        if connection_number == 1:
+            state["initial_socket_configuration"] = initial_configuration.to_dict()
         perf = RecordingPerfEmitter(logger, "windows_python_monotonic")
         service = FileTransferService(perf=perf)
         services.append(service)
@@ -499,17 +507,31 @@ def serve(args: argparse.Namespace) -> int:
                     fail("invalid or overlapping run_start marker")
                     return
                 spec = BUFFER_RUNS[run_number - 1]
+                expected_connection = 1 if run_number <= 3 else 2
+                expected_run_number = len(state["runs"]) + 1
+                if connection_number != expected_connection or run_number != expected_run_number:
+                    fail(
+                        f"run {spec.name} arrived on connection {connection_number}; "
+                        f"expected connection {expected_connection}, run {expected_run_number}"
+                    )
+                    return
                 requested = requested_buffers_for(spec, control_baseline["value"])
                 configuration = configure_socket_buffers(link, *requested)
                 if spec.name == "A1":
                     control_baseline["value"] = configuration
                     state["baseline_socket_configuration"] = configuration.to_dict()
-                if spec.name == "A2" and not _same_effective_buffers(
-                    configuration, control_baseline["value"]
-                ):
-                    fail("A2 did not restore the Windows baseline buffers")
-                    return
                 state["socket_configurations"][spec.name] = configuration.to_dict()
+                if spec.name == "A2":
+                    expected = SocketBufferConfiguration(
+                        **state["baseline_socket_configuration"]
+                    )
+                    if not _same_effective_buffers(configuration, expected):
+                        fail(
+                            "A2 fresh Windows baseline mismatch: "
+                            f"observed={configuration.to_dict()} "
+                            f"expected={expected.to_dict()}"
+                        )
+                        return
                 active_run["number"] = run_number
                 active_run["name"] = spec.name
                 tracker.start(spec.name, queue_bytes=link.bytes_to_write)
@@ -546,6 +568,22 @@ def serve(args: argparse.Namespace) -> int:
                 }
                 active_run["number"] = None
                 active_run["name"] = None
+                return
+
+            if event == "phase_done":
+                if connection_number != 1 or active_run["name"] is not None:
+                    fail("phase_done arrived in invalid state")
+                    return
+                if set(state["runs"]) != {"A1", "B1", "C1"}:
+                    fail("phase_done arrived before A1/B1/C1 completed")
+                    return
+                link.send(
+                    Message(
+                        MessageType.PING,
+                        {"probe_event": "phase_ready"},
+                        b"",
+                    )
+                )
                 return
 
             if event == "probe_done":
@@ -589,11 +627,9 @@ class BufferProbeClient:
         self.args = args
         self.identity = load_or_create(args.state_dir / "identity")
         self.perf = RecordingPerfEmitter(logger, "python_monotonic")
-        self.link = PeerLink(self.identity, perf=self.perf)
-        self.link.message_received.connect(self._on_message)
-        self.link.disconnected.connect(self._on_disconnected)
-        self.link.connected.connect(self._on_connected)
+        self.link = self._new_link()
         self.baseline: SocketBufferConfiguration | None = None
+        self.first_baseline: SocketBufferConfiguration | None = None
         self.manifest = None
         self.entry_index: int | None = None
         self.run_index = 0
@@ -605,6 +641,15 @@ class BufferProbeClient:
         self.timeout.setSingleShot(True)
         self.timeout.timeout.connect(lambda: self._fail("probe timeout"))
 
+    def _new_link(self) -> PeerLink:
+        link = PeerLink(self.identity, perf=self.perf)
+        link.message_received.connect(self._on_message)
+        link.disconnected.connect(
+            lambda reason, source=link: self._on_disconnected(source, reason)
+        )
+        link.connected.connect(self._on_connected)
+        return link
+
     def start(self) -> None:
         self.timeout.start(CONNECT_TIMEOUT_MS)
         self.link.connect_to(self.args.host, self.args.port, self.args.fingerprint)
@@ -612,12 +657,24 @@ class BufferProbeClient:
     def _on_connected(self, _fingerprint: str) -> None:
         try:
             self.baseline = configure_socket_buffers(self.link, None, None)
+            if self.run_index == 0:
+                self.first_baseline = self.baseline
+            elif self.run_index == 3 and self.first_baseline is not None:
+                if not _same_effective_buffers(self.baseline, self.first_baseline):
+                    self._fail(
+                        "A2 fresh Mac baseline mismatch: "
+                        f"observed={self.baseline.to_dict()} "
+                        f"expected={self.first_baseline.to_dict()}"
+                    )
+                    return
         except SocketBufferError as error:
             self._fail(str(error))
             return
         self.timeout.start(OFFER_TIMEOUT_MS)
 
-    def _on_disconnected(self, reason: str) -> None:
+    def _on_disconnected(self, source: PeerLink, reason: str) -> None:
+        if source is not self.link:
+            return
         if self.active is not None:
             self.active.disconnect(reason)
         if len(self.results) != len(BUFFER_RUNS):
@@ -625,6 +682,12 @@ class BufferProbeClient:
 
     def _on_message(self, message: Message) -> None:
         try:
+            event = message.header.get("probe_event") if message.type is MessageType.PING else None
+            if event == "phase_ready":
+                if self.run_index != 3 or self.active is not None:
+                    raise SocketBufferError("phase_ready arrived in invalid state")
+                self._reconnect_for_second_triplet()
+                return
             if message.type is MessageType.FILE_OFFER:
                 if self.manifest is not None:
                     raise SocketBufferError("duplicate FILE_OFFER")
@@ -647,6 +710,16 @@ class BufferProbeClient:
         except (SocketBufferError, ValueError, OSError, RuntimeError) as error:
             self._fail(str(error))
 
+    def _reconnect_for_second_triplet(self) -> None:
+        old_link = self.link
+        self.manifest = None
+        self.entry_index = None
+        self.baseline = None
+        self.link = self._new_link()
+        old_link.close()
+        self.timeout.start(CONNECT_TIMEOUT_MS)
+        self.link.connect_to(self.args.host, self.args.port, self.args.fingerprint)
+
     def _send_marker(self, event: str, spec: BufferRunSpec | None = None) -> None:
         header: dict[str, object] = {"probe_event": event}
         if spec is not None:
@@ -667,11 +740,6 @@ class BufferProbeClient:
             configuration = configure_socket_buffers(self.link, *requested)
         except SocketBufferError as error:
             self._fail(str(error))
-            return
-        if spec.name == "A1":
-            self.baseline = configuration
-        if spec.name == "A2" and not _same_effective_buffers(configuration, self.baseline):
-            self._fail("A2 did not restore the Mac baseline buffers")
             return
         self.active_configuration = configuration
         entry = self.manifest.entries[self.entry_index]
@@ -713,7 +781,11 @@ class BufferProbeClient:
         self.active_configuration = None
         self.run_index += 1
         self.timeout.stop()
-        QTimer.singleShot(500, self._start_next_run)
+        if self.run_index == 3:
+            self._send_marker("phase_done")
+            self.timeout.start(CONNECT_TIMEOUT_MS)
+        else:
+            QTimer.singleShot(500, self._start_next_run)
 
     def _complete(self) -> None:
         self._send_marker("probe_done")
@@ -728,7 +800,9 @@ class BufferProbeClient:
         output = {
             "chunk_size": MIB,
             "per_file_window": 1,
-            "baseline_socket_configuration": self.baseline.to_dict() if self.baseline else None,
+            "baseline_socket_configuration": (
+                self.first_baseline.to_dict() if self.first_baseline else None
+            ),
             "median_throughput_by_profile": medians,
             "runs": self.results,
         }

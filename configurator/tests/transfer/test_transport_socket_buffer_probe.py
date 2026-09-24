@@ -165,7 +165,7 @@ def test_buffer_matrix_order_and_values_are_fixed():
     ]
 
 
-def test_current_profile_is_untouched_once_then_restored_to_initial_readback():
+def test_each_current_profile_is_untouched_on_its_fresh_connection():
     baseline = SocketBufferConfiguration(
         descriptor=77,
         sndbuf_requested=None,
@@ -179,8 +179,8 @@ def test_current_profile_is_untouched_once_then_restored_to_initial_readback():
         None,
     )
     assert requested_buffers_for(BufferRunSpec("A2", "current"), baseline) == (
-        65_536,
-        131_072,
+        None,
+        None,
     )
     assert requested_buffers_for(BufferRunSpec("B1", "1m"), baseline) == (MIB, MIB)
     assert requested_buffers_for(BufferRunSpec("C1", "4m"), baseline) == (
