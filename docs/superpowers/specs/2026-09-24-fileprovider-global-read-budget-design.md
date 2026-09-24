@@ -141,3 +141,29 @@ Metrics: reconstruct per generation_id from ~/.local/share/DuoInput/logs/duo-inp
 Windows source = C:\Users\Valentyn\Desktop\B-mixed (100 files, 42,158,741 B).
 Mac=192.168.0.139, Windows=192.168.0.128. iperf3 on Mac available.
 ```
+
+## AS-BUILT (phase 2, commit 138d9e95, branch feature/fileprovider-read-window-v2)
+Implemented exactly per plan; NO Phase-1 contradiction found, so no redesign.
+- `_read_budget_from_env()`/`GLOBAL_READ_BUDGET` + `DUO_FP_READ_BUDGET` (mirrors the
+  window selector). DEFAULT = `MAX_ACTIVE_FETCHES*PER_FILE_READ_WINDOW` = 16 =
+  today's unbounded-W4 ceiling => budget INERT by default, existing tests (incl.
+  `test_four_streams_independently_bounded` = 16 outstanding) unchanged; >=16 == control.
+- `Fetch.pulled`; `_wants_read`; `_schedule_reads` (round-robin `_rr` deque, one read
+  per selected fetch, rotate(-1), reset-on-progress; byte gate parks in `_pull_queue`,
+  inert at B<=8; `_scheduling` reentrancy guard). `_fill_window` -> ensure `_rr`
+  membership + `_schedule_reads`; `_resume_windows` -> `_schedule_reads`; `_on_chunk`
+  schedules after permit release (out-of-order path). `_rr` add on REQUESTING admission
+  (`_open_fetch`/`_admit_from_queue`, deduped), remove in `_finish_fetch`. Defensive
+  `fp_read_budget_violation` telemetry at emission. Permit == `by_read_id` entry (no 2nd
+  counter). `_issue_read` is the SOLE emitter and is called ONLY from `_schedule_reads`.
+- RED: 21-case suite `tests/transfer/test_fileprovider_global_budget.py` (17 failed / 3
+  guard-passed pre-impl; selector ImportError + `assert 16<=4` bound failures = expected).
+- GREEN offline: new suite 21/21; full transfer 806 passed, 10 skipped (Windows-only
+  ctypes.WINFUNCTYPE collection excluded); files/2 wire 45 passed. Swift untouched.
+- Invariants (measured): B4/B6/B8 MAX_GLOBAL = 4/6/8 (fully borrowable, never exceeded);
+  ISOLATED_MAX_PER_FETCH = 4; SMALL = 1; ZERO_BYTE = 0; byte-exact; permit leaks = 0;
+  budget/window bound violations = 0; four large fetches all progress under B=4.
+- REVIEW_FIX_COMMIT = NONE (dedicated review of bypass/leak/double-release/RR-dup/stale-RR/
+  starvation/reentrancy/cancel-disconnect-retry races/plan-offset/reorder-bound found no
+  proven defect; races covered by existing cancel/disconnect/retry/error suites + new
+  reentrancy test). RUNTIME (§24-31) NOT run: needs the two-machine stand; runbook below.
