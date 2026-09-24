@@ -10,10 +10,11 @@ outstanding reads' expected sizes* across ALL active fetches never exceeds
 ``MAX_TOTAL_BUFFERED_BYTES``, regardless of how large the transferred files
 are - the failure this guards against is "memory grows with file size".
 
-Chunks are delivered by reference (``reply(message.blob)``) - the backend
-itself never accumulates bytes (see fileprovider_backend module docstring),
-so "buffered bytes" here means the sum of *requested* (``expected``) sizes
-for reads currently in flight, which is exactly what the budget bounds.
+With the per-file read window, "outstanding bytes" is the sum of the lengths
+of every live range across all fetches - both IN_FLIGHT (requested, not yet
+received) and RECEIVED (buffered in the bounded reorder store awaiting the
+sequential consumer). That sum is what ``MAX_TOTAL_BUFFERED_BYTES`` bounds,
+and it never depends on total file size.
 """
 
 from __future__ import annotations

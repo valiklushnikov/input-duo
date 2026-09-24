@@ -57,9 +57,61 @@ def _manifest(sizes: tuple[int, ...], transfer_id: str = "generation-1") -> Tran
     )
 
 
-def _backend(qapp, manifest: TransferManifest, link: FakeLink | None = None):
+class FakeTimer:
+    """Injectable QTimer stand-in (mirrors test_fileprovider_observability)."""
+
+    def __init__(self) -> None:
+        self._callback = None
+        self.running = False
+
+    def setSingleShot(self, _single: bool) -> None:  # noqa: N802
+        pass
+
+    @property
+    def timeout(self) -> "FakeTimer":
+        return self
+
+    def connect(self, callback) -> None:
+        self._callback = callback
+
+    def start(self, _ms: int) -> None:
+        self.running = True
+
+    def stop(self) -> None:
+        self.running = False
+
+    def fire(self) -> None:
+        if not self.running or self._callback is None:
+            return
+        self.running = False
+        self._callback()
+
+
+def _timer_factory():
+    created: list[FakeTimer] = []
+
+    def factory() -> FakeTimer:
+        timer = FakeTimer()
+        created.append(timer)
+        return timer
+
+    factory.created = created
+    return factory
+
+
+def _backend(
+    qapp,
+    manifest: TransferManifest,
+    link: FakeLink | None = None,
+    timer_factory=None,
+):
     link = link or FakeLink()
-    backend = FileProviderBackend(FakeClient(FakeRemote()), object(), lambda _urls: None)
+    backend = FileProviderBackend(
+        FakeClient(FakeRemote()),
+        object(),
+        lambda _urls: None,
+        timer_factory=timer_factory,
+    )
     backend.attach_link(link)
     epoch = backend.handle_offer(manifest)
     backend.authorize(True, epoch)
@@ -417,3 +469,47 @@ def test_four_streams_independently_bounded(qapp):
     assert len(backend.by_read_id) == 16
     assert int(backend.counters.get("fp_max_outstanding_reads_per_stream", 0)) <= 4
     assert int(backend.counters.get("fp_max_global_outstanding_reads", 0)) <= 16
+
+
+# --- review-fix: watchdog deadline vs serial sender (rearm on progress) -------
+def test_chunk_arrival_rearms_sibling_inflight_watchdogs(qapp):
+    factory = _timer_factory()
+    backend, link = _backend(qapp, _manifest((8 * CHUNK,)), timer_factory=factory)
+    (token, _size), = [backend.open_fetch("generation-1", 0)]
+    backend.pull_chunk(token, Collector())
+    reads = _reads(link)
+    assert len(reads) == 4
+    assert len(factory.created) == 4 and all(t.running for t in factory.created)
+
+    # Deliver R0: its own timer disarms and the 3 still-in-flight reads' timers
+    # are restarted (fresh timers), so a slow/serial sender cannot falsely time
+    # out a later read whose clock was ticking since issue.
+    backend.handle_message(_chunk_for(reads[0]))
+
+    # every original per-read timer (R0..R3) is now stopped...
+    assert not any(factory.created[i].running for i in range(4))
+    # ...replaced by 4 running timers: R1/R2/R3 rearmed + the refill read R4.
+    assert sum(1 for t in factory.created if t.running) == 4
+    assert len(backend.by_read_id) == 4
+
+
+# --- review-fix: zero-byte QUEUED fetch must not settle before admission ------
+def test_zero_byte_queued_fetch_completes_only_after_admission(qapp):
+    backend, link = _backend(qapp, _manifest((CHUNK, CHUNK, CHUNK, CHUNK, 0)))
+    tokens = [backend.open_fetch("generation-1", i)[0] for i in range(5)]
+    zero = tokens[4]
+    assert backend.by_token[zero].state == "queued"
+
+    c = Collector()
+    backend.pull_chunk(zero, c)
+    assert c.calls == []           # must NOT complete out of turn while queued
+    assert zero in backend._queue
+
+    # Complete an active fetch -> a slot frees -> the zero-byte fetch is promoted
+    # and only now completes (empty EOF), exactly once.
+    backend.pull_chunk(tokens[0], Collector())
+    r0 = next(m for m in _reads(link) if m.header["entry_index"] == 0)
+    backend.handle_message(_chunk_for(r0))
+
+    assert c.calls == [(b"", True, None)]
+    assert zero not in backend.by_token

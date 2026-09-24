@@ -416,10 +416,14 @@ class FileProviderBackend(QObject):
         self.by_read_id: dict[int, Fetch] = {}
         self._active: set[str] = set()
         self._queue: deque[str] = deque()
-        # --- Task 11: second, finer admission gate on top of the slot gate
-        # above - pulls that are admitted at the slot level but would push
-        # outstanding bytes over MAX_TOTAL_BUFFERED_BYTES wait here (FIFO)
-        # until a prior read completes and frees budget (_admit_pull_queue).
+        # --- Task 11 / windowing: second, finer admission gate on top of the
+        # slot gate above - a fetch whose next window read would push outstanding
+        # bytes over MAX_TOTAL_BUFFERED_BYTES parks here (FIFO) until a range is
+        # consumed and frees budget (_resume_windows). With the shipped config
+        # (MAX_TOTAL_BUFFERED_BYTES == MAX_ACTIVE_FETCHES * window * chunk) this
+        # is a defense-in-depth net that does not fire - the per-fetch window cap
+        # already bounds outstanding reads; it only engages if a future
+        # WINDOW/MAX_ACTIVE change would otherwise exceed the global budget.
         self._pull_queue: deque[str] = deque()
         self._read_ids = itertools.count(1)
         # --- Task 14: link.disconnected -> local fail-all (see attach_link).
@@ -1139,9 +1143,9 @@ class FileProviderBackend(QObject):
         # Task 14: host-down (no peer link at all, e.g. never attached or
         # already disconnected - see _on_link_lost) must reply NotConnected,
         # not silently admit a fetch that can never actually read a byte
-        # (pull_chunk's own self._link is None check in _request_chunk only
-        # fires once a read is admitted - by then the item already looks
-        # "in progress" to Finder for no reason).
+        # (_issue_read's own self._link is None check only fires once the window
+        # starts issuing - by then the item already looks "in progress" to Finder
+        # for no reason).
         if self._link is None:
             if reply is None:
                 raise RuntimeError("file provider peer not connected")
@@ -1350,6 +1354,16 @@ class FileProviderBackend(QObject):
         ``consume_offset`` is RECEIVED."""
         if fetch.reply is None:
             return
+        # Only an admitted (slot-holding) fetch may settle here: a fetch still in
+        # the MAX_ACTIVE_FETCHES slot queue keeps its reply parked until
+        # _admit_from_queue promotes it. Without this guard a zero-byte QUEUED
+        # fetch would complete out of turn (bypassing the slot gate and leaving a
+        # stale token in _queue).
+        if (
+            fetch.state is not FetchState.REQUESTING
+            or fetch.fetch_token not in self._active
+        ):
+            return
         # Zero-byte, or the whole file already consumed: the fetch is complete.
         if fetch.consume_offset >= fetch.size:
             reply, fetch.reply = fetch.reply, None
@@ -1419,12 +1433,12 @@ class FileProviderBackend(QObject):
             int(counters.get("fp_max_global_outstanding_bytes", 0)),
             self._outstanding_bytes(),
         )
-        counters["fp_window_occupancy_sum"] = (
-            int(counters.get("fp_window_occupancy_sum", 0)) + len(fetch.ranges)
-        )
-        counters["fp_window_occupancy_samples"] = (
-            int(counters.get("fp_window_occupancy_samples", 0)) + 1
-        )
+        # NOTE: window OCCUPANCY over time (and TIME_WINDOW_FULL_PERCENT, spec
+        # §27) is derived from the fp_range_issued/received/consumed event stream
+        # with timestamps, NOT a running mean here: an issue-time-only sample
+        # would systematically understate the steady-state occupancy (it never
+        # samples the window while it sits full between issues). The peak gauges
+        # above are exact; the event log carries the rest.
         if in_flight > PER_FILE_READ_WINDOW or len(fetch.ranges) > PER_FILE_READ_WINDOW:
             self._bump("fp_window_bound_violation")
             _log_event(
@@ -1490,6 +1504,16 @@ class FileProviderBackend(QObject):
             self._disarm_watchdog(rng.read_id)
         fetch.ranges.clear()
 
+    def _rearm_inflight_watchdogs(self, fetch: Fetch) -> None:
+        """Restart the deadline of every still-IN_FLIGHT read of ``fetch`` - used
+        when a chunk arrives, so a windowed read's timeout measures time since the
+        fetch last made progress, not time since it was issued (see ``_on_chunk``
+        for why serial sender servicing makes this necessary)."""
+        for rng in fetch.ranges.values():
+            if rng.state is RangeState.IN_FLIGHT:
+                self._disarm_watchdog(rng.read_id)
+                self._arm_watchdog(rng.read_id)
+
     #: FetchState (terminal) -> its counter name, for _finish_fetch below.
     _TERMINAL_COUNTERS = {
         FetchState.DONE: "fp_fetch_completed",
@@ -1535,7 +1559,7 @@ class FileProviderBackend(QObject):
         # this explicitly, so a long-lived extension leaked one dict entry per
         # completed/failed fetch forever. All production readers of by_token
         # already use .get() and handle a None/missing entry the same way they
-        # handle "unknown token" (see pull_chunk/_admit_pull_queue/
+        # handle "unknown token" (see pull_chunk/_resume_windows/
         # _admit_from_queue/cancel_fetch) - verified during task-19 review, so
         # dropping it here the instant a fetch goes terminal is safe.
         self.by_token.pop(fetch.fetch_token, None)
@@ -1606,6 +1630,15 @@ class FileProviderBackend(QObject):
         self._disarm_watchdog(rng.read_id)
         rng.state = RangeState.RECEIVED
         rng.blob = message.blob
+        # Forward progress on this fetch means the sender is alive, so restart the
+        # deadline of every OTHER read still in flight for it. The window issues
+        # up to PER_FILE_READ_WINDOW reads at once but the sender answers them
+        # serially (one event-loop thread, see TransferService._answer_read), so
+        # a later read's clock would otherwise be consumed by head-of-line
+        # queueing behind earlier ones and fail a steadily-progressing transfer.
+        # This keeps the watchdog meaning "no chunk for 30s" (a genuinely hung
+        # host), exactly as it did under WINDOW=1, not "issued 30s ago".
+        self._rearm_inflight_watchdogs(fetch)
         self._bump("fp_bytes_received", chunk_size)
         self._bump("fp_range_received")
         _log_event(

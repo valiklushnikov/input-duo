@@ -179,3 +179,50 @@ gauges — proves `MAX_OBSERVED_OUTSTANDING_READS <= 4`.
 scheduler/streaming/cancel/errors/observability tests that encode the WINDOW=1
 `Fetch` shape are migrated to the windowed invariant (byte-exactness and
 independence preserved).
+
+## 6. Review findings & resolutions (spec §22 gate)
+
+A multi-angle review (line-by-line, removed-behavior, cross-file) ran against the
+implementation commit. Cross-file: no production call site broke; the XPC
+`pullChunk(blob, eof, error)` contract and the Swift consumer are untouched.
+Windows concurrency (§18): `TransferService._answer_read` is stateless and the
+peer link dispatches `handle_message` serially on one Qt event-loop thread
+(`peer.py` `message_received` from the socket `readyRead`), so up to 16 in-flight
+FILE_READs are serviced one at a time — the shared per-entry descriptor
+(`SnapshotRegistry._read_at`, lseek+read) is safe under serial access. Findings:
+
+- **Watchdog deadline vs serial sender (FIXED).** The per-read watchdog was armed
+  at issue time; with 4 reads issued at once and a serial sender, a later read's
+  30s clock was consumed by head-of-line queueing and could fail a
+  steadily-progressing transfer (a regression vs WINDOW=1). Fix: `_on_chunk`
+  restarts every still-IN_FLIGHT read's watchdog on each chunk arrival
+  (`_rearm_inflight_watchdogs`), so the watchdog again means "no chunk for 30s"
+  (a genuinely hung host). Covered by
+  `test_chunk_arrival_rearms_sibling_inflight_watchdogs`.
+- **Zero-byte QUEUED fetch settling out of turn (FIXED).** `_try_deliver` now
+  requires the fetch to be admitted (REQUESTING and in `_active`) before
+  completing. Covered by
+  `test_zero_byte_queued_fetch_completes_only_after_admission`.
+- **Global byte-budget gate is defense-in-depth (BY DESIGN).** With the shipped
+  config `MAX_TOTAL_BUFFERED_BYTES == MAX_ACTIVE_FETCHES × window × chunk` the
+  per-fetch window cap already bounds outstanding reads and the global gate never
+  fires; it engages only if a future WINDOW/MAX_ACTIVE change would exceed the
+  global budget. Comment clarified; kept as an honest bound.
+- **Occupancy-mean telemetry (FIXED).** Removed the issue-time-only occupancy
+  mean (biased low); peak gauges stay exact and TIME_WINDOW_FULL_PERCENT (§27) is
+  derived from the timestamped `fp_range_issued/received/consumed` events.
+- **Stale comments/docstrings (FIXED).**
+
+### Known bounded trade-off (accepted, not fixed)
+
+An abandoned consumer that stops pulling **without** cancelling or disconnecting
+can leave a fetch holding up to `PER_FILE_READ_WINDOW` buffered ranges
+(≤ 4 MiB/stream) plus its generation in-use ref, with no watchdog once every
+range is RECEIVED (watchdogs cover IN_FLIGHT reads only). This is **bounded**
+(≤ 4 MiB/stream, ≤ 16 MiB total — the declared memory cap) and **self-heals** on
+the normal termination paths (Finder cancel → `cancel_fetch`; peer disconnect →
+`_fail_all_active`). A consumer-idle timeout was deliberately NOT added:
+fileproviderd may legitimately pause between pulls under memory pressure, so
+timing that out would introduce spurious failures. Watch
+`fp_max_outstanding_bytes_per_stream` / `fp_max_global_outstanding_bytes` in
+runtime artifacts to confirm the bound holds.
