@@ -596,6 +596,8 @@ class ProbeClient:
     def _on_disconnected(self, source: PeerLink, reason: str) -> None:
         if source is not self.link:
             return
+        if len(self.results) == len(MEASURED_RUNS) and len(self.warmups) == 2:
+            return
         if self.active is not None:
             self.active.disconnect(reason)
         self._fail(f"link disconnected during run: {reason}")

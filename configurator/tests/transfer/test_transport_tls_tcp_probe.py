@@ -116,3 +116,18 @@ def test_server_link_and_file_service_share_one_recording_emitter(tmp_path):
     bind_recording_perf(link, emitter)
 
     assert link._perf is emitter
+
+
+def test_peer_close_after_all_results_does_not_invalidate_completed_probe():
+    client = object.__new__(ProbeClient)
+    source = object()
+    failures = []
+    client.link = source
+    client.active = None
+    client.results = [{} for _ in MEASURED_RUNS]
+    client.warmups = [{}, {}]
+    client._fail = failures.append
+
+    client._on_disconnected(source, "peer closed after probe_done")
+
+    assert failures == []
