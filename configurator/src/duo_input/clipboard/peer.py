@@ -493,6 +493,7 @@ class PeerLink(QObject):
         except WireError as error:
             self._fail(str(error))
             return
+        frames_complete_ns = self._perf.now()
         for message in messages:
             if self._socket is not socket:
                 # Обработчик предыдущего кадра разорвал соединение: кадры,
@@ -504,6 +505,15 @@ class PeerLink(QObject):
                     available_ns, "file_read_bytes_available", **correlation
                 )
                 self._perf.emit("file_read_decode_complete", **correlation)
+            elif message.type is MessageType.FILE_CHUNK:
+                correlation = self._file_perf_fields(message)
+                self._perf.emit_at(
+                    available_ns, "file_chunk_bytes_available", **correlation
+                )
+                self._perf.emit_at(
+                    frames_complete_ns, "file_chunk_frame_complete", **correlation
+                )
+                self._perf.emit("file_chunk_deliver", **correlation)
             self.message_received.emit(message)
 
     def _fail(self, reason: str) -> None:

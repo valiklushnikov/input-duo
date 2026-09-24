@@ -775,6 +775,44 @@ def test_file_read_receive_records_bytes_available_and_decode_complete(
     assert len(delivered) == 1
 
 
+def test_file_chunk_receive_records_socket_frame_and_delivery_boundaries_without_mutation(
+    qapp, tmp_path, monkeypatch, caplog
+):
+    from duo_input.clipboard.wire import encode
+
+    logger = logging.getLogger("duo_input.clipboard.peer")
+    ticks = iter(range(500, 10_000))
+    perf = PerfEmitter(logger, "python_monotonic", clock=lambda: next(ticks))
+    caplog.set_level(logging.INFO, logger=logger.name)
+    link = PeerLink(load_or_create(tmp_path), perf=perf)
+    socket = QSslSocket(link)
+    link._wire_up(socket)
+    original = Message(
+        MessageType.FILE_CHUNK,
+        {
+            "transfer_id": "generation",
+            "entry_index": 2,
+            "read_id": 7,
+            "offset": 4096,
+        },
+        b"payload",
+    )
+    monkeypatch.setattr(type(socket), "readAll", lambda _self: encode(original))
+    delivered = []
+    link.message_received.connect(delivered.append)
+
+    link._on_ready_read()
+
+    events = _perf_events(caplog)
+    assert [event["event"] for event in events] == [
+        "file_chunk_bytes_available",
+        "file_chunk_frame_complete",
+        "file_chunk_deliver",
+    ]
+    assert all(event["read_id"] == "7" for event in events)
+    assert delivered == [original]
+
+
 def test_a_message_whose_header_cannot_be_framed_is_refused_without_raising(
     qapp, tmp_path, monkeypatch
 ):
