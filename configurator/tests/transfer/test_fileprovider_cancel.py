@@ -87,7 +87,7 @@ def test_cancelling_a_queued_fetch_is_never_promoted_and_never_reads(qapp):
     # Complete an active fetch: the FIFO successor must be the OTHER queued
     # token, never the cancelled one - and the cancelled one must never have
     # triggered a FILE_READ, before or after.
-    backend.pull_chunk(tokens[0])
+    backend.pull_chunk(tokens[0], lambda *a: None)
     [read] = link.sent
     backend.handle_message(_reply(read, b"abc"))
 
@@ -131,7 +131,7 @@ def test_cancelling_active_fetch_with_chunk_in_flight_settles_the_pull_reply(qap
     replies = []
     backend.pull_chunk(token, lambda *a: replies.append(a))
     [read] = link.sent
-    read_id = backend.by_token[token].read_id
+    (read_id,) = (r.read_id for r in backend.by_token[token].ranges.values())
     assert backend.by_read_id[read_id] is backend.by_token[token]
     assert replies == []  # nothing settled yet - the read is in flight
 
@@ -171,7 +171,7 @@ def test_late_file_chunk_after_cancel_is_dropped_silently(qapp):
 def test_late_file_error_after_cancel_is_dropped_silently(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(9,)))
     [token] = _open_all(backend, manifest)
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = link.sent
 
     backend.cancel_fetch(token)
@@ -266,13 +266,15 @@ def test_cancelling_a_fetch_holding_budget_frees_it_for_the_next_queued_pull(
     backend.pull_chunk(second, lambda *a: second_replies.append(a))
 
     assert len(link.sent) == 1, "only one 3-byte read fits the 3-byte budget"
-    assert list(backend._pull_queue) == [second]
+    assert backend._outstanding_bytes() <= 3
+    assert second in backend._pull_queue  # second is budget-parked, unread
     assert second_replies == []
 
     backend.cancel_fetch(first)  # frees the only budget slot it held
 
-    assert len(link.sent) == 2, "cancelling the budget holder admits the FIFO successor"
-    assert list(backend._pull_queue) == []
+    # the freed budget admits a read for the previously-parked successor
+    assert any(m.header["entry_index"] == 1 for m in link.sent), "second now reads"
+    assert backend._outstanding_bytes() <= 3
     assert first not in backend.by_token
 
 
@@ -288,13 +290,16 @@ def test_cancelling_a_fetch_still_in_the_pull_queue_drops_it_without_reading(
     first, second = _open_all(backend, manifest)
     backend.pull_chunk(first, lambda *a: None)
     backend.pull_chunk(second, lambda *a: None)
-    assert list(backend._pull_queue) == [second]
+    assert second in backend._pull_queue
 
     backend.cancel_fetch(second)  # cancel the one still parked in the byte queue
 
     assert second not in backend.by_token
-    # Freeing the (never-consumed) budget of `second` changes nothing - it
-    # held none - and it must never be admitted from the pull queue now.
+    # Freeing the (never-held) budget of `second` changes nothing for it - it
+    # must never be admitted from the pull queue / issue a FILE_READ. `first`
+    # may legitimately advance its own window, but no read for `second`
+    # (entry_index 1) is ever sent.
     backend.handle_message(_reply(link.sent[0], b"abc"))
-    assert len(link.sent) == 1, "the cancelled fetch must never get a FILE_READ"
-    assert list(backend._pull_queue) == []
+    assert all(m.header["entry_index"] == 0 for m in link.sent), \
+        "the cancelled fetch must never get a FILE_READ"
+    assert second not in backend._pull_queue  # the cancelled fetch is gone

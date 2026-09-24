@@ -71,7 +71,12 @@ def _open_many(backend, generation_id, indices):
 
 def _snapshot(backend, token):
     fetch = backend.by_token[token]
-    return (fetch.offset, fetch.read_id, fetch.expected, fetch.state)
+    return (
+        fetch.consume_offset,
+        fetch.plan_offset,
+        frozenset(r.read_id for r in fetch.ranges.values()),
+        fetch.state,
+    )
 
 
 # --- two flat, top-level files -----------------------------------------------
@@ -168,7 +173,7 @@ def test_depth_two_nested_file_fetch_reassembles_correctly(qapp):
         "entry_index": 5,
         "offset": 0,
         "length": 4,
-        "read_id": fetch.read_id,
+        "read_id": next(iter(r.read_id for r in fetch.ranges.values())),
     }
     backend.handle_message(_reply(read, b"deep"))
 
@@ -207,7 +212,7 @@ def test_queue_admits_fifo_successor_across_tree_branches(qapp):
     # Active: dirA/a.bin, dirA/b.bin, dirA/c.bin, dirA/sub/d.bin (indices 0-3).
     # Queued: dirB/a.bin, root1.bin, root2.bin (indices 4-6), in that order.
     fetch0 = backend.by_token[tokens[0]]
-    backend.pull_chunk(tokens[0])
+    backend.pull_chunk(tokens[0], lambda *a: None)
     [read] = link.sent
 
     backend.handle_message(_reply(read, b"AAA"))  # completes dirA/a.bin (3 bytes)
@@ -219,7 +224,7 @@ def test_queue_admits_fifo_successor_across_tree_branches(qapp):
 
     # Drain one more slot: the FIFO successor must again be the head of what's
     # left, never a fetch from a different point in the tree jumping the line.
-    backend.pull_chunk(tokens[1])
+    backend.pull_chunk(tokens[1], lambda *a: None)
     [read2] = [m for m in link.sent if m.header["entry_index"] == 2]
     backend.handle_message(_reply(read2, b"BBBBB"))
 
@@ -341,7 +346,7 @@ def test_fetch_tokens_and_read_ids_are_unique_across_the_whole_tree(qapp):
 
     assert len(set(tokens)) == len(tokens)  # every token distinct
     for token in tokens:
-        backend.pull_chunk(token)
+        backend.pull_chunk(token, lambda *a: None)
     # Only the 4 admitted-active fetches actually issued a FILE_READ; each
     # got its own read_id even though several sizes coincide with entries
     # under different directories.

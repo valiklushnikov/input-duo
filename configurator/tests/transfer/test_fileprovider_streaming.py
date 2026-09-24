@@ -10,10 +10,11 @@ outstanding reads' expected sizes* across ALL active fetches never exceeds
 ``MAX_TOTAL_BUFFERED_BYTES``, regardless of how large the transferred files
 are - the failure this guards against is "memory grows with file size".
 
-Chunks are delivered by reference (``reply(message.blob)``) - the backend
-itself never accumulates bytes (see fileprovider_backend module docstring),
-so "buffered bytes" here means the sum of *requested* (``expected``) sizes
-for reads currently in flight, which is exactly what the budget bounds.
+With the per-file read window, "outstanding bytes" is the sum of the lengths
+of every live range across all fetches - both IN_FLIGHT (requested, not yet
+received) and RECEIVED (buffered in the bounded reorder store awaiting the
+sequential consumer). That sum is what ``MAX_TOTAL_BUFFERED_BYTES`` bounds,
+and it never depends on total file size.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from test_fileprovider_scheduler import (
     _error_code,
     _manifest,
     _open_all,
+    _range_ids,
     _reply,
 )
 
@@ -56,7 +58,7 @@ def test_exactly_one_chunk_ceiling_completes_in_a_single_read(qapp):
         "entry_index": 0,
         "offset": 0,
         "length": MAX_FILE_CHUNK_BYTES,
-        "read_id": fetch.read_id,
+        "read_id": next(iter(_range_ids(fetch))),
     }
     backend.handle_message(_reply(read, b"a" * MAX_FILE_CHUNK_BYTES))
 
@@ -75,17 +77,28 @@ def test_multi_chunk_file_reassembles_with_increasing_offsets(qapp):
     [token] = _open_all(backend, manifest)
 
     reassembled = bytearray()
+    replies: list = []
+    # The window issues all three ranges up front (3 < WINDOW); deliver them in
+    # offset order to the serial parked reply, re-pulling after each delivery.
+    backend.pull_chunk(token, lambda *a: replies.append(a))
     eof = False
-    while not eof:
-        replies = []
-        backend.pull_chunk(token, lambda *a: replies.append(a))
-        [read] = [m for m in link.sent if m.header["read_id"] == backend.by_token[token].read_id]
-        blob = bytes([len(link.sent) % 256]) * read.header["length"]
+    guard = 0
+    while not eof and guard < 100:
+        guard += 1
+        pending = sorted(
+            (m for m in link.sent if m.header["read_id"] in backend.by_read_id),
+            key=lambda m: m.header["offset"],
+        )
+        read = pending[0]  # lowest in-flight offset == the consume cursor
+        blob = bytes([read.header["offset"] // MAX_FILE_CHUNK_BYTES % 256]) * read.header["length"]
+        before = len(replies)
         backend.handle_message(_reply(read, blob))
-        assert len(replies) == 1
-        chunk, eof, error = replies[0]
+        assert len(replies) == before + 1
+        chunk, eof, error = replies[-1]
         assert error is None
         reassembled.extend(chunk)
+        if not eof:
+            backend.pull_chunk(token, lambda *a: replies.append(a))
 
     assert len(reassembled) == total
     assert [m.header["offset"] for m in link.sent] == [
@@ -154,22 +167,18 @@ def test_pull_chunk_queues_when_it_would_exceed_the_byte_budget_even_with_free_a
     for token, bucket in zip(tokens, replies):
         backend.pull_chunk(token, lambda *a, b=bucket: b.append(a))
 
+    # Only one 3-byte read fits the 5-byte budget; every other range parks.
     assert len(link.sent) == 1, "only one 3-byte read fits the 5-byte budget"
-    assert [backend.by_token[t].read_id is not None for t in tokens] == [
-        True,
-        False,
-        False,
-        False,
-    ]
-    assert list(backend._pull_queue) == tokens[1:]
+    assert backend._outstanding_bytes() <= 5
+    assert len(backend._pull_queue) >= 1, "the rest are budget-parked"
     assert all(bucket == [] for bucket in replies), "nothing settled yet"
 
     backend.handle_message(_reply(link.sent[0], b"abc"))
 
+    # The delivered chunk frees budget; exactly one more read is admitted.
     assert len(replies[0]) == 1 and replies[0][0][:2] == (b"abc", False)
-    assert len(link.sent) == 2, "freeing the budget admits exactly the FIFO successor"
-    assert list(backend._pull_queue) == tokens[2:]
-    assert backend.by_token[tokens[1]].read_id is not None
+    assert len(link.sent) == 2, "freeing the budget admits exactly one more read"
+    assert backend._outstanding_bytes() <= 5
 
 
 def test_admitting_from_the_active_slot_queue_still_respects_the_byte_budget(
@@ -216,38 +225,55 @@ def test_outstanding_bytes_stay_bounded_regardless_of_total_file_size(qapp, monk
         tokens = _open_all(backend, manifest)
         assert backend._active == set(tokens)
 
-        received = {token: bytearray() for token in tokens}
-        results: dict[str, list] = {}
+        received = {token: 0 for token in tokens}
+        boxes: dict[str, list] = {token: [] for token in tokens}
         done: set[str] = set()
         peak_outstanding = 0
-
-        def start_pull(token):
-            if token in done or token in results:
-                return
-            results[token] = []
-            backend.pull_chunk(token, lambda *a, t=token: results[t].append(a))
 
         guard = 0
         while len(done) < len(tokens):
             guard += 1
-            assert guard < 20_000, "livelock: a fetch never progressed"
+            assert guard < 50_000, "livelock: a fetch never progressed"
+            # Ensure every unfinished fetch has a serial consumer reply parked.
             for token in tokens:
-                start_pull(token)
+                if token in done:
+                    continue
+                fetch = backend.by_token.get(token)
+                if fetch is None:
+                    done.add(token)
+                    continue
+                if fetch.reply is None:
+                    boxes[token] = []
+                    backend.pull_chunk(
+                        token, lambda *a, t=token: boxes[t].append(a)
+                    )
+            # The budget bound must hold at every point, independent of size.
             outstanding = backend._outstanding_bytes()
             peak_outstanding = max(peak_outstanding, outstanding)
             assert outstanding <= 8, "byte budget exceeded"
-
-            for read_id, fetch in list(backend.by_read_id.items()):
-                [read] = [m for m in link.sent if m.header["read_id"] == read_id]
-                blob = b"x" * fetch.expected
-                token = fetch.fetch_token
-                received[token].extend(blob)
-                backend.handle_message(_reply(read, blob))
-                chunk, eof, error = results.pop(token)[0]
-                assert error is None
-                assert chunk == blob
-                if eof:
+            # Deliver each in-flight range currently at its fetch's consume
+            # cursor (that is what a parked reply is waiting on).
+            for token in tokens:
+                if token in done:
+                    continue
+                fetch = backend.by_token.get(token)
+                if fetch is None:
                     done.add(token)
+                    continue
+                rng = fetch.ranges.get(fetch.consume_offset)
+                if rng is not None and rng.state is fp_backend.RangeState.IN_FLIGHT:
+                    [read] = [
+                        m for m in link.sent if m.header["read_id"] == rng.read_id
+                    ]
+                    backend.handle_message(_reply(read, b"x" * rng.length))
+            # Collect deliveries.
+            for token in tokens:
+                while boxes[token]:
+                    chunk, eof, error = boxes[token].pop(0)
+                    assert error is None
+                    received[token] += len(chunk)
+                    if eof:
+                        done.add(token)
 
         assert peak_outstanding <= 8
-        assert all(len(buf) == total_size for buf in received.values())
+        assert all(count == total_size for count in received.values())

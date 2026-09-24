@@ -41,7 +41,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, StrEnum, auto
 from pathlib import PurePosixPath
 
@@ -121,7 +121,43 @@ def _default_url_resolver(
 LEASE_SECONDS = 86_400
 LEASE_NS = LEASE_SECONDS * 1_000_000_000
 MAX_ACTIVE_FETCHES = 4
-MAX_TOTAL_BUFFERED_BYTES = 8 * 1024 * 1024
+#: Per-file read window (spec §3). Up to this many ``FILE_READ`` ranges are kept
+#: in flight/buffered per active fetch so the host↔Windows link stays full even
+#: though the XPC ``pullChunk`` contract (and the Swift consumer) remain strictly
+#: sequential - the host prefetches ahead of the consumer cursor and serves each
+#: sequential pull from a bounded in-order reorder buffer. WINDOW=4 is the
+#: measured/production configuration; this is NOT an adaptive window (spec §20/§32).
+#:
+#: Runtime acceptance selector (spec §3 "only runtime comparison variable"): the
+#: SAME code path runs at either window; ``DUO_FP_READ_WINDOW`` overrides the value
+#: at import so W1 vs W4 is chosen by relaunching the host app with that env var,
+#: with no rebuild and no second implementation. Unset/invalid -> production 4.
+#: Only 1..MAX_ACTIVE_FETCHES-derived sizes are sensible; a value <1 falls back to
+#: 4. This is the ONLY knob the acceptance experiment flips.
+def _read_window_from_env() -> int:
+    import os
+
+    raw = os.environ.get("DUO_FP_READ_WINDOW")
+    if raw is None:
+        return 4
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("ignoring non-integer DUO_FP_READ_WINDOW=%r; using 4", raw)
+        return 4
+    if value < 1:
+        logger.warning("ignoring DUO_FP_READ_WINDOW=%d (<1); using 4", value)
+        return 4
+    return value
+
+
+PER_FILE_READ_WINDOW = _read_window_from_env()
+#: Global read-ahead budget: file-level pipeline (MAX_ACTIVE_FETCHES=4) times the
+#: per-file window (4) times one 1-MiB chunk = 16 MiB conceptual maximum payload
+#: outstanding (spec §8). Bytes are only briefly held in the per-fetch reorder
+#: buffer (received-but-not-yet-consumed); ``_outstanding_bytes`` sums the length
+#: of every live range and the window planner parks against this bound (§9).
+MAX_TOTAL_BUFFERED_BYTES = PER_FILE_READ_WINDOW * MAX_ACTIVE_FETCHES * MAX_FILE_CHUNK_BYTES
 #: TTL после которого протухшая (retired) generation без in-use ref подлежит
 #: удалению - зеркалит StagingArea(ttl_seconds=86_400)/LEASE_NS.
 GENERATION_TTL_NS = LEASE_NS
@@ -182,11 +218,34 @@ def _log_event(event: str, **fields: object) -> None:
 
 class FetchState(StrEnum):
     QUEUED = auto()
+    #: Admitted (holds a slot in ``_active``); its read window is managed by
+    #: ``_fill_window``. Replaces the old REQUESTING/RECEIVING split - with a
+    #: window >1 a fetch can simultaneously have reads in flight AND buffered
+    #: chunks, so the per-fetch distinction is no longer meaningful.
     REQUESTING = auto()
-    RECEIVING = auto()
     DONE = auto()
     CANCELLED = auto()
     FAILED = auto()
+
+
+class RangeState(StrEnum):
+    #: ``FILE_READ`` sent, awaiting its ``FILE_CHUNK``.
+    IN_FLIGHT = auto()
+    #: ``FILE_CHUNK`` arrived and is buffered, awaiting in-order consume.
+    RECEIVED = auto()
+
+
+@dataclass
+class _Range:
+    """One windowed ``[offset, length]`` read of a fetch (spec §4/§7). Live from
+    the moment its ``FILE_READ`` is issued (IN_FLIGHT) until the consumer pull
+    delivers it (deleted). ``read_id`` is the wire correlation id."""
+
+    read_id: int
+    offset: int
+    length: int
+    state: RangeState
+    blob: bytes | None = None
 
 
 @dataclass
@@ -194,19 +253,32 @@ class Fetch:
     fetch_token: str
     generation_id: str
     entry_index: int
-    offset: int
-    read_id: int | None
-    expected: int
     size: int
     state: FetchState
+    #: Next byte to hand to the (sequential) consumer - the in-order delivery
+    #: cursor. A range is deliverable only when ``ranges[consume_offset]`` is
+    #: RECEIVED (spec §6).
+    consume_offset: int = 0
+    #: Next byte to REQUEST - the window planner cursor (spec §4). Advances as
+    #: ``FILE_READ``s are issued, independently of ``consume_offset``.
+    plan_offset: int = 0
+    #: Live ranges keyed by their byte offset; at most ``PER_FILE_READ_WINDOW``
+    #: (invariant enforced in ``_fill_window``/``_issue_read``).
+    ranges: dict[int, _Range] = field(default_factory=dict)
+    #: Parked consumer pull reply - at most one (the Swift consumer pulls
+    #: strictly serially, one ``pullChunk`` outstanding per fetch).
     reply: Callable | None = None
     #: True пока этот fetch держит in-use ref своей generation. Ставится один
     #: раз в _open_fetch, снимается ровно один раз при первом settle (см.
     #: _finish_fetch/_decrement_in_use) - гарантия "decrement exactly once"
     #: даже если cancel гонится с завершением (settle-once).
     in_use_counted: bool = False
-    #: Diagnostic-only guard for the first admitted unit of useful work.
+    #: Diagnostic-only guard (perf harness): the first admitted unit of useful
+    #: work for this fetch (first FILE_READ issued) fires ``work_start`` once.
     work_started: bool = False
+
+    def in_flight(self) -> int:
+        return sum(1 for r in self.ranges.values() if r.state is RangeState.IN_FLIGHT)
 
 
 class _GenerationState(Enum):
@@ -301,7 +373,14 @@ class FileProviderBackend(QObject):
         # fp_active_fetches) are overwritten wherever the quantity they track
         # changes. Readable directly by tests via ``backend.counters``.
         self.counters: dict[str, int | str] = {}
+        #: Diagnostic perf event emitter (perf/file-provider-profiling harness).
         self._perf = perf or PerfEmitter(logger, "mac_python_monotonic")
+        # Runtime-acceptance breadcrumb: record which read window this process is
+        # actually running (spec §3 selector), so the operator can confirm the
+        # live W1/W4 variant from the log BEFORE a measured run instead of
+        # discovering a "wrong window configured" invalid run afterwards.
+        self.counters["fp_read_window"] = PER_FILE_READ_WINDOW
+        _log_event("fp_read_window_selected", window=PER_FILE_READ_WINDOW)
         # --- Task 17 (ruling #3, carried from Task 14): per-outstanding-read
         # watchdog. ``timer_factory`` defaults to a real QTimer bound to this
         # backend; tests inject a fake factory so expiry never waits on a real
@@ -374,10 +453,14 @@ class FileProviderBackend(QObject):
         self.by_read_id: dict[int, Fetch] = {}
         self._active: set[str] = set()
         self._queue: deque[str] = deque()
-        # --- Task 11: second, finer admission gate on top of the slot gate
-        # above - pulls that are admitted at the slot level but would push
-        # outstanding bytes over MAX_TOTAL_BUFFERED_BYTES wait here (FIFO)
-        # until a prior read completes and frees budget (_admit_pull_queue).
+        # --- Task 11 / windowing: second, finer admission gate on top of the
+        # slot gate above - a fetch whose next window read would push outstanding
+        # bytes over MAX_TOTAL_BUFFERED_BYTES parks here (FIFO) until a range is
+        # consumed and frees budget (_resume_windows). With the shipped config
+        # (MAX_TOTAL_BUFFERED_BYTES == MAX_ACTIVE_FETCHES * window * chunk) this
+        # is a defense-in-depth net that does not fire - the per-fetch window cap
+        # already bounds outstanding reads; it only engages if a future
+        # WINDOW/MAX_ACTIVE change would otherwise exceed the global budget.
         self._pull_queue: deque[str] = deque()
         self._read_ids = itertools.count(1)
         # --- Task 14: link.disconnected -> local fail-all (see attach_link).
@@ -641,13 +724,15 @@ class FileProviderBackend(QObject):
         ``on_session_timeout`` uses) - every other in-flight fetch is
         untouched. Guards against a stale/racing timer firing after the read
         already settled (disarmed) or was reassigned - by the time a real
-        settle happens ``_clear_read`` has already popped this read_id out of
-        both ``_read_timers`` and ``by_read_id``.
+        settle happens ``_clear_all_ranges`` (or ``_on_chunk`` for that one
+        range) has already popped this read_id out of both ``_read_timers`` and
+        ``by_read_id``. Any single windowed read that hangs fails the whole
+        fetch with Timeout (its other in-flight ranges are cleared with it).
         """
         self._read_timers.pop(read_id, None)
         fetch = self.by_read_id.get(read_id)
-        if fetch is None or fetch.read_id != read_id:
-            return  # already settled - stale timer, no-op
+        if fetch is None:
+            return  # already settled/received - stale timer, no-op
         self._bump("fp_fetch_timeout")
         _log_event(
             "fp_fetch_timeout",
@@ -1100,9 +1185,9 @@ class FileProviderBackend(QObject):
         # Task 14: host-down (no peer link at all, e.g. never attached or
         # already disconnected - see _on_link_lost) must reply NotConnected,
         # not silently admit a fetch that can never actually read a byte
-        # (pull_chunk's own self._link is None check in _request_chunk only
-        # fires once a read is admitted - by then the item already looks
-        # "in progress" to Finder for no reason).
+        # (_issue_read's own self._link is None check only fires once the window
+        # starts issuing - by then the item already looks "in progress" to Finder
+        # for no reason).
         if self._link is None:
             if reply is None:
                 raise RuntimeError("file provider peer not connected")
@@ -1161,9 +1246,6 @@ class FileProviderBackend(QObject):
             fetch_token=fetch_token,
             generation_id=generation_id,
             entry_index=entry_index,
-            offset=0,
-            read_id=None,
-            expected=0,
             size=entry.size,
             state=state,
             in_use_counted=True,
@@ -1199,16 +1281,18 @@ class FileProviderBackend(QObject):
         return fetch_token, entry.size
 
     def pull_chunk(self, fetch_token: str, reply=None) -> None:
-        """Emit at most one request for an admitted fetch with no read in flight.
+        """Serve the next in-order chunk to the (sequential) consumer and keep
+        this fetch's read window full (spec §4/§6).
 
-        Task 11: admission is now gated a second, finer time by the global
-        byte budget (``MAX_TOTAL_BUFFERED_BYTES``), on top of the existing
-        per-fetch "one outstanding read" invariant and the
-        ``MAX_ACTIVE_FETCHES`` slot gate above. A pull that would push the
-        sum of in-flight reads' expected sizes over budget is parked in
-        ``_pull_queue`` (FIFO) instead of being rejected - it fires once a
-        prior read completes and frees enough budget
-        (see ``_admit_pull``/``_admit_pull_queue``).
+        The Swift consumer pulls strictly one chunk at a time, but the host
+        keeps up to ``PER_FILE_READ_WINDOW`` ``FILE_READ`` ranges in flight per
+        fetch (``_fill_window``) so the host<->Windows link never idles between
+        chunks. If the next in-order range is already buffered it is delivered
+        at once; otherwise this reply is parked until its range arrives
+        (``_try_deliver`` from ``_on_chunk``). Window refill is bounded by the
+        global byte budget; a fetch that cannot fill because the budget is full
+        parks in ``_pull_queue`` (FIFO) and resumes as ranges are consumed
+        (``_resume_windows``).
         """
         fetch = self.by_token.get(fetch_token)
         if fetch is None or fetch.state in (
@@ -1219,138 +1303,240 @@ class FileProviderBackend(QObject):
             if reply is not None:
                 reply(None, False, _xpc_error(7))
             return
-        if fetch.reply is not None or fetch.read_id is not None:
+        if fetch.reply is not None:
+            # A consumer pull is already parked - the Swift side pulls serially
+            # (one pullChunk outstanding per fetch); a second concurrent pull is
+            # a protocol error.
             if reply is not None:
                 reply(None, False, _xpc_error(7))
             return
         fetch.reply = reply
-        self._admit_pull(fetch)
+        self._fill_window(fetch)
+        self._try_deliver(fetch)
 
     def _outstanding_bytes(self) -> int:
-        """Sum of ``expected`` across reads currently in flight - the
-        quantity ``MAX_TOTAL_BUFFERED_BYTES`` bounds. Chunks are delivered by
-        reference (``reply(message.blob)`` - see module docstring): the
-        backend itself never accumulates bytes, so this is a request-size
-        budget, not an actual buffer of received bytes."""
-        return sum(fetch.expected for fetch in self.by_read_id.values())
+        """Sum of the length of every live range across all fetches - the
+        quantity ``MAX_TOTAL_BUFFERED_BYTES`` bounds (spec §8/§9). Counts both
+        IN_FLIGHT ranges (requested, not yet received) and RECEIVED ranges
+        (buffered in the per-fetch reorder store, not yet consumed): both hold
+        payload the host is on the hook for. Unlike the old WINDOW=1 backend,
+        RECEIVED ranges really are held in memory (``_Range.blob``) until the
+        sequential consumer catches up, bounded to <= 4 MiB per stream."""
+        return sum(
+            r.length for fetch in self.by_token.values() for r in fetch.ranges.values()
+        )
 
-    def _admit_pull(self, fetch: Fetch) -> None:
-        """Send the FILE_READ for ``fetch`` (whose ``reply`` is already set)
-        now, or park it in ``_pull_queue`` if it would exceed the byte
-        budget. A fetch already at EOF (``offset >= size``) bypasses the
-        budget entirely - it needs no read at all (see ``_request_chunk``)."""
-        if (
-            fetch.state is not FetchState.REQUESTING
-            or fetch.fetch_token not in self._active
-            or fetch.read_id is not None
+    def _fill_window(self, fetch: Fetch) -> None:
+        """Issue ``FILE_READ``s until the window is full, the file is fully
+        planned, or the global byte budget is reached (then park in
+        ``_pull_queue``). Idempotent; safe to call on every pull/consume."""
+        while (
+            fetch.state is FetchState.REQUESTING
+            and fetch.fetch_token in self._active
+            and len(fetch.ranges) < PER_FILE_READ_WINDOW
+            and fetch.plan_offset < fetch.size
         ):
-            return
-        if fetch.offset >= fetch.size:
-            self._request_chunk(fetch)
-            return
-        expected = min(MAX_FILE_CHUNK_BYTES, fetch.size - fetch.offset)
-        if self._outstanding_bytes() + expected > MAX_TOTAL_BUFFERED_BYTES:
-            self._pull_queue.append(fetch.fetch_token)
-            return
-        self._request_chunk(fetch)
+            length = min(MAX_FILE_CHUNK_BYTES, fetch.size - fetch.plan_offset)
+            if self._outstanding_bytes() + length > MAX_TOTAL_BUFFERED_BYTES:
+                if fetch.fetch_token not in self._pull_queue:
+                    self._pull_queue.append(fetch.fetch_token)
+                return
+            offset = fetch.plan_offset
+            fetch.plan_offset += length
+            if not self._issue_read(fetch, offset, length):
+                return  # genuine send failure -> fetch already settled FAILED
 
-    def _admit_pull_queue(self) -> None:
-        """Admit byte-budget-queued pulls, FIFO, while the budget allows."""
-        while self._pull_queue:
-            fetch_token = self._pull_queue[0]
-            fetch = self.by_token.get(fetch_token)
-            if (
-                fetch is None
-                or fetch.reply is None
-                or fetch.state is not FetchState.REQUESTING
-                or fetch_token not in self._active
-                or fetch.read_id is not None
-            ):
-                self._pull_queue.popleft()
-                continue
-            if fetch.offset >= fetch.size:
-                self._pull_queue.popleft()
-                self._request_chunk(fetch)
-                continue
-            expected = min(MAX_FILE_CHUNK_BYTES, fetch.size - fetch.offset)
-            if self._outstanding_bytes() + expected > MAX_TOTAL_BUFFERED_BYTES:
-                break  # still over budget - FIFO means later entries are too
-            self._pull_queue.popleft()
-            self._request_chunk(fetch)
-
-    def _request_chunk(self, fetch: Fetch) -> None:
-        fetch_token = fetch.fetch_token
-        if (
-            fetch.state is not FetchState.REQUESTING
-            or fetch_token not in self._active
-            or fetch.read_id is not None
-        ):
-            return
+    def _issue_read(self, fetch: Fetch, offset: int, length: int) -> bool:
+        """Send one ``FILE_READ`` for ``[offset, length]`` and register its live
+        range. Returns False only on a genuine send failure (the fetch is then
+        already settled FAILED); a fake link that completes synchronously inside
+        ``send()`` returns True (the range was consumed, not failed)."""
+        if self._link is None:
+            self._finish_fetch(fetch, FetchState.FAILED, _xpc_error(8))
+            return False
         if not fetch.work_started:
             fetch.work_started = True
             self._perf.emit(
                 "work_start",
                 generation_id=fetch.generation_id,
                 entry_index=fetch.entry_index,
-                fetch_token=fetch_token,
+                fetch_token=fetch.fetch_token,
             )
-        if fetch.offset >= fetch.size:
-            reply, fetch.reply = fetch.reply, None
-            self._finish_fetch(fetch, FetchState.DONE)
-            if reply is not None:
-                reply(b"", True, None)
-            return
-        if self._link is None:
-            self._finish_fetch(fetch, FetchState.FAILED, _xpc_error(8))
-            return
-        expected = min(MAX_FILE_CHUNK_BYTES, fetch.size - fetch.offset)
         read_id = next(self._read_ids)
-        fetch.read_id = read_id
-        fetch.expected = expected
-        fetch.state = FetchState.RECEIVING
+        rng = _Range(
+            read_id=read_id, offset=offset, length=length, state=RangeState.IN_FLIGHT
+        )
+        fetch.ranges[offset] = rng
         self.by_read_id[read_id] = fetch
-        # Task 17 (ruling #3): arm the per-read watchdog BEFORE calling
-        # send() - a fake link may complete synchronously inside send()
-        # itself (see SynchronouslyCompletingLink in
-        # test_fileprovider_scheduler.py), which must disarm this same timer
-        # via _clear_read before send() even returns.
+        self._observe_outstanding(fetch)
+        self._bump("fp_range_issued")
+        _log_event(
+            "fp_range_issued",
+            transfer_id=fetch.generation_id,
+            entry_index=fetch.entry_index,
+            fetch_token=fetch.fetch_token,
+            read_id=read_id,
+            offset=offset,
+            length=length,
+        )
+        # Arm the per-read watchdog BEFORE send() - a fake link may complete
+        # synchronously inside send() (SynchronouslyCompletingLink), which
+        # disarms this same timer via the chunk path before send() returns.
         self._arm_watchdog(read_id)
         message = Message(
             MessageType.FILE_READ,
             {
                 "transfer_id": fetch.generation_id,
                 "entry_index": fetch.entry_index,
-                "offset": fetch.offset,
-                "length": expected,
+                "offset": offset,
+                "length": length,
                 "read_id": read_id,
             },
             b"",
         )
+        self._perf.emit(
+            "file_read_send",
+            generation_id=fetch.generation_id,
+            entry_index=fetch.entry_index,
+            fetch_token=fetch.fetch_token,
+            read_id=read_id,
+            offset=offset,
+            length=length,
+        )
         try:
-            self._perf.emit(
-                "file_read_send",
-                generation_id=fetch.generation_id,
-                entry_index=fetch.entry_index,
-                fetch_token=fetch_token,
-                read_id=read_id,
-                offset=fetch.offset,
-                length=expected,
-            )
             sent = self._link.send(message)
         except Exception as error:  # noqa: BLE001 - external transport boundary
             logger.warning(
                 "FILE_READ send failed for fetch %s: %s",
-                fetch_token,
+                fetch.fetch_token,
                 type(error).__name__,
             )
             sent = False
+        if sent is False:
+            # Only a genuine failure if this exact range is still live and
+            # in-flight; a synchronous completion inside send() already retired
+            # it (or the whole fetch), in which case there is nothing to fail.
+            if (
+                self.by_token.get(fetch.fetch_token) is fetch
+                and fetch.state is FetchState.REQUESTING
+                and fetch.ranges.get(offset) is rng
+                and rng.state is RangeState.IN_FLIGHT
+            ):
+                self._finish_fetch(fetch, FetchState.FAILED, _xpc_error(3))
+                return False
+        return True
+
+    def _try_deliver(self, fetch: Fetch) -> None:
+        """Hand the next in-order range to a parked consumer reply, if present
+        and buffered (spec §6). Delivers at most one chunk (the consumer pulls
+        serially), advances the consume cursor, finishes on EOF, and refills the
+        freed window slot. Out-of-order arrivals wait here until the range at
+        ``consume_offset`` is RECEIVED."""
+        if fetch.reply is None:
+            return
+        # Only an admitted (slot-holding) fetch may settle here: a fetch still in
+        # the MAX_ACTIVE_FETCHES slot queue keeps its reply parked until
+        # _admit_from_queue promotes it. Without this guard a zero-byte QUEUED
+        # fetch would complete out of turn (bypassing the slot gate and leaving a
+        # stale token in _queue).
         if (
-            sent is False
-            and fetch.state is FetchState.RECEIVING
-            and fetch.read_id == read_id
-            and self.by_read_id.get(read_id) is fetch
+            fetch.state is not FetchState.REQUESTING
+            or fetch.fetch_token not in self._active
         ):
-            self._finish_fetch(fetch, FetchState.FAILED, _xpc_error(3))
+            return
+        # Zero-byte, or the whole file already consumed: the fetch is complete.
+        if fetch.consume_offset >= fetch.size:
+            reply, fetch.reply = fetch.reply, None
+            self._finish_fetch(fetch, FetchState.DONE)
+            reply(b"", True, None)
+            return
+        rng = fetch.ranges.get(fetch.consume_offset)
+        if rng is None or rng.state is not RangeState.RECEIVED:
+            return  # not arrived yet - the reply stays parked
+        reply, fetch.reply = fetch.reply, None
+        blob = rng.blob if rng.blob is not None else b""
+        del fetch.ranges[fetch.consume_offset]
+        fetch.consume_offset += rng.length
+        self._bump("fp_range_consumed")
+        _log_event(
+            "fp_range_consumed",
+            transfer_id=fetch.generation_id,
+            entry_index=fetch.entry_index,
+            fetch_token=fetch.fetch_token,
+            read_id=rng.read_id,
+            offset=rng.offset,
+            length=rng.length,
+        )
+        eof = fetch.consume_offset >= fetch.size
+        self._perf.emit(
+            "xpc_chunk_reply",
+            generation_id=fetch.generation_id,
+            entry_index=fetch.entry_index,
+            fetch_token=fetch.fetch_token,
+            read_id=rng.read_id,
+            bytes=len(blob),
+            eof=eof,
+        )
+        if eof:
+            self._finish_fetch(fetch, FetchState.DONE)
+            reply(blob, True, None)
+            return
+        reply(blob, False, None)
+        # A window slot just freed: refill this stream, then let any
+        # budget-parked stream proceed on the freed global budget.
+        self._fill_window(fetch)
+        self._resume_windows()
+
+    def _resume_windows(self) -> None:
+        """Re-fill budget-parked fetches (FIFO) after a range was consumed and
+        freed global budget. Each ``_fill_window`` re-parks itself if it is
+        still capped, so one drain pass per consume is sufficient."""
+        pending = list(self._pull_queue)
+        self._pull_queue.clear()
+        for token in pending:
+            fetch = self.by_token.get(token)
+            if (
+                fetch is None
+                or fetch.state is not FetchState.REQUESTING
+                or token not in self._active
+            ):
+                continue
+            self._fill_window(fetch)
+
+    def _observe_outstanding(self, fetch: Fetch) -> None:
+        """Update the bound gauges (spec §21) and flag any window violation.
+        Called right after a range is registered, so the maxima reflect the
+        peak the process actually reached."""
+        counters = self.counters
+        in_flight = fetch.in_flight()
+        per_bytes = sum(r.length for r in fetch.ranges.values())
+        counters["fp_max_outstanding_reads_per_stream"] = max(
+            int(counters.get("fp_max_outstanding_reads_per_stream", 0)), in_flight
+        )
+        counters["fp_max_global_outstanding_reads"] = max(
+            int(counters.get("fp_max_global_outstanding_reads", 0)), len(self.by_read_id)
+        )
+        counters["fp_max_outstanding_bytes_per_stream"] = max(
+            int(counters.get("fp_max_outstanding_bytes_per_stream", 0)), per_bytes
+        )
+        counters["fp_max_global_outstanding_bytes"] = max(
+            int(counters.get("fp_max_global_outstanding_bytes", 0)),
+            self._outstanding_bytes(),
+        )
+        # NOTE: window OCCUPANCY over time (and TIME_WINDOW_FULL_PERCENT, spec
+        # §27) is derived from the fp_range_issued/received/consumed event stream
+        # with timestamps, NOT a running mean here: an issue-time-only sample
+        # would systematically understate the steady-state occupancy (it never
+        # samples the window while it sits full between issues). The peak gauges
+        # above are exact; the event log carries the rest.
+        if in_flight > PER_FILE_READ_WINDOW or len(fetch.ranges) > PER_FILE_READ_WINDOW:
+            self._bump("fp_window_bound_violation")
+            _log_event(
+                "fp_window_bound_violation",
+                fetch_token=fetch.fetch_token,
+                in_flight=in_flight,
+                live=len(fetch.ranges),
+            )
 
     def _admit_from_queue(self) -> None:
         while self._queue and len(self._active) < MAX_ACTIVE_FETCHES:
@@ -1368,41 +1554,62 @@ class FileProviderBackend(QObject):
                 queued=True,
             )
             if fetch.reply is not None:
-                # Promotion out of the slot queue must still pass through
-                # the byte-budget gate (Task 11) - not bypass it.
-                self._admit_pull(fetch)
+                # A pull arrived while this fetch was slot-queued: now that it is
+                # admitted, start its window and serve any buffered range.
+                self._fill_window(fetch)
+                self._try_deliver(fetch)
         self._sync_active_gauges()
 
-    def _pending_fetch(self, message: Message) -> Fetch | None:
+    def _correlate(self, message: Message) -> tuple[_Range | None, Fetch | None]:
+        """Map a ``FILE_CHUNK``/``FILE_ERROR`` to its live IN_FLIGHT range via
+        the wire ``read_id`` + ``offset`` (spec §5 - reuses existing identity).
+        Returns ``(None, None)`` for a stale/late/unexpected message: unknown
+        ``read_id``, terminal/reassigned range, or a header that does not match
+        the range this fetch is expecting."""
         header = message.header
         read_id = header.get("read_id")
         if not isinstance(read_id, int) or isinstance(read_id, bool):
-            return None
+            return None, None
         entry_index = header.get("entry_index")
         offset = header.get("offset")
         if any(
             not isinstance(value, int) or isinstance(value, bool) or value < 0
             for value in (entry_index, offset)
         ):
-            return None
+            return None, None
         fetch = self.by_read_id.get(read_id)
-        if fetch is None or fetch.read_id != read_id:
-            return None
+        if fetch is None:
+            return None, None
+        rng = fetch.ranges.get(offset)
         if (
-            fetch.state is not FetchState.RECEIVING
+            rng is None
+            or rng.read_id != read_id
+            or rng.state is not RangeState.IN_FLIGHT
             or header.get("transfer_id") != fetch.generation_id
             or entry_index != fetch.entry_index
-            or offset != fetch.offset
         ):
-            return None
-        return fetch
+            return None, None
+        return rng, fetch
 
-    def _clear_read(self, fetch: Fetch) -> None:
-        if fetch.read_id is not None:
-            self.by_read_id.pop(fetch.read_id, None)
-            self._disarm_watchdog(fetch.read_id)
-        fetch.read_id = None
-        fetch.expected = 0
+    def _clear_all_ranges(self, fetch: Fetch) -> None:
+        """Drop every live range of ``fetch``: pop each ``read_id`` from
+        ``by_read_id`` and disarm its watchdog (so a late chunk for any of them
+        is dropped as unknown), and release the reorder buffer. Used by every
+        terminal settle (cancel/fail/timeout/disconnect)."""
+        for rng in fetch.ranges.values():
+            self.by_read_id.pop(rng.read_id, None)
+            self._disarm_watchdog(rng.read_id)
+        fetch.ranges.clear()
+
+    def _rearm_inflight_watchdogs(self, fetch: Fetch) -> None:
+        """Restart the deadline of every still-IN_FLIGHT read of ``fetch`` - used
+        when a chunk arrives, so a windowed read's timeout measures time since the
+        fetch last made progress, not time since it was issued (see ``_on_chunk``
+        for why serial sender servicing makes this necessary)."""
+        for rng in fetch.ranges.values():
+            if rng.state is RangeState.IN_FLIGHT:
+                self._disarm_watchdog(rng.read_id)
+                self._arm_watchdog(rng.read_id)
 
     #: FetchState (terminal) -> its counter name, for _finish_fetch below.
     _TERMINAL_COUNTERS = {
@@ -1413,8 +1620,8 @@ class FileProviderBackend(QObject):
 
     def _finish_fetch(self, fetch: Fetch, state: FetchState, error=None) -> None:
         reply, fetch.reply = fetch.reply, None
-        read_id = fetch.read_id
-        self._clear_read(fetch)
+        live_reads = len(fetch.ranges)
+        self._clear_all_ranges(fetch)
         fetch.state = state
         held_slot = fetch.fetch_token in self._active
         self._active.discard(fetch.fetch_token)
@@ -1426,6 +1633,10 @@ class FileProviderBackend(QObject):
                 fetch_token=fetch.fetch_token,
                 state=state.value,
             )
+        try:
+            self._pull_queue.remove(fetch.fetch_token)
+        except ValueError:
+            pass
         self._sync_active_gauges()
         counter_name = self._TERMINAL_COUNTERS.get(state)
         if counter_name is not None:
@@ -1435,12 +1646,12 @@ class FileProviderBackend(QObject):
                 transfer_id=fetch.generation_id,
                 entry_index=fetch.entry_index,
                 fetch_token=fetch.fetch_token,
-                read_id=read_id,
+                live_reads=live_reads,
             )
         if reply is not None:
             reply(None, False, error or _xpc_error(7))
         self._admit_from_queue()
-        self._admit_pull_queue()
+        self._resume_windows()
         # Task 15: settle-once in-use decrement. Every terminal path
         # (DONE/FAILED/CANCELLED) funnels through here, and in_use_counted
         # guards against a double-decrement when e.g. a cancel races an
@@ -1454,7 +1665,7 @@ class FileProviderBackend(QObject):
         # this explicitly, so a long-lived extension leaked one dict entry per
         # completed/failed fetch forever. All production readers of by_token
         # already use .get() and handle a None/missing entry the same way they
-        # handle "unknown token" (see pull_chunk/_admit_pull_queue/
+        # handle "unknown token" (see pull_chunk/_resume_windows/
         # _admit_from_queue/cancel_fetch) - verified during task-19 review, so
         # dropping it here the instant a fetch goes terminal is safe.
         self.by_token.pop(fetch.fetch_token, None)
@@ -1463,18 +1674,19 @@ class FileProviderBackend(QObject):
         """Task 12: Finder cancel, purely local - NO wire message (there is
         no ``FILE_CANCEL`` in ``MessageType`` and none must ever be added;
         see task-12 brief ruling #1). Drops ``fetch_token`` from ``by_token``
-        AND ``by_read_id`` (the latter via ``_finish_fetch``/``_clear_read``),
-        stops issuing any further ``FILE_READ`` for it, frees whatever byte
-        budget it held and re-admits both queues (``_admit_from_queue``/
-        ``_admit_pull_queue`` inside ``_finish_fetch``).
+        AND every one of its ranges from ``by_read_id`` (via ``_finish_fetch``/
+        ``_clear_all_ranges``), stops issuing any further ``FILE_READ`` for it,
+        frees its window budget and re-admits both queues
+        (``_admit_from_queue``/``_resume_windows`` inside ``_finish_fetch``).
 
         Idempotent no-op for an unknown token or one already settled
         (``DONE``/``FAILED``/already ``CANCELLED``) - ruling #2: cancel vs.
         completion is settle-once, and the loser here is always this no-op
-        branch, never a crash. A ``FILE_CHUNK`` that later arrives for the
-        read this fetch held finds nothing in ``by_read_id`` and is dropped
-        silently by ``_pending_fetch`` (unknown ``read_id`` - the same path
-        Task 9/10 already use for stale reads).
+        branch, never a crash. Any of the (up to ``PER_FILE_READ_WINDOW``)
+        ``FILE_CHUNK``s that later arrive for the reads this fetch held find
+        nothing in ``by_read_id`` and are dropped silently by ``_correlate``
+        (unknown ``read_id``) - they cannot resurrect the fetch, write, refill,
+        or complete it (spec §10).
         """
         fetch = self.by_token.get(fetch_token)
         if fetch is None or fetch.state in (
@@ -1483,15 +1695,23 @@ class FileProviderBackend(QObject):
             FetchState.CANCELLED,
         ):
             return
+        outstanding = len(fetch.ranges)
+        if outstanding:
+            self._bump("fp_cancel_outstanding", outstanding)
+            _log_event(
+                "fp_cancel_outstanding",
+                fetch_token=fetch_token,
+                outstanding=outstanding,
+            )
         self._finish_fetch(fetch, FetchState.CANCELLED, _xpc_error(3))
 
     def _on_chunk(self, message: Message) -> None:
         received_ns = self._perf.now()
-        fetch = self._pending_fetch(message)
-        if fetch is None:
-            # No outstanding read matches this message - it settled/moved on
-            # already (cancelled, timed out, or a stale duplicate) by the
-            # time this chunk arrived.
+        rng, fetch = self._correlate(message)
+        if fetch is None or rng is None:
+            # No live in-flight range matches this message - it settled/moved on
+            # already (cancelled, timed out, a duplicate, or an unexpected/stale
+            # range) by the time this chunk arrived (spec §7/§10).
             self._bump("fp_late_chunk")
             _log_event("fp_late_chunk", read_id=message.header.get("read_id"))
             return
@@ -1502,12 +1722,12 @@ class FileProviderBackend(QObject):
             generation_id=fetch.generation_id,
             entry_index=fetch.entry_index,
             fetch_token=fetch.fetch_token,
-            read_id=fetch.read_id,
-            offset=fetch.offset,
+            read_id=rng.read_id,
+            offset=rng.offset,
             bytes=chunk_size,
         )
-        if chunk_size != fetch.expected or fetch.offset + chunk_size > fetch.size:
-            if chunk_size > fetch.expected or fetch.offset + chunk_size > fetch.size:
+        if chunk_size != rng.length or rng.offset + chunk_size > fetch.size:
+            if chunk_size > rng.length or rng.offset + chunk_size > fetch.size:
                 event = "fp_oversized_chunk"
             else:
                 event = "fp_truncated"
@@ -1517,42 +1737,40 @@ class FileProviderBackend(QObject):
                 transfer_id=fetch.generation_id,
                 entry_index=fetch.entry_index,
                 fetch_token=fetch.fetch_token,
-                read_id=fetch.read_id,
+                read_id=rng.read_id,
             )
             self._finish_fetch(fetch, FetchState.FAILED, _xpc_error(7))
             return
+        # Range received: retire its read_id + watchdog and buffer the payload in
+        # the bounded reorder store until the sequential consumer reaches it.
+        self.by_read_id.pop(rng.read_id, None)
+        self._disarm_watchdog(rng.read_id)
+        rng.state = RangeState.RECEIVED
+        rng.blob = message.blob
+        # Forward progress on this fetch means the sender is alive, so restart the
+        # deadline of every OTHER read still in flight for it. The window issues
+        # up to PER_FILE_READ_WINDOW reads at once but the sender answers them
+        # serially (one event-loop thread, see TransferService._answer_read), so
+        # a later read's clock would otherwise be consumed by head-of-line
+        # queueing behind earlier ones and fail a steadily-progressing transfer.
+        # This keeps the watchdog meaning "no chunk for 30s" (a genuinely hung
+        # host), exactly as it did under WINDOW=1, not "issued 30s ago".
+        self._rearm_inflight_watchdogs(fetch)
         self._bump("fp_bytes_received", chunk_size)
-        reply, fetch.reply = fetch.reply, None
-        read_id = fetch.read_id
-        self._clear_read(fetch)
-        fetch.offset += chunk_size
+        self._bump("fp_range_received")
         _log_event(
             "fp_bytes_received",
             transfer_id=fetch.generation_id,
             entry_index=fetch.entry_index,
             fetch_token=fetch.fetch_token,
-            read_id=read_id,
+            read_id=rng.read_id,
             bytes=chunk_size,
         )
-        if fetch.offset >= fetch.size:
-            self._finish_fetch(fetch, FetchState.DONE)
-        else:
-            fetch.state = FetchState.REQUESTING
-        if reply is not None:
-            self._perf.emit(
-                "xpc_chunk_reply",
-                generation_id=fetch.generation_id,
-                entry_index=fetch.entry_index,
-                fetch_token=fetch.fetch_token,
-                read_id=read_id,
-                bytes=chunk_size,
-                eof=fetch.offset >= fetch.size,
-            )
-            reply(message.blob, fetch.offset >= fetch.size, None)
-        # Clearing this read (above) may have freed enough budget for a
-        # byte-budget-queued pull elsewhere - harmless no-op if not, and if
-        # this fetch just finished, _finish_fetch already ran this too.
-        self._admit_pull_queue()
+        # Deliver in order if this filled the gap at the consume cursor; an
+        # out-of-order arrival simply waits here (range stays RECEIVED). No
+        # refill is due until a range is actually consumed (the window is still
+        # full), which _try_deliver handles.
+        self._try_deliver(fetch)
 
     #: Wire ``FILE_ERROR`` ``reason`` -> ``DuoFPErrorDomain`` code (spec §16).
     #: ``"cancelled"``/``"not connected"`` are deliberately absent - those are
@@ -1569,8 +1787,12 @@ class FileProviderBackend(QObject):
     }
 
     def _on_file_error(self, message: Message) -> None:
-        fetch = self._pending_fetch(message)
+        _rng, fetch = self._correlate(message)
         if fetch is None:
+            # Stale/late error for a range that already settled - drop it, the
+            # same way _on_chunk drops a late chunk. A live fetch is failed once
+            # (below); any other in-flight range's later chunk/error is then a
+            # late no-op (spec §14).
             return
         reason = message.header.get("reason")
         code = (
