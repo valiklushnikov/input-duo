@@ -96,7 +96,7 @@ def test_disconnect_is_local_only_no_wire_message_sent(qapp):
     link = DisconnectableLink()
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)), link=link)
     [token] = _open_all(backend, manifest)
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     sent_before = list(link.sent)
 
     link.disconnected.emit("interrupted")
@@ -121,7 +121,7 @@ def test_disconnect_twice_is_a_harmless_no_op(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)), link=link)
     [token] = _open_all(backend, manifest)
     fetch = backend.by_token[token]
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
 
     link.disconnected.emit("first")
     link.disconnected.emit("second")  # must not raise, must not re-settle
@@ -135,14 +135,14 @@ def test_reattaching_a_new_link_after_disconnect_stops_listening_to_the_old_one(
     first = DisconnectableLink()
     backend, first, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)), link=first)
     [token] = _open_all(backend, manifest)
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
 
     second = DisconnectableLink()
     backend.attach_link(second)
 
     first.disconnected.emit("stale")  # must be ignored - no longer "the" link
 
-    assert backend.by_token[token].state == "receiving"  # untouched
+    assert backend.by_token[token].state == "requesting"  # untouched
 
 
 # --- host-down: open_fetch / pull_chunk reply NotConnected -----------------
@@ -254,7 +254,7 @@ def test_oversized_chunk_yields_protocol_code(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)))
     [token] = _open_all(backend, manifest)
     fetch = backend.by_token[token]
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = link.sent
 
     backend.handle_message(_reply(read, b"toobig!!"))  # 8 bytes for a 3-byte file

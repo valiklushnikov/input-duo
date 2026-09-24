@@ -267,7 +267,7 @@ def test_fetch_started_counter_and_active_queued_gauges(qapp):
 def test_fetch_completed_counter_increments_exactly_on_done(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)))
     [token] = _open_all(backend, manifest)
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = link.sent
 
     backend.handle_message(_reply(read, b"abc"))
@@ -293,7 +293,7 @@ def test_fetch_failed_counter_increments_on_wire_file_error(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)))
     [token] = _open_all(backend, manifest)
     fetch = backend.by_token[token]
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = link.sent
 
     backend.handle_message(_file_error(read, "protocol"))
@@ -309,7 +309,7 @@ def test_bytes_received_counter_sums_real_chunk_bytes(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3, 4)))
     tokens = _open_all(backend, manifest)
     for token in tokens:
-        backend.pull_chunk(token)
+        backend.pull_chunk(token, lambda *a: None)
     first_read, second_read = link.sent
 
     backend.handle_message(_reply(first_read, b"abc"))
@@ -366,7 +366,7 @@ def test_reattaching_a_link_increments_connect_again(qapp):
 def test_late_chunk_counter_increments_for_an_unmatched_read(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)))
     [token] = _open_all(backend, manifest)
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = link.sent
     backend.cancel_fetch(token)  # settles + drops read_id tracking
 
@@ -379,7 +379,7 @@ def test_oversized_chunk_counter_increments_and_fails_the_fetch(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)))
     [token] = _open_all(backend, manifest)
     fetch = backend.by_token[token]
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = link.sent
 
     backend.handle_message(_reply(read, b"abcdefgh"))  # bigger than expected(3)
@@ -393,7 +393,7 @@ def test_truncated_chunk_counter_increments_and_fails_the_fetch(qapp):
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(5,)))
     [token] = _open_all(backend, manifest)
     fetch = backend.by_token[token]
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = link.sent
 
     backend.handle_message(_reply(read, b"ab"))  # smaller than expected(5)
@@ -477,7 +477,7 @@ def test_watchdog_expiry_fails_exactly_the_stalled_fetch_with_timeout(qapp):
     assert backend.counters["fp_fetch_timeout"] == 1
     assert backend.counters["fp_fetch_failed"] == 1
     # the OTHER fetch is completely undisturbed
-    assert fetches[tokens[1]].state == "receiving"
+    assert fetches[tokens[1]].state == "requesting"
     assert replies[tokens[1]] == []
     assert factory.created[1].running
 
@@ -489,7 +489,7 @@ def test_chunk_arrival_disarms_the_watchdog_no_timeout_counted(qapp):
     )
     [token] = _open_all(backend, manifest)
     fetch = backend.by_token[token]
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = link.sent
     assert len(factory.created) == 1
     assert factory.created[0].running
@@ -509,7 +509,7 @@ def test_cancel_disarms_the_watchdog(qapp):
         qapp, _manifest(sizes=(3,)), timer_factory=factory
     )
     [token] = _open_all(backend, manifest)
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     assert factory.created[0].running
 
     backend.cancel_fetch(token)
@@ -530,18 +530,18 @@ def test_watchdog_only_fails_the_read_it_was_armed_for_not_a_reused_token(qapp):
     )
     tokens = _open_all(backend, manifest)
     fetch0 = backend.by_token[tokens[0]]
-    backend.pull_chunk(tokens[0])
+    backend.pull_chunk(tokens[0], lambda *a: None)
     first_read = link.sent[0]
     stale_timer = factory.created[0]
     backend.handle_message(_reply(first_read, b"abc"))  # settles + disarms
     assert fetch0.state == "done"
 
-    backend.pull_chunk(tokens[1])  # a fresh read, gets a fresh read_id/timer
+    backend.pull_chunk(tokens[1], lambda *a: None)  # a fresh read, gets a fresh read_id/timer
 
     stale_timer.fire()  # the OLD, already-disarmed timer firing late
 
     assert backend.counters.get("fp_fetch_timeout", 0) == 0
-    assert backend.by_token[tokens[1]].state == "receiving"
+    assert backend.by_token[tokens[1]].state == "requesting"
 
 
 # --- privacy hard block: never a full path, never content bytes ------------
@@ -572,10 +572,10 @@ def test_no_log_record_ever_carries_a_full_path_or_content_bytes(qapp, caplog):
     backend, link, _remote, manifest = _backend(qapp, manifest, link=link, domain=domain)
     tokens = _open_all(backend, manifest)
 
-    backend.pull_chunk(tokens[0])
+    backend.pull_chunk(tokens[0], lambda *a: None)
     backend.handle_message(_reply(link.sent[0], secret_blob))  # completes
 
-    backend.pull_chunk(tokens[1])
+    backend.pull_chunk(tokens[1], lambda *a: None)
     backend.handle_message(_reply(link.sent[1], b"toolong!!"))  # oversized-fails
 
     backend.cancel_fetch(tokens[2])

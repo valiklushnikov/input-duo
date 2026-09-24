@@ -127,7 +127,8 @@ def row_multiple_flat_files(qapp, qtbot, tmp_path):
         replies = []
         fetch = backend.by_token[token]
         backend.pull_chunk(token, lambda *a, r=replies: r.append(a))
-        [read] = [m for m in link.sent if m.header["read_id"] == fetch.read_id]
+        live = {r.read_id for r in fetch.ranges.values()}
+        [read] = [m for m in link.sent if m.header["read_id"] in live]
         backend.handle_message(_sched_reply(read, blob))
         assert replies == [(blob, True, None)]
 
@@ -231,7 +232,7 @@ def row_repeated_paste_of_completed_generation(qapp, qtbot, tmp_path):
     _lc_publish(backend, "A")
 
     token, _size = backend.open_fetch("A", 0)
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = [m for m in link.sent if m.type is MessageType.FILE_READ]
     backend.handle_message(_lc_reply(read, b"abc"))
 
@@ -244,7 +245,7 @@ def row_repeated_paste_of_completed_generation(qapp, qtbot, tmp_path):
     # never touched again.
     token2, _size2 = backend.open_fetch("A", 0)
     assert token2 != token
-    backend.pull_chunk(token2)
+    backend.pull_chunk(token2, lambda *a: None)
     [read2] = [m for m in link.sent if m.type is MessageType.FILE_READ][1:]
     backend.handle_message(_lc_reply(read2, b"abc"))
 
@@ -264,7 +265,7 @@ def row_new_clipboard_while_old_fetch_active(qapp, qtbot, tmp_path):
     assert backend._generations["B"].state.name == "ACTIVE_CLIPBOARD"
 
     # The old, now-retired generation's already-open fetch still completes.
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = [m for m in link.sent if m.type is MessageType.FILE_READ]
     backend.handle_message(_lc_reply(read, b"abc"))
 

@@ -188,7 +188,7 @@ def test_repeated_paste_of_completed_generation_serves_without_remote_refetch(qa
 
     token, _size = backend.open_fetch("A", 0)
     fetch = backend.by_token[token]
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = [m for m in link.sent if m.type is MessageType.FILE_READ]
     backend.handle_message(_reply(read, b"abc"))
     assert fetch.state == "done"
@@ -228,7 +228,7 @@ def test_in_use_ref_blocks_delete_but_not_retire(qapp):
     # Settle the fetch -> last ref drops -> A quiesces and (already past TTL)
     # is GC-eligible, so it is deleted on settle. Delete happens ONLY now,
     # never while the ref was held.
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = [m for m in link.sent if m.type is MessageType.FILE_READ]
     backend.handle_message(_reply(read, b"abc"))
     assert remote.deleted == ["A"]
@@ -248,14 +248,14 @@ def test_in_use_ref_returns_to_zero_after_all_fetches_settle(qapp):
 
     # Settle each via a completed read (DONE), a cancel (CANCELLED),
     # and a protocol error (FAILED) - every terminal path decrements once.
-    backend.pull_chunk(tokens[0])
+    backend.pull_chunk(tokens[0], lambda *a: None)
     [read0] = [m for m in link.sent if m.type is MessageType.FILE_READ]
     backend.handle_message(_reply(read0, b"abc"))  # DONE
     assert fetch0.state == "done"
 
     backend.cancel_fetch(tokens[1])  # CANCELLED
 
-    backend.pull_chunk(tokens[2])
+    backend.pull_chunk(tokens[2], lambda *a: None)
     read2 = [m for m in link.sent if m.type is MessageType.FILE_READ][-1]
     backend.handle_message(_reply(read2, b"toolong-oops"))  # FAILED (oversized)
     assert fetch2.state == "failed"
@@ -270,7 +270,7 @@ def test_settled_fetch_decrements_in_use_exactly_once(qapp):
     token, _size = backend.open_fetch("A", 0)
     assert backend._gen_in_use["A"] == 1
 
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = [m for m in link.sent if m.type is MessageType.FILE_READ]
     backend.handle_message(_reply(read, b"abc"))  # DONE, decremented once
     assert backend._gen_in_use["A"] == 0
@@ -287,7 +287,7 @@ def test_completed_then_superseded_generation_past_ttl_is_deleted(qapp):
 
     # Complete a fetch on A -> ref back to 0.
     token, _size = backend.open_fetch("A", 0)
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = [m for m in link.sent if m.type is MessageType.FILE_READ]
     backend.handle_message(_reply(read, b"abc"))
     assert backend._gen_in_use["A"] == 0
@@ -375,7 +375,7 @@ def test_transfer_end_sent_when_generation_quiesces(qapp):
     assert [m for m in link.sent if m.type is MessageType.TRANSFER_END] == []
 
     # Settle the fetch -> A quiesces -> TRANSFER_END for A (frees sender fds).
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = [m for m in link.sent if m.type is MessageType.FILE_READ]
     backend.handle_message(_reply(read, b"abc"))
 
@@ -394,7 +394,7 @@ def test_transfer_end_uses_the_existing_closed_message_type(qapp):
     _publish(backend, "A")
     token, _size = backend.open_fetch("A", 0)
     _publish(backend, "B")
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, lambda *a: None)
     [read] = [m for m in link.sent if m.type is MessageType.FILE_READ]
     backend.handle_message(_reply(read, b"abc"))
 
@@ -410,12 +410,12 @@ def test_transfer_end_sent_once_per_generation(qapp):
     t1, _ = backend.open_fetch("A", 1)
     _publish(backend, "B")  # A retired, IN_USE (2 refs)
 
-    backend.pull_chunk(t0)
+    backend.pull_chunk(t0, lambda *a: None)
     read0 = [m for m in link.sent if m.type is MessageType.FILE_READ][-1]
     backend.handle_message(_reply(read0, b"abc"))  # ref 2 -> 1, not quiesced yet
     assert [m for m in link.sent if m.type is MessageType.TRANSFER_END] == []
 
-    backend.pull_chunk(t1)
+    backend.pull_chunk(t1, lambda *a: None)
     read1 = [m for m in link.sent if m.type is MessageType.FILE_READ][-1]
     backend.handle_message(_reply(read1, b"abcde"))  # ref 1 -> 0 -> quiesce
 

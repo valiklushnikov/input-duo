@@ -114,6 +114,35 @@ def _reply(read: Message, blob: bytes, message_type=MessageType.FILE_CHUNK) -> M
     return Message(message_type, dict(read.header), blob)
 
 
+class Collector:
+    """Captures pull_chunk reply callbacks: (blob, eof, error). A production
+    ``pullChunk`` always carries a reply block; the windowed backend only
+    consumes a buffered range when a consumer reply is parked, so completion
+    tests must pass one (unlike the old WINDOW=1 backend, where a chunk advanced
+    the fetch regardless)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[bytes | None, bool, object]] = []
+
+    def __call__(self, blob, eof, error) -> None:
+        self.calls.append((blob, eof, error))
+
+
+def _range_ids(fetch) -> set[int]:
+    return {r.read_id for r in fetch.ranges.values()}
+
+
+def _snap(fetch):
+    """Windowed replacement for the old (offset, read_id, expected, state)
+    tuple: the fetch's observable per-stream state."""
+    return (
+        fetch.consume_offset,
+        fetch.plan_offset,
+        frozenset(_range_ids(fetch)),
+        fetch.state,
+    )
+
+
 def _error_code(error) -> int:
     """DuoFPErrorDomain code from either a real NSError (darwin) or the
     ``RuntimeError('DuoFPErrorDomain:<n>')`` fallback ``_xpc_error`` returns
@@ -170,71 +199,84 @@ def test_opening_six_fetches_admits_four_and_queues_two_without_reading(qapp):
 def test_completing_fetch_admits_fifo_successor(qapp):
     backend, link, _remote, manifest = _backend(qapp)
     tokens = _open_all(backend, manifest)
-    backend.pull_chunk(tokens[0])
-    [read] = link.sent
     first_fetch = backend.by_token[tokens[0]]
+    c = Collector()
+    backend.pull_chunk(tokens[0], c)  # 3-byte file -> exactly one range
+    [read] = link.sent
 
     backend.handle_message(_reply(read, b"abc"))
 
     assert first_fetch.state == "done"
+    assert c.calls[-1] == (b"abc", True, None)
     assert backend.by_token[tokens[4]].state == "requesting"
     assert backend.by_token[tokens[5]].state == "queued"
     assert tokens[4] in backend._active
     assert list(backend._queue) == [tokens[5]]
 
 
-def test_fetches_keep_independent_offset_read_id_and_expected(qapp):
+def test_fetches_keep_independent_cursors_and_ranges(qapp):
+    # First file spans two ranges (>1 MiB); second is tiny. Each fetch owns its
+    # own consume/plan cursors and read_ids - no shared sequential state.
     manifest = _manifest(sizes=(MAX_FILE_CHUNK_BYTES + 2, 7))
     backend, link, _remote, manifest = _backend(qapp, manifest)
     first, second = _open_all(backend, manifest)
 
-    backend.pull_chunk(first)
-    backend.pull_chunk(second)
-    first_read, second_read = link.sent
-    second_before = backend.by_token[second]
-    second_snapshot = (
-        second_before.offset,
-        second_before.read_id,
-        second_before.expected,
-        second_before.state,
-    )
-
-    backend.handle_message(_reply(first_read, b"a" * MAX_FILE_CHUNK_BYTES))
-
+    cf, cs = Collector(), Collector()
+    backend.pull_chunk(first, cf)
+    backend.pull_chunk(second, cs)
     first_fetch = backend.by_token[first]
     second_fetch = backend.by_token[second]
-    assert first_fetch.offset == MAX_FILE_CHUNK_BYTES
-    assert first_fetch.read_id is None
-    assert first_fetch.expected == 0
-    assert first_fetch.state == "requesting"
+
+    # Independent read_ids, no overlap.
+    assert _range_ids(first_fetch).isdisjoint(_range_ids(second_fetch))
+    second_snapshot = (
+        second_fetch.consume_offset,
+        second_fetch.plan_offset,
+        _range_ids(second_fetch),
+        second_fetch.state,
+    )
+
+    # Deliver the first file's first range; only `first` advances.
+    first_r0 = next(m for m in link.sent if m.header["read_id"] in _range_ids(first_fetch)
+                    and m.header["offset"] == 0)
+    backend.handle_message(_reply(first_r0, b"a" * MAX_FILE_CHUNK_BYTES))
+
+    assert first_fetch.consume_offset == MAX_FILE_CHUNK_BYTES
+    assert cf.calls[-1] == (b"a" * MAX_FILE_CHUNK_BYTES, False, None)
     assert (
-        second_fetch.offset,
-        second_fetch.read_id,
-        second_fetch.expected,
+        second_fetch.consume_offset,
+        second_fetch.plan_offset,
+        _range_ids(second_fetch),
         second_fetch.state,
     ) == second_snapshot
-    assert first_read.header["read_id"] != second_read.header["read_id"]
 
 
-def test_pull_chunk_sends_exactly_one_read_for_that_fetch(qapp):
+def test_pull_chunk_sends_window_reads_and_rejects_a_concurrent_pull(qapp):
+    # A 3-byte file needs exactly one range; the window naturally shrinks to it.
     backend, link, _remote, manifest = _backend(qapp, _manifest(sizes=(3,)))
     [token] = _open_all(backend, manifest)
+    fetch = backend.by_token[token]
 
-    backend.pull_chunk(token)
-    backend.pull_chunk(token)
+    c1 = Collector()
+    backend.pull_chunk(token, c1)
+    # A second concurrent pull while one reply is parked is a protocol error and
+    # issues no extra read (the consumer must pull serially).
+    c2 = Collector()
+    backend.pull_chunk(token, c2)
 
     [read] = link.sent
-    fetch = backend.by_token[token]
+    read_id = next(iter(_range_ids(fetch)))
     assert read.type is MessageType.FILE_READ
     assert read.header == {
         "transfer_id": manifest.transfer_id,
         "entry_index": 0,
         "offset": 0,
         "length": 3,
-        "read_id": fetch.read_id,
+        "read_id": read_id,
     }
-    assert backend.by_read_id == {fetch.read_id: fetch}
-    assert fetch.state == "receiving"
+    assert backend.by_read_id == {read_id: fetch}
+    assert fetch.state == "requesting"
+    assert len(c2.calls) == 1 and c2.calls[0][2] is not None  # rejected once
 
 
 def test_open_fetch_requires_the_acked_active_generation(qapp):
@@ -257,17 +299,9 @@ def test_unindexed_chunk_and_error_do_not_mutate_any_fetch(qapp):
     manifest = _manifest(sizes=(3, 5))
     backend, link, _remote, manifest = _backend(qapp, manifest)
     first, second = _open_all(backend, manifest)
-    backend.pull_chunk(first)
-    backend.pull_chunk(second)
-    before = {
-        token: (
-            backend.by_token[token].offset,
-            backend.by_token[token].read_id,
-            backend.by_token[token].expected,
-            backend.by_token[token].state,
-        )
-        for token in (first, second)
-    }
+    backend.pull_chunk(first, Collector())
+    backend.pull_chunk(second, Collector())
+    before = {token: _snap(backend.by_token[token]) for token in (first, second)}
     unknown = dict(link.sent[0].header, read_id=999_999)
 
     backend.handle_message(Message(MessageType.FILE_CHUNK, unknown, b"abc"))
@@ -276,13 +310,7 @@ def test_unindexed_chunk_and_error_do_not_mutate_any_fetch(qapp):
     )
 
     assert {
-        token: (
-            backend.by_token[token].offset,
-            backend.by_token[token].read_id,
-            backend.by_token[token].expected,
-            backend.by_token[token].state,
-        )
-        for token in (first, second)
+        token: _snap(backend.by_token[token]) for token in (first, second)
     } == before
 
 
@@ -290,16 +318,16 @@ def test_boolean_response_coordinates_do_not_match_integer_fetch_coordinates(qap
     manifest = _manifest(sizes=(3,))
     backend, link, _remote, manifest = _backend(qapp, manifest)
     [token] = _open_all(backend, manifest)
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, Collector())
     [read] = link.sent
     malformed = dict(read.header, entry_index=False, offset=False)
 
     backend.handle_message(Message(MessageType.FILE_CHUNK, malformed, b"abc"))
 
     fetch = backend.by_token[token]
-    assert fetch.offset == 0
-    assert fetch.read_id == read.header["read_id"]
-    assert fetch.state == "receiving"
+    assert fetch.consume_offset == 0
+    assert _range_ids(fetch) == {read.header["read_id"]}
+    assert fetch.state == "requesting"
 
 
 def test_zero_size_fetches_complete_and_release_slots_without_reading(qapp):
@@ -309,7 +337,7 @@ def test_zero_size_fetches_complete_and_release_slots_without_reading(qapp):
     zero_size_fetches = [backend.by_token[token] for token in tokens[:4]]
 
     for token in tokens[:4]:
-        backend.pull_chunk(token)
+        backend.pull_chunk(token, Collector())
 
     assert [fetch.state for fetch in zero_size_fetches] == [
         "done",
@@ -333,12 +361,11 @@ def test_send_failure_fails_only_that_fetch_and_admits_fifo_successor(qapp, link
     tokens = _open_all(backend, manifest)
     failed = backend.by_token[tokens[0]]
 
-    backend.pull_chunk(tokens[0])
+    backend.pull_chunk(tokens[0], Collector())
 
     assert failed.state == "failed"
-    assert failed.offset == 0
-    assert failed.read_id is None
-    assert failed.expected == 0
+    assert failed.consume_offset == 0
+    assert failed.ranges == {}
     assert backend.by_read_id == {}
     assert tokens[0] not in backend._active
     assert backend.by_token[tokens[4]].state == "requesting"
@@ -352,11 +379,11 @@ def test_false_send_result_does_not_undo_synchronous_completion(qapp):
     [token] = _open_all(backend, manifest)
     fetch = backend.by_token[token]
 
-    backend.pull_chunk(token)
+    backend.pull_chunk(token, Collector())
 
     assert fetch.state == "done"
-    assert fetch.offset == 3
-    assert fetch.read_id is None
+    assert fetch.consume_offset == 3
+    assert fetch.ranges == {}
     assert backend.by_read_id == {}
     assert backend._active == set()
 
@@ -366,16 +393,15 @@ def test_malformed_chunk_fails_exact_fetch_without_advancing_offset(qapp, blob):
     manifest = _manifest(sizes=(3, 5, 7, 9, 11))
     backend, link, _remote, manifest = _backend(qapp, manifest)
     tokens = _open_all(backend, manifest)
-    backend.pull_chunk(tokens[0])
+    backend.pull_chunk(tokens[0], Collector())
     [read] = link.sent
     failed = backend.by_token[tokens[0]]
 
     backend.handle_message(_reply(read, blob))
 
     assert failed.state == "failed"
-    assert failed.offset == 0
-    assert failed.read_id is None
-    assert failed.expected == 0
+    assert failed.consume_offset == 0
+    assert failed.ranges == {}
     assert backend.by_read_id == {}
     assert backend.by_token[tokens[4]].state == "requesting"
 
@@ -394,17 +420,17 @@ def test_response_coordinate_mismatch_does_not_mutate_indexed_fetch(
     manifest = _manifest(sizes=(3, 5))
     backend, link, _remote, manifest = _backend(qapp, manifest)
     first, _second = _open_all(backend, manifest)
-    backend.pull_chunk(first)
+    backend.pull_chunk(first, Collector())
     [read] = link.sent
     mismatched = dict(read.header, **{field: bad_value})
 
     backend.handle_message(Message(MessageType.FILE_CHUNK, mismatched, b"abc"))
 
     fetch = backend.by_token[first]
-    assert fetch.offset == 0
-    assert fetch.read_id == read.header["read_id"]
-    assert fetch.expected == 3
-    assert fetch.state == "receiving"
+    assert fetch.consume_offset == 0
+    assert _range_ids(fetch) == {read.header["read_id"]}
+    assert fetch.ranges[0].length == 3
+    assert fetch.state == "requesting"
     assert backend.by_read_id == {read.header["read_id"]: fetch}
 
 
@@ -412,28 +438,20 @@ def test_stale_known_read_id_does_not_mutate_another_fetch(qapp):
     manifest = _manifest(sizes=(3, 5))
     backend, link, _remote, manifest = _backend(qapp, manifest)
     first, second = _open_all(backend, manifest)
-    backend.pull_chunk(first)
-    backend.pull_chunk(second)
+    backend.pull_chunk(first, Collector())
+    backend.pull_chunk(second, Collector())
     first_read, second_read = link.sent
+    # Receiving first's chunk retires its read_id from by_read_id (whether or
+    # not it is consumed), so reusing it on second's header is a stale/unknown id.
     backend.handle_message(_reply(first_read, b"abc"))
     second_before = backend.by_token[second]
-    snapshot = (
-        second_before.offset,
-        second_before.read_id,
-        second_before.expected,
-        second_before.state,
-    )
+    snapshot = _snap(second_before)
     stale_for_second = dict(second_read.header, read_id=first_read.header["read_id"])
 
     backend.handle_message(Message(MessageType.FILE_CHUNK, stale_for_second, b"abcde"))
 
     second_fetch = backend.by_token[second]
-    assert (
-        second_fetch.offset,
-        second_fetch.read_id,
-        second_fetch.expected,
-        second_fetch.state,
-    ) == snapshot
+    assert _snap(second_fetch) == snapshot
     assert backend.by_read_id == {second_read.header["read_id"]: second_fetch}
 
 
@@ -455,13 +473,13 @@ def test_by_token_does_not_retain_a_done_or_a_failed_fetch(qapp):
     done_token, failed_token = _open_all(backend, manifest)
 
     # Settle done_token to DONE via a full, well-formed chunk.
-    backend.pull_chunk(done_token)
+    backend.pull_chunk(done_token, Collector())
     [done_read] = link.sent
     backend.handle_message(_reply(done_read, b"abc"))
     assert done_token not in backend.by_token
 
     # Settle failed_token to FAILED via a malformed (oversized) chunk.
-    backend.pull_chunk(failed_token)
+    backend.pull_chunk(failed_token, Collector())
     [failed_read] = [m for m in link.sent if m is not done_read]
     backend.handle_message(_reply(failed_read, b"toolong!!"))
     assert failed_token not in backend.by_token

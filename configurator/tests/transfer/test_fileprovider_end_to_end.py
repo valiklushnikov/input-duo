@@ -138,7 +138,7 @@ def test_queued_pull_waits_then_completes_and_duplicate_does_not_replace_reply(q
     backend.pull_chunk(tokens[4], lambda *a: duplicate.append(a))
     assert not link.sent and not replies
     assert len(duplicate) == 1 and duplicate[0][2] is not None
-    backend.pull_chunk(tokens[0])
+    backend.pull_chunk(tokens[0], lambda *a: None)
     backend.handle_message(
         Message(MessageType.FILE_CHUNK, dict(link.sent[0].header), b"abc")
     )
