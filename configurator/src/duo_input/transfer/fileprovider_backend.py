@@ -158,6 +158,41 @@ PER_FILE_READ_WINDOW = _read_window_from_env()
 #: buffer (received-but-not-yet-consumed); ``_outstanding_bytes`` sums the length
 #: of every live range and the window planner parks against this bound (§9).
 MAX_TOTAL_BUFFERED_BYTES = PER_FILE_READ_WINDOW * MAX_ACTIVE_FETCHES * MAX_FILE_CHUNK_BYTES
+#: Global outstanding-read budget (spec §5/§13). The per-file window keeps up to
+#: PER_FILE_READ_WINDOW reads in flight PER fetch, but with MAX_ACTIVE_FETCHES
+#: fetches that is up to 16 concurrent 1-MiB reads over ONE serially-serviced
+#: Windows source/transport path - the proven over-subscription (design doc
+#: "Proven root cause"). This budget caps ``len(self.by_read_id)`` (the exact
+#: set of emitted-but-not-yet-correlated FILE_READs = permits in use) at a fixed
+#: value, enforced at the single emission point by the round-robin scheduler.
+#:
+#: Selector (spec §13, mirrors DUO_FP_READ_WINDOW): ``DUO_FP_READ_BUDGET``
+#: overrides at import; runtime acceptance compares 4/6/8. A value >= the default
+#: reproduces the current unbounded-W4 behaviour (the experiment's control).
+#: Unset/invalid -> the default MAX_ACTIVE_FETCHES * PER_FILE_READ_WINDOW, which
+#: is exactly today's unbounded ceiling: the budget is INERT by default and only
+#: binds once the runtime winner is pinned lower (spec §96 compatibility).
+def _read_budget_from_env() -> int:
+    import os
+
+    default = MAX_ACTIVE_FETCHES * PER_FILE_READ_WINDOW
+    raw = os.environ.get("DUO_FP_READ_BUDGET")
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "ignoring non-integer DUO_FP_READ_BUDGET=%r; using %d", raw, default
+        )
+        return default
+    if value < 1:
+        logger.warning("ignoring DUO_FP_READ_BUDGET=%d (<1); using %d", value, default)
+        return default
+    return value
+
+
+GLOBAL_READ_BUDGET = _read_budget_from_env()
 #: TTL после которого протухшая (retired) generation без in-use ref подлежит
 #: удалению - зеркалит StagingArea(ttl_seconds=86_400)/LEASE_NS.
 GENERATION_TTL_NS = LEASE_NS
@@ -276,6 +311,11 @@ class Fetch:
     #: Diagnostic-only guard (perf harness): the first admitted unit of useful
     #: work for this fetch (first FILE_READ issued) fires ``work_start`` once.
     work_started: bool = False
+    #: True once the consumer has begun pulling this fetch (spec §6). The global
+    #: round-robin scheduler only prefetches ahead for a fetch that has been
+    #: pulled; it persists across the serial per-pull gaps (the reply is parked
+    #: and cleared between chunks, but eligibility for read-ahead does not blink).
+    pulled: bool = False
 
     def in_flight(self) -> int:
         return sum(1 for r in self.ranges.values() if r.state is RangeState.IN_FLIGHT)
@@ -381,6 +421,8 @@ class FileProviderBackend(QObject):
         # discovering a "wrong window configured" invalid run afterwards.
         self.counters["fp_read_window"] = PER_FILE_READ_WINDOW
         _log_event("fp_read_window_selected", window=PER_FILE_READ_WINDOW)
+        self.counters["fp_read_budget"] = GLOBAL_READ_BUDGET
+        _log_event("fp_read_budget_selected", budget=GLOBAL_READ_BUDGET)
         # --- Task 17 (ruling #3, carried from Task 14): per-outstanding-read
         # watchdog. ``timer_factory`` defaults to a real QTimer bound to this
         # backend; tests inject a fake factory so expiry never waits on a real
@@ -453,6 +495,17 @@ class FileProviderBackend(QObject):
         self.by_read_id: dict[int, Fetch] = {}
         self._active: set[str] = set()
         self._queue: deque[str] = deque()
+        # --- global read-budget scheduler (spec §5/§6/§7). ``_rr`` is the
+        # round-robin pool of active (REQUESTING, admitted) fetch tokens; the
+        # scheduler rotates it so a freed permit goes to the NEXT eligible fetch
+        # (interleave A B C D, never one fetch monopolising the budget). Global
+        # in-flight reads == len(self.by_read_id), gated <= self._global_budget
+        # at the single emission point. ``_scheduling`` guards against reentrant
+        # scheduler invocation when a fake/synchronous link completes a read
+        # inside send() (spec §18).
+        self._global_budget = GLOBAL_READ_BUDGET
+        self._rr: deque[str] = deque()
+        self._scheduling = False
         # --- Task 11 / windowing: second, finer admission gate on top of the
         # slot gate above - a fetch whose next window read would push outstanding
         # bytes over MAX_TOTAL_BUFFERED_BYTES parks here (FIFO) until a range is
@@ -1254,6 +1307,8 @@ class FileProviderBackend(QObject):
         self.by_token[fetch_token] = fetch
         if state is FetchState.REQUESTING:
             self._active.add(fetch_token)
+            if fetch_token not in self._rr:
+                self._rr.append(fetch_token)
             self._perf.emit(
                 "slot_acquired",
                 generation_id=generation_id,
@@ -1310,6 +1365,7 @@ class FileProviderBackend(QObject):
             if reply is not None:
                 reply(None, False, _xpc_error(7))
             return
+        fetch.pulled = True
         fetch.reply = reply
         self._fill_window(fetch)
         self._try_deliver(fetch)
@@ -1326,25 +1382,78 @@ class FileProviderBackend(QObject):
             r.length for fetch in self.by_token.values() for r in fetch.ranges.values()
         )
 
-    def _fill_window(self, fetch: Fetch) -> None:
-        """Issue ``FILE_READ``s until the window is full, the file is fully
-        planned, or the global byte budget is reached (then park in
-        ``_pull_queue``). Idempotent; safe to call on every pull/consume."""
-        while (
-            fetch.state is FetchState.REQUESTING
+    def _wants_read(self, fetch: Fetch | None) -> bool:
+        """A fetch is schedulable for ONE more ``FILE_READ`` iff its consumer has
+        started pulling, it is an admitted REQUESTING fetch, its per-file window
+        has a free range slot, and it has bytes left to plan (spec §6). The
+        global budget and the byte guard are checked by the scheduler, not here."""
+        return (
+            fetch is not None
+            and fetch.pulled
+            and fetch.state is FetchState.REQUESTING
             and fetch.fetch_token in self._active
             and len(fetch.ranges) < PER_FILE_READ_WINDOW
             and fetch.plan_offset < fetch.size
+        )
+
+    def _schedule_reads(self) -> None:
+        """The single FILE_READ emission gate (spec §7). Round-robin over the
+        active-fetch pool: while the global read budget has room and some fetch
+        is still eligible, take the token at the front, rotate, and issue AT
+        MOST ONE read for it (then reset the scan so a freed permit interleaves
+        to the next eligible fetch - A B C D, never A A A A). A single eligible
+        large fetch borrows the whole window up to the budget (spec §8). The
+        secondary byte-budget gate (MAX_TOTAL_BUFFERED_BYTES) parks a fetch in
+        ``_pull_queue``; it is inert at the shipped budgets (spec §6). Reentrancy
+        (a synchronous link completing inside send()) is dropped: the outer loop
+        re-reads len(by_read_id) each turn and picks up the freed permit."""
+        if self._scheduling:
+            return
+        self._scheduling = True
+        try:
+            scanned = 0
+            while (
+                len(self.by_read_id) < self._global_budget
+                and scanned < len(self._rr)
+            ):
+                token = self._rr[0]
+                self._rr.rotate(-1)
+                fetch = self.by_token.get(token)
+                if not self._wants_read(fetch):
+                    scanned += 1
+                    continue
+                length = min(MAX_FILE_CHUNK_BYTES, fetch.size - fetch.plan_offset)
+                if self._outstanding_bytes() + length > MAX_TOTAL_BUFFERED_BYTES:
+                    # Secondary byte-budget gate (spec §6): park and try others.
+                    if token not in self._pull_queue:
+                        self._pull_queue.append(token)
+                    scanned += 1
+                    continue
+                # This token is issuing now; it is no longer byte-parked.
+                if token in self._pull_queue:
+                    self._pull_queue.remove(token)
+                offset = fetch.plan_offset
+                fetch.plan_offset += length
+                if not self._issue_read(fetch, offset, length):
+                    # Genuine send failure -> fetch already settled FAILED and
+                    # its token was removed from _rr by _finish_fetch.
+                    continue
+                scanned = 0  # progress -> every eligible fetch gets another turn
+        finally:
+            self._scheduling = False
+
+    def _fill_window(self, fetch: Fetch) -> None:
+        """Ensure ``fetch`` is in the round-robin pool (if it is an admitted,
+        active REQUESTING fetch) and run the global scheduler. All FILE_READ
+        emission now flows through ``_schedule_reads`` so the global budget can
+        never be bypassed (spec §9/§17). Idempotent; safe on every pull/consume."""
+        if (
+            fetch.state is FetchState.REQUESTING
+            and fetch.fetch_token in self._active
+            and fetch.fetch_token not in self._rr
         ):
-            length = min(MAX_FILE_CHUNK_BYTES, fetch.size - fetch.plan_offset)
-            if self._outstanding_bytes() + length > MAX_TOTAL_BUFFERED_BYTES:
-                if fetch.fetch_token not in self._pull_queue:
-                    self._pull_queue.append(fetch.fetch_token)
-                return
-            offset = fetch.plan_offset
-            fetch.plan_offset += length
-            if not self._issue_read(fetch, offset, length):
-                return  # genuine send failure -> fetch already settled FAILED
+            self._rr.append(fetch.fetch_token)
+        self._schedule_reads()
 
     def _issue_read(self, fetch: Fetch, offset: int, length: int) -> bool:
         """Send one ``FILE_READ`` for ``[offset, length]`` and register its live
@@ -1354,6 +1463,18 @@ class FileProviderBackend(QObject):
         if self._link is None:
             self._finish_fetch(fetch, FetchState.FAILED, _xpc_error(8))
             return False
+        # Defensive global-budget invariant (spec §17): every emission MUST come
+        # through _schedule_reads, which only calls this while len(by_read_id) <
+        # budget. If that boundary is ever violated, fail loudly in telemetry
+        # rather than silently over-subscribing (the tests assert this is 0).
+        if len(self.by_read_id) >= self._global_budget:
+            self._bump("fp_read_budget_violation")
+            _log_event(
+                "fp_read_budget_violation",
+                fetch_token=fetch.fetch_token,
+                in_use=len(self.by_read_id),
+                budget=self._global_budget,
+            )
         if not fetch.work_started:
             fetch.work_started = True
             self._perf.emit(
@@ -1488,20 +1609,11 @@ class FileProviderBackend(QObject):
         self._resume_windows()
 
     def _resume_windows(self) -> None:
-        """Re-fill budget-parked fetches (FIFO) after a range was consumed and
-        freed global budget. Each ``_fill_window`` re-parks itself if it is
-        still capped, so one drain pass per consume is sufficient."""
-        pending = list(self._pull_queue)
-        self._pull_queue.clear()
-        for token in pending:
-            fetch = self.by_token.get(token)
-            if (
-                fetch is None
-                or fetch.state is not FetchState.REQUESTING
-                or token not in self._active
-            ):
-                continue
-            self._fill_window(fetch)
+        """Re-run the global scheduler after a range was consumed/freed. The
+        round-robin pool (``_rr``) already holds every active fetch - including
+        any that byte-parked in ``_pull_queue`` - so a single scheduler pass
+        re-admits whatever now fits the freed budget (spec §7/§9)."""
+        self._schedule_reads()
 
     def _observe_outstanding(self, fetch: Fetch) -> None:
         """Update the bound gauges (spec §21) and flag any window violation.
@@ -1546,6 +1658,8 @@ class FileProviderBackend(QObject):
                 continue
             fetch.state = FetchState.REQUESTING
             self._active.add(fetch_token)
+            if fetch_token not in self._rr:
+                self._rr.append(fetch_token)
             self._perf.emit(
                 "slot_acquired",
                 generation_id=fetch.generation_id,
@@ -1635,6 +1749,10 @@ class FileProviderBackend(QObject):
             )
         try:
             self._pull_queue.remove(fetch.fetch_token)
+        except ValueError:
+            pass
+        try:
+            self._rr.remove(fetch.fetch_token)
         except ValueError:
             pass
         self._sync_active_gauges()
@@ -1767,10 +1885,13 @@ class FileProviderBackend(QObject):
             bytes=chunk_size,
         )
         # Deliver in order if this filled the gap at the consume cursor; an
-        # out-of-order arrival simply waits here (range stays RECEIVED). No
-        # refill is due until a range is actually consumed (the window is still
-        # full), which _try_deliver handles.
+        # out-of-order arrival simply waits here (range stays RECEIVED). The
+        # transport permit was already released above (by_read_id.pop), so run
+        # the global scheduler even when nothing was consumed: an out-of-order
+        # chunk frees a permit another (globally budget-starved) fetch can now
+        # use, and _try_deliver's own refill only covers the fetch it delivered.
         self._try_deliver(fetch)
+        self._schedule_reads()
 
     #: Wire ``FILE_ERROR`` ``reason`` -> ``DuoFPErrorDomain`` code (spec §16).
     #: ``"cancelled"``/``"not connected"`` are deliberately absent - those are
@@ -2035,6 +2156,7 @@ __all__ = [
     "FetchState",
     "FileProviderBackend",
     "GENERATION_TTL_NS",
+    "GLOBAL_READ_BUDGET",
     "LEASE_NS",
     "LEASE_SECONDS",
     "MAX_ACTIVE_FETCHES",
