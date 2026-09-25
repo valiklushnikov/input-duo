@@ -54,7 +54,9 @@ class AddressExchange(QObject):
     def tick(self) -> None:
         local = self._local()
         for backend in self._backends:
-            backend.exchange_addresses(local)  # Return value intentionally unused; backend skips if busy.
+            # Результат не нужен: бэкенд, которому сейчас не до обмена, просто
+            # пропускает такт.
+            backend.exchange_addresses(local)
 
     def _on_peer(self, addresses: list) -> None:
         addresses = [str(address) for address in addresses]
