@@ -121,12 +121,18 @@ class _FakeTimer:
     def __init__(self) -> None:
         self.starts: list[int] = []
         self.stopped = 0
+        self._active = False
 
     def start(self, ms: int) -> None:
         self.starts.append(ms)
+        self._active = True
 
     def stop(self) -> None:
         self.stopped += 1
+        self._active = False
+
+    def isActive(self) -> bool:
+        return self._active
 
 
 class _DialLink(QObject):
@@ -1388,11 +1394,14 @@ def test_the_last_good_address_is_tried_first_then_the_boards(tmp_path, dial):
     coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
     coordinator._retry = _FakeTimer()
     # 192.168.1.5 - сохранённый last_address; в списке платы он повторяется.
+    # Список изменился, а набора не было - coordinator звонит сам, первым
+    # кандидатом (Task 15, п.4), поэтому первая попытка видна уже здесь, без
+    # явного _try_connect().
     coordinator.set_board_addresses(["10.0.0.2", "192.168.1.5", "10.0.0.3"])
 
-    for _ in range(3):
-        coordinator._try_connect()  # то, что сделал бы сработавший _retry
+    for _ in range(2):
         dial[-1].disconnected.emit("refused")
+        coordinator._try_connect()  # то, что сделал бы сработавший _retry
 
     assert [link.address for link in dial] == ["192.168.1.5", "10.0.0.2", "10.0.0.3"]
 
@@ -1427,11 +1436,15 @@ def test_the_backoff_starts_only_after_the_whole_list_failed(tmp_path, dial):
 
 def test_a_manual_address_is_the_only_candidate(tmp_path, dial):
     coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    # set_board_addresses само звонит первым кандидатом (Task 15, п.4) - это
+    # не то, что здесь проверяется, поэтому считаем набор ДО restore.
     coordinator.set_board_addresses(["10.0.0.2"])
+    dialed_before_restore = len(dial)
+
     coordinator.restore_manual_address("192.168.7.7")
 
     assert coordinator._candidates() == ["192.168.7.7"]
-    assert dial == []  # restore только запоминает, не звонит
+    assert len(dial) == dialed_before_restore  # restore только запоминает, не звонит
 
 
 def test_a_connection_remembers_and_announces_the_address_that_worked(tmp_path, dial):
@@ -1480,11 +1493,126 @@ def test_no_candidates_at_all_falls_back_to_searching(tmp_path, dial, monkeypatc
         coordinator.stop()
 
 
-def test_an_empty_board_address_is_not_a_candidate(tmp_path):
+def test_an_empty_board_address_is_not_a_candidate(tmp_path, dial):
+    # set_board_addresses теперь может звонить само (Task 15, п.4) - `dial`
+    # держит это на замене PeerLink, а не на настоящем сокете.
     coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
     coordinator.set_board_addresses(["", "10.0.0.2", ""])
 
     assert coordinator._candidates() == ["192.168.1.5", "10.0.0.2"]
+
+
+# ------------------------------------------------------- автонабор при новом списке адресов платы
+
+
+def test_a_new_board_address_list_dials_immediately_from_idle(tmp_path, dial, qapp):
+    """(a) Звонящая сторона, простой: новый список от платы обязан
+    набираться сразу, а не ждать следующего такта обмена (до пяти секунд).
+    Первый кандидат - сохранённый last_address (192.168.1.5, см.
+    _make_coordinator), как и при любом другом наборе - _candidates() ставит
+    его первым; новый адрес от платы пополняет список тем же порядком, каким
+    его увидел бы обычный _try_connect()."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+
+    coordinator.set_board_addresses(["10.0.0.2"])
+
+    assert len(dial) == 1
+    assert dial[-1].address == "192.168.1.5"
+    assert coordinator._candidates() == ["192.168.1.5", "10.0.0.2"]
+    assert coordinator._dialing is True
+    assert coordinator._candidate_index == 0
+
+
+def test_the_same_board_address_list_again_does_not_redial(tmp_path, dial, qapp):
+    """(b) Список не изменился - "изменился" проверяется по значению, а
+    не звонить второй раз просто потому что обмен снова прислал тот же
+    список. `_dialing` сброшен руками, как будто первая попытка уже как-то
+    разрешилась - иначе одного только "набор уже идёт" хватило бы, чтобы
+    скрыть отсутствие проверки на "список не менялся"."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator.set_board_addresses(["10.0.0.2"])
+    assert len(dial) == 1
+    coordinator._dialing = False
+
+    coordinator.set_board_addresses(["10.0.0.2"])
+
+    assert len(dial) == 1
+
+
+def test_a_live_link_is_not_disturbed_by_a_new_board_address_list(tmp_path, dial, qapp):
+    """(c) Живая связь уже есть - новый список от платы её не трогает."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator._link = _FakeLink()
+
+    coordinator.set_board_addresses(["10.0.0.2"])
+
+    try:
+        assert dial == []
+    finally:
+        coordinator._link = None
+        coordinator.stop()
+
+
+def test_the_waiting_side_does_not_dial_on_a_new_board_address_list(tmp_path, dial, qapp):
+    """(d) Ждущая сторона (наш origin_id больше) никогда не звонит сама -
+    новый список от платы не должен это менять. `_try_connect()` сам по себе
+    уже не звонит за ждущую сторону (внутренняя проверка того же условия),
+    поэтому отсутствие звонка в `dial` не отличило бы удалённую здесь
+    проверку от рабочей - в обоих случаях `dial` остаётся пустым. Наблюдаемая
+    разница - таймер молчания: без проверки в set_board_addresses он
+    перезапускался бы на каждый новый список от платы, хотя связь и так уже
+    не идёт."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=SMALLEST_ORIGIN_ID)
+
+    coordinator.set_board_addresses(["10.0.0.2"])
+
+    try:
+        assert dial == []
+        assert coordinator._silence.isActive() is False
+    finally:
+        coordinator.stop()
+
+
+def test_an_active_retry_timer_blocks_a_new_board_address_dial(tmp_path, dial, qapp):
+    """(e) Таймер повтора уже тикает - новый список от платы ждёт его,
+    а не набирает поверх него."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    fake_retry = _FakeTimer()
+    coordinator._retry = fake_retry
+    fake_retry.start(reconnect_delay_ms(0))
+
+    coordinator.set_board_addresses(["10.0.0.2"])
+
+    assert dial == []
+
+
+def test_a_dial_already_in_flight_is_not_joined_by_a_second_one(tmp_path, dial, qapp):
+    """Набор уже идёт (первый кандидат ещё не ответил ни успехом, ни
+    отказом) - второй список от платы не должен запускать второй набор
+    поверх первого."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator.set_board_addresses(["10.0.0.2"])
+    assert len(dial) == 1
+    assert coordinator._dialing is True
+
+    coordinator.set_board_addresses(["10.0.0.3"])
+
+    assert len(dial) == 1
+
+
+def test_pairing_blocks_a_new_board_address_dial(tmp_path, dial, qapp):
+    """Идёт связывание - новый список от платы не должен запускать
+    параллельный набор поверх него."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator._pairing = True
+
+    coordinator.set_board_addresses(["10.0.0.2"])
+
+    try:
+        assert dial == []
+    finally:
+        coordinator._pairing = False
+        coordinator.stop()
 
 
 def test_stop_resets_dialing_and_candidate_index(tmp_path, dial):

@@ -289,9 +289,28 @@ class ClipboardCoordinator(QObject):
     def set_board_addresses(self, addresses: list[str]) -> None:
         """Адреса второго компьютера, которые сообщила плата.
 
-        Живую связь это не трогает: список нужен только следующему набору.
+        Живую связь это не трогает: список нужен только следующему набору. Но
+        если список действительно изменился, эта сторона звонящая (пир уже
+        доверен, и это НЕ ветка ожидания - peer.origin_id < наш origin_id), и
+        сейчас нет ни живой связи, ни набора в процессе, ни связывания, ни
+        тикающего таймера повтора - ждать до пяти секунд следующего такта
+        обмена незачем: набор начинается заново прямо сейчас, с первого
+        кандидата.
         """
-        self._board_addresses = [address for address in addresses if address]
+        filtered = [address for address in addresses if address]
+        changed = filtered != self._board_addresses
+        self._board_addresses = filtered
+        if not changed:
+            return
+        peer = self.peer
+        if peer is None or peer.origin_id < self._identity.origin_id:
+            return
+        if self._link is not None or self._dialing or self._pairing:
+            return
+        if self._retry.isActive():
+            return
+        self._candidate_index = 0
+        self._try_connect()
 
     # ------------------------------------------------------------------ парринг: вход и код
 
