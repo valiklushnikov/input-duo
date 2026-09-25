@@ -1,6 +1,7 @@
 #pragma once
 
-// TinyUSB configuration for U2: three HID interfaces and nothing else.
+// TinyUSB configuration for U2: three HID interfaces plus one CDC pair used
+// only for the address exchange.
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,15 +23,20 @@ extern "C" {
 // can be a real boot keyboard; see firmware/common/hid/report_ids.hpp.
 #define CFG_TUD_HID 3
 
-// No CDC. U2 is not configurable, and a serial port on it would invite
-// someone to try - the configurator would then be talking to the board that
-// holds no configuration at all.
-#define CFG_TUD_CDC 0
+// One CDC pair: U2 is not configurable, and this port carries only the
+// address exchange - a program pointed at it for anything else is answered
+// with UNSUPPORTED_CAPABILITY, not silence.
+#define CFG_TUD_CDC 1
 #define CFG_TUD_MSC 0
 #define CFG_TUD_MIDI 0
 #define CFG_TUD_VENDOR 0
 
 #define CFG_TUD_HID_EP_BUFSIZE 8
+
+// Address exchange only: requests and replies are well under 128 bytes.
+#define CFG_TUD_CDC_RX_BUFSIZE 256
+#define CFG_TUD_CDC_TX_BUFSIZE 256
+#define CFG_TUD_CDC_EP_BUFSIZE 64
 
 #ifdef __cplusplus
 }

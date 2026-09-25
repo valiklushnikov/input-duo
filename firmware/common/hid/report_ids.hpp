@@ -30,13 +30,16 @@ enum class U1Interface : std::uint8_t {
     Count = 5,
 };
 
-/// Interfaces on U2. The same HID set, and no CDC: U2 is not configurable, and
-/// offering a serial port on it would invite someone to try.
+/// Interfaces on U2. The same HID set as U1, plus a CDC pair used only for the
+/// address exchange: U2 holds no configuration, so this serial port never
+/// carries anything else.
 enum class U2Interface : std::uint8_t {
     Keyboard = 0,
     Mouse = 1,
     Consumer = 2,
-    Count = 3,
+    CdcControl = 3,
+    CdcData = 4,
+    Count = 5,
 };
 
 /// Endpoint addresses. The 0x80 bit means device-to-host.

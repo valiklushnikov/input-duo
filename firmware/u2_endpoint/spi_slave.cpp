@@ -40,6 +40,31 @@ void SpiSlave::prime() {
     // already in its transmit path is what goes out while the master's bytes
     // come in. Deciding what to send once the clock is running means sending
     // whatever happened to be there.
+#if !DUO_SPI_DEBUG
+    // Once in kEndpointAddressesEvery replies, and only once PC2 has said
+    // where it is, this reply carries PC2's addresses instead of the status.
+    // The status loses nothing it cannot afford: it is absolute and repeats
+    // on the very next transfer.
+    //
+    // Kept out of DUO_SPI_DEBUG builds: that mode's whole point is a counting
+    // pattern the far end can check byte-for-byte, and returning early here
+    // would let this branch skip that pattern silently.
+    if (addresses_ != nullptr && addresses_->take_reply_slot()) {
+        protocol::SpiFrame frame;
+        frame.type = protocol::SpiMessageType::ENDPOINT_ADDRESSES;
+        frame.sequence = reply_sequence_++;
+        std::uint8_t list[link::kHostAddressesMaxSize];
+        std::size_t size = 0;
+        link::encode_host_addresses(addresses_->local(),
+                                    protocol::MutableByteView{list, sizeof(list)}, size);
+        frame.payload = protocol::ByteView{list, size};
+        std::size_t written = 0;
+        std::memset(tx_, 0, sizeof(tx_));
+        protocol::encode_spi_frame(frame, protocol::MutableByteView{tx_, sizeof(tx_)}, written);
+        return;
+    }
+#endif
+
     protocol::SpiFrame frame;
     frame.type = protocol::SpiMessageType::ENDPOINT_STATUS;
     frame.sequence = reply_sequence_++;

@@ -1,8 +1,9 @@
 // What U2 tells a computer it is.
 //
-// The same three HID interfaces as U1, and no CDC. U2 holds no configuration,
-// so a serial port here would only invite someone to point the configurator at
-// the board that cannot answer it.
+// The same three HID interfaces as U1, plus one CDC pair used only so PC2's
+// program can swap IPv4 addresses with PC1's. U2 still holds no configuration
+// of its own - the serial port answers nothing but HELLO/PING/EXCHANGE_ADDRESSES,
+// and everything else with UNSUPPORTED_CAPABILITY.
 //
 // The HID report descriptors are byte-identical to U1's, and a test asserts
 // that: the two computers must see the same keyboard and the same mouse, or a
@@ -83,7 +84,7 @@ const std::uint8_t* tud_hid_descriptor_report_cb(std::uint8_t instance) {
 
 // ---------------------------------------------------- configuration
 
-#define DUO_U2_CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + 3 * TUD_HID_DESC_LEN)
+#define DUO_U2_CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + 3 * TUD_HID_DESC_LEN + TUD_CDC_DESC_LEN)
 
 extern const std::uint8_t desc_configuration[];
 const std::uint8_t desc_configuration[] = {
@@ -109,6 +110,9 @@ const std::uint8_t desc_configuration[] = {
                        HID_ITF_PROTOCOL_NONE, sizeof(desc_hid_consumer_report),
                        hid::kEpConsumerIn, hid::kConsumerReportSize,
                        hid::kConsumerPollIntervalMs),
+
+    TUD_CDC_DESCRIPTOR(static_cast<std::uint8_t>(hid::U2Interface::CdcControl), 7,
+                       hid::kEpCdcNotifyIn, 8, hid::kEpCdcDataOut, hid::kEpCdcDataIn, 64),
 };
 
 const std::uint8_t* tud_descriptor_configuration_cb(std::uint8_t index) {
@@ -131,6 +135,7 @@ const char* const string_table[] = {
     "Duo Input Keyboard",                       // 4
     "Duo Input Mouse",                          // 5
     "Duo Input Consumer Control",               // 6
+    "Duo Input Address Exchange",               // 7
 };
 
 std::uint16_t string_descriptor[33];

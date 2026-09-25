@@ -10,7 +10,11 @@
 
 #include "hardware/gpio.h"
 
+#include "tusb.h"
+
+#include "address_service.hpp"
 #include "hid/state_manager.hpp"
+#include "link/host_addresses.hpp"
 #include "link/spi_protocol.hpp"
 #include "link_drop_log.hpp"
 #include "link_watchdog.hpp"
@@ -41,7 +45,8 @@ void configure_indicator() {
 }
 
 void apply(const duo_input::u2::ValidFrame& frame,
-           duo_input::hid::HidStateManager& outputs) {
+           duo_input::hid::HidStateManager& outputs,
+           duo_input::link::AddressBook& addresses) {
     namespace hid = duo_input::hid;
     namespace link = duo_input::link;
     const auto payload = duo_input::protocol::ByteView{frame.payload, frame.payload_size};
@@ -74,12 +79,27 @@ void apply(const duo_input::u2::ValidFrame& frame,
         case duo_input::protocol::SpiMessageType::CONTROL_RELEASE_ALL:
             outputs.release_target(hid::Target::Pc2);
             return;
+        case duo_input::protocol::SpiMessageType::HOST_ADDRESSES:
+            // PC1's addresses, for PC2's program to read over CDC.
+            addresses.accept_peer(payload);
+            return;
         default:
             // HEARTBEAT and HANDSHAKE carry no state; arriving intact is the
             // whole message.
             return;
     }
 }
+
+/// Sends the address service's replies back down the CDC pipe.
+class CdcWriter : public duo_input::u2::ByteSink {
+public:
+    void write(const std::uint8_t* data, std::size_t size) override {
+        // Same rule as U1: written whether or not DTR is up, because
+        // QSerialPort does not raise it on open.
+        tud_cdc_write(data, static_cast<std::uint32_t>(size));
+        tud_cdc_write_flush();
+    }
+};
 
 }  // namespace
 
@@ -120,6 +140,11 @@ int main() {
     usb.begin();
     link.begin();
 
+    static duo_input::link::AddressBook addresses;
+    static CdcWriter cdc_writer;
+    static duo_input::u2::AddressService address_service(addresses, cdc_writer);
+    link.set_address_book(&addresses);
+
     bool was_mounted = false;
     bool released_for_silence = false;
 
@@ -130,6 +155,12 @@ int main() {
     while (true) {
         usb.task();
 
+        if (tud_cdc_available()) {
+            std::uint8_t incoming[64];
+            const std::uint32_t read = tud_cdc_read(incoming, sizeof(incoming));
+            address_service.on_cdc_bytes(incoming, read);
+        }
+
         const bool mounted = usb.mounted();
         if (mounted != was_mounted) {
             // A host that has just enumerated knows nothing about the reports
@@ -137,6 +168,9 @@ int main() {
             // released as far as it is concerned. Start from nothing.
             outputs.release_target(duo_input::hid::Target::Pc2);
             usb.forget_sent_state();
+            if (!mounted) {
+                address_service.on_disconnect();
+            }
             was_mounted = mounted;
         }
 
@@ -152,7 +186,7 @@ int main() {
             watchdog.observe_valid(now_ms);
             drops.recovered();
             released_for_silence = false;
-            apply(frame, outputs);
+            apply(frame, outputs, addresses);
         }
 
         // No valid frame for 100 ms. U1 cannot tell us to let go, because the

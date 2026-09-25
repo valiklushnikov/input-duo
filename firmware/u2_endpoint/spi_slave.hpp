@@ -24,6 +24,7 @@
 #include "frame_resync.hpp"
 
 #include "hid/types.hpp"
+#include "link/host_addresses.hpp"
 #include "link/spi_protocol.hpp"
 #include "protocol/frame.hpp"
 #include "protocol/generated.hpp"
@@ -75,6 +76,10 @@ public:
 
     void set_status(const Status& status);
 
+    /// Where PC2's addresses live and where PC1's land. Not owned: the caller
+    /// keeps it alive for as long as the slave runs.
+    void set_address_book(link::AddressBook* book) { addresses_ = book; }
+
     std::uint32_t crc_errors() const { return crc_errors_; }
     std::uint32_t frames_received() const { return frames_; }
 
@@ -99,6 +104,7 @@ private:
     int rx_channel_ = -1;
     int tx_channel_ = -1;
     Status status_{};
+    link::AddressBook* addresses_ = nullptr;
 };
 
 }  // namespace duo_input::u2

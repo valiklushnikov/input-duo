@@ -2,6 +2,7 @@
 
 #include <cstring>
 
+#include "pico/bootrom.h"
 #include "tusb.h"
 
 #include "hid/report_ids.hpp"
@@ -103,6 +104,28 @@ std::uint16_t tud_hid_get_report_cb(std::uint8_t instance, std::uint8_t report_i
     (void)buffer;
     (void)reqlen;
     return 0;
+}
+
+// Opening the port at 1200 baud and dropping DTR asks the board to restart
+// into its bootloader. This is the convention every Arduino and Pico board
+// follows, and the configurator and the update instructions both rely on it:
+// without it, every firmware update needs someone physically present to hold
+// BOOTSEL, which is a poor thing to require for a fix.
+//
+// Nothing opens a port at 1200 baud by accident - it is a rate no modern
+// device uses - and the worst case is a reboot into a bootloader the operator
+// can leave by unplugging the board.
+void tud_cdc_line_state_cb(std::uint8_t instance, bool dtr, bool rts) {
+    (void)instance;
+    (void)rts;
+    if (dtr) {
+        return;
+    }
+    cdc_line_coding_t coding;
+    tud_cdc_get_line_coding(&coding);
+    if (coding.bit_rate == 1200) {
+        reset_usb_boot(0, 0);
+    }
 }
 
 // Output reports carry keyboard LED state. Duo Input has no LEDs to drive on

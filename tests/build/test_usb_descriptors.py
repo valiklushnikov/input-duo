@@ -115,14 +115,13 @@ def test_u1_offers_three_hid_interfaces_and_one_cdc(u1):
     assert u1["configuration"]["bNumInterfaces"] == 5
 
 
-def test_u2_offers_the_same_hid_and_no_cdc(u2):
+def test_u2_offers_the_same_hid_and_one_cdc_for_address_exchange(u2):
     classes = [interface["bInterfaceClass"] for interface in u2["configuration"]["interfaces"]]
-
-    # A serial port on U2 would invite someone to point the configurator at the
-    # board that holds no configuration.
-    assert classes == [CLASS_HID, CLASS_HID, CLASS_HID]
-    assert CLASS_CDC_CONTROL not in classes
-    assert u2["configuration"]["bNumInterfaces"] == 3
+    # U2 has no configuration; its serial port exists only so PC2's program can
+    # swap addresses with PC1's. The HID part must stay exactly U1's - see
+    # test_both_boards_describe_identical_input_devices.
+    assert classes == [CLASS_HID, CLASS_HID, CLASS_HID, CLASS_CDC_CONTROL, CLASS_CDC_DATA]
+    assert u2["configuration"]["bNumInterfaces"] == 5
 
 
 @pytest.mark.parametrize("board", ("u1", "u2"))

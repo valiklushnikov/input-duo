@@ -1,5 +1,5 @@
-# U2: the second computer's endpoint. It has no CDC and no configuration of
-# its own; everything it emits arrives over SPI from U1.
+# U2: the second computer's endpoint. Its only CDC traffic is the address
+# exchange; everything it emits as HID arrives over SPI from U1.
 add_executable(duo_u2_endpoint
     main.cpp
     usb_descriptors.cpp
@@ -8,6 +8,7 @@ add_executable(duo_u2_endpoint
     frame_resync.cpp
     link_drop_log.cpp
     link_watchdog.cpp
+    address_service.cpp
 )
 
 # tusb_config.h lives beside the sources, so TinyUSB has to be told to look
@@ -22,6 +23,7 @@ target_link_libraries(duo_u2_endpoint PRIVATE
     hardware_spi
     hardware_dma
     hardware_watchdog
+    pico_bootrom
 )
 
 pico_enable_stdio_usb(duo_u2_endpoint 0)
