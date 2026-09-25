@@ -63,7 +63,6 @@ private:
     std::uint32_t capabilities_ = 0;
     std::uint8_t pending_[kMaxWire] = {};
     std::size_t pending_size_ = 0;
-    bool overflowed_ = false;
     std::uint8_t decoded_[protocol::ProtocolLimits::CDC_MAX_PAYLOAD] = {};
     std::uint8_t payload_[kMaxPayload] = {};
     std::uint8_t out_[kMaxReplyWire] = {};

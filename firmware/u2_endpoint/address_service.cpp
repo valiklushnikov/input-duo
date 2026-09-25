@@ -26,27 +26,30 @@ void AddressService::on_cdc_bytes(const std::uint8_t* data, std::size_t size) {
     for (std::size_t index = 0; index < size; ++index) {
         const std::uint8_t byte = data[index];
         if (byte == kFrameDelimiter) {
-            if (!overflowed_ && pending_size_ > 0) {
+            if (pending_size_ > 0) {
                 pending_[pending_size_++] = byte;
                 handle_frame(pending_, pending_size_);
             }
             pending_size_ = 0;
-            overflowed_ = false;
             continue;
         }
         if (pending_size_ + 1 < sizeof(pending_)) {
             pending_[pending_size_++] = byte;
         } else {
-            // Beyond any legal frame. Keep discarding until the delimiter, so
-            // the next real frame starts clean rather than inheriting this.
-            overflowed_ = true;
+            // Beyond any legal frame: once pending_ is full it freezes right
+            // here and stops accepting bytes, so nothing marks this run as
+            // overflowed any more - there is nothing left for that mark to
+            // change. The frozen prefix is what reaches handle_frame() at the
+            // next delimiter, decoded and rejected there (a truncated frame
+            // fails length/CRC validation), so any real frame embedded inside
+            // this overlong run is lost by design: this buffer holds no
+            // complete copy of it to recover.
         }
     }
 }
 
 void AddressService::on_disconnect() {
     pending_size_ = 0;
-    overflowed_ = false;
     negotiated_ = false;
     capabilities_ = 0;
 }
