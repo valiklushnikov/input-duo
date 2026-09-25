@@ -162,6 +162,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 ("error_code", String(NSFileProviderError.noSuchItem.rawValue))
             ])
             completionHandler(nil, nil, NSError(domain: NSFileProviderErrorDomain, code: NSFileProviderError.noSuchItem.rawValue))
+            // T7 (tail diagnostics): the completionHandler has RETURNED.
+            perf.mark("fetch_contents_returned", fields: [
+                ("item_identifier", itemIdentifier.rawValue),
+                ("perf_fetch_id", perfFetchId),
+                ("status", "error")
+            ])
             return Progress()
         }
         let decision = burstDownloads.beginFetch(
@@ -245,6 +251,13 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
                 ("status", error == nil ? "ok" : "error")
             ] + traceFields)
             completionHandler(url, fetchedItem, error)
+            // T7 (tail diagnostics): passive mark once the handler RETURNED;
+            // ordering/semantics of the completion are unchanged.
+            self.perf.mark("fetch_contents_returned", fields: [
+                ("item_identifier", itemIdentifier.rawValue),
+                ("transfer_id", transferId),
+                ("status", error == nil ? "ok" : "error")
+            ] + traceFields)
         }
         return fetchController.fetch(
             item, request: request, fetchStartedAt: fetchStartedAt,
