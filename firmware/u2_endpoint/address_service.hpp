@@ -24,6 +24,17 @@ public:
 };
 
 class AddressService {
+private:
+    /// Largest request this service answers, framed: HELLO or a full list,
+    /// with room for COBS overhead. Anything longer is discarded to the next
+    /// delimiter.
+    ///
+    /// Declared ahead of the public section below because kMaxReplyWire's
+    /// in-class initializer needs its value, and a static data member's
+    /// initializer - unlike a member function body - cannot forward-reference
+    /// one declared later in the class.
+    static constexpr std::size_t kMaxWire = 96;
+
 public:
     AddressService(link::AddressBook& book, ByteSink& sink) : book_(book), sink_(sink) {}
 
@@ -32,11 +43,14 @@ public:
     /// The host went away. The next one starts with HELLO.
     void on_disconnect();
 
+    /// The most bytes any single call to ByteSink::write can ever carry -
+    /// exactly the capacity of reply()'s encode buffer (out_ below), sized
+    /// generously for COBS overhead. Public so the CDC TX FIFO it is written
+    /// into can be sized against it at compile time (see the static_assert
+    /// beside U2's ByteSink in main.cpp).
+    static constexpr std::size_t kMaxReplyWire = 2 * kMaxWire;
+
 private:
-    /// Largest request this service answers, framed: HELLO or a full list,
-    /// with room for COBS overhead. Anything longer is discarded to the next
-    /// delimiter.
-    static constexpr std::size_t kMaxWire = 96;
     static constexpr std::size_t kMaxPayload = 64;
 
     void handle_frame(const std::uint8_t* wire, std::size_t size);
@@ -52,8 +66,8 @@ private:
     bool overflowed_ = false;
     std::uint8_t decoded_[protocol::ProtocolLimits::CDC_MAX_PAYLOAD] = {};
     std::uint8_t payload_[kMaxPayload] = {};
-    std::uint8_t out_[2 * kMaxWire] = {};
-    std::uint8_t scratch_[2 * kMaxWire] = {};
+    std::uint8_t out_[kMaxReplyWire] = {};
+    std::uint8_t scratch_[kMaxReplyWire] = {};
 };
 
 }  // namespace duo_input::u2

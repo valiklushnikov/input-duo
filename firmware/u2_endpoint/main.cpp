@@ -91,6 +91,14 @@ void apply(const duo_input::u2::ValidFrame& frame,
 }
 
 /// Sends the address service's replies back down the CDC pipe.
+///
+/// Mirrors U1's own static_assert beside its CdcWriter (main.cpp:660): the
+/// TinyUSB TX FIFO has to hold whatever a single write() hands it, or a reply
+/// longer than the FIFO would be split - or dropped - underneath the class
+/// that has no idea that happened.
+static_assert(CFG_TUD_CDC_TX_BUFSIZE >= duo_input::u2::AddressService::kMaxReplyWire,
+              "TinyUSB TX FIFO must hold one complete encoded reply");
+
 class CdcWriter : public duo_input::u2::ByteSink {
 public:
     void write(const std::uint8_t* data, std::size_t size) override {

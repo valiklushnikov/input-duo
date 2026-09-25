@@ -76,14 +76,16 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def uf2_extent(path: Path) -> tuple[int, int]:
-    """The lowest and highest flash address one UF2 writes to."""
+def _iter_uf2_blocks(path: Path):
+    """Yield ``(address, payload)`` for every block in a UF2 file, validated.
+
+    The one parser both ``uf2_extent`` and ``uf2_payload`` build on, so a UF2
+    file is only ever walked and checked in one place.
+    """
     data = path.read_bytes()
     if len(data) % _UF2_BLOCK:
         raise ValueError(f"{path.name} is not a whole number of UF2 blocks")
 
-    lowest = None
-    highest = 0
     for offset in range(0, len(data), _UF2_BLOCK):
         block = data[offset : offset + _UF2_BLOCK]
         start0, start1, _flags, address, payload_size, *_rest = _UF2_HEADER.unpack_from(block)
@@ -94,12 +96,33 @@ def uf2_extent(path: Path) -> tuple[int, int]:
             raise ValueError(f"{path.name} block at {offset} has no UF2 end magic")
         if payload_size > 476:
             raise ValueError(f"{path.name} block at {offset} claims {payload_size} payload bytes")
+        yield address, block[32 : 32 + payload_size]
+
+
+def uf2_extent(path: Path) -> tuple[int, int]:
+    """The lowest and highest flash address one UF2 writes to."""
+    lowest = None
+    highest = 0
+    for address, payload in _iter_uf2_blocks(path):
         lowest = address if lowest is None else min(lowest, address)
-        highest = max(highest, address + payload_size)
+        highest = max(highest, address + len(payload))
 
     if lowest is None:
         raise ValueError(f"{path.name} contains no blocks")
     return lowest, highest
+
+
+def uf2_payload(path: Path) -> bytes:
+    """The flash image a UF2 file writes, as one contiguous run of bytes.
+
+    A UF2 file wraps every 256 bytes of the actual image in a 512-byte block
+    - a 32-byte header, the payload, then padding and a trailing magic. Byte
+    strings that live in the image can straddle that block boundary, and are
+    then invisible to anything that scans the raw file instead of the image
+    it encodes - which is exactly what made the build-date check below blind
+    to a date it had already written correctly.
+    """
+    return b"".join(payload for _address, payload in _iter_uf2_blocks(path))
 
 
 @pytest.fixture(scope="module")
@@ -280,11 +303,17 @@ def test_the_image_dates_itself_by_the_source_not_by_the_clock(artifacts, name):
     Asserting on *every* date-shaped string in the image, rather than only on
     the one the SDK emits today, means a future ``__DATE__`` leaking in from
     anywhere else fails here too.
+
+    Scanned over the reconstructed flash payload (``uf2_payload``), not the
+    raw UF2 file: the date lives at whatever address the linker happened to
+    put it, and a UF2 file interleaves 32-byte headers into the image every
+    256 bytes, so a raw scan misses a date that straddles one of those seams
+    even though it is right there in the flash the board will run.
     """
     found = sorted(
         {
             match.group().decode()
-            for match in _DATE_IN_IMAGE.finditer(artifacts[name].read_bytes())
+            for match in _DATE_IN_IMAGE.finditer(uf2_payload(artifacts[name]))
         }
     )
 
