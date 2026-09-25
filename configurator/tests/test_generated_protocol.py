@@ -84,6 +84,15 @@ def test_the_device_layer_takes_error_codes_from_the_generated_protocol():
     assert "from .emulator import" not in source
 
 
+def test_the_address_exchange_identifiers_are_generated():
+    from duo_input.generated import protocol
+
+    assert protocol.CdcMessageType.EXCHANGE_ADDRESSES == 24
+    assert protocol.SpiMessageType.HOST_ADDRESSES == 8
+    assert protocol.SpiMessageType.ENDPOINT_ADDRESSES == 9
+    assert protocol.Capability.ADDRESS_EXCHANGE == 8192
+
+
 def test_config_flags_are_generated_from_the_schema():
     schema = json.loads(Path("protocol/schema.json").read_text("utf-8"))
 

@@ -92,6 +92,7 @@ bool is_known(CdcMessageType type) {
         case CdcMessageType::CAPTURE_END:
         case CdcMessageType::CAPTURE_EVENT:
         case CdcMessageType::DEVICE_INFO:
+        case CdcMessageType::EXCHANGE_ADDRESSES:
         case CdcMessageType::FACTORY_RESET_ARM:
         case CdcMessageType::FACTORY_RESET_COMMIT:
         case CdcMessageType::GET_ACTIVE_CONFIG_INFO:
@@ -120,9 +121,11 @@ bool is_known(SpiMessageType type) {
     switch (type) {
         case SpiMessageType::CONSUMER_STATE:
         case SpiMessageType::CONTROL_RELEASE_ALL:
+        case SpiMessageType::ENDPOINT_ADDRESSES:
         case SpiMessageType::ENDPOINT_STATUS:
         case SpiMessageType::HANDSHAKE:
         case SpiMessageType::HEARTBEAT:
+        case SpiMessageType::HOST_ADDRESSES:
         case SpiMessageType::KBD_STATE:
         case SpiMessageType::MOUSE_DELTA:
             return true;

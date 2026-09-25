@@ -38,6 +38,7 @@ class CdcMessageType(IntEnum):
     CAPTURE_END = 0x0F
     CAPTURE_EVENT = 0x0E
     DEVICE_INFO = 0x02
+    EXCHANGE_ADDRESSES = 0x18
     FACTORY_RESET_ARM = 0x13
     FACTORY_RESET_COMMIT = 0x14
     GET_ACTIVE_CONFIG_INFO = 0x04
@@ -61,9 +62,11 @@ class CdcMessageType(IntEnum):
 class SpiMessageType(IntEnum):
     CONSUMER_STATE = 0x03
     CONTROL_RELEASE_ALL = 0x05
+    ENDPOINT_ADDRESSES = 0x09
     ENDPOINT_STATUS = 0x07
     HANDSHAKE = 0x01
     HEARTBEAT = 0x06
+    HOST_ADDRESSES = 0x08
     KBD_STATE = 0x02
     MOUSE_DELTA = 0x04
 
@@ -141,6 +144,7 @@ class InputBackend(IntEnum):
     UNKNOWN = 0x00
 
 class Capability(IntFlag):
+    ADDRESS_EXCHANGE = 0x2000
     CAPTURE = 0x20
     CONFIG_READ = 0x08
     CONFIG_WRITE = 0x10

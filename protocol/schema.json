@@ -1,5 +1,6 @@
 {
   "capabilities": {
+    "ADDRESS_EXCHANGE": 8192,
     "CAPTURE": 32,
     "CONFIG_READ": 8,
     "CONFIG_WRITE": 16,
@@ -70,6 +71,7 @@
     "CAPTURE_END": 15,
     "CAPTURE_EVENT": 14,
     "DEVICE_INFO": 2,
+    "EXCHANGE_ADDRESSES": 24,
     "FACTORY_RESET_ARM": 19,
     "FACTORY_RESET_COMMIT": 20,
     "GET_ACTIVE_CONFIG_INFO": 4,
@@ -140,9 +142,11 @@
   "spi_messages": {
     "CONSUMER_STATE": 3,
     "CONTROL_RELEASE_ALL": 5,
+    "ENDPOINT_ADDRESSES": 9,
     "ENDPOINT_STATUS": 7,
     "HANDSHAKE": 1,
     "HEARTBEAT": 6,
+    "HOST_ADDRESSES": 8,
     "KBD_STATE": 2,
     "MOUSE_DELTA": 4
   }

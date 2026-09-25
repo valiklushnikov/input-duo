@@ -359,3 +359,15 @@ at this instant: `0` no fault, `1` a queue that is refusing commands. It is not 
 runtime releases everything once when it notices the loss and resumes after a pass in which
 nothing was refused, so a host that reads `1` is looking at a burst still in progress, where
 a nonzero `dropped_commands` only says one happened at some point since boot.
+
+## EXCHANGE_ADDRESSES (0x18), capability ADDRESS_EXCHANGE (0x2000)
+
+Запрос: `HostAddresses` хоста. Ответ: `[error u8][HostAddresses соседа]`.
+
+`HostAddresses` = `count u8` (0..8), затем `count` IPv4-адресов по 4 байта в
+сетевом порядке; длина строго `1 + 4·count`; `0.0.0.0` недопустим. Неверный
+список → `INVALID_REQUEST`, сохранённый список не меняется.
+
+По SPI тот же формат идёт как `HOST_ADDRESSES` (0x08, U1→U2, раз в 250 мс,
+если хост U1 уже дал список) и `ENDPOINT_ADDRESSES` (0x09, U2→U1, раз в 64
+ответа, если хост U2 уже дал список). Платы хранят оба списка только в RAM.

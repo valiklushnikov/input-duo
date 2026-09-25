@@ -66,6 +66,7 @@ _REQUIRED_CAPABILITY = {
     CdcMessageType.GET_HID_REPORT_SETS: Capability.HID_REPORT_SET_DIAGNOSTICS,
     CdcMessageType.FACTORY_RESET_ARM: Capability.FACTORY_RESET,
     CdcMessageType.FACTORY_RESET_COMMIT: Capability.FACTORY_RESET,
+    CdcMessageType.EXCHANGE_ADDRESSES: Capability.ADDRESS_EXCHANGE,
 }
 
 
@@ -828,6 +829,9 @@ class U1Emulator(AbstractByteTransport):
         self._capture_event = None
         self._factory_reset_armed = False
         return bytes((ErrorCode.OK,))
+
+    def _handle_exchange_addresses(self, payload: bytes) -> bytes:
+        return bytes((ErrorCode.INVALID_REQUEST,))
 
     def _handle_ping(self, payload: bytes) -> bytes:
         if len(payload) == CDC_MAX_PAYLOAD:

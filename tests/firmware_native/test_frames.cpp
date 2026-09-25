@@ -191,6 +191,26 @@ TEST_CASE(spi_frame_matches_shared_vector_is_64_bytes_and_round_trips) {
     CHECK(bytes_equal(decoded.spi.payload.data, payload.data(), payload.size()));
 }
 
+TEST_CASE(address_frames_are_known_in_both_directions) {
+    using duo_input::protocol::SpiFrame;
+    using duo_input::protocol::SpiMessageType;
+    for (SpiMessageType type :
+         {SpiMessageType::HOST_ADDRESSES, SpiMessageType::ENDPOINT_ADDRESSES}) {
+        const std::uint8_t payload[5] = {1, 192, 168, 1, 7};
+        SpiFrame frame;
+        frame.type = type;
+        frame.payload = duo_input::protocol::ByteView{payload, sizeof(payload)};
+        std::uint8_t wire[64] = {};
+        std::size_t written = 0;
+        CHECK(duo_input::protocol::encode_spi_frame(
+            frame, duo_input::protocol::MutableByteView{wire, sizeof(wire)}, written));
+        duo_input::protocol::DecodeResult result;
+        CHECK(duo_input::protocol::decode_spi_frame(
+            duo_input::protocol::ByteView{wire, sizeof(wire)}, result));
+        CHECK(result.spi.type == type);
+    }
+}
+
 TEST_CASE(cdc_frame_rejects_every_transport_truncation_and_crc_damage) {
     const std::vector<std::uint8_t> transport =
         hex_bytes(vector_value(vector_document(), "cdc", "transport"));
