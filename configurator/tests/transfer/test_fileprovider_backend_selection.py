@@ -147,6 +147,11 @@ class FakeFPBackend(QObject):
         # generation_ready как границу "точки невозврата").
         self.generation_ready.emit(self._last_manifest.transfer_id, ())
 
+    def owns_reply(self, message: Message) -> bool:
+        # The fake never issues FILE_READs itself, so no reply is "its own";
+        # routing then falls back to the per-offer active backend.
+        return False
+
     def handle_message(self, message: Message) -> None:
         self.messages.append(message)
 

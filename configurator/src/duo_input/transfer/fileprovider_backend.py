@@ -1926,18 +1926,40 @@ class FileProviderBackend(QObject):
     }
 
     def _on_file_error(self, message: Message) -> None:
+        header = message.header
+        reason = header.get("reason")
+        # Only the short wire identifier (the source sends [a-z_]{1,64}); never
+        # free text, paths or content.
+        reason_label = reason if isinstance(reason, str) and reason.isidentifier() else "invalid"
         _rng, fetch = self._correlate(message)
         if fetch is None:
             # Stale/late error for a range that already settled - drop it, the
             # same way _on_chunk drops a late chunk. A live fetch is failed once
             # (below); any other in-flight range's later chunk/error is then a
             # late no-op (spec §14).
+            _log_event(
+                "fp_file_error_unmatched",
+                read_id=header.get("read_id"),
+                reason=reason_label,
+            )
             return
-        reason = message.header.get("reason")
         code = (
             self._FILE_ERROR_REASON_CODES.get(reason, 7)
             if isinstance(reason, str)
             else 7
+        )
+        # retryable mirrors the extension's FetchController.isRetryable: only
+        # the host-unreachable codes 3/5/8 are retried; everything a FILE_ERROR
+        # maps to is final for this fetch.
+        _log_event(
+            "fp_file_error",
+            transfer_id=fetch.generation_id,
+            entry_index=fetch.entry_index,
+            fetch_token=fetch.fetch_token,
+            read_id=header.get("read_id"),
+            reason=reason_label,
+            code=code,
+            retryable="true" if code in (3, 5, 8) else "false",
         )
         self._finish_fetch(fetch, FetchState.FAILED, _xpc_error(code))
 
@@ -2174,6 +2196,16 @@ class FileProviderBackend(QObject):
             self._on_chunk(message)
         elif message.type is MessageType.FILE_ERROR:
             self._on_file_error(message)
+
+    def owns_reply(self, message: Message) -> bool:
+        """True iff ``message`` is a FILE_CHUNK/FILE_ERROR answering one of
+        THIS backend's live in-flight FILE_READs (same correlation as
+        ``_correlate``; pure, no side effects). Lets the receive router deliver
+        replies to reads this backend issued outside a router-level offer -
+        e.g. a rehydrated generation fetched after a host restart."""
+        if message.type not in (MessageType.FILE_CHUNK, MessageType.FILE_ERROR):
+            return False
+        return self._correlate(message)[1] is not None
 
     # --- session-wide lifecycle is implemented by the later lifecycle tasks
     def cancel(self) -> None:

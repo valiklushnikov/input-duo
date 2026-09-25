@@ -278,6 +278,16 @@ class MacReceiveRouter(QObject):
 
     # --- остальной интерфейс MacFileReceiver
     def handle_message(self, message) -> None:
+        # A reply to a FILE_READ the File Provider backend itself issued goes
+        # to it by read ownership, not by the per-offer selection: fetches of
+        # an already-published (e.g. rehydrated after a host restart)
+        # generation run with NO active router offer, and dropping their
+        # FILE_ERROR turned a terminal source_missing into a 30 s read-timeout
+        # (transient) that the extension kept retrying.
+        fp = self._fp
+        if fp is not None and fp.owns_reply(message):
+            fp.handle_message(message)
+            return
         backend = self._active_backend
         if backend is not None:
             backend.handle_message(message)
