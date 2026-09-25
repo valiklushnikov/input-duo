@@ -470,8 +470,8 @@ def test_switching_off_disconnects_page_controls_from_the_stopped_coordinator(
 
     window.clipboard_page.sharing_checkbox.setChecked(False)
     window.clipboard_page.pair_button.click()
-    window.clipboard_page.address_field.setText("192.168.1.42")
-    window.clipboard_page.address_field.editingFinished.emit()
+    window.clipboard_page.address_combo.lineEdit().setText("192.168.1.42")
+    window.clipboard_page.address_combo.lineEdit().editingFinished.emit()
 
     try:
         assert coordinator._discovery._timer.isActive() is False
@@ -558,8 +558,8 @@ def test_a_manual_address_typed_on_the_page_reaches_the_coordinator(
     qtbot.addWidget(window)
     coordinator = configure_runtime(qapp, window, settings)
 
-    window.clipboard_page.address_field.setText("192.168.1.42")
-    window.clipboard_page.address_field.editingFinished.emit()
+    window.clipboard_page.address_combo.lineEdit().setText("192.168.1.42")
+    window.clipboard_page.address_combo.lineEdit().editingFinished.emit()
 
     assert coordinator._manual_address == "192.168.1.42"
     coordinator.service._backend.stop()

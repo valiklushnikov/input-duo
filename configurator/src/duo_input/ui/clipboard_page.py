@@ -9,10 +9,10 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QPushButton,
     QVBoxLayout,
@@ -89,11 +89,23 @@ class ClipboardPage(QWidget):
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_requested)
 
-        self.address_field = QLineEdit(self)
-        self.address_field.setPlaceholderText(self.tr("Адрес второго компьютера, если поиск не нашёл"))
-        self.address_field.editingFinished.connect(
-            lambda: self.address_changed.emit(self.address_field.text().strip())
+        # Одна строка на оба случая: выпадающий список - адреса, которые
+        # сообщила плата; ввод - ручной адрес, который главнее них, пока его
+        # не сотрут. Программная подстановка идёт под blockSignals и ручным
+        # вводом не считается.
+        self._manual = False
+        #: Последний адрес, который показал show_address_in_use. Нужен,
+        #: чтобы отличить настоящую правку от editingFinished на голой
+        #: потере фокуса - оно срабатывает и без единого нажатия клавиши.
+        self._auto_text = ""
+        self.address_combo = QComboBox(self)
+        self.address_combo.setEditable(True)
+        self.address_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.address_combo.lineEdit().setPlaceholderText(
+            self.tr("Адрес второго компьютера, если поиск не нашёл")
         )
+        self.address_combo.lineEdit().editingFinished.connect(self._on_address_edited)
+        self.address_combo.activated.connect(self._on_address_chosen)
 
         self.events_list = QListWidget(self)
         self.events_list.setMaximumHeight(120)
@@ -113,7 +125,7 @@ class ClipboardPage(QWidget):
         buttons.addWidget(self.forget_button)
         buttons.addStretch(1)
         peer_layout.addLayout(buttons)
-        peer_layout.addWidget(self.address_field)
+        peer_layout.addWidget(self.address_combo)
 
         layout = QVBoxLayout(self)
         layout.addWidget(peer_box)
@@ -175,6 +187,57 @@ class ClipboardPage(QWidget):
         self.events_list.insertItem(0, text)
         while self.events_list.count() > EVENTS_LIMIT:
             self.events_list.takeItem(self.events_list.count() - 1)
+
+    @property
+    def is_manual(self) -> bool:
+        return self._manual
+
+    def set_board_addresses(self, addresses: list[str]) -> None:
+        """Заполнить список адресами, которые сообщила плата.
+
+        Что набрано или выбрано, сохраняется: перезаполнение списка не
+        должно стирать ручной ввод у человека из-под курсора.
+        """
+        text = self.address_combo.currentText()
+        self.address_combo.blockSignals(True)
+        self.address_combo.clear()
+        self.address_combo.addItems(addresses)
+        self.address_combo.setEditText(text)
+        self.address_combo.blockSignals(False)
+
+    def set_manual_address(self, address: str) -> None:
+        self._manual = bool(address)
+        self._show(address, self.tr("введён вручную") if address else "")
+
+    def show_address_in_use(self, address: str) -> None:
+        if self._manual:
+            return
+        self._auto_text = address
+        self._show(address, self.tr("найден автоматически"))
+
+    def _show(self, address: str, source: str) -> None:
+        self.address_combo.blockSignals(True)
+        self.address_combo.setEditText(address)
+        self.address_combo.blockSignals(False)
+        self.address_combo.setToolTip(source)
+
+    def _on_address_edited(self) -> None:
+        text = self.address_combo.currentText().strip()
+        if not self._manual and (not text or text == self._auto_text):
+            # В автоматическом режиме editingFinished срабатывает и на
+            # обычной потере фокуса, без единой нажатой клавиши. Текст,
+            # совпадающий с тем, что уже показано (в том числе пустой,
+            # пока плата ничего не нашла), - это не редактирование.
+            return
+        self._manual = bool(text)
+        self.address_combo.setToolTip(self.tr("введён вручную") if text else "")
+        self.address_changed.emit(text)
+
+    def _on_address_chosen(self, index: int) -> None:
+        text = self.address_combo.itemText(index).strip()
+        self._manual = bool(text)
+        self.address_combo.setToolTip(self.tr("введён вручную") if text else "")
+        self.address_changed.emit(text)
 
     def set_peer(self, peer: TrustedPeer | None) -> None:
         if peer is None:

@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
+
 from duo_input.clipboard.trust import TrustedPeer
 from duo_input.ui.clipboard_page import ClipboardPage, human_bytes
 
 PEER = TrustedPeer("a" * 32, "LAPTOP-TWO", "b" * 64, "192.168.1.7")
+
+
+def _page(qtbot):
+    page = ClipboardPage()
+    qtbot.addWidget(page)
+    page.show()
+    return page
 
 
 def test_an_unpaired_page_offers_pairing(qtbot):
@@ -126,3 +135,140 @@ def test_setting_the_files_checkbox_programmatically_does_not_echo_a_signal(qtbo
         page.files_checkbox.click()
 
     assert blocker.args == [False]
+
+
+# --------------------------------------------------------- address_combo
+
+
+def test_typing_an_address_and_pressing_enter_reports_it_and_makes_it_manual(qtbot):
+    page = _page(qtbot)
+    seen = []
+    page.address_changed.connect(seen.append)
+
+    qtbot.keyClicks(page.address_combo.lineEdit(), "192.168.1.42")
+    qtbot.keyClick(page.address_combo.lineEdit(), Qt.Key.Key_Return)
+
+    assert seen[-1] == "192.168.1.42"
+    assert page.is_manual is True
+
+
+def test_board_addresses_fill_the_drop_down_without_reporting_anything(qtbot):
+    page = _page(qtbot)
+    seen = []
+    page.address_changed.connect(seen.append)
+
+    page.set_board_addresses(["192.168.1.7", "10.0.0.2"])
+
+    items = [page.address_combo.itemText(i) for i in range(page.address_combo.count())]
+    assert items == ["192.168.1.7", "10.0.0.2"]
+    assert seen == []
+    assert page.is_manual is False
+
+
+def test_choosing_from_the_list_is_a_manual_choice(qtbot):
+    page = _page(qtbot)
+    page.set_board_addresses(["192.168.1.7", "10.0.0.2"])
+    seen = []
+    page.address_changed.connect(seen.append)
+
+    page.address_combo.activated.emit(1)  # то, что шлёт QComboBox при выборе мышью
+
+    assert seen == ["10.0.0.2"]
+    assert page.is_manual is True
+
+
+def test_clearing_the_field_returns_to_automatic(qtbot):
+    page = _page(qtbot)
+    page.set_manual_address("192.168.1.42")
+    seen = []
+    page.address_changed.connect(seen.append)
+
+    page.address_combo.lineEdit().selectAll()
+    qtbot.keyClick(page.address_combo.lineEdit(), Qt.Key.Key_Delete)
+    qtbot.keyClick(page.address_combo.lineEdit(), Qt.Key.Key_Return)
+
+    assert seen[-1] == ""
+    assert page.is_manual is False
+
+
+def test_the_address_in_use_is_shown_in_automatic_mode_only(qtbot):
+    page = _page(qtbot)
+    seen = []
+    page.address_changed.connect(seen.append)
+
+    page.show_address_in_use("10.0.0.2")
+    assert page.address_combo.currentText() == "10.0.0.2"
+    assert page.is_manual is False
+    assert seen == []
+
+    page.set_manual_address("192.168.1.42")
+    page.show_address_in_use("10.0.0.2")
+    assert page.address_combo.currentText() == "192.168.1.42"
+
+
+def test_refilling_the_list_keeps_what_is_typed(qtbot):
+    page = _page(qtbot)
+    page.set_manual_address("192.168.1.42")
+    page.set_board_addresses(["10.0.0.2"])
+    assert page.address_combo.currentText() == "192.168.1.42"
+
+
+def test_showing_an_address_does_not_leak_any_qt_signal(qtbot):
+    """blockSignals в _show: setEditText сам по себе рассылает
+    currentTextChanged/editTextChanged, даже когда ни editingFinished, ни
+    activated не срабатывают. Без blockSignals эти сигналы утекли бы наружу."""
+    page = _page(qtbot)
+    texts = []
+    page.address_combo.currentTextChanged.connect(texts.append)
+
+    page.show_address_in_use("10.0.0.2")
+
+    assert texts == []
+
+
+def test_refilling_the_list_does_not_leak_any_qt_signal(qtbot):
+    """blockSignals в set_board_addresses: тот же утекающий сигнал, только
+    при перезаполнении списка, а не при показе одного адреса."""
+    page = _page(qtbot)
+    texts = []
+    page.address_combo.currentTextChanged.connect(texts.append)
+
+    page.set_board_addresses(["192.168.1.7", "10.0.0.2"])
+
+    assert texts == []
+
+
+def test_leaving_the_field_without_typing_keeps_automatic_mode(qtbot):
+    """editingFinished срабатывает и просто на потере фокуса - без правки текста
+    это не должно превращать автоматический режим в ручной (постановление
+    контролёра, точнее черновика задачи)."""
+    page = _page(qtbot)
+    seen = []
+    page.address_changed.connect(seen.append)
+
+    page.show_address_in_use("10.0.0.2")
+    page.address_combo.lineEdit().setFocus()
+    qtbot.waitUntil(lambda: page.address_combo.lineEdit().hasFocus())
+
+    # Текст не менялся - editingFinished здесь означает только потерю фокуса.
+    page.address_combo.lineEdit().editingFinished.emit()
+
+    assert page.is_manual is False
+    assert seen == []
+
+
+def test_clearing_to_empty_in_automatic_mode_stays_automatic(qtbot):
+    """Пустой текст в автоматическом режиме - не редактирование, даже когда
+    он отличается от последнего показанного адреса (ruling, вторая половина
+    условия «or empty»)."""
+    page = _page(qtbot)
+    seen = []
+    page.address_changed.connect(seen.append)
+
+    page.show_address_in_use("10.0.0.2")
+    page.address_combo.lineEdit().selectAll()
+    qtbot.keyClick(page.address_combo.lineEdit(), Qt.Key.Key_Delete)
+    page.address_combo.lineEdit().editingFinished.emit()
+
+    assert page.is_manual is False
+    assert seen == []
