@@ -323,18 +323,19 @@ def test_out_of_order_received_releases_transport_permit(qapp):
     assert len(_reads(link)) == 4  # window still full (4 live ranges) -> no refill
 
 
-# --- default budget preserves current unbounded-W4 behaviour (COMPAT) --------
-def test_default_budget_preserves_unbounded_behaviour(qapp):
-    # No override: four active fetches x per-file window = the current 16
-    # outstanding reads. The default budget must NOT clamp this (spec §13/§96:
-    # default == current unbounded-W4 control).
+# --- default budget = measured production B8 --------------------------------
+def test_default_budget_clamps_to_production_8(qapp):
+    # No override: four active fetches x per-file window 4 would be 16
+    # outstanding reads; the measured production default budget (8) clamps the
+    # global in-flight set to 8.
     backend, link = _backend(qapp, _manifest((8 * CHUNK,) * 4))
     tokens = [backend.open_fetch("generation-1", i)[0] for i in range(4)]
     for t in tokens:
         backend.pull_chunk(t, Collector())
 
-    assert len(backend.by_read_id) == 16
-    assert int(backend.counters.get("fp_max_global_outstanding_reads", 0)) <= 16
+    assert len(backend.by_read_id) == 8
+    assert int(backend.counters.get("fp_max_global_outstanding_reads", 0)) == 8
+    assert int(backend.counters.get("fp_read_budget_violation", 0)) == 0
 
 
 # --- round-robin membership carries no duplicate active token (case 23) ------
@@ -428,13 +429,14 @@ def test_synchronous_link_reentrancy_stays_bounded_and_byte_exact(qapp):
 
 
 # --- runtime acceptance selector (DUO_FP_READ_BUDGET) ------------------------
-_DEFAULT_BUDGET = PER_FILE_READ_WINDOW * 4  # MAX_ACTIVE_FETCHES
+#: Measured production default (runtime 4/6/8 benchmark, 2026-09-25: B8 won).
+_DEFAULT_BUDGET = 8
 
 
 @pytest.mark.parametrize(
     ("env", "expected"),
     [
-        (None, _DEFAULT_BUDGET),  # unset -> unbounded-W4 compatibility default
+        (None, _DEFAULT_BUDGET),  # unset -> measured production default
         ("4", 4),
         ("6", 6),
         ("8", 8),
@@ -454,3 +456,16 @@ def test_read_budget_from_env_selector(monkeypatch, env, expected):
     else:
         monkeypatch.setenv("DUO_FP_READ_BUDGET", env)
     assert _read_budget_from_env() == expected
+
+
+def test_production_defaults_window_4_budget_8(monkeypatch):
+    # Environment unset -> the measured production configuration W4 + B8.
+    from duo_input.transfer.fileprovider_backend import (
+        _read_budget_from_env,
+        _read_window_from_env,
+    )
+
+    monkeypatch.delenv("DUO_FP_READ_WINDOW", raising=False)
+    monkeypatch.delenv("DUO_FP_READ_BUDGET", raising=False)
+    assert _read_window_from_env() == 4
+    assert _read_budget_from_env() == 8

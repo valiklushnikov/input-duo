@@ -167,15 +167,19 @@ MAX_TOTAL_BUFFERED_BYTES = PER_FILE_READ_WINDOW * MAX_ACTIVE_FETCHES * MAX_FILE_
 #: value, enforced at the single emission point by the round-robin scheduler.
 #:
 #: Selector (spec §13, mirrors DUO_FP_READ_WINDOW): ``DUO_FP_READ_BUDGET``
-#: overrides at import; runtime acceptance compares 4/6/8. A value >= the default
-#: reproduces the current unbounded-W4 behaviour (the experiment's control).
-#: Unset/invalid -> the default MAX_ACTIVE_FETCHES * PER_FILE_READ_WINDOW, which
-#: is exactly today's unbounded ceiling: the budget is INERT by default and only
-#: binds once the runtime winner is pinned lower (spec §96 compatibility).
+#: overrides at import (e.g. 16 == the old unbounded-W4 ceiling at window 4).
+#: Unset/invalid -> PRODUCTION_READ_BUDGET = 8: the MEASURED production default
+#: (runtime 4/6/8 benchmark 2026-09-25, docs/superpowers/records/
+#: 2026-09-25-fileprovider-global-budget-runtime-results.md - B8 had the best
+#: median Finder copy time and kept the isolated per-fetch window at 4). This
+#: is a fixed value, NOT an adaptive budget.
+PRODUCTION_READ_BUDGET = 8
+
+
 def _read_budget_from_env() -> int:
     import os
 
-    default = MAX_ACTIVE_FETCHES * PER_FILE_READ_WINDOW
+    default = PRODUCTION_READ_BUDGET
     raw = os.environ.get("DUO_FP_READ_BUDGET")
     if raw is None:
         return default

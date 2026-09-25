@@ -456,6 +456,10 @@ def test_final_partial_range(qapp):
 # --- 15. four simultaneous fetch streams remain independently bounded --------
 def test_four_streams_independently_bounded(qapp):
     backend, link = _backend(qapp, _manifest((8 * CHUNK,) * 4))
+    # Per-file window property in isolation: lift the global budget to the old
+    # unbounded ceiling (16) - the production default 8 is covered by
+    # test_fileprovider_global_budget.py (same pattern as its _backend(budget=)).
+    backend._global_budget = 16
     tokens = [backend.open_fetch("generation-1", i)[0] for i in range(4)]
     for t in tokens:
         backend.pull_chunk(t, Collector())
