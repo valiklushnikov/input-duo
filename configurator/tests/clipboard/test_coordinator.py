@@ -1600,7 +1600,7 @@ def test_a_dial_already_in_flight_is_not_joined_by_a_second_one(tmp_path, dial, 
     assert len(dial) == 1
 
 
-def test_a_new_board_address_list_does_not_dial_while_blocked(tmp_path, dial, monkeypatch):
+def test_a_new_board_address_list_does_not_dial_while_blocked(tmp_path, dial, monkeypatch, qapp):
     """BLOCKED должен оставаться BLOCKED: занятый порт слушателя - это не
     что-то, что чинится звонком, а новый список адресов от платы не должен
     выглядеть так, будто он его чинит."""
@@ -1611,8 +1611,11 @@ def test_a_new_board_address_list_does_not_dial_while_blocked(tmp_path, dial, mo
 
     coordinator.set_board_addresses(["10.0.0.2"])
 
-    assert dial == []
-    assert coordinator.state is LinkState.BLOCKED
+    try:
+        assert dial == []
+        assert coordinator.state is LinkState.BLOCKED
+    finally:
+        coordinator.stop()
 
 
 def test_a_new_board_address_list_does_not_redial_after_protocol_mismatch(tmp_path, dial, qapp):
@@ -1632,6 +1635,30 @@ def test_a_new_board_address_list_does_not_redial_after_protocol_mismatch(tmp_pa
     try:
         assert dial == []
         assert coordinator.state is LinkState.PROTOCOL_MISMATCH
+    finally:
+        coordinator.stop()
+
+
+def test_a_new_board_address_list_dials_immediately_from_searching(tmp_path, dial, monkeypatch, qapp):
+    """SEARCHING - доверенный пир есть, но кандидатов для набора пока нет
+    (см. test_no_candidates_at_all_falls_back_to_searching - TrustStore не
+    хранит пира без адреса, поэтому «кандидатов нет» задаётся тем же
+    монкипатчем напрямую). Список от платы - единственное, что может
+    запустить набор в этом состоянии: таймер повтора здесь не тикает вовсе
+    (в отличие от DISCONNECTED после обычного разрыва), так что без ветки
+    SEARCHING в guard'е немедленного набора соединение никогда бы не
+    началось само."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    monkeypatch.setattr(coordinator, "_candidates", lambda: list(coordinator._board_addresses))
+    coordinator._try_connect()
+    assert coordinator.state is LinkState.SEARCHING
+    assert dial == []
+    assert coordinator._retry.isActive() is False
+
+    coordinator.set_board_addresses(["10.0.0.2"])
+
+    try:
+        assert [link.address for link in dial] == ["10.0.0.2"]
     finally:
         coordinator.stop()
 
