@@ -82,6 +82,11 @@ def matches_u1(port_info) -> bool:
     return _identity_matches(port_info, U1_IDENTITY)
 
 
+def matches_u2(port_info) -> bool:
+    """Return whether a ``QSerialPortInfo``-shaped object is U2's address endpoint."""
+    return _identity_matches(port_info, U2_IDENTITY)
+
+
 def available_port_infos():
     """Return the live ``QSerialPortInfo`` list (imported lazily to stay Qt-free)."""
     from PySide6.QtSerialPort import QSerialPortInfo
@@ -100,6 +105,17 @@ def find_u1_ports(port_infos=None) -> tuple[PortCandidate, ...]:
     )
 
 
+def find_u2_ports(port_infos=None) -> tuple[PortCandidate, ...]:
+    """Return every port that presents the U2 identity, in enumeration order."""
+    if port_infos is None:
+        port_infos = available_port_infos()
+    return tuple(
+        PortCandidate(info.portName(), (info.serialNumber() or "").strip())
+        for info in port_infos
+        if matches_u2(info)
+    )
+
+
 __all__ = [
     "DeviceIdentity",
     "PortCandidate",
@@ -107,5 +123,7 @@ __all__ = [
     "U2_IDENTITY",
     "available_port_infos",
     "find_u1_ports",
+    "find_u2_ports",
     "matches_u1",
+    "matches_u2",
 ]

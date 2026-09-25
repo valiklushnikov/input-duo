@@ -9,7 +9,9 @@ from duo_input.device.discovery import (
     U2_IDENTITY,
     PortCandidate,
     find_u1_ports,
+    find_u2_ports,
     matches_u1,
+    matches_u2,
 )
 
 
@@ -108,6 +110,16 @@ def test_matching_u1_is_accepted_for_any_serial_with_the_expected_prefix():
 def test_u1_and_u2_identities_are_distinct_products():
     assert U1_IDENTITY.product_id != U2_IDENTITY.product_id
     assert U1_IDENTITY.product_string != U2_IDENTITY.product_string
+
+
+def test_matches_u2_finds_the_u2_identity_and_rejects_the_u1_one():
+    u2 = _u2()
+
+    assert matches_u2(u2) is True
+    assert matches_u1(u2) is False
+    assert find_u2_ports([_unrelated(), _u1(), u2]) == (
+        PortCandidate("COM8", U2_IDENTITY.serial_number_prefix + "0001"),
+    )
 
 
 # ------------------------------------------------------- what Windows reports
