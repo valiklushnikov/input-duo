@@ -2003,6 +2003,73 @@ def test_addresses_from_the_board_reach_the_page_and_the_coordinator(
         runtime.stop()
 
 
+def test_pc2_addresses_from_u2_reach_the_page_and_the_coordinator(
+    qtbot, qapp, tmp_path, monkeypatch
+):
+    """Сквозной путь для ПК2: эмулированная U2 -> EndpointService ->
+    AddressExchange -> координатор и строка. Симметрично тесту выше для
+    ПК1 (``test_addresses_from_the_board_reach_the_page_and_the_coordinator``),
+    но здесь ``window.service`` (U1) остаётся неподключённым - на ПК2 своей
+    U1 нет, поэтому отвечает только ``EndpointService`` через свою U2, а
+    второй бэкенд ``AddressExchange`` просто пропускает такт (см. комментарий
+    в ``app.py`` у сборки ``exchange``).
+
+    ``duo_input.device.endpoint_service.default_link_factory`` подменяется
+    здесь напрямую, поверх автоиспользуемой заглушки в
+    ``configurator/tests/ui/conftest.py`` (та всегда возвращает ``None``) -
+    именно так, как предписывает её собственный докстринг: имя разрешается
+    из глобалов модуля в момент конструирования ``EndpointService``, уже
+    ПОСЛЕ того, как эта подмена встанет. Гранты U2 урезаны до
+    ``Capability.ADDRESS_EXCHANGE`` - ровно то, что реальная U2 отдаёт (см.
+    firmware/u2_endpoint/address_service.cpp): она отвечает только на HELLO
+    и EXCHANGE_ADDRESSES.
+
+    Mutation: сузив список бэкендов при сборке ``AddressExchange`` в app.py
+    до одного только ``[window.service]`` (без ``self._endpoint``), этот
+    тест перестаёт проходить - именно ту проводку он и проверяет.
+    """
+    import duo_input.device.emulator as emulator_module
+    from duo_input.device import endpoint_service as endpoint_service_module
+    from duo_input.device.emulator import U1Emulator
+    from duo_input.device.qt_transport import SynchronousTransportLink
+    from duo_input.generated.protocol import Capability
+
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(app_module, "local_ipv4_addresses", lambda: ["192.168.0.77"])
+    monkeypatch.setattr(
+        emulator_module, "DEVICE_CAPABILITIES", int(Capability.ADDRESS_EXCHANGE)
+    )
+    emulator = U1Emulator()
+    emulator.set_peer_addresses(["192.168.0.128"])
+    monkeypatch.setattr(
+        endpoint_service_module,
+        "default_link_factory",
+        lambda: SynchronousTransportLink(emulator),
+    )
+
+    settings = _settings(tmp_path, True)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+
+    coordinator = configure_runtime(qapp, window, settings)
+    runtime = _runtime_of(qapp)
+    try:
+        assert window.service.is_connected is False  # ПК2: своей U1 нет
+
+        qtbot.waitUntil(
+            lambda: [
+                window.clipboard_page.address_combo.itemText(i)
+                for i in range(window.clipboard_page.address_combo.count())
+            ]
+            == ["192.168.0.128"],
+            timeout=3000,
+        )
+        assert coordinator._board_addresses == ["192.168.0.128"]
+        assert emulator.local_addresses == ["192.168.0.77"]
+    finally:
+        runtime.stop()
+
+
 def test_connect_device_success_ticks_the_address_exchange(
     qtbot, qapp, tmp_path, monkeypatch
 ):
