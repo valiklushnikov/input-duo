@@ -94,6 +94,23 @@ endif()
 
 add_test(NAME frame_resync COMMAND duo_frame_resync_test)
 
+add_executable(duo_address_service_test
+    test_main.cpp
+    test_address_service.cpp
+    ${CMAKE_SOURCE_DIR}/firmware/u2_endpoint/address_service.cpp
+)
+
+target_link_libraries(duo_address_service_test PRIVATE duo_common)
+target_include_directories(duo_address_service_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/firmware/u2_endpoint
+)
+
+if(MSVC)
+    target_compile_options(duo_address_service_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME address_service COMMAND duo_address_service_test)
+
 add_executable(duo_link_drop_log_test
     test_main.cpp
     test_link_drop_log.cpp
