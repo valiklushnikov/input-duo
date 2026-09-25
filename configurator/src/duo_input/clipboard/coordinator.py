@@ -310,6 +310,11 @@ class ClipboardCoordinator(QObject):
             self._retry.stop()
             self._silence.stop()
             self._attempt = 0
+            # Набор начинается заново, не оттуда, где мог застрять прежний
+            # неудачный набор: оператор нажал «Связать» именно для того,
+            # чтобы попробовать снова, начиная с последнего удачного адреса.
+            self._candidate_index = 0
+            self._dialing = False
             self._try_connect()
             return
         # Повторный запуск начинает новый lifecycle. Согласия и callbacks
@@ -441,6 +446,11 @@ class ClipboardCoordinator(QObject):
             # Спаренный компьютер сменил адрес - этого достаточно, чтобы позвонить.
             if self.peer is not None and beacon.origin_id == self.peer.origin_id:
                 self._trust.update_address(address)
+                # Свежий адрес из маячка - самый достоверный кандидат сейчас;
+                # набор должен начаться с него, а не продолжаться с середины
+                # прежнего списка, в которой мог застрять неудачный набор.
+                self._candidate_index = 0
+                self._dialing = False
                 self._try_connect()
             return
         if self._pairing_link is not None:

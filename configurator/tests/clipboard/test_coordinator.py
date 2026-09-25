@@ -1554,3 +1554,64 @@ def test_an_incoming_link_with_no_peer_address_does_not_touch_trust(tmp_path):
         assert trust.peer().last_address == "192.168.1.5"
     finally:
         coordinator.stop()
+
+
+def test_the_candidate_index_wraps_when_the_list_shrinks(tmp_path, dial):
+    """Индекс мог указывать в глубь более длинного списка кандидатов - набор
+    ещё шёл по адресам от платы, - а затем плата прислала список короче.
+    Без взятия по модулю следующий набор либо упал бы с IndexError, либо
+    навсегда застрял на последнем элементе старой длины: оба хуже, чем откат
+    к первому кандидату (последнему удачному адресу)."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator.set_board_addresses(["10.0.0.2", "10.0.0.3", "10.0.0.4"])
+    coordinator._candidate_index = 2
+    coordinator.set_board_addresses(["10.0.0.9"])  # кандидатов теперь только 2
+
+    coordinator._try_connect()
+
+    try:
+        assert dial[-1].address == "192.168.1.5"
+    finally:
+        coordinator.stop()
+
+
+def test_on_peer_seen_restarts_the_dial_from_the_fresh_address(tmp_path, dial):
+    """Маячок от уже доверенного пира с новым адресом - самый достоверный
+    кандидат сейчас; набор должен начаться с него, а не продолжаться с
+    середины прежнего списка, в которой мог застрять неудачный набор."""
+    coordinator, trust = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator.set_board_addresses(["10.0.0.2", "10.0.0.3"])
+    coordinator._candidate_index = 2  # где-то в середине прежнего списка
+
+    coordinator._on_peer_seen(
+        coordinator_module.Beacon(
+            origin_id=LARGEST_ORIGIN_ID,
+            machine_name="LAPTOP-TWO",
+            fingerprint="f" * 64,
+            port=TCP_PORT,
+            protocol_major=PROTOCOL_MAJOR,
+        ),
+        "192.168.1.99",
+    )
+
+    try:
+        assert trust.peer().last_address == "192.168.1.99"
+        assert dial[-1].address == "192.168.1.99"
+    finally:
+        coordinator.stop()
+
+
+def test_begin_pairing_restarts_the_dial_from_the_last_good_address(tmp_path, dial):
+    """«Связать» для уже доверенного, но не подключённого пира должно
+    начинать набор с последнего удачного адреса, а не продолжаться с
+    середины списка, в которой застрял предыдущий неудачный набор."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator.set_board_addresses(["10.0.0.2", "10.0.0.3"])
+    coordinator._candidate_index = 2
+
+    coordinator.begin_pairing()
+
+    try:
+        assert dial[-1].address == "192.168.1.5"
+    finally:
+        coordinator.stop()
