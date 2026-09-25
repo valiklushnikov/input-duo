@@ -13,7 +13,7 @@ import socket
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QObject, QSettings, Qt
+from PySide6.QtCore import QCoreApplication, QObject, QSettings, Qt, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
@@ -181,6 +181,43 @@ def _pairing_confirmation_dialog(
     return dialog, accept_button
 
 
+class _SkipEndpointWhileU1Connected(QObject):
+    """Wraps ``EndpointService`` so PC1 does not also probe for a U2 port
+    while its own U1 is already connected.
+
+    ``AddressExchange`` only knows "ask this backend"; it has no idea that
+    one of its two backends (this computer's U1, via ``window.service``) and
+    the other (a possible U2, via ``EndpointService``) answer to the SAME
+    physical pairing question, and that a computer with a live U1 never
+    needs its own U2 at all (§ EXCHANGE_ADDRESSES, PC1/PC2 split). Without
+    this wrapper, every tick's ``EndpointService.exchange_addresses`` call
+    that finds no link open falls through to ``_open()``, which enumerates
+    serial ports looking for a U2 that, on a PC1 with U1 already plugged in,
+    is never going to answer for THIS pairing - a needless scan repeated
+    once per exchange interval, forever. This belongs in the runtime, not in
+    ``EndpointService`` itself: the service has no idea a ``DeviceService``
+    exists, and should not have to.
+    """
+
+    peer_addresses_received = Signal(list)
+
+    def __init__(
+        self,
+        endpoint: EndpointService,
+        device_service: DeviceService,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._endpoint = endpoint
+        self._device_service = device_service
+        endpoint.peer_addresses_received.connect(self.peer_addresses_received)
+
+    def exchange_addresses(self, local: list[str]) -> bool:
+        if self._device_service.is_connected:
+            return False
+        return self._endpoint.exchange_addresses(local)
+
+
 class _ClipboardRuntime(QObject):
     """Поднимает и останавливает подсистему общего буфера по переключателю.
 
@@ -221,6 +258,7 @@ class _ClipboardRuntime(QObject):
         self.coordinator: ClipboardCoordinator | None = None
         self.address_exchange: AddressExchange | None = None
         self._endpoint: EndpointService | None = None
+        self._endpoint_backend: _SkipEndpointWhileU1Connected | None = None
         self.transfer: FileTransferService | None = None
         self.file_backend: QObject | None = None
         self._file_callback_gateway = None
@@ -385,10 +423,14 @@ class _ClipboardRuntime(QObject):
 
         # ПК1 спрашивает через U1 (порт уже держит DeviceService), ПК2 - через
         # свою U2. На каждом компьютере отвечает ровно один из двух: второй
-        # просто не находит своей платы и пропускает такт.
+        # просто не находит своей платы и пропускает такт. Пока U1 подключена,
+        # второй бэкенд вообще не пытается искать U2 - _SkipEndpointWhileU1Connected
+        # возвращает False сразу, без перечисления портов.
         self._endpoint = EndpointService(parent=self)
+        endpoint_backend = _SkipEndpointWhileU1Connected(self._endpoint, window.service, self)
+        self._endpoint_backend = endpoint_backend
         exchange = AddressExchange(
-            [window.service, self._endpoint], lambda: local_ipv4_addresses(), self
+            [window.service, endpoint_backend], lambda: local_ipv4_addresses(), self
         )
         exchange.peer_addresses_changed.connect(coordinator.set_board_addresses)
         exchange.peer_addresses_changed.connect(window.clipboard_page.set_board_addresses)
@@ -435,6 +477,9 @@ class _ClipboardRuntime(QObject):
         if endpoint is not None:
             endpoint.stop()
             endpoint.deleteLater()
+        endpoint_backend, self._endpoint_backend = self._endpoint_backend, None
+        if endpoint_backend is not None:
+            endpoint_backend.deleteLater()
 
         self._application.setQuitOnLastWindowClosed(True)
 

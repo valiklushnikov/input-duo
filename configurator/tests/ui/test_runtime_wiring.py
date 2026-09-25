@@ -2070,6 +2070,64 @@ def test_pc2_addresses_from_u2_reach_the_page_and_the_coordinator(
         runtime.stop()
 
 
+def test_pc1_does_not_scan_for_u2_while_u1_is_connected(
+    qtbot, qapp, tmp_path, monkeypatch
+):
+    """(Recommendation) PC1 already has an answer from its own U1 - it must
+    not also go looking for a U2 port while that link is up. The runtime
+    wraps ``EndpointService`` so a tick skips it (returns ``False`` without
+    ever calling ``default_link_factory``, i.e. without enumerating serial
+    ports) whenever ``window.service.is_connected``; once U1 disconnects,
+    the same tick is free to look for U2 again.
+
+    ``default_link_factory`` is patched (overriding the autouse
+    ``no_real_u2_link`` stub) with one that only counts its calls, so this
+    test can tell "skipped" from "tried and found nothing" - both leave U2
+    unreached, but only the second one calls the factory at all.
+    """
+    from duo_input.device import endpoint_service as endpoint_service_module
+    from duo_input.device.emulator import U1Emulator
+    from duo_input.device.qt_transport import SynchronousTransportLink
+
+    factory_calls: list[int] = []
+
+    def counting_factory():
+        factory_calls.append(1)
+        return None
+
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(
+        endpoint_service_module, "default_link_factory", counting_factory
+    )
+
+    u1_emulator = U1Emulator()
+    settings = _settings(tmp_path, True)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+    configure_runtime(qapp, window, settings)
+    runtime = _runtime_of(qapp)
+    try:
+        window.service.connect_device(SynchronousTransportLink(u1_emulator))
+        qtbot.waitUntil(lambda: window.service.is_connected)
+        # configure_runtime() already ticked once, before the device was
+        # connected - only the tick below, taken while U1 IS connected, is
+        # under test here.
+        factory_calls.clear()
+
+        runtime.address_exchange.tick()
+
+        assert factory_calls == []
+
+        window.service.disconnect_device()
+        assert window.service.is_connected is False
+
+        runtime.address_exchange.tick()
+
+        assert factory_calls == [1]
+    finally:
+        runtime.stop()
+
+
 def test_connect_device_success_ticks_the_address_exchange(
     qtbot, qapp, tmp_path, monkeypatch
 ):
