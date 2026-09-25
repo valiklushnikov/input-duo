@@ -176,7 +176,14 @@ struct Link {
     ConfigService service{store, replies, runtime};
     std::uint16_t sequence = 0;
 
-    Link() { service.set_address_book(&book); }
+    /// The book is wired in by default, the way main() does it. Pass false
+    /// to reproduce a build that never called set_address_book, which is the
+    /// only way to exercise EXCHANGE_ADDRESSES' own "no book" guard.
+    explicit Link(bool wire_address_book = true) {
+        if (wire_address_book) {
+            service.set_address_book(&book);
+        }
+    }
 
     /// Send one request and return the decoded reply.
     CdcFrame send(CdcMessageType type, const std::uint8_t* payload, std::size_t size) {
@@ -2483,10 +2490,24 @@ TEST_CASE(an_exchange_keeps_the_hosts_list_and_returns_the_peers) {
 TEST_CASE(an_exchange_with_a_broken_list_changes_nothing) {
     Link link;
     link.hello();
+    // A good exchange first, so "changes nothing" is checked against a book
+    // that actually holds something - a broken payload landing on an empty
+    // book would pass this test even if decode ran after set_local instead
+    // of before it.
+    const std::uint8_t mine[] = {1, 192, 168, 1, 7};
+    link.send(CdcMessageType::EXCHANGE_ADDRESSES, mine, sizeof(mine));
+    CHECK(link.book.has_local());
+    CHECK_EQ(link.book.local().count, 1u);
+    CHECK_EQ(link.book.local().octets[0][0], 192u);
+    CHECK_EQ(link.book.local().octets[0][3], 7u);
+
     const std::uint8_t broken[] = {2, 192, 168, 1, 7};
     const CdcFrame reply = link.send(CdcMessageType::EXCHANGE_ADDRESSES, broken, sizeof(broken));
     CHECK_EQ(error_of(reply), CdcError::InvalidRequest);
-    CHECK_FALSE(link.book.has_local());
+    CHECK(link.book.has_local());
+    CHECK_EQ(link.book.local().count, 1u);
+    CHECK_EQ(link.book.local().octets[0][0], 192u);
+    CHECK_EQ(link.book.local().octets[0][3], 7u);
 }
 
 TEST_CASE(an_exchange_needs_the_capability_to_have_been_agreed) {
@@ -2497,4 +2518,15 @@ TEST_CASE(an_exchange_needs_the_capability_to_have_been_agreed) {
     const CdcFrame reply = link.send(CdcMessageType::EXCHANGE_ADDRESSES, mine, sizeof(mine));
     CHECK_EQ(error_of(reply), CdcError::UnsupportedCapability);
     CHECK_FALSE(link.book.has_local());
+}
+
+TEST_CASE(an_exchange_without_a_wired_book_is_unsupported) {
+    // Reproduces a build that never called set_address_book: the capability
+    // is still negotiated (HELLO does not know the book is missing), but the
+    // command itself must refuse rather than dereference a null pointer.
+    Link link(/*wire_address_book=*/false);
+    link.hello();
+    const std::uint8_t mine[] = {1, 192, 168, 1, 7};
+    const CdcFrame reply = link.send(CdcMessageType::EXCHANGE_ADDRESSES, mine, sizeof(mine));
+    CHECK_EQ(error_of(reply), CdcError::UnsupportedCapability);
 }
