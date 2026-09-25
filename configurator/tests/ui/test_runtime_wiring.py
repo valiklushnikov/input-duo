@@ -1869,3 +1869,214 @@ def test_toggling_the_flag_mid_generation_does_not_migrate_the_active_transfer(
         assert router._active_backend is router._staging
     finally:
         runtime.stop()
+
+
+# --------------------------------------------------------------------------
+# Task 14: wire the address exchange into the running app, persist the
+# manual address, and prove the chain from the board through to the page -
+# every piece above was unit-tested in isolation and none of it was reachable
+# from ``main()`` (see project memory: "Tested but never called").
+# --------------------------------------------------------------------------
+
+
+def test_default_link_factory_is_patched_in_tests():
+    """Guards the controller ruling itself: a real U1 and a real U2 are
+    plugged into this machine, so ``EndpointService``'s default factory -
+    which opens the first real U2 serial port - must never run un-patched
+    in a test process. ``configurator/tests/ui/conftest.py``'s
+    ``no_real_u2_link`` autouse fixture patches the module-level
+    ``default_link_factory`` before this test body runs; remove that
+    fixture and this assertion fails because the real port is found."""
+    from duo_input.device.endpoint_service import EndpointService
+
+    service = EndpointService()
+
+    assert service._factory() is None
+
+
+def test_a_manual_address_survives_a_restart(qtbot, qapp, tmp_path, monkeypatch):
+    """Исходная жалоба: после пересборки строка адреса пустела."""
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    settings = _settings(tmp_path, True)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+    coordinator = configure_runtime(qapp, window, settings)
+    line = window.clipboard_page.address_combo.lineEdit()
+    qtbot.keyClicks(line, "192.168.1.42")
+    qtbot.keyClick(line, Qt.Key.Key_Return)
+    coordinator.service._backend.stop()
+    coordinator.stop()
+
+    again = build_main_window(settings=settings)
+    qtbot.addWidget(again)
+    restored = configure_runtime(qapp, again, settings)
+    try:
+        assert again.clipboard_page.address_combo.currentText() == "192.168.1.42"
+        assert again.clipboard_page.is_manual is True
+        assert restored._manual_address == "192.168.1.42"
+    finally:
+        restored.service._backend.stop()
+        restored.stop()
+
+
+def test_addresses_from_the_board_reach_the_page_and_the_coordinator(
+    qtbot, qapp, tmp_path, monkeypatch
+):
+    """Сквозной путь: эмулятор U1 -> DeviceService -> AddressExchange ->
+    координатор и строка. Без него каждая часть протестирована, а цепочка -
+    нет (см. память «Tested but never called»)."""
+    from duo_input.device.emulator import U1Emulator
+    from duo_input.device.qt_transport import SynchronousTransportLink
+
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(app_module, "local_ipv4_addresses", lambda: ["192.168.1.10"])
+    emulator = U1Emulator()
+    emulator.set_peer_addresses(["10.0.0.2"])
+    settings = _settings(tmp_path, True)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+    window.service.connect_device(SynchronousTransportLink(emulator))
+    qtbot.waitUntil(lambda: window.service.is_connected and window.service.device_info is not None)
+
+    coordinator = configure_runtime(qapp, window, settings)
+    try:
+        qtbot.waitUntil(
+            lambda: [
+                window.clipboard_page.address_combo.itemText(i)
+                for i in range(window.clipboard_page.address_combo.count())
+            ]
+            == ["10.0.0.2"],
+            timeout=3000,
+        )
+        assert coordinator._board_addresses == ["10.0.0.2"]
+        assert emulator.local_addresses == ["192.168.1.10"]
+    finally:
+        coordinator.service._backend.stop()
+        coordinator.stop()
+
+
+def test_a_manual_address_typed_on_the_page_is_saved_immediately(
+    qtbot, qapp, tmp_path, monkeypatch
+):
+    """Saving must not wait for a restart: it happens on the same edit that
+    reaches the coordinator, through ``_ClipboardRuntime.set_manual_address``
+    - not through a direct ``page.address_changed -> coordinator.
+    set_manual_address`` connection, which would reach the coordinator but
+    never touch ``QSettings`` at all."""
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    settings = _settings(tmp_path, True)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+    coordinator = configure_runtime(qapp, window, settings)
+    try:
+        line = window.clipboard_page.address_combo.lineEdit()
+        qtbot.keyClicks(line, "192.168.1.99")
+        qtbot.keyClick(line, Qt.Key.Key_Return)
+
+        assert settings.value("clipboard/manual_address", "", type=str) == "192.168.1.99"
+    finally:
+        coordinator.service._backend.stop()
+        coordinator.stop()
+
+
+def test_address_in_use_reaches_the_page(qtbot, qapp, tmp_path, monkeypatch):
+    """The coordinator's ``address_in_use`` signal must be wired to the
+    page's ``show_address_in_use`` - otherwise a candidate the coordinator
+    dials from the board's list never shows up in the combo box at all."""
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    settings = _settings(tmp_path, True)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+    coordinator = configure_runtime(qapp, window, settings)
+    try:
+        assert window.clipboard_page.is_manual is False
+
+        coordinator.address_in_use.emit("192.168.1.77")
+
+        assert window.clipboard_page.address_combo.currentText() == "192.168.1.77"
+    finally:
+        coordinator.service._backend.stop()
+        coordinator.stop()
+
+
+def test_address_exchange_starts_with_sharing(qtbot, qapp, tmp_path, monkeypatch):
+    """``AddressExchange.start()`` must actually be called - an exchange
+    object that exists but never started would leave the periodic tick, and
+    therefore every address the board ever offers, dead on arrival."""
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    settings = _settings(tmp_path, True)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+    coordinator = configure_runtime(qapp, window, settings)
+    runtime = _runtime_of(qapp)
+    try:
+        assert runtime.address_exchange is not None
+        assert runtime._endpoint is not None
+        assert runtime.address_exchange._timer.isActive() is True
+    finally:
+        coordinator.service._backend.stop()
+        coordinator.stop()
+
+
+def test_stop_calls_stop_on_both_exchange_and_endpoint(
+    qtbot, qapp, tmp_path, monkeypatch
+):
+    """``_stop`` must stop (not merely drop the reference to) both the
+    exchange and the endpoint service - otherwise the endpoint's timer (and
+    a still-open U2 link, on real hardware) survives sharing being switched
+    off."""
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    settings = _settings(tmp_path, True)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+    coordinator = configure_runtime(qapp, window, settings)
+    runtime = _runtime_of(qapp)
+    coordinator.service._backend.stop()
+
+    exchange = runtime.address_exchange
+    endpoint = runtime._endpoint
+    exchange_stops: list[int] = []
+    endpoint_stops: list[int] = []
+    monkeypatch.setattr(exchange, "stop", lambda: exchange_stops.append(1))
+    monkeypatch.setattr(endpoint, "stop", lambda: endpoint_stops.append(1))
+
+    window.clipboard_page.sharing_checkbox.setChecked(False)
+
+    assert exchange_stops == [1]
+    assert endpoint_stops == [1]
+    assert runtime.address_exchange is None
+    assert runtime._endpoint is None
+
+
+def test_stop_then_start_does_not_double_connect_the_manual_address_signal(
+    qtbot, qapp, tmp_path, monkeypatch
+):
+    """The page (and ``_ClipboardRuntime`` itself) survive an
+    enable/disable cycle - only the coordinator is rebuilt. If ``_stop``
+    left ``page.address_changed`` connected to ``self.set_manual_address``,
+    the next ``_start`` would add a second connection to the very same
+    bound method, and one edit on the page would reach the (new)
+    coordinator's ``set_manual_address`` twice."""
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    settings = _settings(tmp_path, True)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+    coordinator = configure_runtime(qapp, window, settings)
+    runtime = _runtime_of(qapp)
+    coordinator.service._backend.stop()
+
+    window.clipboard_page.sharing_checkbox.setChecked(False)
+    window.clipboard_page.sharing_checkbox.setChecked(True)
+    new_coordinator = runtime.coordinator
+    new_coordinator.service._backend.stop()
+
+    calls: list[str] = []
+    monkeypatch.setattr(new_coordinator, "set_manual_address", calls.append)
+
+    line = window.clipboard_page.address_combo.lineEdit()
+    qtbot.keyClicks(line, "10.0.0.9")
+    qtbot.keyClick(line, Qt.Key.Key_Return)
+
+    assert calls == ["10.0.0.9"]
+
+    new_coordinator.stop()

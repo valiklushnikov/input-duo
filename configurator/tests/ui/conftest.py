@@ -22,3 +22,24 @@ def themed_application(qapp):
 
     apply_theme(qapp)
     return qapp
+
+
+@pytest.fixture(autouse=True)
+def no_real_u2_link(monkeypatch):
+    """Controller ruling: a real U1 and a real U2 are plugged into this
+    machine - no test here may open a real serial port.
+
+    ``_ClipboardRuntime._start`` (app.py) builds an ``EndpointService()``
+    with no ``link_factory`` argument, which falls back to the module-level
+    ``duo_input.device.endpoint_service.default_link_factory`` - the
+    function that opens the first real U2 port found. ``EndpointService.
+    __init__`` resolves that name from its own module's globals at
+    construction time (``self._factory = link_factory or
+    default_link_factory``), which happens inside a test function's body,
+    *after* this autouse fixture has already patched the module attribute -
+    so patching the module-level name here is enough; ``EndpointService``
+    does not need to change to resolve it any later than that.
+    """
+    monkeypatch.setattr(
+        "duo_input.device.endpoint_service.default_link_factory", lambda: None
+    )

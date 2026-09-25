@@ -19,11 +19,14 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 
 from duo_input import __version__
+from duo_input.clipboard.address_exchange import AddressExchange
 from duo_input.clipboard.coordinator import ClipboardCoordinator
 from duo_input.clipboard.identity import load_or_create
+from duo_input.clipboard.local_addresses import local_ipv4_addresses
 from duo_input.clipboard.pairing import PairingCandidate
 from duo_input.clipboard.trust import TrustStore
 from duo_input.clipboard.platform_backend import create_backend
+from duo_input.device.endpoint_service import EndpointService
 from duo_input.device.service import DeviceService
 from duo_input.i18n import TranslationManager
 from duo_input.persistence import autostart
@@ -216,6 +219,8 @@ class _ClipboardRuntime(QObject):
         self._window = window
         self._settings = settings
         self.coordinator: ClipboardCoordinator | None = None
+        self.address_exchange: AddressExchange | None = None
+        self._endpoint: EndpointService | None = None
         self.transfer: FileTransferService | None = None
         self.file_backend: QObject | None = None
         self._file_callback_gateway = None
@@ -289,6 +294,13 @@ class _ClipboardRuntime(QObject):
             # ничего, кроме самого автозапуска.
             logger.exception("не удалось изменить автозапуск")
 
+    def set_manual_address(self, address: str) -> None:
+        """Ручной адрес со страницы: сохранить (переживает перезапуск и
+        пересборку) и отдать координатору."""
+        self._settings.setValue("clipboard/manual_address", address)
+        if self.coordinator is not None:
+            self.coordinator.set_manual_address(address)
+
     def stop(self) -> None:
         """Остановить перед выходом (aboutToQuit) - безопасно, если и так выключено."""
         self._stop()
@@ -341,9 +353,26 @@ class _ClipboardRuntime(QObject):
         window.clipboard_page.set_peer(coordinator.peer)
         window.clipboard_page.pair_requested.connect(coordinator.begin_pairing)
         window.clipboard_page.forget_requested.connect(coordinator.forget_peer)
-        window.clipboard_page.address_changed.connect(coordinator.set_manual_address)
+        window.clipboard_page.address_changed.connect(self.set_manual_address)
+
+        manual = str(self._settings.value("clipboard/manual_address", "", type=str) or "")
+        coordinator.restore_manual_address(manual)
+        window.clipboard_page.set_manual_address(manual)
+        coordinator.address_in_use.connect(window.clipboard_page.show_address_in_use)
+
+        # ПК1 спрашивает через U1 (порт уже держит DeviceService), ПК2 - через
+        # свою U2. На каждом компьютере отвечает ровно один из двух: второй
+        # просто не находит своей платы и пропускает такт.
+        self._endpoint = EndpointService(parent=self)
+        exchange = AddressExchange(
+            [window.service, self._endpoint], lambda: local_ipv4_addresses(), self
+        )
+        exchange.peer_addresses_changed.connect(coordinator.set_board_addresses)
+        exchange.peer_addresses_changed.connect(window.clipboard_page.set_board_addresses)
+        self.address_exchange = exchange
 
         coordinator.start()
+        exchange.start()
 
         self.coordinator = coordinator
         self._backend = backend
@@ -368,10 +397,20 @@ class _ClipboardRuntime(QObject):
         page = self._window.clipboard_page
         page.pair_requested.disconnect(coordinator.begin_pairing)
         page.forget_requested.disconnect(coordinator.forget_peer)
-        page.address_changed.disconnect(coordinator.set_manual_address)
+        page.address_changed.disconnect(self.set_manual_address)
+        coordinator.address_in_use.disconnect(page.show_address_in_use)
         if backend is not None:
             backend.stop()
         coordinator.deleteLater()
+
+        exchange, self.address_exchange = self.address_exchange, None
+        if exchange is not None:
+            exchange.stop()
+            exchange.deleteLater()
+        endpoint, self._endpoint = self._endpoint, None
+        if endpoint is not None:
+            endpoint.stop()
+            endpoint.deleteLater()
 
         self._application.setQuitOnLastWindowClosed(True)
 
