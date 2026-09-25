@@ -10,6 +10,7 @@ using duo_input::link::decode_host_addresses;
 using duo_input::link::encode_host_addresses;
 using duo_input::link::kEndpointAddressesEvery;
 using duo_input::link::kHostAddressesIntervalMs;
+using duo_input::link::kHostAddressesMaxSize;
 using duo_input::protocol::ByteView;
 using duo_input::protocol::MutableByteView;
 
@@ -30,7 +31,7 @@ HostAddresses two_addresses() {
 }  // namespace
 
 TEST_CASE(a_list_survives_the_round_trip) {
-    std::uint8_t wire[33] = {};
+    std::uint8_t wire[kHostAddressesMaxSize] = {};
     std::size_t written = 0;
     CHECK(encode_host_addresses(two_addresses(), MutableByteView{wire, sizeof(wire)}, written));
     CHECK_EQ(written, 9u);
@@ -45,7 +46,7 @@ TEST_CASE(a_list_survives_the_round_trip) {
 }
 
 TEST_CASE(an_empty_list_is_one_byte) {
-    std::uint8_t wire[33] = {};
+    std::uint8_t wire[kHostAddressesMaxSize] = {};
     std::size_t written = 0;
     CHECK(encode_host_addresses(HostAddresses{}, MutableByteView{wire, sizeof(wire)}, written));
     CHECK_EQ(written, 1u);
@@ -78,7 +79,7 @@ TEST_CASE(the_unspecified_address_is_refused) {
 
 TEST_CASE(a_refused_peer_list_leaves_the_previous_one) {
     AddressBook book;
-    std::uint8_t wire[33] = {};
+    std::uint8_t wire[kHostAddressesMaxSize] = {};
     std::size_t written = 0;
     encode_host_addresses(two_addresses(), MutableByteView{wire, sizeof(wire)}, written);
     CHECK(book.accept_peer(ByteView{wire, written}));
@@ -121,4 +122,27 @@ TEST_CASE(the_endpoint_answers_with_its_list_once_in_so_many_replies) {
         if (book.take_reply_slot()) ++slots;
     }
     CHECK_EQ(slots, 3u);
+}
+
+TEST_CASE(encode_refuses_more_than_eight_addresses) {
+    HostAddresses addresses = two_addresses();
+    addresses.count = 9;  // Set count to 9 but octets only has 8 valid indices
+    std::uint8_t wire[1 + 4 * 9] = {};  // Large enough buffer for 9 addresses
+    std::size_t written = 0;
+    CHECK_FALSE(encode_host_addresses(addresses, MutableByteView{wire, sizeof(wire)}, written));
+    CHECK_EQ(written, 0u);
+}
+
+TEST_CASE(encode_refuses_a_buffer_shorter_than_required) {
+    std::uint8_t wire[8] = {};  // Only 8 bytes, but 2 addresses need 9
+    std::size_t written = 0;
+    CHECK_FALSE(encode_host_addresses(two_addresses(), MutableByteView{wire, sizeof(wire)}, written));
+    CHECK_EQ(written, 0u);
+}
+
+TEST_CASE(encode_refuses_a_null_buffer) {
+    std::uint8_t wire[kHostAddressesMaxSize] = {};
+    std::size_t written = 0;
+    CHECK_FALSE(encode_host_addresses(two_addresses(), MutableByteView{nullptr, 0}, written));
+    CHECK_EQ(written, 0u);
 }
