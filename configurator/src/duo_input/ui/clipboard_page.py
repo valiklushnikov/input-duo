@@ -98,6 +98,12 @@ class ClipboardPage(QWidget):
         #: чтобы отличить настоящую правку от editingFinished на голой
         #: потере фокуса - оно срабатывает и без единого нажатия клавиши.
         self._auto_text = ""
+        #: Последний текст, который действительно ушёл сигналом
+        #: address_changed. Нужен, чтобы один и тот же выбор не улетал
+        #: дважды: клик по элементу списка шлёт activated, а следующая
+        #: обычная потеря фокуса - editingFinished с тем же текстом. None -
+        #: ещё ни разу не отправляли, поэтому пустая строка не гасится сама.
+        self._last_emitted: str | None = None
         self.address_combo = QComboBox(self)
         self.address_combo.setEditable(True)
         self.address_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
@@ -207,6 +213,8 @@ class ClipboardPage(QWidget):
 
     def set_manual_address(self, address: str) -> None:
         self._manual = bool(address)
+        if not self._manual:
+            self._auto_text = ""  # выходим из ручного режима - не тащить за собой старый показанный адрес
         self._show(address, self.tr("введён вручную") if address else "")
 
     def show_address_in_use(self, address: str) -> None:
@@ -229,14 +237,27 @@ class ClipboardPage(QWidget):
             # совпадающий с тем, что уже показано (в том числе пустой,
             # пока плата ничего не нашла), - это не редактирование.
             return
-        self._manual = bool(text)
-        self.address_combo.setToolTip(self.tr("введён вручную") if text else "")
-        self.address_changed.emit(text)
+        self._commit(text)
 
     def _on_address_chosen(self, index: int) -> None:
         text = self.address_combo.itemText(index).strip()
+        self._commit(text)
+
+    def _commit(self, text: str) -> None:
+        """Зафиксировать выбор человека и сообщить о нём - но только один раз.
+
+        Клик по элементу списка шлёт activated, а следующая обычная потеря
+        фокуса - editingFinished с тем же самым текстом: то же самое
+        значение не должно улетать address_changed второй раз, иначе
+        координатор увидит его как новую команду и переподключится заново.
+        """
         self._manual = bool(text)
+        if not self._manual:
+            self._auto_text = ""  # то же самое - вышли в автоматический режим, не тащить старый адрес
         self.address_combo.setToolTip(self.tr("введён вручную") if text else "")
+        if text == self._last_emitted:
+            return
+        self._last_emitted = text
         self.address_changed.emit(text)
 
     def set_peer(self, peer: TrustedPeer | None) -> None:

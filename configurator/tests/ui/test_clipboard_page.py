@@ -213,6 +213,92 @@ def test_refilling_the_list_keeps_what_is_typed(qtbot):
     assert page.address_combo.currentText() == "192.168.1.42"
 
 
+def test_a_popup_choice_followed_by_an_ordinary_focus_loss_reports_once(qtbot):
+    """Клик по элементу шлёт activated; следующая обычная потеря фокуса
+    (editingFinished) для того же самого текста не должна переслать
+    address_changed второй раз - иначе координатор видит новую команду и
+    переподключается заново на ровном месте (review, round 1, finding 1)."""
+    page = _page(qtbot)
+    page.set_board_addresses(["192.168.1.7", "10.0.0.2"])
+    seen = []
+    page.address_changed.connect(seen.append)
+
+    page.address_combo.setCurrentIndex(1)
+    page.address_combo.activated.emit(1)
+    page.address_combo.lineEdit().editingFinished.emit()
+
+    assert seen == ["10.0.0.2"]
+    assert page.is_manual is True
+
+
+def test_a_typed_address_followed_by_a_later_focus_loss_reports_once(qtbot):
+    """То же самое, но для набранного вручную адреса, а не выбранного
+    мышью: Enter коммитит текст, следующая потеря фокуса без правки не
+    должна отправить его снова."""
+    page = _page(qtbot)
+    seen = []
+    page.address_changed.connect(seen.append)
+
+    qtbot.keyClicks(page.address_combo.lineEdit(), "192.168.1.42")
+    qtbot.keyClick(page.address_combo.lineEdit(), Qt.Key.Key_Return)
+    page.address_combo.lineEdit().editingFinished.emit()  # обычная потеря фокуса, текст не менялся
+
+    assert seen == ["192.168.1.42"]
+    assert page.is_manual is True
+
+
+def test_choosing_the_same_item_twice_reports_once(qtbot):
+    page = _page(qtbot)
+    page.set_board_addresses(["192.168.1.7", "10.0.0.2"])
+    seen = []
+    page.address_changed.connect(seen.append)
+
+    page.address_combo.activated.emit(1)
+    page.address_combo.activated.emit(1)
+
+    assert seen == ["10.0.0.2"]
+
+
+def test_leaving_manual_mode_does_not_leave_a_stale_auto_text(qtbot):
+    """Обратно в автоматическом режиме адрес, который когда-то показал
+    show_address_in_use, не должен считаться «тем же самым», если плата с
+    тех пор его не подтверждала: иначе набранный вручную адрес, случайно
+    совпавший со старым автоматическим, молча проглатывается (review, round
+    1, finding 3)."""
+    page = _page(qtbot)
+    page.show_address_in_use("10.0.0.2")
+    page.set_manual_address("192.168.1.42")
+
+    page.address_combo.lineEdit().selectAll()
+    qtbot.keyClick(page.address_combo.lineEdit(), Qt.Key.Key_Delete)
+    qtbot.keyClick(page.address_combo.lineEdit(), Qt.Key.Key_Return)  # назад в автоматический режим
+
+    seen = []
+    page.address_changed.connect(seen.append)
+    qtbot.keyClicks(page.address_combo.lineEdit(), "10.0.0.2")
+    qtbot.keyClick(page.address_combo.lineEdit(), Qt.Key.Key_Return)
+
+    assert seen == ["10.0.0.2"]
+    assert page.is_manual is True
+
+
+def test_calling_set_manual_address_empty_also_drops_the_stale_auto_text(qtbot):
+    """Тот же дефект, что и выше, но по программному пути set_manual_address("")
+    вместо очистки через интерфейс - у него своя строка сброса."""
+    page = _page(qtbot)
+    page.show_address_in_use("10.0.0.2")
+    page.set_manual_address("192.168.1.42")
+    page.set_manual_address("")  # программный возврат в автоматический режим
+
+    seen = []
+    page.address_changed.connect(seen.append)
+    qtbot.keyClicks(page.address_combo.lineEdit(), "10.0.0.2")
+    qtbot.keyClick(page.address_combo.lineEdit(), Qt.Key.Key_Return)
+
+    assert seen == ["10.0.0.2"]
+    assert page.is_manual is True
+
+
 def test_showing_an_address_does_not_leak_any_qt_signal(qtbot):
     """blockSignals в _show: setEditText сам по себе рассылает
     currentTextChanged/editTextChanged, даже когда ни editingFinished, ни
