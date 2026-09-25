@@ -197,6 +197,57 @@ TEST_CASE(u2_ignores_garbage_and_recovers_on_the_next_frame) {
     CHECK(reply.type == CdcMessageType::DEVICE_INFO);
 }
 
+TEST_CASE(u2_ignores_a_stray_byte_after_the_boundary_and_recovers) {
+    Board board;
+
+    // A real PING with an 80-byte payload encodes to exactly kMaxWire (96)
+    // wire bytes: raw frame is 10 (header) + 80 (payload) + 4 (CRC) = 94
+    // bytes, COBS adds its one leading code byte (95), and the trailing
+    // delimiter that encode_cdc_frame appends makes 96 - exactly the size
+    // that fills pending_ to its frozen boundary with nothing to spare. This
+    // is the boundary case: the allowed part of pending_ is filled with a
+    // genuinely valid frame, not noise.
+    std::uint8_t payload[80];
+    for (std::size_t i = 0; i < sizeof(payload); ++i) {
+        payload[i] = static_cast<std::uint8_t>(i + 1);
+    }
+    duo_input::protocol::CdcFrame request;
+    request.type = CdcMessageType::PING;
+    request.sequence = 1;
+    request.payload = duo_input::protocol::ByteView{payload, sizeof(payload)};
+    std::uint8_t wire[128];
+    std::uint8_t encode_scratch[128];
+    std::size_t wire_size = 0;
+    CHECK(duo_input::protocol::encode_cdc_frame(
+        request, duo_input::protocol::MutableByteView{wire, sizeof(wire)},
+        duo_input::protocol::MutableByteView{encode_scratch, sizeof(encode_scratch)}, wire_size));
+    CHECK_EQ(wire_size, 96u);
+
+    // Everything except the trailing delimiter: fills the allowed part of
+    // pending_ exactly to the boundary.
+    board.service.on_cdc_bytes(wire, wire_size - 1);
+
+    // One stray byte that arrives before the delimiter, once pending_ is
+    // already full. Without overflowed_, this byte leaves no trace at all -
+    // pending_ is frozen and silently ignores it.
+    const std::uint8_t junk = 0x7A;
+    board.service.on_cdc_bytes(&junk, 1);
+
+    // The delimiter that would have completed the otherwise-valid PING.
+    const std::uint8_t delimiter = 0;
+    board.service.on_cdc_bytes(&delimiter, 1);
+
+    // The saved valid prefix must NOT be answered: the stray byte corrupted
+    // this frame, and the frozen prefix reaching handle_frame() unmarked
+    // would make it look untouched.
+    CHECK_EQ(board.sink.writes, 0);
+
+    // Delimiter resets pending_size_ and overflowed_: the next, unrelated
+    // frame must be handled normally.
+    const CdcFrame reply = board.hello();
+    CHECK(reply.type == CdcMessageType::DEVICE_INFO);
+}
+
 TEST_CASE(u2_discards_a_whole_overflow_run_even_when_it_hides_a_valid_frame) {
     Board board;
 
