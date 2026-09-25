@@ -296,10 +296,31 @@ class _ClipboardRuntime(QObject):
 
     def set_manual_address(self, address: str) -> None:
         """Ручной адрес со страницы: сохранить (переживает перезапуск и
-        пересборку) и отдать координатору."""
+        пересборку) и отдать координатору.
+
+        Подключено ОДИН раз, в ``configure_runtime`` - поле адреса
+        редактируемо независимо от того, включён ли общий буфер (ревью
+        Task 14, раунд 1: адрес, набранный при выключенном общем буфере,
+        раньше терялся - страница ни к чему не была подключена до первого
+        ``_start()``), так что сохранение обязано работать всегда, а
+        отправка координатору - только когда он существует.
+        """
         self._settings.setValue("clipboard/manual_address", address)
         if self.coordinator is not None:
             self.coordinator.set_manual_address(address)
+
+    def _on_device_connected(self, result: object) -> None:
+        """Полный успешный ``connect_device`` - самый первый обмен адресами
+        не обязан ждать до пяти секунд общего таймера (ревью Task 14, раунд
+        1). В этот самый момент ``DeviceService._finish_success`` уже снял
+        ``_operation`` (он выставляется в None ДО эмита), а собственный
+        отложенный запрос MainWindow (``QTimer.singleShot(0,
+        read_device_project)``) ещё не выполнился - значит сервис сейчас
+        простаивает, и синхронный ``tick()`` здесь успевает начать обмен
+        раньше, чем встанет в очередь чтение конфигурации, которое
+        деферится за ним (Task 8)."""
+        if result.operation == "connect_device" and self.address_exchange is not None:
+            self.address_exchange.tick()
 
     def stop(self) -> None:
         """Остановить перед выходом (aboutToQuit) - безопасно, если и так выключено."""
@@ -353,11 +374,13 @@ class _ClipboardRuntime(QObject):
         window.clipboard_page.set_peer(coordinator.peer)
         window.clipboard_page.pair_requested.connect(coordinator.begin_pairing)
         window.clipboard_page.forget_requested.connect(coordinator.forget_peer)
-        window.clipboard_page.address_changed.connect(self.set_manual_address)
 
+        # Поле адреса на странице живёт (и подключено к set_manual_address)
+        # независимо от того, включён ли общий буфер - подключено один раз в
+        # configure_runtime. Здесь координатор лишь узнаёт то, что уже
+        # сохранено.
         manual = str(self._settings.value("clipboard/manual_address", "", type=str) or "")
         coordinator.restore_manual_address(manual)
-        window.clipboard_page.set_manual_address(manual)
         coordinator.address_in_use.connect(window.clipboard_page.show_address_in_use)
 
         # ПК1 спрашивает через U1 (порт уже держит DeviceService), ПК2 - через
@@ -370,6 +393,7 @@ class _ClipboardRuntime(QObject):
         exchange.peer_addresses_changed.connect(coordinator.set_board_addresses)
         exchange.peer_addresses_changed.connect(window.clipboard_page.set_board_addresses)
         self.address_exchange = exchange
+        window.service.operation_succeeded.connect(self._on_device_connected)
 
         coordinator.start()
         exchange.start()
@@ -397,8 +421,8 @@ class _ClipboardRuntime(QObject):
         page = self._window.clipboard_page
         page.pair_requested.disconnect(coordinator.begin_pairing)
         page.forget_requested.disconnect(coordinator.forget_peer)
-        page.address_changed.disconnect(self.set_manual_address)
         coordinator.address_in_use.disconnect(page.show_address_in_use)
+        self._window.service.operation_succeeded.disconnect(self._on_device_connected)
         if backend is not None:
             backend.stop()
         coordinator.deleteLater()
@@ -790,6 +814,12 @@ def configure_runtime(
     window.clipboard_page.files_toggled.connect(runtime.set_files_enabled)
     window.clipboard_page.auto_incoming_toggled.connect(runtime.set_incoming_files_mode)
     window.clipboard_page.autostart_toggled.connect(runtime.set_autostart)
+    # Подключено здесь, один раз, а не в _start()/_stop() (ревью Task 14,
+    # раунд 1): поле адреса на странице редактируемо и при выключенном общем
+    # буфере, и адрес, набранный в это время, обязан сохраниться - раньше
+    # страница подключалась к координатору только между _start и _stop, и
+    # набранный при выключенной фиче адрес терялся молча.
+    window.clipboard_page.address_changed.connect(runtime.set_manual_address)
     application.aboutToQuit.connect(runtime.stop)
 
     # Показать сохранённое состояние ОДИНАКОВО на странице и в трее - раньше
@@ -804,10 +834,15 @@ def configure_runtime(
     )
     autostart_enabled = bool(settings.value("clipboard/autostart", False, type=bool))
     incoming_auto = settings.value("clipboard/incoming_files", "ask", type=str) == "auto"
+    # То же самое - читается и показывается независимо от `enabled` (исходная
+    # жалоба: выключенный общий буфер при запуске показывал пустое поле, даже
+    # если адрес был сохранён с прошлого сеанса).
+    manual_address = str(settings.value("clipboard/manual_address", "", type=str) or "")
     window.clipboard_page.set_sharing_checked(enabled)
     window.clipboard_page.set_files_checked(files_enabled)
     window.clipboard_page.set_auto_incoming_checked(incoming_auto)
     window.clipboard_page.set_autostart_checked(autostart_enabled)
+    window.clipboard_page.set_manual_address(manual_address)
     runtime.tray.set_sharing_checked(enabled)
     runtime.tray.set_files_checked(files_enabled)
     if enabled:
