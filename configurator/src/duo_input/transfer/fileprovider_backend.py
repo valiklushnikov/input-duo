@@ -548,6 +548,20 @@ class FileProviderBackend(QObject):
         # open_fetch (set_callbacks below): there must be no window where a fetch
         # can arrive while _generations is still empty after a restart.
         self._rehydrate_generations()
+        # Restart-path namespace GC (RETIRED -> TOMBSTONED). ``_gc`` runs the
+        # authoritative TTL/budget policy, but on the live path it is only
+        # triggered by a publish/decrement - so after a restart the generations
+        # rehydrated above are never re-evaluated until the NEXT live publish,
+        # and TTL-expired / over-budget ones linger in the working-set namespace.
+        # We cannot run ``_gc`` here in __init__: the extension control XPC is
+        # not connected yet, so ``deleteGeneration`` would not reach it and would
+        # orphan an un-tombstoned Swift record. Instead ride the client's
+        # ``connected`` signal (emitted when the extension XPC is established, so
+        # ``remote()`` is live) and sweep then - reusing the existing policy, not
+        # inventing a second TTL/count (design §7). Idempotent on reconnect.
+        connected_signal = getattr(client, "connected", None)
+        if connected_signal is not None:
+            connected_signal.connect(self._on_extension_connected)
         if hasattr(client, "set_callbacks"):
             client.set_callbacks(self.open_fetch, self.pull_chunk, self.cancel_fetch)
 
@@ -2020,6 +2034,21 @@ class FileProviderBackend(QObject):
                 generation_id,
                 type(error).__name__,
             )
+
+    def _on_extension_connected(self) -> None:
+        """The extension control XPC is (re)connected, so ``remote()`` is live:
+        run the restart-path namespace GC sweep. This is the single point where
+        the TTL/budget policy is applied to generations rehydrated after a
+        restart (the live path only runs ``_gc`` on publish/decrement). It emits
+        real ``deleteGeneration`` tombstones because the XPC is now up. Reuses
+        the authoritative ``_gc`` policy - no new TTL/count - and is idempotent
+        (a reconnect with nothing eligible is a no-op)."""
+        self._bump("fp_namespace_gc_on_connect")
+        _log_event(
+            "fp_namespace_gc_on_connect",
+            durable_generations=len(self._generations),
+        )
+        self._gc()
 
     def _gc(self) -> None:
         """BEGIN NAMESPACE DELETION for quiesced, unreferenced RETIRED

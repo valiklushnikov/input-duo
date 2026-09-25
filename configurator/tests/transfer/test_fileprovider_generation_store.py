@@ -354,3 +354,177 @@ def test_store_rejects_path_traversal_id(tmp_path):
 
     with pytest.raises(ValueError):
         store.save(_record("../escape"))
+
+
+# --- restart-path namespace GC (RETIRED -> TOMBSTONED on extension connect) ---
+def _connectable_client(remote):
+    """A client fake that, unlike the module ``FakeClient``, exposes the real
+    ``connected`` Qt signal the production client emits when the extension
+    control connection is (re)established - the hook the restart namespace GC
+    rides on so ``deleteGeneration`` reaches a LIVE extension XPC."""
+    from PySide6.QtCore import QObject, Signal
+
+    class ConnectableFakeClient(QObject):
+        connected = Signal()
+
+        def __init__(self, remote_):
+            super().__init__()
+            self._remote = remote_
+
+        def remote(self):
+            return self._remote
+
+    return ConnectableFakeClient(remote)
+
+
+_TTL_NS = 24 * 3600 * 1_000_000_000
+
+
+def test_restart_gc_tombstones_ttl_expired_retired_on_extension_connect(qapp, tmp_path):
+    """After a restart the RETIRED->TOMBSTONED transition (TTL/budget) must run
+    once the extension is reachable: ``_rehydrate_generations`` never invoked
+    ``_gc``, so TTL-expired retired generations lingered in the namespace until
+    the next live publish. They must instead be tombstoned when the extension
+    control connection is established."""
+    store_dir = tmp_path / "generations"
+    t = [1_000_000_000]
+    clock = lambda: t[0]  # noqa: E731
+
+    # Live path: publish A..I -> I active, A..H retired (8 = at budget, none GC'd).
+    backend_a = _backend(
+        GenerationRegistryStore(store_dir), clock=clock,
+        generation_ttl_ns=_TTL_NS, max_generations=8,
+    )
+    for name in ["A", "B", "C", "D", "E", "F", "G", "H", "I"]:
+        _publish(backend_a, name)
+
+    # Restart 25h later (past the 24h TTL). Fresh backend + connectable client.
+    t[0] = 1_000_000_000 + 25 * 3600 * 1_000_000_000
+    remote = FakeRemote()
+    client = _connectable_client(remote)
+    backend_b = FileProviderBackend(
+        client, object(), lambda _urls: None,
+        generation_store=GenerationRegistryStore(store_dir),
+        clock=clock, generation_ttl_ns=_TTL_NS, max_generations=8,
+    )
+    retired_ids = {"A", "B", "C", "D", "E", "F", "G", "H"}
+    # Rehydrated, but nothing tombstoned yet (extension not connected).
+    assert retired_ids <= set(backend_b._generations)
+    assert remote.deleted == []
+
+    # Extension connects -> restart namespace GC sweeps the TTL-expired retired.
+    client.connected.emit()
+
+    assert set(remote.deleted) == retired_ids           # all 8 tombstoned
+    assert "I" not in remote.deleted                    # active never deleted
+    assert backend_b._generations["I"].state is _GenerationState.ACTIVE_CLIPBOARD
+    for gid in retired_ids:
+        assert gid not in backend_b._generations        # dropped from host tracking
+
+
+def test_restart_gc_keeps_active_and_within_budget_recent_retired(qapp, tmp_path):
+    """The restart sweep must NOT tombstone the active generation nor recent
+    (within-TTL, within-budget) retired ones - it applies exactly the existing
+    TTL/budget policy, never an aggressive wipe."""
+    store_dir = tmp_path / "generations"
+    t = [1_000_000_000]
+    clock = lambda: t[0]  # noqa: E731
+
+    backend_a = _backend(
+        GenerationRegistryStore(store_dir), clock=clock,
+        generation_ttl_ns=_TTL_NS, max_generations=8,
+    )
+    for name in ["A", "B", "C"]:  # C active, A/B retired (within budget + TTL)
+        _publish(backend_a, name)
+
+    # Restart only 1h later (well within the 24h TTL).
+    t[0] = 1_000_000_000 + 3600 * 1_000_000_000
+    remote = FakeRemote()
+    client = _connectable_client(remote)
+    backend_b = FileProviderBackend(
+        client, object(), lambda _urls: None,
+        generation_store=GenerationRegistryStore(store_dir),
+        clock=clock, generation_ttl_ns=_TTL_NS, max_generations=8,
+    )
+
+    client.connected.emit()
+
+    # Nothing tombstoned: 2 retired <= budget 8 and both < TTL.
+    assert remote.deleted == []
+    assert backend_b._generations["C"].state is _GenerationState.ACTIVE_CLIPBOARD
+    assert set(backend_b._generations) == {"A", "B", "C"}
+
+
+def test_ten_sequential_generations_stay_bounded_across_restart_no_resurrection(qapp, tmp_path):
+    """Offline acceptance (§14): ten unique 'cold' generations published in a
+    row, then a restart, must leave a BOUNDED namespace (<= budget retired + one
+    active), the current generation still directly fetchable (no -1000/-1005),
+    and tombstoned generations must NOT resurrect after another restart."""
+    store_dir = tmp_path / "generations"
+    hour = 3600 * 1_000_000_000
+    t = [hour]
+    clock = lambda: t[0]  # noqa: E731
+    ttl = _TTL_NS  # 24h
+
+    backend = _backend(
+        GenerationRegistryStore(store_dir), clock=clock,
+        generation_ttl_ns=ttl, max_generations=8,
+    )
+    names = [f"G{i:02d}" for i in range(10)]
+    for name in names:
+        _publish(backend, name)
+        t[0] += 5 * hour  # 5h between generations -> total span 45h
+
+    # Live path already bounds the durable set (budget + TTL GC on each publish).
+    active = [g for g in backend._generations.values()
+              if g.state is _GenerationState.ACTIVE_CLIPBOARD]
+    retired = [g for g in backend._generations.values()
+               if g.state is _GenerationState.RETIRED]
+    assert len(active) == 1
+    assert active[0].transfer_id == names[-1]
+    assert len(retired) <= 8
+    # The active generation is directly fetchable - no -1000 (ValueError) path.
+    token, size = backend.open_fetch(names[-1], 0)
+    assert token and size == 3
+
+    deleted_before_restart = set(backend._client.remote().deleted)
+    assert deleted_before_restart, "old generations past TTL were tombstoned live"
+
+    # --- restart: fresh backend + connectable client, a bit later.
+    t[0] += hour
+    remote2 = FakeRemote()
+    client2 = _connectable_client(remote2)
+    backend2 = FileProviderBackend(
+        client2, object(), lambda _urls: None,
+        generation_store=GenerationRegistryStore(store_dir),
+        clock=clock, generation_ttl_ns=ttl, max_generations=8,
+    )
+    backend2.attach_link(FakeLink())
+    # Tombstoned-then-store-deleted generations never rehydrate (no resurrection).
+    for gid in deleted_before_restart:
+        assert gid not in backend2._generations
+
+    client2.connected.emit()  # restart namespace GC sweep
+
+    active2 = [g for g in backend2._generations.values()
+               if g.state is _GenerationState.ACTIVE_CLIPBOARD]
+    retired2 = [g for g in backend2._generations.values()
+                if g.state is _GenerationState.RETIRED]
+    assert len(active2) == 1 and active2[0].transfer_id == names[-1]
+    assert len(retired2) <= 8
+    # Current generation still fetchable after restart + sweep (no -1000/-1005).
+    token2, size2 = backend2.open_fetch(names[-1], 0)
+    assert token2 and size2 == 3
+
+    # --- second restart: nothing the sweep tombstoned comes back.
+    swept = set(remote2.deleted)
+    t[0] += hour
+    backend3 = FileProviderBackend(
+        _connectable_client(FakeRemote()), object(), lambda _urls: None,
+        generation_store=GenerationRegistryStore(store_dir),
+        clock=clock, generation_ttl_ns=ttl, max_generations=8,
+    )
+    backend3.attach_link(FakeLink())
+    for gid in swept:
+        assert gid not in backend3._generations       # no resurrection
+    assert names[-1] in backend3._generations         # active preserved
