@@ -296,6 +296,12 @@ class ClipboardCoordinator(QObject):
         тикающего таймера повтора - ждать до пяти секунд следующего такта
         обмена незачем: набор начинается заново прямо сейчас, с первого
         кандидата.
+
+        Немедленный набор разрешён только из состояний, в которых соединяться
+        и так уместно прямо сейчас (DISCONNECTED/SEARCHING). BLOCKED (порт
+        слушателя занят) и PROTOCOL_MISMATCH (пир уже признан несовместимым)
+        обязаны остаться собой: новый список адресов не чинит ни то, ни
+        другое, а набор поверх них выглядел бы так, будто чинит.
         """
         filtered = [address for address in addresses if address]
         changed = filtered != self._board_addresses
@@ -304,6 +310,8 @@ class ClipboardCoordinator(QObject):
             return
         peer = self.peer
         if peer is None or peer.origin_id < self._identity.origin_id:
+            return
+        if self._state not in (LinkState.DISCONNECTED, LinkState.SEARCHING):
             return
         if self._link is not None or self._dialing or self._pairing:
             return

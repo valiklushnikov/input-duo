@@ -1600,6 +1600,42 @@ def test_a_dial_already_in_flight_is_not_joined_by_a_second_one(tmp_path, dial, 
     assert len(dial) == 1
 
 
+def test_a_new_board_address_list_does_not_dial_while_blocked(tmp_path, dial, monkeypatch):
+    """BLOCKED должен оставаться BLOCKED: занятый порт слушателя - это не
+    что-то, что чинится звонком, а новый список адресов от платы не должен
+    выглядеть так, будто он его чинит."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    monkeypatch.setattr(coordinator._listener, "listen", lambda port: False)
+    coordinator.start()
+    assert coordinator.state is LinkState.BLOCKED
+
+    coordinator.set_board_addresses(["10.0.0.2"])
+
+    assert dial == []
+    assert coordinator.state is LinkState.BLOCKED
+
+
+def test_a_new_board_address_list_does_not_redial_after_protocol_mismatch(tmp_path, dial, qapp):
+    """После PROTOCOL_MISMATCH пир уже признан несовместимым - новый список
+    адресов от платы не должен запускать повторный набор именно этого пира:
+    расхождение версии протокола не лечится переподключением (§11)."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    link = _FakeLink()
+    coordinator._on_connected(link)
+    coordinator._on_message(
+        Message(MessageType.HELLO, {"protocol_major": PROTOCOL_MAJOR + 1}, b"")
+    )
+    assert coordinator.state is LinkState.PROTOCOL_MISMATCH
+
+    coordinator.set_board_addresses(["10.0.0.2"])
+
+    try:
+        assert dial == []
+        assert coordinator.state is LinkState.PROTOCOL_MISMATCH
+    finally:
+        coordinator.stop()
+
+
 def test_pairing_blocks_a_new_board_address_dial(tmp_path, dial, qapp):
     """Идёт связывание - новый список от платы не должен запускать
     параллельный набор поверх него."""
