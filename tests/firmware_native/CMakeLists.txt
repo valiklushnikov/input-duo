@@ -47,6 +47,19 @@ endif()
 
 add_test(NAME hid_state_manager COMMAND duo_hid_state_manager_test)
 
+add_executable(duo_host_addresses_test
+    test_main.cpp
+    test_host_addresses.cpp
+)
+
+target_link_libraries(duo_host_addresses_test PRIVATE duo_common)
+
+if(MSVC)
+    target_compile_options(duo_host_addresses_test PRIVATE /EHsc)
+endif()
+
+add_test(NAME host_addresses COMMAND duo_host_addresses_test)
+
 add_executable(duo_link_watchdog_test
     test_main.cpp
     test_link_watchdog.cpp
