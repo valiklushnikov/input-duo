@@ -434,11 +434,19 @@ class U1Emulator(AbstractByteTransport):
     def _process_request(self, request_wire: bytes, frame: CdcFrame, major: int) -> bytes | None:
         if request_wire == self._last_request_wire:
             return self._last_response_wire
-        if self._last_sequence is not None and frame.sequence != (self._last_sequence + 1) & 0xFFFF:
+        # A HELLO starts a session, so it is accepted at whatever sequence it
+        # carries - config_service.cpp clears have_sequence_ before this check
+        # runs, on purpose, so that a configurator which closed the port and
+        # reopened it (with no memory of the last session's counter) is never
+        # refused the very handshake meant to start a new one.
+        if (
+            frame.type is not CdcMessageType.HELLO
+            and self._last_sequence is not None
+            and frame.sequence != (self._last_sequence + 1) & 0xFFFF
+        ):
             self._diagnostics.bad_sequence += 1
-            response_type = CdcMessageType.DEVICE_INFO if frame.type is CdcMessageType.HELLO else frame.type
             return encode_cdc_frame(
-                CdcFrame(response_type, frame.sequence, self._error_payload(frame, ErrorCode.BAD_SEQUENCE))
+                CdcFrame(frame.type, frame.sequence, self._error_payload(frame, ErrorCode.BAD_SEQUENCE))
             )
 
         response_type, payload = self._dispatch(frame, major)

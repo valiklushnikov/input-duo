@@ -100,12 +100,7 @@ class EndpointService(QObject):
         self._link = link
         self._ready = False
         self._assembler.clear()
-        # Deliberately not a fresh SequenceGenerator: a lost link does not
-        # imply the board forgot its session. U2 tracks the last sequence it
-        # saw and rejects a HELLO that does not continue from it (the same
-        # check every other request gets), so restarting the counter at 1
-        # here would make the very reconnect this service exists for look
-        # like a protocol error to a board that never actually reset.
+        self._sequence = SequenceGenerator()
         self._send(CdcMessageType.HELLO, struct.pack("<I", int(Capability.ADDRESS_EXCHANGE)))
         return True
 
@@ -113,7 +108,6 @@ class EndpointService(QObject):
         self._timer.stop()
         self._pending = None
         self._ready = False
-        self._queued_local = None
         link, self._link = self._link, None
         if link is None:
             return
@@ -165,7 +159,7 @@ class EndpointService(QObject):
         info = parse_device_info(payload)
         granted = info.capabilities & int(Capability.ADDRESS_EXCHANGE)
         if info.protocol_major != PROTOCOL_VERSION_MAJOR or not granted:
-            logger.warning("плата U2 не поддерживает обмен адресами")
+            logger.warning("U2 does not support address exchange")
             self._unsupported = True
             self._close("")
             return

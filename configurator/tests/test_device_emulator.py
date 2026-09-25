@@ -243,6 +243,23 @@ def test_non_v1_stateful_requests_are_rejected_before_dispatch(config_a: bytes):
     assert emulator.release_all_count == 0
 
 
+def test_a_hello_at_any_sequence_starts_a_new_session():
+    # config_service.cpp clears have_sequence_ for a HELLO before the
+    # sequence check runs, so a handshake is accepted at whatever sequence
+    # it carries - a configurator that closed the port and reopened it has
+    # no memory of the last session's counter, and must not be refused the
+    # very request meant to start a new one.
+    emulator = U1Emulator()
+    _request(emulator, CdcMessageType.PING, b"", sequence=500)
+
+    hello = _hello(emulator, sequence=1)
+    assert _error(hello) is ErrorCode.OK
+
+    # The new session continues from this HELLO's own sequence, not the
+    # abandoned session's.
+    assert _error(_request(emulator, CdcMessageType.PING, b"", sequence=2)) is ErrorCode.OK
+
+
 def test_exact_retry_is_byte_identical_and_bad_sequence_does_not_repeat_side_effects():
     emulator = U1Emulator()
     _hello(emulator, sequence=41)

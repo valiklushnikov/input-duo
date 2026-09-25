@@ -420,18 +420,23 @@ def test_a_reply_that_is_only_junk_still_fails_the_operation_at_once(
     assert failure.detail
 
 
-def test_device_reported_bad_sequence_fails_the_connection(qtbot, service, emulator, config_a):
+def test_device_reported_bad_sequence_fails_an_operation(qtbot, service, emulator, config_a):
+    # A HELLO is never refused for the sequence a previous session left
+    # behind - config_service.cpp clears have_sequence_ for it before the
+    # check runs, precisely so a reconnect is never locked out. Only a
+    # request *within* an established session can still desync: here the
+    # host's own counter runs ahead of what the device has actually seen,
+    # the same way a reply the host gave up on but the device still
+    # answered would leave it.
     emulator.install_active(config_a)
-    emulator.open()
-    # Skew the sequence the device expects before the host ever speaks.
-    emulator.exchange(CdcFrame(CdcMessageType.PING, 500, b""))
+    _connect(qtbot, service, emulator)
+    service._sequence.next()
 
-    failure = _fail(qtbot, service, lambda: service.connect_device(emulator))
+    failure = _fail(qtbot, service, service.get_diagnostics)
 
-    assert failure.operation == "connect_device"
+    assert failure.operation == "get_diagnostics"
     assert failure.reason is FailureReason.DEVICE_ERROR
     assert failure.error_code is ErrorCode.BAD_SEQUENCE
-    assert service.state is DeviceState.DISCONNECTED
 
 
 def test_reply_with_a_mismatched_sequence_is_rejected(qtbot, service, emulator, config_a):
