@@ -18,6 +18,7 @@
 #include <cstdint>
 
 #include "diagnostics/latency.hpp"
+#include "link/host_addresses.hpp"
 #include "mapping/capture.hpp"
 #include "protocol/frame.hpp"
 #include "protocol/generated.hpp"
@@ -508,6 +509,11 @@ public:
 
     const LinkState& link_state() const { return link_state_; }
 
+    /// Where EXCHANGE_ADDRESSES keeps this computer's list and finds the
+    /// other one's. main() and SpiMaster share the same book; without one the
+    /// command is refused as unsupported.
+    void set_address_book(link::AddressBook* book) { addresses_ = book; }
+
     /// Publish how long the device itself has been taking.
     ///
     /// Owned by the output runtime and copied here each pass, for the same
@@ -715,6 +721,7 @@ private:
     storage::AbStore& store_;
     CdcSink& sink_;
     IRuntimeConfig& runtime_;
+    link::AddressBook* addresses_ = nullptr;
 
     // The working buffers, kept here rather than on the stack.
     //

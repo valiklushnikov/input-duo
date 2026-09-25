@@ -17,6 +17,7 @@
 #include "pio_usb/device_registry.hpp"
 #include "../../firmware/u1_reference/source_adapter.hpp"
 #include "input/source_table.hpp"
+#include "link/host_addresses.hpp"
 #include "storage/ab_store.hpp"
 #include "test_support.hpp"
 
@@ -171,8 +172,11 @@ struct Link {
     AbStore store{flash};
     Recorder replies;
     RuntimeConfigRecorder runtime;
+    duo_input::link::AddressBook book;
     ConfigService service{store, replies, runtime};
     std::uint16_t sequence = 0;
+
+    Link() { service.set_address_book(&book); }
 
     /// Send one request and return the decoded reply.
     CdcFrame send(CdcMessageType type, const std::uint8_t* payload, std::size_t size) {
@@ -2445,4 +2449,52 @@ TEST_CASE(hid_descriptor_diagnostics_rejects_a_nonempty_request) {
     CHECK_EQ(error_of(link.send(CdcMessageType::GET_HID_DESCRIPTOR_CAPTURE,
                                 &unexpected, 1)),
              CdcError::InvalidRequest);
+}
+
+// ------------------------------------------------------- address exchange
+
+TEST_CASE(the_device_offers_address_exchange) {
+    Link link;
+    std::uint8_t request[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+    const CdcFrame reply = link.send(CdcMessageType::HELLO, request, sizeof(request));
+    const std::uint32_t granted = u32_at(reply, 3);
+    CHECK((granted & static_cast<std::uint32_t>(
+                         duo_input::protocol::Capability::ADDRESS_EXCHANGE)) != 0u);
+}
+
+TEST_CASE(an_exchange_keeps_the_hosts_list_and_returns_the_peers) {
+    Link link;
+    link.hello();
+    const std::uint8_t peer[] = {1, 10, 0, 0, 2};
+    CHECK(link.book.accept_peer(duo_input::protocol::ByteView{peer, sizeof(peer)}));
+
+    const std::uint8_t mine[] = {1, 192, 168, 1, 7};
+    const CdcFrame reply = link.send(CdcMessageType::EXCHANGE_ADDRESSES, mine, sizeof(mine));
+
+    CHECK(reply.type == CdcMessageType::EXCHANGE_ADDRESSES);
+    CHECK_EQ(error_of(reply), CdcError::Ok);
+    CHECK_EQ(reply.payload.size, 6u);
+    CHECK_EQ(reply.payload.data[1], 1u);
+    CHECK_EQ(reply.payload.data[2], 10u);
+    CHECK(link.book.has_local());
+    CHECK_EQ(link.book.local().octets[0][0], 192u);
+}
+
+TEST_CASE(an_exchange_with_a_broken_list_changes_nothing) {
+    Link link;
+    link.hello();
+    const std::uint8_t broken[] = {2, 192, 168, 1, 7};
+    const CdcFrame reply = link.send(CdcMessageType::EXCHANGE_ADDRESSES, broken, sizeof(broken));
+    CHECK_EQ(error_of(reply), CdcError::InvalidRequest);
+    CHECK_FALSE(link.book.has_local());
+}
+
+TEST_CASE(an_exchange_needs_the_capability_to_have_been_agreed) {
+    Link link;
+    std::uint8_t nothing[4] = {0, 0, 0, 0};
+    link.send(CdcMessageType::HELLO, nothing, sizeof(nothing));
+    const std::uint8_t mine[] = {1, 192, 168, 1, 7};
+    const CdcFrame reply = link.send(CdcMessageType::EXCHANGE_ADDRESSES, mine, sizeof(mine));
+    CHECK_EQ(error_of(reply), CdcError::UnsupportedCapability);
+    CHECK_FALSE(link.book.has_local());
 }

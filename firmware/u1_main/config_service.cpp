@@ -35,7 +35,8 @@ constexpr std::uint32_t device_capabilities() {
            static_cast<std::uint32_t>(protocol::Capability::HID_REPORT_SET_DIAGNOSTICS) |
            static_cast<std::uint32_t>(protocol::Capability::ROUTE_CONTROL) |
            static_cast<std::uint32_t>(protocol::Capability::SPI_ENDPOINT) |
-           static_cast<std::uint32_t>(protocol::Capability::FACTORY_RESET);
+           static_cast<std::uint32_t>(protocol::Capability::FACTORY_RESET) |
+           static_cast<std::uint32_t>(protocol::Capability::ADDRESS_EXCHANGE);
 }
 
 void put_u32(std::uint8_t* out, std::uint32_t value) {
@@ -104,6 +105,7 @@ int expected_request_size(CdcMessageType type) {
             return 2;
         case CdcMessageType::WRITE_CHUNK:
         case CdcMessageType::PING:
+        case CdcMessageType::EXCHANGE_ADDRESSES:
             return -1;
         case CdcMessageType::GET_STATUS:
         case CdcMessageType::GET_ACTIVE_CONFIG_INFO:
@@ -165,6 +167,8 @@ std::uint32_t required_capability(CdcMessageType type) {
         case CdcMessageType::FACTORY_RESET_ARM:
         case CdcMessageType::FACTORY_RESET_COMMIT:
             return static_cast<std::uint32_t>(protocol::Capability::FACTORY_RESET);
+        case CdcMessageType::EXCHANGE_ADDRESSES:
+            return static_cast<std::uint32_t>(protocol::Capability::ADDRESS_EXCHANGE);
         default:
             return 0;
     }
@@ -1103,6 +1107,28 @@ void ConfigService::dispatch(const CdcFrame& frame) {
             active_profile_ = 1;
             payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
             reply(frame.type, frame.sequence, payload, 1);
+            return;
+        }
+        case CdcMessageType::EXCHANGE_ADDRESSES: {
+            if (addresses_ == nullptr) {
+                reply_error(frame, CdcError::UnsupportedCapability);
+                return;
+            }
+            link::HostAddresses local;
+            if (!link::decode_host_addresses(frame.payload, local)) {
+                // The list that was there stays: a malformed request is not a
+                // reason for the other computer to stop seeing this one.
+                reply_error(frame, CdcError::InvalidRequest);
+                return;
+            }
+            addresses_->set_local(local);
+            payload[0] = static_cast<std::uint8_t>(CdcError::Ok);
+            std::size_t written = 0;
+            link::encode_host_addresses(
+                addresses_->peer(),
+                protocol::MutableByteView{payload + 1, ProtocolLimits::CDC_MAX_PAYLOAD - 1},
+                written);
+            reply(frame.type, frame.sequence, payload, 1 + written);
             return;
         }
         default:
