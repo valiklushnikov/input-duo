@@ -129,6 +129,38 @@ class _FakeTimer:
         self.stopped += 1
 
 
+class _DialLink(QObject):
+    """PeerLink, который только записывает, куда его попросили позвонить."""
+
+    connected = Signal(str)
+    disconnected = Signal(str)
+    message_received = Signal(object)
+    made: list["_DialLink"] = []
+
+    def __init__(self, identity, parent=None) -> None:
+        super().__init__(parent)
+        self.address = ""
+        self.peer_address = ""
+        _DialLink.made.append(self)
+
+    def connect_to(self, address, port, expected_fingerprint) -> None:
+        self.address = address
+        self.peer_address = address
+
+    def send(self, message) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture
+def dial(monkeypatch):
+    _DialLink.made = []
+    monkeypatch.setattr(coordinator_module, "PeerLink", _DialLink)
+    return _DialLink.made
+
+
 def _make_coordinator(tmp_path, peer_origin_id: str | None = None) -> tuple[ClipboardCoordinator, TrustStore]:
     identity = load_or_create(tmp_path / "id")
     trust = TrustStore(tmp_path / "peers.json")
@@ -1347,3 +1379,178 @@ def test_the_pairing_button_still_searches_for_a_first_time_peer(tmp_path, qapp)
     coordinator.begin_pairing()
 
     assert coordinator._pairing
+
+
+# ---------------------------------------------------------------------- адреса от платы
+
+
+def test_the_last_good_address_is_tried_first_then_the_boards(tmp_path, dial):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator._retry = _FakeTimer()
+    # 192.168.1.5 - сохранённый last_address; в списке платы он повторяется.
+    coordinator.set_board_addresses(["10.0.0.2", "192.168.1.5", "10.0.0.3"])
+
+    for _ in range(3):
+        coordinator._try_connect()  # то, что сделал бы сработавший _retry
+        dial[-1].disconnected.emit("refused")
+
+    assert [link.address for link in dial] == ["192.168.1.5", "10.0.0.2", "10.0.0.3"]
+
+
+def test_the_next_candidate_is_tried_without_the_backoff(tmp_path, dial):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    timer = _FakeTimer()
+    coordinator._retry = timer
+    coordinator.set_board_addresses(["10.0.0.2"])
+
+    coordinator._try_connect()
+    dial[-1].disconnected.emit("refused")
+
+    assert timer.starts == [0]
+    assert coordinator._attempt == 0
+
+
+def test_the_backoff_starts_only_after_the_whole_list_failed(tmp_path, dial):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    timer = _FakeTimer()
+    coordinator._retry = timer
+    coordinator.set_board_addresses(["10.0.0.2"])
+
+    coordinator._try_connect()
+    dial[-1].disconnected.emit("refused")
+    coordinator._try_connect()
+    dial[-1].disconnected.emit("refused")
+
+    assert timer.starts == [0, reconnect_delay_ms(0)]
+    assert coordinator._candidate_index == 0
+
+
+def test_a_manual_address_is_the_only_candidate(tmp_path, dial):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator.set_board_addresses(["10.0.0.2"])
+    coordinator.restore_manual_address("192.168.7.7")
+
+    assert coordinator._candidates() == ["192.168.7.7"]
+    assert dial == []  # restore только запоминает, не звонит
+
+
+def test_a_connection_remembers_and_announces_the_address_that_worked(tmp_path, dial):
+    coordinator, trust = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator.set_board_addresses(["10.0.0.2"])
+    announced = []
+    coordinator.address_in_use.connect(announced.append)
+    coordinator._candidate_index = 1
+
+    coordinator._try_connect()
+    dial[-1].connected.emit("f" * 64)
+
+    try:
+        assert announced == ["10.0.0.2"]
+        assert trust.peer().last_address == "10.0.0.2"
+        assert coordinator._candidate_index == 0
+    finally:
+        coordinator.stop()
+
+
+def test_an_incoming_ipv4_mapped_address_is_stored_plain(tmp_path, qapp):
+    coordinator, trust = _make_coordinator(tmp_path, peer_origin_id=SMALLEST_ORIGIN_ID)
+    announced = []
+    coordinator.address_in_use.connect(announced.append)
+
+    coordinator._on_incoming_link(_FakeLink("f" * 64, peer_address="::ffff:192.168.1.44"))
+
+    try:
+        assert announced == ["192.168.1.44"]
+        assert trust.peer().last_address == "192.168.1.44"
+    finally:
+        coordinator.stop()
+
+
+def test_no_candidates_at_all_falls_back_to_searching(tmp_path, dial, monkeypatch):
+    # TrustStore не хранит пира без адреса, поэтому «кандидатов нет» задаётся
+    # напрямую: так выглядит пир, чей адрес неизвестен, а плата молчит.
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    monkeypatch.setattr(coordinator, "_candidates", lambda: [])
+    try:
+        coordinator._try_connect()
+
+        assert coordinator.state is LinkState.SEARCHING
+        assert dial == []
+    finally:
+        coordinator.stop()
+
+
+def test_an_empty_board_address_is_not_a_candidate(tmp_path):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator.set_board_addresses(["", "10.0.0.2", ""])
+
+    assert coordinator._candidates() == ["192.168.1.5", "10.0.0.2"]
+
+
+def test_stop_resets_dialing_and_candidate_index(tmp_path, dial):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator._retry = _FakeTimer()
+    coordinator.set_board_addresses(["10.0.0.2", "10.0.0.3"])
+    coordinator._try_connect()
+    dial[-1].disconnected.emit("refused")
+    assert coordinator._candidate_index == 1
+
+    coordinator.stop()
+
+    assert coordinator._candidate_index == 0
+    assert coordinator._dialing is False
+
+
+def test_forget_peer_resets_dialing_and_candidate_index(tmp_path, dial):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator._retry = _FakeTimer()
+    coordinator.set_board_addresses(["10.0.0.2", "10.0.0.3"])
+    coordinator._try_connect()
+    dial[-1].disconnected.emit("refused")
+    assert coordinator._candidate_index == 1
+
+    coordinator.forget_peer()
+
+    assert coordinator._candidate_index == 0
+    assert coordinator._dialing is False
+
+
+def test_update_address_is_skipped_when_the_address_did_not_change(tmp_path):
+    """update_address вызывается только когда адрес действительно сменился -
+    иначе штамп времени последнего изменения дёргался бы на каждое обычное
+    переподключение по тому же, уже сохранённому адресу."""
+    coordinator, trust = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    calls: list[str] = []
+    original = trust.update_address
+
+    def recording(address):
+        calls.append(address)
+        return original(address)
+
+    trust.update_address = recording
+    link = _FakeLink(peer_fingerprint="f" * 64, peer_address="192.168.1.5")
+
+    coordinator._on_connected(link)
+
+    try:
+        assert calls == []
+        assert trust.peer().last_address == "192.168.1.5"
+    finally:
+        coordinator.stop()
+
+
+def test_an_incoming_link_with_no_peer_address_does_not_touch_trust(tmp_path):
+    """Пустой peer_address (заглушка без настоящего сокета) не должен ни
+    что-то сохранять в доверие, ни оповещать несуществующим адресом."""
+    coordinator, trust = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    announced = []
+    coordinator.address_in_use.connect(announced.append)
+    link = _FakeLink(peer_fingerprint="f" * 64, peer_address="")
+
+    coordinator._on_incoming_link(link)
+
+    try:
+        assert announced == []
+        assert trust.peer().last_address == "192.168.1.5"
+    finally:
+        coordinator.stop()

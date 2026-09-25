@@ -108,6 +108,13 @@ def _capabilities_from(header: dict) -> frozenset[str]:
     return frozenset(item for item in announced if isinstance(item, str))
 
 
+def _plain_ipv4(address: str) -> str:
+    """Входящий сокет на двухстековом слушателе даёт "::ffff:1.2.3.4" -
+    звонить обратно и показывать человеку нужно "1.2.3.4"."""
+    prefix = "::ffff:"
+    return address[len(prefix):] if address.lower().startswith(prefix) else address
+
+
 class ClipboardCoordinator(QObject):
     """Владеет связью, обнаружением, доверием и сервисом правил."""
 
@@ -119,6 +126,9 @@ class ClipboardCoordinator(QObject):
     event_logged = Signal(str)
     #: Пир объявил себя в HELLO. Аргумент - frozenset[str] возможностей.
     capabilities_known = Signal(object)
+    #: Адрес, по которому связь действительно установилась - для журнала и
+    #: для того, чтобы показать оператору, что используется на самом деле.
+    address_in_use = Signal(str)
 
     def __init__(
         self,
@@ -147,6 +157,12 @@ class ClipboardCoordinator(QObject):
         self._peer_capabilities: frozenset[str] = frozenset()
         self._attempt = 0
         self._manual_address = ""
+        self._board_addresses: list[str] = []
+        # Какой по счёту кандидат набирается сейчас и идёт ли набор вообще:
+        # неудача набора ведёт к следующему кандидату без паузы, а разрыв
+        # живой связи - к обычной паузе переподключения.
+        self._candidate_index = 0
+        self._dialing = False
         self._state = LinkState.UNPAIRED if trust.peer() is None else LinkState.DISCONNECTED
 
         # Состояние самого связывания - отдельное от рабочей связи: рабочая
@@ -234,6 +250,8 @@ class ClipboardCoordinator(QObject):
     def stop(self) -> None:
         self._retry.stop()
         self._silence.stop()
+        self._dialing = False
+        self._candidate_index = 0
         self._clear_pairing_attempt(close_link=True)
         self._end_pairing()
         self._listener.stop()
@@ -263,6 +281,17 @@ class ClipboardCoordinator(QObject):
             self._service.detach_link()
         self._attempt = 0
         self._try_connect()
+
+    def restore_manual_address(self, address: str) -> None:
+        """Сохранённый ручной адрес при запуске - без немедленного звонка."""
+        self._manual_address = address.strip()
+
+    def set_board_addresses(self, addresses: list[str]) -> None:
+        """Адреса второго компьютера, которые сообщила плата.
+
+        Живую связь это не трогает: список нужен только следующему набору.
+        """
+        self._board_addresses = [address for address in addresses if address]
 
     # ------------------------------------------------------------------ парринг: вход и код
 
@@ -351,6 +380,8 @@ class ClipboardCoordinator(QObject):
         self._silence.stop()
         self._discovery.stop()
         self._attempt = 0
+        self._dialing = False
+        self._candidate_index = 0
         self._trust.forget()
         if self._link is not None:
             self._link.close()
@@ -502,11 +533,17 @@ class ClipboardCoordinator(QObject):
 
     # ------------------------------------------------------------------ рабочая связь
 
-    def _address(self) -> str:
+    def _candidates(self) -> list[str]:
+        """Куда звонить, по порядку: ручной адрес - единственный кандидат;
+        иначе последний удачный, затем адреса от платы, без повторов."""
         if self._manual_address:
-            return self._manual_address
+            return [self._manual_address]
         peer = self.peer
-        return peer.last_address if peer else ""
+        result: list[str] = []
+        for address in ([peer.last_address] if peer else []) + self._board_addresses:
+            if address and address not in result:
+                result.append(address)
+        return result
 
     def _try_connect(self) -> None:
         peer = self.peer
@@ -516,8 +553,8 @@ class ClipboardCoordinator(QObject):
             # forget_peer(). Единственный законный способ снова оказаться
             # здесь без пира - забытый узел; тот обязан молчать.
             return
-        address = self._address()
-        if not address:
+        candidates = self._candidates()
+        if not candidates:
             self._start_looking()
             return
         if peer.origin_id < self._identity.origin_id:
@@ -526,6 +563,8 @@ class ClipboardCoordinator(QObject):
             self._silence.start()
             return
 
+        address = candidates[self._candidate_index % len(candidates)]
+        self._dialing = True
         link = PeerLink(self._identity, self)
         link.connected.connect(lambda _fingerprint: self._on_connected(link))
         link.disconnected.connect(self._on_disconnected)
@@ -568,6 +607,14 @@ class ClipboardCoordinator(QObject):
 
     def _on_connected(self, link: PeerLink) -> None:
         self._link = link
+        self._dialing = False
+        self._candidate_index = 0
+        address = _plain_ipv4(getattr(link, "peer_address", "") or "")
+        if address:
+            peer = self.peer
+            if peer is not None and peer.last_address != address:
+                self._trust.update_address(address)
+            self.address_in_use.emit(address)
         generation = getattr(link, "connection_generation", "unknown")
         # Переподключение может привести на другую сборку пира - забыть, что
         # умел прежний пир, чтобы не унести его возможности на нового.
@@ -646,6 +693,17 @@ class ClipboardCoordinator(QObject):
         if protocol_mismatch:
             self._set_state(LinkState.PROTOCOL_MISMATCH)
             return
+        if self._dialing:
+            self._dialing = False
+            if self._candidate_index + 1 < len(self._candidates()):
+                # Этот адрес не ответил - следующий пробуем сразу: пауза
+                # переподключения нужна после неудачи всего списка, а не
+                # каждого адреса в нём.
+                self._candidate_index += 1
+                self._set_state(LinkState.DISCONNECTED)
+                self._retry.start(0)
+                return
+        self._candidate_index = 0
         if not self._manual_address:
             self._start_looking()
         self._set_state(LinkState.DISCONNECTED)
