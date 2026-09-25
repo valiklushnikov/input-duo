@@ -637,8 +637,6 @@ def test_ping_rejects_payload_that_cannot_fit_error_prefixed_reply():
 
 def test_the_emulator_exchanges_addresses_like_the_board():
     from duo_input.device.host_addresses import decode_host_addresses, encode_host_addresses
-    from duo_input.generated.protocol import CdcMessageType
-    from duo_input.protocol.frame import CdcFrame
 
     emulator = U1Emulator()
     emulator.exchange(CdcFrame(CdcMessageType.HELLO, 0, struct.pack("<I", 0xFFFFFFFF)))
@@ -651,4 +649,26 @@ def test_the_emulator_exchanges_addresses_like_the_board():
     assert reply.type is CdcMessageType.EXCHANGE_ADDRESSES
     assert reply.payload[0] == 0
     assert decode_host_addresses(bytes(reply.payload[1:])) == ["10.0.0.2"]
+    assert emulator.local_addresses == ["192.168.1.7"]
+
+
+def test_malformed_exchange_addresses_payload_is_refused():
+    from duo_input.device.host_addresses import encode_host_addresses
+
+    emulator = U1Emulator()
+    _hello(emulator, sequence=0)
+    emulator.set_peer_addresses(["10.0.0.2"])
+
+    # One successful exchange first
+    reply = emulator.exchange(
+        CdcFrame(CdcMessageType.EXCHANGE_ADDRESSES, 1, encode_host_addresses(["192.168.1.7"]))
+    )
+    assert _error(reply) is ErrorCode.OK
+    assert emulator.local_addresses == ["192.168.1.7"]
+
+    # Malformed payload: claims 2 addresses but only provides partial bytes
+    malformed = emulator.exchange(
+        CdcFrame(CdcMessageType.EXCHANGE_ADDRESSES, 2, bytes([2, 10, 0, 0, 2]))
+    )
+    assert _error(malformed) is ErrorCode.INVALID_REQUEST
     assert emulator.local_addresses == ["192.168.1.7"]
