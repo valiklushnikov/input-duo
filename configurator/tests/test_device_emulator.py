@@ -633,3 +633,22 @@ def test_ping_rejects_payload_that_cannot_fit_error_prefixed_reply():
     assert reply.payload == bytes((ErrorCode.BAD_SIZE,))
     stale = emulator.exchange(CdcFrame(CdcMessageType.PING, 100, b"y" * 1024))
     assert stale.payload == bytes((ErrorCode.BAD_SEQUENCE,))
+
+
+def test_the_emulator_exchanges_addresses_like_the_board():
+    from duo_input.device.host_addresses import decode_host_addresses, encode_host_addresses
+    from duo_input.generated.protocol import CdcMessageType
+    from duo_input.protocol.frame import CdcFrame
+
+    emulator = U1Emulator()
+    emulator.exchange(CdcFrame(CdcMessageType.HELLO, 0, struct.pack("<I", 0xFFFFFFFF)))
+    emulator.set_peer_addresses(["10.0.0.2"])
+
+    reply = emulator.exchange(
+        CdcFrame(CdcMessageType.EXCHANGE_ADDRESSES, 1, encode_host_addresses(["192.168.1.7"]))
+    )
+
+    assert reply.type is CdcMessageType.EXCHANGE_ADDRESSES
+    assert reply.payload[0] == 0
+    assert decode_host_addresses(bytes(reply.payload[1:])) == ["10.0.0.2"]
+    assert emulator.local_addresses == ["192.168.1.7"]

@@ -21,8 +21,9 @@ from duo_input.protocol.cobs import cobs_decode, cobs_encode
 from duo_input.protocol.crc import crc32_ieee
 from duo_input.protocol.frame import CdcFrame, FrameError, decode_cdc_frame, encode_cdc_frame
 
+from .host_addresses import decode_host_addresses, encode_host_addresses
 from .transport import AbstractByteTransport
-from .transactions import HidReportSets
+from .transactions import HidReportSets, PayloadError
 
 
 DEVICE_CAPABILITIES = sum(int(capability) for capability in Capability)
@@ -199,6 +200,8 @@ class U1Emulator(AbstractByteTransport):
         self._disconnect_once = False
         self._bad_crc_response_once = False
         self._leading_noise = b""
+        self._local_addresses: list[str] = []
+        self._peer_addresses: list[str] = []
 
     @property
     def last_sequence(self) -> int | None:
@@ -242,6 +245,10 @@ class U1Emulator(AbstractByteTransport):
             identities.add(identity)
         self._hid_report_sets = report_sets
 
+    def set_peer_addresses(self, addresses: list[str]) -> None:
+        """Set the peer addresses to send in response to EXCHANGE_ADDRESSES."""
+        self._peer_addresses = addresses
+
     @property
     def active_generation(self) -> int:
         slot = self._active()
@@ -267,6 +274,10 @@ class U1Emulator(AbstractByteTransport):
     @property
     def release_all_count(self) -> int:
         return self._release_all_count
+
+    @property
+    def local_addresses(self) -> list[str]:
+        return self._local_addresses
 
     def write(self, data: bytes) -> bytes:
         if not self.is_open:
@@ -831,7 +842,12 @@ class U1Emulator(AbstractByteTransport):
         return bytes((ErrorCode.OK,))
 
     def _handle_exchange_addresses(self, payload: bytes) -> bytes:
-        return bytes((ErrorCode.INVALID_REQUEST,))
+        try:
+            local = decode_host_addresses(payload)
+        except PayloadError:
+            return bytes((ErrorCode.INVALID_REQUEST,))
+        self._local_addresses = local
+        return bytes((ErrorCode.OK,)) + encode_host_addresses(self._peer_addresses)
 
     def _handle_ping(self, payload: bytes) -> bytes:
         if len(payload) == CDC_MAX_PAYLOAD:
