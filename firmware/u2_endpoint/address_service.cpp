@@ -104,6 +104,10 @@ void AddressService::handle_frame(const std::uint8_t* wire, std::size_t size) {
                 reply(frame.type, frame.sequence, payload_, 1);
                 return;
             }
+            // capabilities_ is already the HELLO-time intersection with
+            // kCapabilities (see below), so this is exactly "did the host ask
+            // for ADDRESS_EXCHANGE" - masking again here makes that explicit
+            // rather than relying on the caller to remember.
             if ((capabilities_ & kCapabilities) == 0) {
                 payload_[0] = static_cast<std::uint8_t>(CdcError::UnsupportedCapability);
                 reply(frame.type, frame.sequence, payload_, 1);

@@ -101,6 +101,21 @@ TEST_CASE(u2_exchanges_addresses_after_hello) {
     CHECK_EQ(board.book.local().octets[0][0], 10u);
 }
 
+TEST_CASE(u2_rejects_a_malformed_hello_and_does_not_negotiate) {
+    Board board;
+    const std::uint8_t short_hello[] = {1, 2, 3};  // HELLO wants exactly 4 bytes.
+    const CdcFrame hello_reply =
+        board.send(CdcMessageType::HELLO, short_hello, sizeof(short_hello));
+    CHECK(hello_reply.type == CdcMessageType::DEVICE_INFO);
+    CHECK_EQ(hello_reply.payload.data[0], static_cast<std::uint8_t>(CdcError::InvalidRequest));
+
+    // A malformed HELLO must not count as a handshake: the next request is
+    // still pre-negotiation.
+    const std::uint8_t mine[] = {1, 10, 0, 0, 2};
+    const CdcFrame reply = board.send(CdcMessageType::EXCHANGE_ADDRESSES, mine, sizeof(mine));
+    CHECK_EQ(reply.payload.data[0], static_cast<std::uint8_t>(CdcError::BadState));
+}
+
 TEST_CASE(u2_refuses_an_exchange_before_hello) {
     Board board;
     const std::uint8_t mine[] = {1, 10, 0, 0, 2};
@@ -145,6 +160,31 @@ TEST_CASE(u2_answers_ping_before_hello) {
     CHECK_EQ(reply.payload.data[2], 8u);
 }
 
+TEST_CASE(u2_truncates_a_ping_reply_instead_of_overflowing_its_buffer) {
+    Board board;
+    // At kMaxPayload (64) bytes the request itself still fits comfortably in
+    // the service's 96-byte wire budget (raw frame 14 + 64 = 78 bytes, COBS
+    // overhead 2 bytes => 80-byte wire frame), so this exercises the reply
+    // truncation guard, not the input-side overflow guard covered below.
+    std::uint8_t probe[64];
+    for (std::size_t i = 0; i < sizeof(probe); ++i) {
+        probe[i] = static_cast<std::uint8_t>(i);
+    }
+    const CdcFrame reply = board.send(CdcMessageType::PING, probe, sizeof(probe));
+    CHECK(reply.type == CdcMessageType::PING);
+    CHECK_EQ(reply.payload.size, 1u);
+    CHECK_EQ(reply.payload.data[0], static_cast<std::uint8_t>(CdcError::Ok));
+}
+
+TEST_CASE(u2_forgets_negotiation_after_disconnect) {
+    Board board;
+    board.hello();
+    board.service.on_disconnect();
+    const std::uint8_t mine[] = {1, 10, 0, 0, 2};
+    const CdcFrame reply = board.send(CdcMessageType::EXCHANGE_ADDRESSES, mine, sizeof(mine));
+    CHECK_EQ(reply.payload.data[0], static_cast<std::uint8_t>(CdcError::BadState));
+}
+
 TEST_CASE(u2_ignores_garbage_and_recovers_on_the_next_frame) {
     Board board;
     std::uint8_t noise[300];
@@ -153,6 +193,43 @@ TEST_CASE(u2_ignores_garbage_and_recovers_on_the_next_frame) {
     const std::uint8_t delimiter = 0;
     board.service.on_cdc_bytes(&delimiter, 1);
     CHECK_EQ(board.sink.writes, 0);
+    const CdcFrame reply = board.hello();
+    CHECK(reply.type == CdcMessageType::DEVICE_INFO);
+}
+
+TEST_CASE(u2_discards_a_whole_overflow_run_even_when_it_hides_a_valid_frame) {
+    Board board;
+
+    // A complete, independently valid HELLO frame, built without going
+    // through the service, so it can be glued onto the end of an overflow
+    // run with no delimiter of its own in front of it.
+    const std::uint8_t hello_request[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+    duo_input::protocol::CdcFrame request;
+    request.type = CdcMessageType::HELLO;
+    request.sequence = 1;
+    request.payload = duo_input::protocol::ByteView{hello_request, sizeof(hello_request)};
+    std::uint8_t hello_wire[64];
+    std::uint8_t encode_scratch[64];
+    std::size_t hello_wire_size = 0;
+    CHECK(duo_input::protocol::encode_cdc_frame(
+        request, duo_input::protocol::MutableByteView{hello_wire, sizeof(hello_wire)},
+        duo_input::protocol::MutableByteView{encode_scratch, sizeof(encode_scratch)},
+        hello_wire_size));
+
+    // Two full cycles of the service's 96-byte wire budget: enough that a
+    // mutant which resets pending_size_ to 0 on overflow (instead of
+    // discarding to the next delimiter) would land back on an aligned zero
+    // right as the embedded HELLO begins, and so accidentally decode it
+    // cleanly. Any length would demonstrate that CRC rejects raw noise;
+    // only an aligned length demonstrates that a resync-by-luck bug is
+    // caught too.
+    std::uint8_t noise[192];
+    std::memset(noise, 0x55, sizeof(noise));
+    board.service.on_cdc_bytes(noise, sizeof(noise));
+    board.service.on_cdc_bytes(hello_wire, hello_wire_size);
+    CHECK_EQ(board.sink.writes, 0);
+
+    // The buffer must be clean for the next, unrelated frame.
     const CdcFrame reply = board.hello();
     CHECK(reply.type == CdcMessageType::DEVICE_INFO);
 }
