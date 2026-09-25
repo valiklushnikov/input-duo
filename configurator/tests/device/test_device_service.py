@@ -2211,3 +2211,157 @@ def test_the_emulator_and_the_parser_agree_about_the_reference_counters() -> Non
     unset = parse_diagnostics(emulator._handle_get_diagnostics(b"")).reference_counters
     assert unset is not None
     assert unset.state == "none"
+
+
+@pytest.fixture
+def connected(qtbot, service, emulator):
+    _connect(qtbot, service, emulator)
+    return service, emulator
+
+
+def test_an_exchange_returns_the_peers_addresses_quietly(qtbot, connected):
+    service, emulator = connected
+    emulator.set_peer_addresses(["10.0.0.2"])
+    states, succeeded, failed, received = [], [], [], []
+    service.state_changed.connect(states.append)
+    service.operation_succeeded.connect(succeeded.append)
+    service.operation_failed.connect(failed.append)
+    service.peer_addresses_received.connect(received.append)
+
+    assert service.exchange_addresses(["192.168.1.7"]) is True
+    qtbot.waitUntil(lambda: received == [["10.0.0.2"]])
+
+    assert emulator.local_addresses == ["192.168.1.7"]
+    assert states == [] and succeeded == [] and failed == []
+
+
+def test_no_exchange_is_attempted_without_a_link():
+    from duo_input.device.service import DeviceService
+
+    assert DeviceService().exchange_addresses(["192.168.1.7"]) is False
+
+
+def test_no_exchange_is_attempted_while_another_operation_runs(qtbot, connected):
+    service, _ = connected
+    service.get_diagnostics()
+    assert service.exchange_addresses(["192.168.1.7"]) is False
+
+
+def test_a_user_operation_started_during_an_exchange_waits_instead_of_failing(qtbot, connected):
+    service, _ = connected
+    failed, succeeded = [], []
+    service.operation_failed.connect(failed.append)
+    service.operation_succeeded.connect(succeeded.append)
+
+    assert service.exchange_addresses(["192.168.1.7"]) is True
+    service.get_diagnostics()  # в тот же миг, пока обмен ещё не ответил
+    assert len(service._deferred_calls) == 1
+
+    qtbot.waitUntil(lambda: len(succeeded) == 1)
+    assert failed == []
+    assert succeeded[0].operation == "get_diagnostics"
+
+
+def test_a_board_without_the_capability_is_not_asked(qtbot, connected, monkeypatch):
+    service, _ = connected
+    from dataclasses import replace
+    from duo_input.generated.protocol import Capability
+
+    info = service.device_info
+    monkeypatch.setattr(
+        service,
+        "_device_info",
+        replace(info, capabilities=info.capabilities & ~int(Capability.ADDRESS_EXCHANGE)),
+    )
+    assert service.exchange_addresses(["192.168.1.7"]) is False
+
+
+def test_a_failed_exchange_is_silent_and_frees_the_service(qtbot, connected):
+    service, emulator = connected
+    failed = []
+    service.operation_failed.connect(failed.append)
+    emulator.inject_timeout()
+
+    assert service.exchange_addresses(["192.168.1.7"]) is True
+    # Ответа не будет; по таймауту сервиса (5 с) обмен молча снимается.
+    qtbot.waitUntil(lambda: service.exchange_addresses(["192.168.1.7"]) is True, timeout=8000)
+    assert failed == []
+
+
+def test_link_lost_during_an_exchange_is_silent_and_runs_deferred_calls(qtbot, connected):
+    """A user operation deferred behind an exchange is owed an honest failure.
+
+    The exchange itself must stay silent (no operation_failed for it), but
+    the deferred call queued behind it is not the exchange: it ran, the
+    link died before it could finish, and the caller is owed NOT_CONNECTED
+    rather than being dropped on the floor.
+    """
+    service, emulator = connected
+    failed = []
+    service.operation_failed.connect(failed.append)
+
+    assert service.exchange_addresses(["192.168.1.7"]) is True
+    service.get_diagnostics()
+    assert len(service._deferred_calls) == 1
+
+    emulator.close()
+
+    qtbot.waitUntil(lambda: len(failed) == 1)
+    assert failed[0].operation == "get_diagnostics"
+    assert failed[0].reason == FailureReason.NOT_CONNECTED
+
+
+def test_disconnect_during_an_exchange_clears_deferred_calls(qtbot, connected):
+    """Disconnecting mid-exchange must not leave a stale call to fire later."""
+    service, _ = connected
+    succeeded = []
+    service.operation_succeeded.connect(succeeded.append)
+
+    assert service.exchange_addresses(["192.168.1.7"]) is True
+    service.get_diagnostics()
+    assert len(service._deferred_calls) == 1
+
+    service.disconnect_device()
+
+    assert service._deferred_calls == []
+    assert succeeded == []
+
+
+@pytest.mark.parametrize(
+    "method_name, args",
+    [
+        ("read_config", ()),
+        ("write_config", (b"\x00" * 4,)),
+        ("begin_capture", ()),
+        ("test_macro", (1, 1)),
+        ("stop_and_release_all", ()),
+        ("get_diagnostics", ()),
+    ],
+)
+def test_every_guarded_operation_waits_behind_an_exchange(qtbot, connected, method_name, args):
+    """Each operation method has its own ``_defer_behind_exchange`` call.
+
+    A guard missing from just one of these six would let that one method's
+    call through immediately - BUSY instead of a wait - while every other
+    method in this list kept passing. Parametrizing catches that method
+    individually instead of relying on ``get_diagnostics`` alone to stand
+    in for the rest.
+    """
+    service, _ = connected
+    failed, succeeded = [], []
+    service.operation_failed.connect(failed.append)
+    service.operation_succeeded.connect(succeeded.append)
+
+    assert service.exchange_addresses(["192.168.1.7"]) is True
+    getattr(service, method_name)(*args)
+
+    # Deferred, not refused: nothing has resolved yet, and the call is queued.
+    assert len(service._deferred_calls) == 1
+    assert failed == []
+    assert succeeded == []
+
+    qtbot.waitUntil(lambda: bool(failed or succeeded))
+
+    assert service._deferred_calls == []
+    resolved = (failed + succeeded)[0]
+    assert resolved.operation == method_name

@@ -27,6 +27,7 @@ from duo_input.generated.protocol import (
 )
 from duo_input.protocol.frame import CdcFrame, encode_cdc_frame
 
+from .host_addresses import decode_host_addresses, encode_host_addresses
 from .qt_transport import SynchronousTransportLink
 from .transactions import (
     ErrorCode,
@@ -64,6 +65,7 @@ _BEGIN_CAPTURE = "begin_capture"
 _TEST_MACRO = "test_macro"
 _STOP_AND_RELEASE_ALL = "stop_and_release_all"
 _GET_DIAGNOSTICS = "get_diagnostics"
+_EXCHANGE_ADDRESSES = "exchange_addresses"
 
 
 class DeviceState(StrEnum):
@@ -84,6 +86,7 @@ class DeviceService(QObject):
     progress_changed = Signal(int)
     operation_failed = Signal(object)
     operation_succeeded = Signal(object)
+    peer_addresses_received = Signal(list)
 
     def __init__(self, timeout_ms: int = DEFAULT_TIMEOUT_MS, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -97,6 +100,7 @@ class DeviceService(QObject):
         self._pending: Transaction | None = None
         self._operation: str | None = None
         self._deferred_failure: OperationFailure | None = None
+        self._deferred_calls: list = []
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._on_timeout)
@@ -215,9 +219,12 @@ class DeviceService(QObject):
         """Close the link without reporting a failure for an idle service."""
         self._operation = None
         self._deferred_failure = None
+        self._deferred_calls.clear()
         self._teardown_link()
 
     def read_config(self) -> None:
+        if self._defer_behind_exchange(self.read_config):
+            return
         if not self._begin_operation(_READ_CONFIG):
             return
         self._read_buffer = bytearray()
@@ -231,6 +238,8 @@ class DeviceService(QObject):
         )
 
     def write_config(self, package: bytes) -> None:
+        if self._defer_behind_exchange(lambda: self.write_config(package)):
+            return
         if not self._begin_operation(_WRITE_CONFIG):
             return
         if not isinstance(package, (bytes, bytearray, memoryview)):
@@ -262,6 +271,8 @@ class DeviceService(QObject):
         return True
 
     def begin_capture(self) -> None:
+        if self._defer_behind_exchange(self.begin_capture):
+            return
         if not self._begin_operation(_BEGIN_CAPTURE):
             return
         if self._device_info is not None and self._device_info.capabilities & Capability.DIAGNOSTICS:
@@ -286,6 +297,8 @@ class DeviceService(QObject):
         configuration, so what runs is what was written, not what is being
         edited.
         """
+        if self._defer_behind_exchange(lambda: self.test_macro(profile_id, macro_id)):
+            return
         if not self._begin_operation(_TEST_MACRO):
             return
         if not (1 <= profile_id <= 0xFF and 1 <= macro_id <= 0xFF):
@@ -302,6 +315,8 @@ class DeviceService(QObject):
         )
 
     def stop_and_release_all(self) -> None:
+        if self._defer_behind_exchange(self.stop_and_release_all):
+            return
         if not self._begin_operation(_STOP_AND_RELEASE_ALL):
             return
         self._request(
@@ -312,6 +327,8 @@ class DeviceService(QObject):
         )
 
     def get_diagnostics(self) -> None:
+        if self._defer_behind_exchange(self.get_diagnostics):
+            return
         if not self._begin_operation(_GET_DIAGNOSTICS):
             return
         self._request(
@@ -320,6 +337,54 @@ class DeviceService(QObject):
             b"",
             self._on_diagnostics,
         )
+
+    def exchange_addresses(self, local: list[str]) -> bool:
+        """Hand the board this computer's addresses and ask for the other's.
+
+        A background chore, not an operation the operator started: it runs
+        only when the service is idle, never changes ``state`` and never
+        reports through ``operation_succeeded``/``operation_failed``. The
+        answer arrives as ``peer_addresses_received``; a failure is dropped,
+        because the next tick asks again.
+        """
+        if self._link is None or not self._link.is_open:
+            return False
+        if self._operation is not None or self._pending is not None:
+            return False
+        info = self._device_info
+        if info is None or not info.capabilities & int(Capability.ADDRESS_EXCHANGE):
+            return False
+        self._operation = _EXCHANGE_ADDRESSES
+        self._request(
+            CdcMessageType.EXCHANGE_ADDRESSES,
+            CdcMessageType.EXCHANGE_ADDRESSES,
+            encode_host_addresses(local),
+            self._on_addresses_exchanged,
+        )
+        return True
+
+    def _on_addresses_exchanged(self, payload: bytes) -> None:
+        peers = decode_host_addresses(payload[1:])
+        self._operation = None
+        self._run_deferred()
+        self.peer_addresses_received.emit(peers)
+
+    def _defer_behind_exchange(self, call) -> bool:
+        """An operator's request that arrives mid-exchange waits for it.
+
+        The exchange is a few milliseconds long; refusing the operator with
+        BUSY over a chore they never asked for would be a failure they could
+        not explain.
+        """
+        if self._operation != _EXCHANGE_ADDRESSES:
+            return False
+        self._deferred_calls.append(call)
+        return True
+
+    def _run_deferred(self) -> None:
+        calls, self._deferred_calls = self._deferred_calls, []
+        for call in calls:
+            call()
 
     # ------------------------------------------------------------- link plumbing
 
@@ -414,6 +479,8 @@ class DeviceService(QObject):
     def _on_link_lost(self, detail: str = "") -> None:
         operation = self._operation
         self._operation = None
+        if operation == _EXCHANGE_ADDRESSES:
+            operation = None
         deferred = self._deferred_failure
         self._deferred_failure = None
         self._teardown_link()
@@ -423,6 +490,7 @@ class DeviceService(QObject):
             self.operation_failed.emit(
                 OperationFailure(operation, FailureReason.LINK_LOST, detail=detail)
             )
+        self._run_deferred()
 
     def _teardown_link(self) -> None:
         link = self._link
@@ -513,6 +581,10 @@ class DeviceService(QObject):
         self._finish_failure(failure)
 
     def _finish_failure(self, failure: OperationFailure) -> None:
+        if failure.operation == _EXCHANGE_ADDRESSES:
+            self._operation = None
+            self._run_deferred()
+            return
         self._operation = None
         self._staging_open = False
         self._write_package = b""
