@@ -1,9 +1,10 @@
 # CDC v1 compatibility contract
 
-The configuration endpoint exists only on U1 (MAIN) through its PC1 CDC ACM interface. U2
-has no CDC interface, configuration store, or configuration endpoint. All multibyte application
-fields below are little-endian. CDC transport framing, limits, flags, CRC, and message IDs come
-from `protocol/schema.json` and the generated codecs.
+The configuration endpoint exists only on U1 (MAIN) through its PC1 CDC ACM interface. U2 has no
+configuration store or configuration endpoint, but it does now expose a second, much smaller CDC
+ACM surface of its own - see "U2's CDC surface" under EXCHANGE_ADDRESSES below. All multibyte
+application fields below are little-endian. CDC transport framing, limits, flags, CRC, and message
+IDs come from `protocol/schema.json` and the generated codecs.
 
 ## Version and capability negotiation
 
@@ -362,12 +363,46 @@ a nonzero `dropped_commands` only says one happened at some point since boot.
 
 ## EXCHANGE_ADDRESSES (0x18), capability ADDRESS_EXCHANGE (0x2000)
 
-Запрос: `HostAddresses` хоста. Ответ: `[error u8][HostAddresses соседа]`.
+Each computer's configurator learns the other computer's IPv4 addresses through its own board -
+U1 for PC1, U2 for PC2 - rather than over the network link the addresses are meant to help
+establish. Request: the host's own `HostAddresses`. Reply: `[error u8][HostAddresses of the
+peer computer]`.
 
-`HostAddresses` = `count u8` (0..8), затем `count` IPv4-адресов по 4 байта в
-сетевом порядке; длина строго `1 + 4·count`; `0.0.0.0` недопустим. Неверный
-список → `INVALID_REQUEST`, сохранённый список не меняется.
+`HostAddresses` = `count:u8` (0..8), followed by `count` IPv4 addresses of 4 bytes each in
+network byte order; the length is exactly `1 + 4·count`; `0.0.0.0` is not a valid address. An
+invalid list returns `INVALID_REQUEST` and leaves the stored list unchanged. Only a board that
+negotiated `ADDRESS_EXCHANGE` in `DEVICE_INFO` answers this request at all; one that did not
+returns `UNSUPPORTED_CAPABILITY`.
 
-По SPI тот же формат идёт как `HOST_ADDRESSES` (0x08, U1→U2, раз в 250 мс,
-если хост U1 уже дал список) и `ENDPOINT_ADDRESSES` (0x09, U2→U1, раз в 64
-ответа, если хост U2 уже дал список). Платы хранят оба списка только в RAM.
+On the SPI link between U1 and U2 the same wire shape travels as two distinct frame types:
+`HOST_ADDRESSES` (0x08, U1→U2, resent every 250 ms once the host has given U1 a list) and
+`ENDPOINT_ADDRESSES` (0x09, U2→U1, sent once every 64 replies once the host has given U2 a
+list). Two types, not one, on purpose: U1 tells its own wire echo apart from a genuine reply from
+U2 by frame type (`link::is_endpoint_reply`), and a single shared type in both directions would
+make U1 mistake its own `HOST_ADDRESSES` echo for U2's answer. Both boards hold their own and
+their peer's list only in RAM; nothing here is written to flash, and a power cycle clears it.
+
+### U2's CDC surface
+
+U2 has no configuration to serve, but PC2 needs somewhere to hand over its own addresses and
+read PC1's, so U2 now exposes a second CDC ACM interface, framed exactly like U1's and answering
+exactly four request types:
+
+- `HELLO` → a 44-byte `DEVICE_INFO`, byte-for-byte the same shape U1 sends, with only
+  `ADDRESS_EXCHANGE` ever granted (generation, active profile and hash are always zero - U2
+  holds no configuration to report them from);
+- `PING` → echoed back, same as U1;
+- `EXCHANGE_ADDRESSES` → answered as described above;
+- every other request type → `UNSUPPORTED_CAPABILITY`, not silence. A configurator pointed at
+  the wrong board is told so rather than left to time out.
+
+U2 also answers the same 1200-baud bootloader reset U1 does: opening its CDC port at 1200 baud
+and dropping DTR asks it to restart into BOOTSEL, so U2 can be reflashed without anyone present
+to hold the button.
+
+### Mixed firmware
+
+A board still running firmware from before this capability existed does not recognise
+`HOST_ADDRESSES` or `ENDPOINT_ADDRESSES` on the SPI link at all - it counts each one as a CRC
+error, once every 250 ms on U2's side or once every 64 replies on U1's side, and never produces
+a peer address. Flash U1 and U2 together, not one at a time.
