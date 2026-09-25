@@ -54,3 +54,34 @@ def test_ipv6_is_ignored_and_duplicates_collapse_and_eight_is_the_limit():
     assert result[0] == "192.168.1.10"
     assert len(result) == 8
     assert len(set(result)) == 8
+
+
+def test_loopback_flag_excludes_even_reachable_addresses():
+    entries = [
+        _nic("Loopback Pseudo-Interface 1", "other", "5.5.5.5", loopback=True),
+        _nic("Ethernet", "ethernet", "192.168.1.10"),
+    ]
+    assert select_addresses(entries) == ["192.168.1.10"]
+
+
+def test_within_kind_order_is_preserved():
+    entries = [
+        _nic("Ethernet 3", "ethernet", "192.168.1.13"),
+        _nic("Ethernet 1", "ethernet", "192.168.1.11"),
+        _nic("Wi-Fi 2", "wifi", "10.0.0.2"),
+        _nic("Ethernet 2", "ethernet", "192.168.1.12"),
+        _nic("Wi-Fi 1", "wifi", "10.0.0.1"),
+        _nic("Other VPN", "other", "100.64.0.5"),
+    ]
+    result = select_addresses(entries)
+    # Ethernet entries come first, in enumeration order (3, 1, 2)
+    # Then Wi-Fi entries in enumeration order (2, 1)
+    # Then other in enumeration order
+    assert result == [
+        "192.168.1.13",
+        "192.168.1.11",
+        "192.168.1.12",
+        "10.0.0.2",
+        "10.0.0.1",
+        "100.64.0.5",
+    ]
