@@ -15,7 +15,10 @@
 namespace duo::test {
 
 struct SpiLink {
-    static constexpr std::size_t kMaxFrames = 256;
+    // Large enough to hold every frame a millisecond-by-millisecond test can
+    // produce: the address-exchange tests poll for a simulated second under
+    // continuous motion, which is roughly one frame per millisecond.
+    static constexpr std::size_t kMaxFrames = 1024;
     static constexpr std::size_t kMaxPayload = 64;
 
     duo_input::protocol::SpiMessageType type[kMaxFrames] = {};

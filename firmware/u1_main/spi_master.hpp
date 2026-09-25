@@ -15,7 +15,9 @@
 #include <cstdint>
 
 #include "hid/types.hpp"
+#include "link/host_addresses.hpp"
 #include "link/spi_protocol.hpp"
+#include "protocol/frame.hpp"
 #include "protocol/generated.hpp"
 
 namespace duo_input::u1 {
@@ -157,6 +159,15 @@ public:
     /// because "release everything" must not wait for a change to notice.
     bool send_release_all(std::uint32_t now_ms);
 
+    /// The book this link fills from U2's replies and whose local list it
+    /// repeats to U2. Shared with ConfigService; nullptr means no exchange.
+    void set_address_book(link::AddressBook* book) { addresses_ = book; }
+
+    /// Everything a decoded, genuine U2 reply means. consume_reply() calls
+    /// this once the frame has passed its CRC and the echo check; public so
+    /// the decision can be exercised without the SPI block.
+    void apply_reply(const protocol::SpiFrame& frame);
+
     const EndpointStatus& status() const { return status_; }
 
     /// How many frames have gone out. Diagnostic only.
@@ -202,6 +213,7 @@ private:
 
     EndpointStatus status_{};
     link::SequenceTracker replies_;
+    link::AddressBook* addresses_ = nullptr;
 
     std::uint8_t tx_[kFrameSize] = {};
     std::uint8_t rx_[kFrameSize] = {};

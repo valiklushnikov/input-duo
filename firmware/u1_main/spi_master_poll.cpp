@@ -11,6 +11,7 @@
 
 #include <cstddef>
 
+#include "link/host_addresses.hpp"
 #include "link/spi_protocol.hpp"
 
 namespace duo_input::u1 {
@@ -38,6 +39,23 @@ bool SpiMaster::poll_snapshot(std::uint32_t now_ms, const hid::TargetSnapshot& p
                               bool& consumed_mouse, bool& told_keyboard) {
     consumed_mouse = false;
     told_keyboard = false;
+
+    // The computer's own addresses, repeated on their interval. Checked first
+    // because a link that is never idle - a mouse that never stops - would
+    // otherwise never reach a slot for them. Returning here holds the
+    // keyboard state and the movement exactly as a busy transfer does; they
+    // go out on the next pass.
+    if (addresses_ != nullptr && addresses_->local_due(now_ms)) {
+        std::uint8_t list[link::kHostAddressesMaxSize];
+        std::size_t size = 0;
+        if (link::encode_host_addresses(addresses_->local(),
+                                        protocol::MutableByteView{list, sizeof(list)}, size) &&
+            send(protocol::SpiMessageType::HOST_ADDRESSES, protocol::ByteView{list, size},
+                 now_ms)) {
+            addresses_->mark_local_sent(now_ms);
+            return true;
+        }
+    }
 
     std::uint8_t payload[link::kKeyboardStateSize > link::kMouseDeltaSize
                              ? link::kKeyboardStateSize
@@ -88,6 +106,28 @@ bool SpiMaster::poll_snapshot(std::uint32_t now_ms, const hid::TargetSnapshot& p
                     now_ms);
     }
     return false;
+}
+
+void SpiMaster::apply_reply(const protocol::SpiFrame& frame) {
+    replies_.observe(frame.sequence);
+    status_.answered = true;
+    if (frame.type == protocol::SpiMessageType::ENDPOINT_ADDRESSES) {
+        if (addresses_ != nullptr) {
+            addresses_->accept_peer(frame.payload);
+        }
+        return;
+    }
+    if (frame.type == protocol::SpiMessageType::ENDPOINT_STATUS && frame.payload.size >= 1) {
+        status_.mounted = frame.payload.data[0] != 0;
+    }
+    if (frame.type == protocol::SpiMessageType::ENDPOINT_STATUS && frame.payload.size >= 4) {
+        // Read separately from the mount flag, so a U2 that reports only the
+        // flag stays readable instead of being rejected over a field it never
+        // claimed to send.
+        status_.endpoint_drops = frame.payload.data[1];
+        status_.endpoint_release_ms = static_cast<std::uint16_t>(
+            frame.payload.data[2] | (frame.payload.data[3] << 8));
+    }
 }
 
 }  // namespace duo_input::u1

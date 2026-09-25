@@ -9,6 +9,7 @@
 
 #include "fakes/spi_link.hpp"
 #include "hid/state_manager.hpp"
+#include "link/host_addresses.hpp"
 #include "link/spi_protocol.hpp"
 #include "spi_master.hpp"
 #include "test_support.hpp"
@@ -112,4 +113,104 @@ TEST_CASE(a_quiet_link_still_heartbeats) {
     CHECK_FALSE(link.poll(1, outputs));
     CHECK(link.poll(duo_input::u1::kHeartbeatIntervalMs, outputs));
     CHECK_EQ(duo::test::spi_link().count_of(SpiMessageType::HEARTBEAT), 1u);
+}
+
+// -------------------------------------------------------- address exchange
+
+namespace {
+
+duo_input::link::HostAddresses one_address() {
+    duo_input::link::HostAddresses list;
+    list.count = 1;
+    list.octets[0][0] = 192;
+    list.octets[0][1] = 168;
+    list.octets[0][2] = 1;
+    list.octets[0][3] = 7;
+    return list;
+}
+
+}  // namespace
+
+TEST_CASE(no_address_frame_goes_out_until_the_host_gave_a_list) {
+    HidStateManager outputs;
+    SpiMaster link;
+    duo_input::link::AddressBook book;
+    link.set_address_book(&book);
+    prime(link, outputs);
+    for (std::uint32_t now = 1; now < 1000; ++now) {
+        link.poll(now, outputs);
+    }
+    CHECK_EQ(duo::test::spi_link().count_of(SpiMessageType::HOST_ADDRESSES), 0u);
+}
+
+TEST_CASE(the_hosts_list_goes_out_on_its_interval_even_under_continuous_motion) {
+    HidStateManager outputs;
+    SpiMaster link;
+    duo_input::link::AddressBook book;
+    link.set_address_book(&book);
+    prime(link, outputs);
+    book.set_local(one_address());
+
+    // A mouse that never stops: HEARTBEAT would never be due, so the list
+    // must not depend on it.
+    for (std::uint32_t now = 1; now <= 1000; ++now) {
+        outputs.mouse_delta(Target::Pc2, 1, 0, 0, 0);
+        link.poll(now, outputs);
+    }
+    const std::size_t sent = duo::test::spi_link().count_of(SpiMessageType::HOST_ADDRESSES);
+    CHECK(sent >= 4u);
+    CHECK(sent <= 5u);
+}
+
+TEST_CASE(motion_held_back_by_an_address_frame_is_sent_on_the_next_pass) {
+    HidStateManager outputs;
+    SpiMaster link;
+    duo_input::link::AddressBook book;
+    link.set_address_book(&book);
+    prime(link, outputs);
+    book.set_local(one_address());
+
+    outputs.mouse_delta(Target::Pc2, 5, 0, 0, 0);
+    CHECK(link.poll(1, outputs));
+    CHECK_EQ(duo::test::spi_link().count_of(SpiMessageType::HOST_ADDRESSES), 1u);
+    CHECK(link.poll(2, outputs));
+    CHECK_EQ(total_dx(), 5);
+}
+
+TEST_CASE(an_endpoint_address_reply_fills_the_peer_list) {
+    SpiMaster link;
+    duo_input::link::AddressBook book;
+    link.set_address_book(&book);
+    const std::uint8_t payload[] = {1, 10, 0, 0, 2};
+    duo_input::protocol::SpiFrame frame;
+    frame.type = SpiMessageType::ENDPOINT_ADDRESSES;
+    frame.payload = duo_input::protocol::ByteView{payload, sizeof(payload)};
+
+    link.apply_reply(frame);
+
+    CHECK(link.status().answered);
+    CHECK_EQ(book.peer().count, 1u);
+    CHECK_EQ(book.peer().octets[0][0], 10u);
+}
+
+TEST_CASE(an_endpoint_address_reply_with_no_book_set_does_not_crash) {
+    // U2 can start answering ENDPOINT_ADDRESSES before main() has wired a
+    // book in, or in a build that never does. Nothing here may assume the
+    // pointer is non-null.
+    SpiMaster link;
+    const std::uint8_t payload[] = {1, 10, 0, 0, 2};
+    duo_input::protocol::SpiFrame frame;
+    frame.type = SpiMessageType::ENDPOINT_ADDRESSES;
+    frame.payload = duo_input::protocol::ByteView{payload, sizeof(payload)};
+
+    link.apply_reply(frame);
+
+    CHECK(link.status().answered);
+}
+
+TEST_CASE(an_address_reply_is_an_endpoint_reply_and_the_hosts_own_is_not) {
+    // U1 tells an echo on the wires from U2's answer by type alone. Sharing a
+    // type between the two directions would let an echo pass as U2.
+    CHECK(duo_input::link::is_endpoint_reply(SpiMessageType::ENDPOINT_ADDRESSES));
+    CHECK_FALSE(duo_input::link::is_endpoint_reply(SpiMessageType::HOST_ADDRESSES));
 }

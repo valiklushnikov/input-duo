@@ -48,6 +48,7 @@
 #endif
 #include "input/source_table.hpp"
 #include "input/product_names.hpp"
+#include "link/host_addresses.hpp"
 #include "output_runtime.hpp"
 #include "pico_flash.hpp"
 #include "spi_master.hpp"
@@ -1064,6 +1065,13 @@ int main() {
     static CdcWriter cdc_writer;
     static RuntimeConfig runtime_config;
     static duo_input::u1::ConfigService config(store, cdc_writer, runtime_config);
+
+    // One book, two readers: the CDC side takes this computer's addresses and
+    // hands back the other's; the link repeats the first and fills the second.
+    // Both run in this loop, on this core, so nothing crosses a core here.
+    static duo_input::link::AddressBook addresses;
+    link.set_address_book(&addresses);
+    config.set_address_book(&addresses);
 
     // Whatever was stored last time is what the device runs now.
     //

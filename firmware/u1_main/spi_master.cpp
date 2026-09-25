@@ -193,21 +193,7 @@ void SpiMaster::consume_reply(const std::uint8_t* reply) {
         return;
     }
 
-    replies_.observe(result.spi.sequence);
-    status_.answered = true;
-    if (result.spi.type == protocol::SpiMessageType::ENDPOINT_STATUS &&
-        result.spi.payload.size >= 1) {
-        status_.mounted = result.spi.payload.data[0] != 0;
-    }
-    if (result.spi.type == protocol::SpiMessageType::ENDPOINT_STATUS &&
-        result.spi.payload.size >= 4) {
-        // Read separately from the mount flag, so a U2 that reports only the
-        // flag stays readable instead of being rejected over a field it never
-        // claimed to send.
-        status_.endpoint_drops = result.spi.payload.data[1];
-        status_.endpoint_release_ms = static_cast<std::uint16_t>(
-            result.spi.payload.data[2] | (result.spi.payload.data[3] << 8));
-    }
+    apply_reply(result.spi);
 }
 
 bool SpiMaster::send_release_all(std::uint32_t now_ms) {
