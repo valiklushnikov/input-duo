@@ -299,6 +299,49 @@ def test_calling_set_manual_address_empty_also_drops_the_stale_auto_text(qtbot):
     assert page.is_manual is True
 
 
+def test_a_restored_manual_address_left_untouched_reports_nothing(qtbot):
+    """set_manual_address - это и путь восстановления сохранённого адреса
+    при старте. Он уже применён: первая же потеря фокуса без единой правки
+    текста не должна снова отправлять address_changed с тем же самым
+    адресом - иначе координатор увидит в этом новую команду и
+    переподключится заново на ровном месте (review, round 2)."""
+    page = _page(qtbot)
+    seen = []
+    page.address_changed.connect(seen.append)
+
+    page.set_manual_address("192.168.1.42")
+    qtbot.keyClick(page.address_combo.lineEdit(), Qt.Key.Key_Return)
+
+    assert seen == []
+    assert page.is_manual is True
+
+
+def test_a_restored_manual_address_then_choosing_another_still_reports_once(qtbot):
+    page = _page(qtbot)
+    page.set_board_addresses(["192.168.1.7", "10.0.0.2"])
+    page.set_manual_address("192.168.1.42")
+    seen = []
+    page.address_changed.connect(seen.append)
+
+    page.address_combo.activated.emit(1)  # "10.0.0.2"
+
+    assert seen == ["10.0.0.2"]
+
+
+def test_a_restored_manual_address_then_clearing_still_reports_once(qtbot):
+    page = _page(qtbot)
+    page.set_manual_address("192.168.1.42")
+    seen = []
+    page.address_changed.connect(seen.append)
+
+    page.address_combo.lineEdit().selectAll()
+    qtbot.keyClick(page.address_combo.lineEdit(), Qt.Key.Key_Delete)
+    qtbot.keyClick(page.address_combo.lineEdit(), Qt.Key.Key_Return)
+
+    assert seen == [""]
+    assert page.is_manual is False
+
+
 def test_showing_an_address_does_not_leak_any_qt_signal(qtbot):
     """blockSignals в _show: setEditText сам по себе рассылает
     currentTextChanged/editTextChanged, даже когда ни editingFinished, ни
