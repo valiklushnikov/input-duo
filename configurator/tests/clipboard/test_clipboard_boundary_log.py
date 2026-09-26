@@ -23,7 +23,11 @@ from duo_input.clipboard.backend import ORIGIN_MIME, ClipboardSnapshot
 from duo_input.clipboard.macos_backend import MacOSClipboardBackend
 from duo_input.clipboard.offer import MAX_CONTENT_BYTES, ClipboardOffer, describe
 from duo_input.clipboard.service import ClipboardService
-from duo_input.clipboard.windows_backend import RETRY_LIMIT, WindowsClipboardBackend
+from duo_input.clipboard.windows_backend import (
+    PRIVATE_MARKERS,
+    RETRY_LIMIT,
+    WindowsClipboardBackend,
+)
 from duo_input.clipboard.wire import Message, MessageType
 
 OURS = "1" * 32
@@ -492,6 +496,34 @@ def test_windows_change_without_supported_formats_is_logged_once_after_retries(b
 
     [line] = _lines(boundary_log, "clipboard_local_skipped")
     assert "reason=no_supported_formats" in line
+
+
+def test_windows_late_echo_of_our_own_publish_is_logged_as_own_marker(boundary_log, qapp):
+    """dataChanged от собственной публикации приходит уже после снятия
+    _suspended: подавляет её маркер происхождения, и журнал обязан назвать
+    именно эту причину, а не «нет поддерживаемых форматов»."""
+    clipboard = _QtClipboard()
+    backend = WindowsClipboardBackend(clipboard)
+    clipboard.set_raw({"text/plain": b"x", ORIGIN_MIME: b"1"})
+    backend._attempts = RETRY_LIMIT
+
+    backend._take_snapshot()
+
+    [line] = _lines(boundary_log, "clipboard_local_skipped")
+    assert "platform=windows" in line
+    assert "reason=own_marker" in line
+
+
+def test_windows_password_manager_marker_is_logged_as_private(boundary_log, qapp):
+    clipboard = _QtClipboard()
+    backend = WindowsClipboardBackend(clipboard)
+    clipboard.set_raw({"text/plain": b"x", PRIVATE_MARKERS[0]: b"1"})
+    backend._attempts = RETRY_LIMIT
+
+    backend._take_snapshot()
+
+    [line] = _lines(boundary_log, "clipboard_local_skipped")
+    assert "reason=private" in line
 
 
 # ---------------------------------------------------------------------- приватность

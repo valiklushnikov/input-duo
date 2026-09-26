@@ -136,9 +136,18 @@ class WindowsClipboardBackend(QObject):
             return
         if snapshot.is_empty:
             # Типы, а не содержимое: по ним видно, почему копия не ушла.
+            formats = list(self._clipboard.mimeData().formats())
+            if ORIGIN_MIME in formats or wrapped_windows_mime(ORIGIN_MIME) in formats:
+                # Поздний dataChanged от нашей же публикации - его гасит маркер
+                # происхождения, а не отсутствие поддерживаемых форматов.
+                logger.info("clipboard_local_skipped platform=windows reason=own_marker")
+                return
+            if is_private(formats):
+                logger.info("clipboard_local_skipped platform=windows reason=private")
+                return
             logger.info(
                 "clipboard_local_skipped platform=windows reason=no_supported_formats formats=%s",
-                ",".join(self._clipboard.mimeData().formats()) or "-",
+                ",".join(formats) or "-",
             )
             return
         logger.info(
