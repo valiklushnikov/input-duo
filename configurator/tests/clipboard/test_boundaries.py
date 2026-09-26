@@ -273,6 +273,12 @@ TRANSFER_PACKAGE = SRC_ROOT / "duo_input" / "transfer"
 
 _PURE_MODULES = ("model.py", "paths.py", "pipe.py", "scanner.py")
 _CTYPES_ALLOWED = ("windows_com.py", "windows_files.py", "fileprovider_proto.py")
+#: Вне transfer/ - ровно один файл, названный путём. Правила брандмауэра
+#: ставятся через ShellExecuteExW с глаголом "runas" и ожиданием кода
+#: возврата: в стандартной библиотеке этого нет (os.startfile не ждёт и кода
+#: не возвращает). Вызовы ctypes там - внутри двух функций на границе
+#: процесса, а не по всему модулю.
+_CTYPES_ALLOWED_OUTSIDE_TRANSFER = ("duo_input/persistence/firewall.py",)
 #: Task 19: the File Provider slice adds its own pyobjc-touching modules,
 #: mirroring the existing macos_pasteboard.py exception rather than loosening
 #: the rule itself. fileprovider_client.py/fileprovider_domain.py guard their
@@ -324,12 +330,14 @@ def test_only_the_windows_adapters_touch_ctypes():
         str(path.relative_to(SRC_ROOT))
         for path in modules
         if not (path.parent.name == "transfer" and path.name in _CTYPES_ALLOWED)
+        and path.relative_to(SRC_ROOT).as_posix() not in _CTYPES_ALLOWED_OUTSIDE_TRANSFER
         and any(name.split(".")[0] == "ctypes" for name in _imported_modules(path))
     }
 
     assert offenders == set(), (
-        "ctypes разрешён только в windows_com.py и windows_files.py — вся "
-        "нативная грязь должна быть в одном месте"
+        "ctypes разрешён только в нативных адаптерах transfer/ и в "
+        "persistence/firewall.py — вся нативная грязь должна быть в одном месте: "
+        f"{offenders}"
     )
     # Проверка намеренно на один уровень: утверждение здесь - "в ЭТОМ файле
     # нет нативного кода", а не "этот файл ничего нативного не тянет".
