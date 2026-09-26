@@ -115,6 +115,10 @@ class Discovery(QObject):
         self._joined: dict[str, object] = {}
         self._default_joined = False
         self._failing: set[str] = set()
+        # Как _failing, но для вступления в multicast-группу, а не отправки:
+        # свой набор, потому что отправка и вступление отказывают и
+        # восстанавливаются независимо друг от друга.
+        self._join_failing: set[str] = set()
         self._active = False
         self._timer = QTimer(self)
         self._timer.setInterval(BEACON_INTERVAL_MS)
@@ -174,14 +178,39 @@ class Discovery(QObject):
             del self._joined[name]
         for interface in current:
             name = interface.name()
-            if name not in self._joined and self._socket.joinMulticastGroup(group, interface):
+            if name in self._joined:
+                continue
+            if self._socket.joinMulticastGroup(group, interface):
                 self._joined[name] = interface
+                self._note_join_recovered(name)
+            else:
+                self._note_join_failed(name)
         if not current and not self._default_joined:
             # Ни одного подходящего интерфейса - прежнее поведение: группа на
             # интерфейсе маршрута по умолчанию, лучше так, чем никак.
-            self._socket.joinMulticastGroup(group)
-            self._default_joined = True
+            if self._socket.joinMulticastGroup(group):
+                self._default_joined = True
+                self._note_join_recovered("default")
+            else:
+                self._note_join_failed("default")
         return current
+
+    def _note_join_failed(self, name: str) -> None:
+        if name not in self._join_failing:
+            self._join_failing.add(name)
+            # Одна строка на интерфейс, а не на каждый маячок: то же правило,
+            # что у _send, но у вступления в группу свой собственный учёт -
+            # отправка и вступление отказывают и восстанавливаются независимо.
+            logger.warning(
+                "beacon_join_failed interface=%s error=%s",
+                name,
+                self._socket.errorString(),
+            )
+
+    def _note_join_recovered(self, name: str) -> None:
+        if name in self._join_failing:
+            self._join_failing.discard(name)
+            logger.info("beacon_join_recovered interface=%s", name)
 
     def _send(self, payload: bytes, group: QHostAddress, label: str) -> None:
         written = self._socket.writeDatagram(payload, group, BEACON_PORT)

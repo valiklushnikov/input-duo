@@ -159,6 +159,8 @@ class MockUdpSocket(QObject):
         self.multicast_interface = None
         self.sent_via = []
         self.fail_writes = False
+        self.fail_joins: set[str] = set()
+        self.fail_default_join = False
 
     def bind(self, host, port, flags):
         self.bind_count += 1
@@ -172,6 +174,10 @@ class MockUdpSocket(QObject):
     def joinMulticastGroup(self, address, iface=None):
         self.join_count += 1
         self.operations.append("join" if iface is None else f"join:{iface.name()}")
+        if iface is not None and iface.name() in self.fail_joins:
+            return False
+        if iface is None and self.fail_default_join:
+            return False
         self.multicast_groups.add(str(address.toString()))
         return True
 
@@ -501,4 +507,80 @@ def test_a_failed_send_is_logged_once_per_interface_until_it_recovers(qapp, capl
     assert len(failures) == 2
     assert "interface=en0" in failures[0] and "No route to host" in failures[0]
     assert len(recoveries) == 1
+    discovery.stop()
+
+
+def test_a_failed_join_is_retried_on_the_next_beacon_until_it_succeeds(qapp):
+    """Вступление в группу могло отказать (например, интерфейс ещё не готов) -
+    следующий маячок обязан пробовать снова, а не считать интерфейс
+    участником группы, которым он на самом деле не стал."""
+    socket = MockUdpSocket()
+    socket.fail_joins = {"en0"}
+    discovery = Discovery(OURS, socket=socket, interfaces=lambda: [_FakeIface("en0")])
+    discovery.start(OUR_BEACON)  # первая попытка join - внутри start()
+    socket.operations.clear()
+
+    discovery._announce()
+
+    assert socket.operations.count("join:en0") == 1  # повторная попытка
+
+    socket.fail_joins = set()
+    socket.operations.clear()
+    discovery._announce()
+
+    assert socket.operations.count("join:en0") == 1  # на этот раз вступили
+
+    socket.operations.clear()
+    discovery._announce()
+
+    assert "join:en0" not in socket.operations  # уже участник - не пробуем снова
+    discovery.stop()
+
+
+def test_a_failed_join_is_logged_once_per_interface_until_it_recovers(qapp, caplog):
+    """Как и с отправкой: одна строка на интерфейс, а не на каждый маячок."""
+    caplog.set_level(logging.INFO, logger="duo_input.clipboard.discovery")
+    socket = MockUdpSocket()
+    socket.fail_joins = {"en0"}
+    discovery = Discovery(OURS, socket=socket, interfaces=lambda: [_FakeIface("en0")])
+
+    discovery.start(OUR_BEACON)  # 1-я неудача - внутри start()
+    discovery._announce()  # 2-я неудача - лог не повторяется
+    socket.fail_joins = set()
+    discovery._announce()  # вступили - recovered
+    discovery._announce()  # уже участник - ни неудачи, ни повтора recovered
+
+    failures = [r.getMessage() for r in caplog.records if "beacon_join_failed" in r.getMessage()]
+    recoveries = [
+        r.getMessage() for r in caplog.records if "beacon_join_recovered" in r.getMessage()
+    ]
+    assert len(failures) == 1
+    assert "interface=en0" in failures[0] and "No route to host" in failures[0]
+    assert len(recoveries) == 1
+    assert "interface=en0" in recoveries[0]
+    discovery.stop()
+
+
+def test_a_failed_default_route_join_is_logged_once_until_it_recovers(qapp, caplog):
+    """Тот же учёт, но для маршрута по умолчанию - когда LAN-интерфейсов нет
+    вовсе, и группа вступает через него как раньше."""
+    caplog.set_level(logging.INFO, logger="duo_input.clipboard.discovery")
+    socket = MockUdpSocket()
+    socket.fail_default_join = True
+    discovery = Discovery(OURS, socket=socket, interfaces=lambda: [])
+
+    discovery.start(OUR_BEACON)  # 1-я неудача - внутри start()
+    discovery._announce()  # 2-я неудача - лог не повторяется
+    socket.fail_default_join = False
+    discovery._announce()  # вступили - recovered
+    discovery._announce()  # уже участники (_default_joined) - без повторной попытки
+
+    failures = [r.getMessage() for r in caplog.records if "beacon_join_failed" in r.getMessage()]
+    recoveries = [
+        r.getMessage() for r in caplog.records if "beacon_join_recovered" in r.getMessage()
+    ]
+    assert len(failures) == 1
+    assert "interface=default" in failures[0] and "No route to host" in failures[0]
+    assert len(recoveries) == 1
+    assert "interface=default" in recoveries[0]
     discovery.stop()
