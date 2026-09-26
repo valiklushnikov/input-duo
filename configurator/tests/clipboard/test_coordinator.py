@@ -2184,8 +2184,10 @@ def test_a_connection_through_a_beacon_address_persists_it_and_clears_the_cache(
         coordinator.stop()
 
 
-def test_a_spoofed_beacon_address_costs_one_attempt_and_is_never_persisted(tmp_path, dial, qapp):
-    """Чужой узел повторил публичные origin_id и отпечаток пира со своим адресом."""
+def test_a_spoofed_beacon_address_costs_attempts_but_is_never_persisted(tmp_path, dial, qapp):
+    """Чужой узел повторил публичные origin_id и отпечаток пира со своим адресом:
+    каждый такой адрес стоит одну попытку набора за круг (не больше
+    MAX_DISCOVERED_ADDRESSES адресов сразу), но никогда не попадает на диск."""
     coordinator, trust = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=_Clock())
     coordinator._retry = _FakeTimer()
     coordinator._on_peer_seen(_peer_beacon(), "192.168.1.66")
