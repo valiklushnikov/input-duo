@@ -12,12 +12,17 @@
 from __future__ import annotations
 
 import json
+import logging
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QHostAddress, QUdpSocket
 
+from .local_addresses import local_multicast_interfaces
 from .wire import PROTOCOL_MAJOR
+
+logger = logging.getLogger(__name__)
 
 GROUP_ADDRESS = "239.255.76.67"
 BEACON_PORT = 47655
@@ -82,7 +87,13 @@ def decode_beacon(raw: bytes, own_origin_id: str) -> Beacon | None:
 
 
 class Discovery(QObject):
-    """Рассылает свой маячок и слушает чужие."""
+    """Рассылает свой маячок и слушает чужие - на каждом LAN-интерфейсе.
+
+    Один сокет: членство в группе и отправка задаются по интерфейсу
+    (joinMulticastGroup(group, iface), setMulticastInterface(iface)). Без
+    этого маячок уходит только через маршрут по умолчанию - а он при Wi-Fi и
+    Ethernet сразу или с поднятым VPN ведёт не туда, где второй компьютер.
+    """
 
     peer_seen = Signal(object, str)
 
@@ -91,12 +102,19 @@ class Discovery(QObject):
         own_origin_id: str,
         parent: QObject | None = None,
         socket: QUdpSocket | None = None,
+        interfaces: Callable[[], list] | None = None,
     ) -> None:
         super().__init__(parent)
         self._own_origin_id = own_origin_id
         self._beacon: Beacon | None = None
         self._socket = socket if socket is not None else QUdpSocket(self)
         self._socket.readyRead.connect(self._on_ready_read)
+        # Список интерфейсов берётся заново на каждом маячке: Wi-Fi
+        # переподключается, Ethernet втыкают, VPN поднимают.
+        self._interfaces = interfaces if interfaces is not None else local_multicast_interfaces
+        self._joined: dict[str, object] = {}
+        self._default_joined = False
+        self._failing: set[str] = set()
         self._active = False
         self._timer = QTimer(self)
         self._timer.setInterval(BEACON_INTERVAL_MS)
@@ -110,7 +128,7 @@ class Discovery(QObject):
             # состоять в multicast-группе нового сетевого интерфейса. Каждый
             # повторный recovery начинает настоящую новую UDP-сессию.
             self._timer.stop()
-            self._socket.leaveMulticastGroup(QHostAddress(GROUP_ADDRESS))
+            self._leave_all()
             self._socket.close()
             self._active = False
         bound = self._socket.bind(
@@ -120,7 +138,6 @@ class Discovery(QObject):
         )
         if not bound:
             return False
-        self._socket.joinMulticastGroup(QHostAddress(GROUP_ADDRESS))
         self._active = True
         self._announce()
         self._timer.start()
@@ -130,17 +147,66 @@ class Discovery(QObject):
         """Остановить рассылку и приём."""
         self._timer.stop()
         if self._active:
-            self._socket.leaveMulticastGroup(QHostAddress(GROUP_ADDRESS))
+            self._leave_all()
         self._socket.close()
         self._active = False
 
     def _announce(self) -> None:
-        """Отправить свой маячок в группу."""
+        """Отправить свой маячок в группу через каждый LAN-интерфейс."""
         if self._beacon is None:
             return
-        self._socket.writeDatagram(
-            encode_beacon(self._beacon), QHostAddress(GROUP_ADDRESS), BEACON_PORT
-        )
+        payload = encode_beacon(self._beacon)
+        group = QHostAddress(GROUP_ADDRESS)
+        interfaces = self._sync_memberships(group)
+        if not interfaces:
+            self._send(payload, group, "default")
+            return
+        for interface in interfaces:
+            self._socket.setMulticastInterface(interface)
+            self._send(payload, group, interface.name())
+
+    def _sync_memberships(self, group: QHostAddress) -> list:
+        """Вступить в группу на новых интерфейсах; вернуть текущий список."""
+        current = list(self._interfaces())
+        names = {interface.name() for interface in current}
+        # Исчезнувший интерфейс унёс членство с собой; вернётся - вступим заново.
+        for name in [name for name in self._joined if name not in names]:
+            del self._joined[name]
+        for interface in current:
+            name = interface.name()
+            if name not in self._joined and self._socket.joinMulticastGroup(group, interface):
+                self._joined[name] = interface
+        if not current and not self._default_joined:
+            # Ни одного подходящего интерфейса - прежнее поведение: группа на
+            # интерфейсе маршрута по умолчанию, лучше так, чем никак.
+            self._socket.joinMulticastGroup(group)
+            self._default_joined = True
+        return current
+
+    def _send(self, payload: bytes, group: QHostAddress, label: str) -> None:
+        written = self._socket.writeDatagram(payload, group, BEACON_PORT)
+        if written == -1:
+            if label not in self._failing:
+                self._failing.add(label)
+                # Одна строка на интерфейс, а не каждые две секунды: на macOS
+                # так выглядит, например, запрет доступа к локальной сети.
+                logger.warning(
+                    "beacon_send_failed interface=%s error=%s",
+                    label,
+                    self._socket.errorString(),
+                )
+        elif label in self._failing:
+            self._failing.discard(label)
+            logger.info("beacon_send_recovered interface=%s", label)
+
+    def _leave_all(self) -> None:
+        group = QHostAddress(GROUP_ADDRESS)
+        for interface in self._joined.values():
+            self._socket.leaveMulticastGroup(group, interface)
+        if self._default_joined:
+            self._socket.leaveMulticastGroup(group)
+        self._joined.clear()
+        self._default_joined = False
 
     def _on_ready_read(self) -> None:
         """Обработать входящую датаграмму."""

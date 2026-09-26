@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import Mock, MagicMock, call
 
 from PySide6.QtCore import QByteArray, QObject, Signal
@@ -155,6 +156,9 @@ class MockUdpSocket(QObject):
         self.leave_count = 0
         self.close_count = 0
         self.operations = []
+        self.multicast_interface = None
+        self.sent_via = []
+        self.fail_writes = False
 
     def bind(self, host, port, flags):
         self.bind_count += 1
@@ -165,15 +169,21 @@ class MockUdpSocket(QObject):
         self.is_closed = False
         return True
 
-    def joinMulticastGroup(self, address):
+    def joinMulticastGroup(self, address, iface=None):
         self.join_count += 1
-        self.operations.append("join")
+        self.operations.append("join" if iface is None else f"join:{iface.name()}")
         self.multicast_groups.add(str(address.toString()))
+        return True
 
-    def leaveMulticastGroup(self, address):
+    def leaveMulticastGroup(self, address, iface=None):
         self.leave_count += 1
-        self.operations.append("leave")
+        self.operations.append("leave" if iface is None else f"leave:{iface.name()}")
         self.multicast_groups.discard(str(address.toString()))
+        return True
+
+    def setMulticastInterface(self, iface):
+        self.operations.append(f"via:{iface.name()}")
+        self.multicast_interface = iface.name()
 
     def close(self):
         self.close_count += 1
@@ -184,6 +194,11 @@ class MockUdpSocket(QObject):
     def writeDatagram(self, data, address, port):
         self.operations.append("announce")
         self.sent_datagrams.append((bytes(data), str(address.toString()), port))
+        self.sent_via.append(self.multicast_interface)
+        return -1 if self.fail_writes else len(bytes(data))
+
+    def errorString(self):
+        return "No route to host"
 
     def hasPendingDatagrams(self):
         return len(self.pending_datagrams) > 0 and not self.is_closed
@@ -199,6 +214,17 @@ class MockUdpSocket(QObject):
         datagram.data = Mock(return_value=QByteArray(data))
         datagram.senderAddress = Mock(return_value=QHostAddress(sender_address))
         self.pending_datagrams.append(datagram)
+
+
+class _FakeIface:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def name(self) -> str:
+        return self._name
+
+
+OUR_BEACON = Beacon(OURS, "LAPTOP-ONE", "a" * 64, 47654, PROTOCOL_MAJOR)
 
 
 def test_discovery_sends_beacon_on_start():
@@ -223,7 +249,7 @@ def test_restarting_discovery_rebinds_and_rejoins_multicast(qapp):
     socket = MockUdpSocket()
     first = Beacon(OURS, "LAPTOP-ONE", "a" * 64, 47654, PROTOCOL_MAJOR)
     refreshed = Beacon(OURS, "LAPTOP-ONE", "b" * 64, 47654, PROTOCOL_MAJOR)
-    discovery = Discovery(OURS, socket=socket)
+    discovery = Discovery(OURS, socket=socket, interfaces=lambda: [])
 
     assert discovery.start(first) is True
     socket.operations.clear()
@@ -383,3 +409,96 @@ def test_discovery_readyread_signal_connection(qapp):
     call_args = peer_seen_spy.call_args
     assert call_args[0][0] == peer_beacon
     assert call_args[0][1] == "192.168.1.100"
+
+
+def test_the_beacon_is_joined_and_sent_on_every_interface(qapp):
+    socket = MockUdpSocket()
+    discovery = Discovery(
+        OURS, socket=socket, interfaces=lambda: [_FakeIface("en0"), _FakeIface("en7")]
+    )
+
+    assert discovery.start(OUR_BEACON) is True
+
+    assert socket.operations == [
+        "bind", "join:en0", "join:en7", "via:en0", "announce", "via:en7", "announce",
+    ]
+    assert socket.sent_via == ["en0", "en7"]
+    discovery.stop()
+
+
+def test_an_interface_that_appears_later_is_joined_on_the_next_beacon(qapp):
+    """Воткнули Ethernet или переподключился Wi-Fi - рестарт discovery не нужен."""
+    socket = MockUdpSocket()
+    current = [_FakeIface("en0")]
+    discovery = Discovery(OURS, socket=socket, interfaces=lambda: list(current))
+    discovery.start(OUR_BEACON)
+    current.append(_FakeIface("en7"))
+    socket.operations.clear()
+
+    discovery._announce()
+
+    assert socket.operations == ["join:en7", "via:en0", "announce", "via:en7", "announce"]
+    discovery.stop()
+
+
+def test_an_interface_that_went_away_is_rejoined_when_it_returns(qapp):
+    socket = MockUdpSocket()
+    current = [_FakeIface("en0"), _FakeIface("en7")]
+    discovery = Discovery(OURS, socket=socket, interfaces=lambda: list(current))
+    discovery.start(OUR_BEACON)
+
+    current[:] = [_FakeIface("en0")]
+    discovery._announce()
+    current[:] = [_FakeIface("en0"), _FakeIface("en7")]
+    socket.operations.clear()
+    discovery._announce()
+
+    assert socket.operations[0] == "join:en7"
+    discovery.stop()
+
+
+def test_without_any_lan_interface_the_default_route_is_used_as_before(qapp):
+    socket = MockUdpSocket()
+    discovery = Discovery(OURS, socket=socket, interfaces=lambda: [])
+
+    discovery.start(OUR_BEACON)
+
+    assert socket.operations == ["bind", "join", "announce"]
+    assert socket.sent_via == [None]
+    discovery.stop()
+
+
+def test_stop_leaves_every_joined_group(qapp):
+    socket = MockUdpSocket()
+    discovery = Discovery(
+        OURS, socket=socket, interfaces=lambda: [_FakeIface("en0"), _FakeIface("en7")]
+    )
+    discovery.start(OUR_BEACON)
+    socket.operations.clear()
+
+    discovery.stop()
+
+    assert socket.operations == ["leave:en0", "leave:en7", "close"]
+
+
+def test_a_failed_send_is_logged_once_per_interface_until_it_recovers(qapp, caplog):
+    """На macOS без доступа к локальной сети отправка отказывает каждые 2 с -
+    журнал получает одну строку, а не поток."""
+    caplog.set_level(logging.INFO, logger="duo_input.clipboard.discovery")
+    socket = MockUdpSocket()
+    socket.fail_writes = True
+    discovery = Discovery(OURS, socket=socket, interfaces=lambda: [_FakeIface("en0")])
+
+    discovery.start(OUR_BEACON)
+    discovery._announce()
+    socket.fail_writes = False
+    discovery._announce()
+    socket.fail_writes = True
+    discovery._announce()
+
+    failures = [r.getMessage() for r in caplog.records if "beacon_send_failed" in r.getMessage()]
+    recoveries = [r.getMessage() for r in caplog.records if "beacon_send_recovered" in r.getMessage()]
+    assert len(failures) == 2
+    assert "interface=en0" in failures[0] and "No route to host" in failures[0]
+    assert len(recoveries) == 1
+    discovery.stop()
