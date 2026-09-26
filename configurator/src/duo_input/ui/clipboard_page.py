@@ -50,6 +50,7 @@ class ClipboardPage(QWidget):
     forget_requested = Signal()
     address_changed = Signal(str)
     cancel_requested = Signal()
+    firewall_allow_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -113,6 +114,25 @@ class ClipboardPage(QWidget):
         self.address_combo.lineEdit().editingFinished.connect(self._on_address_edited)
         self.address_combo.activated.connect(self._on_address_chosen)
 
+        # Строка-напоминание о брандмауэре: видна, пока правил нет, и после
+        # "Позже" остаётся единственным местом, откуда их можно поставить.
+        self.firewall_hint = QWidget(self)
+        self.firewall_label = QLabel(
+            self.tr(
+                "Windows не разрешает Duo Input входящие соединения в локальной "
+                "сети - второй компьютер не сможет подключиться."
+            ),
+            self.firewall_hint,
+        )
+        self.firewall_label.setWordWrap(True)
+        self.firewall_allow_button = QPushButton(self.tr("Разрешить"), self.firewall_hint)
+        self.firewall_allow_button.clicked.connect(self.firewall_allow_requested)
+        firewall_layout = QHBoxLayout(self.firewall_hint)
+        firewall_layout.setContentsMargins(0, 0, 0, 0)
+        firewall_layout.addWidget(self.firewall_label, 1)
+        firewall_layout.addWidget(self.firewall_allow_button)
+        self.firewall_hint.setVisible(False)
+
         self.events_list = QListWidget(self)
         self.events_list.setMaximumHeight(120)
         self.events_list.setAccessibleName(self.tr("Последние события"))
@@ -135,6 +155,7 @@ class ClipboardPage(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(peer_box)
+        layout.addWidget(self.firewall_hint)
         layout.addWidget(self.sharing_checkbox)
         layout.addWidget(self.files_checkbox)
         layout.addWidget(self.auto_incoming_checkbox)
@@ -187,6 +208,14 @@ class ClipboardPage(QWidget):
         self.auto_incoming_checkbox.blockSignals(True)
         self.auto_incoming_checkbox.setChecked(checked)
         self.auto_incoming_checkbox.blockSignals(False)
+
+    def set_firewall_hint_visible(self, visible: bool) -> None:
+        self.firewall_hint.setVisible(visible)
+
+    def set_firewall_busy(self, busy: bool) -> None:
+        """Пока правила ставятся (идёт UAC), второе нажатие открыло бы
+        второе окно UAC."""
+        self.firewall_allow_button.setEnabled(not busy)
 
     def add_event(self, text: str) -> None:
         """Добавить строку в список последних событий (§12), самый новый - сверху."""

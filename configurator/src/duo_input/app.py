@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import socket
 import sys
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QObject, QSettings, Qt, Signal
@@ -54,6 +55,10 @@ HIDDEN_START_ARGUMENT = autostart.HIDDEN_START_ARGUMENT
 #: брандмауэра, - см. persistence/firewall.py.
 INSTALL_FIREWALL_RULES_ARGUMENT = firewall.INSTALL_ARGUMENT
 REMOVE_FIREWALL_RULES_ARGUMENT = firewall.REMOVE_ARGUMENT
+
+#: Человек ответил "Позже" (или отказал в UAC): окно о брандмауэре больше не
+#: всплывает, остаётся строка с кнопкой на странице общего буфера.
+FIREWALL_PROMPT_DECLINED_KEY = "clipboard/firewall_prompt_declined"
 
 
 def configure_application() -> Path:
@@ -159,6 +164,12 @@ def _show_pairing_confirmation(
         coordinator.reject_pairing(candidate)
 
 
+def _run_in_background(work) -> None:
+    """Проверка правил - секунда-другая PowerShell, установка - ещё и UAC:
+    ни то, ни другое не должно держать интерфейс."""
+    threading.Thread(target=work, name="duo-input-firewall", daemon=True).start()
+
+
 def _pairing_confirmation_dialog(
     window: MainWindow, code: str, candidate: PairingCandidate
 ) -> tuple[QMessageBox, QPushButton]:
@@ -226,8 +237,9 @@ class _SkipEndpointWhileU1Connected(QObject):
 class _ClipboardRuntime(QObject):
     """Поднимает и останавливает подсистему общего буфера по переключателю.
 
-    Наследуется от ``QObject`` и создаётся с ``parent=application`` не для
-    сигналов - у него их нет, - а потому что PySide6 хранит слабую ссылку на
+    Наследуется от ``QObject`` и создаётся с ``parent=application`` не ради
+    сигналов (свои у него только для возврата из фоновых проверок
+    брандмауэра), а потому что PySide6 хранит слабую ссылку на
     связанный метод обычного Python-объекта: без владельца этот объект
     собирался бы GC сразу после возврата из ``configure_runtime()``, и оба
     переключателя (страница и трей) молча переставали бы что-либо делать -
@@ -255,11 +267,21 @@ class _ClipboardRuntime(QObject):
     открывает.
     """
 
+    #: Результаты фоновой работы с брандмауэром - доставляются в поток
+    #: интерфейса очередью Qt, потому что излучаются из другого потока.
+    _firewall_checked = Signal(object)
+    _firewall_applied = Signal(bool)
+
     def __init__(self, application: QApplication, window: MainWindow, settings: QSettings) -> None:
         super().__init__(application)
         self._application = application
         self._window = window
         self._settings = settings
+        #: Окно о брандмауэре уже показывали в этом запуске - выключение и
+        #: включение общего буфера не повод спрашивать снова.
+        self._firewall_prompted = False
+        self._firewall_checked.connect(self._on_firewall_checked)
+        self._firewall_applied.connect(self._on_firewall_applied)
         self.coordinator: ClipboardCoordinator | None = None
         self.address_exchange: AddressExchange | None = None
         self._endpoint: EndpointService | None = None
@@ -450,6 +472,89 @@ class _ClipboardRuntime(QObject):
 
         self.coordinator = coordinator
         self._backend = backend
+
+        # Порт уже слушается - теперь узнать, пропустит ли к нему Windows.
+        self._check_firewall()
+
+    def _check_firewall(self) -> None:
+        if not firewall.is_applicable():
+            return
+        executable = Path(sys.executable)
+        self._in_background(
+            lambda: firewall.missing_rules(executable), self._firewall_checked, []
+        )
+
+    def _in_background(self, work, signal, fallback) -> None:
+        def run() -> None:
+            try:
+                result = work()
+            except Exception:  # noqa: BLE001 - кнопка не должна остаться мёртвой
+                logger.exception("брандмауэр: фоновая операция упала")
+                result = fallback
+            signal.emit(result)
+
+        _run_in_background(run)
+
+    def _on_firewall_checked(self, missing: list) -> None:
+        self._window.clipboard_page.set_firewall_hint_visible(bool(missing))
+        if not missing or self._firewall_prompted:
+            return
+        if self._settings.value(FIREWALL_PROMPT_DECLINED_KEY, False, type=bool):
+            return
+        self._firewall_prompted = True
+        self._show_firewall_prompt()
+
+    def _show_firewall_prompt(self) -> None:
+        """Немодально для запуска: ``open()``, а не ``exec()`` - окно ждёт
+        ответа, но старт программы его не ждёт."""
+        dialog = QMessageBox(self._window)
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setWindowTitle(self.tr("Брандмауэр Windows"))
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.setText(
+            self.tr(
+                "Чтобы второй компьютер мог подключиться, Windows должна "
+                "разрешить Duo Input входящие соединения в локальной сети."
+            )
+        )
+        allow_button = dialog.addButton(self.tr("Разрешить"), QMessageBox.ButtonRole.AcceptRole)
+        later_button = dialog.addButton(self.tr("Позже"), QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(allow_button)
+        dialog.setEscapeButton(later_button)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        # finished, а не buttonClicked: закрытие крестиком кнопку не нажимает,
+        # и тоже должно считаться ответом "Позже".
+        dialog.finished.connect(
+            lambda _result: self._on_firewall_answer(dialog.clickedButton() is allow_button)
+        )
+        dialog.open()
+
+    def _on_firewall_answer(self, allowed: bool) -> None:
+        if allowed:
+            self.allow_firewall()
+        else:
+            self._settings.setValue(FIREWALL_PROMPT_DECLINED_KEY, True)
+
+    def allow_firewall(self) -> None:
+        """Одно окно UAC; и из диалога, и из строки на странице."""
+        self._window.clipboard_page.set_firewall_busy(True)
+        executable = Path(sys.executable)
+        self._in_background(
+            lambda: firewall.apply_rules(executable), self._firewall_applied, False
+        )
+
+    def _on_firewall_applied(self, succeeded: bool) -> None:
+        page = self._window.clipboard_page
+        page.set_firewall_busy(False)
+        if succeeded:
+            page.add_event("брандмауэр: входящие соединения в локальной сети разрешены")
+        else:
+            # Отказ в UAC - тот же ответ, что "Позже": больше не всплывать.
+            self._settings.setValue(FIREWALL_PROMPT_DECLINED_KEY, True)
+            page.add_event("брандмауэр: входящие соединения не разрешены")
+        # Строка на странице показывает то, что есть на самом деле, а не то,
+        # что мы надеялись поставить.
+        self._check_firewall()
 
     def _stop(self) -> None:
         self._stop_files()
@@ -873,6 +978,7 @@ def configure_runtime(
     # страница подключалась к координатору только между _start и _stop, и
     # набранный при выключенной фиче адрес терялся молча.
     window.clipboard_page.address_changed.connect(runtime.set_manual_address)
+    window.clipboard_page.firewall_allow_requested.connect(runtime.allow_firewall)
     application.aboutToQuit.connect(runtime.stop)
 
     # Показать сохранённое состояние ОДИНАКОВО на странице и в трее - раньше

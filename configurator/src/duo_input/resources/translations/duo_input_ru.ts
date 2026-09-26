@@ -297,83 +297,92 @@
 <context>
     <name>ClipboardPage</name>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="58"/>
-        <location filename="../../ui/clipboard_page.py" line="244"/>
+        <location filename="../../ui/clipboard_page.py" line="59"/>
+        <location filename="../../ui/clipboard_page.py" line="301"/>
         <source>Компьютер не выбран</source>
         <extracomment>Сколько последних событий держим на экране - не журнал целиком, а то, что помогает понять, что произошло только что (§12).</extracomment>
         <translation>Компьютер не выбран</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="62"/>
+        <location filename="../../ui/clipboard_page.py" line="63"/>
         <source>Связать компьютеры</source>
         <translation>Связать компьютеры</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="65"/>
+        <location filename="../../ui/clipboard_page.py" line="66"/>
         <source>Забыть компьютер</source>
         <translation>Забыть компьютер</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="69"/>
+        <location filename="../../ui/clipboard_page.py" line="70"/>
         <source>Общий буфер обмена</source>
         <translation>Общий буфер обмена</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="72"/>
+        <location filename="../../ui/clipboard_page.py" line="73"/>
         <source>Передача файлов</source>
         <translation>Передача файлов</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="77"/>
+        <location filename="../../ui/clipboard_page.py" line="78"/>
         <source>Загружать входящие файлы автоматически</source>
         <translation>Загружать входящие файлы автоматически</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="84"/>
+        <location filename="../../ui/clipboard_page.py" line="85"/>
         <source>Запускать вместе с Windows</source>
         <translation>Запускать вместе с Windows</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="88"/>
+        <location filename="../../ui/clipboard_page.py" line="89"/>
         <source>Отменить</source>
         <translation>Отменить</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="105"/>
+        <location filename="../../ui/clipboard_page.py" line="112"/>
         <source>Адрес второго компьютера, если поиск не нашёл</source>
-        <extracomment>Последний адрес, который показал show_address_in_use. Нужен, чтобы отличить настоящую правку от editingFinished на голой потере фокуса - оно срабатывает и без единого нажатия клавиши.</extracomment>
+        <extracomment>Последний адрес, который показал show_address_in_use. Нужен, чтобы отличить настоящую правку от editingFinished на голой потере фокуса - оно срабатывает и без единого нажатия клавиши. Последний текст, который действительно ушёл сигналом address_changed. Нужен, чтобы один и тот же выбор не улетал дважды: клик по элементу списка шлёт activated, а следующая обычная потеря фокуса - editingFinished с тем же текстом. None - ещё ни разу не отправляли, поэтому пустая строка не гасится сама.</extracomment>
         <translation>Адрес второго компьютера, если поиск не нашёл</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="118"/>
+        <location filename="../../ui/clipboard_page.py" line="122"/>
+        <source>Windows не разрешает Duo Input входящие соединения в локальной сети - второй компьютер не сможет подключиться.</source>
+        <translation>Windows не разрешает Duo Input входящие соединения в локальной сети - второй компьютер не сможет подключиться.</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="128"/>
+        <source>Разрешить</source>
+        <translation>Разрешить</translation>
+    </message>
+    <message>
+        <location filename="../../ui/clipboard_page.py" line="144"/>
         <source>Второй компьютер</source>
         <translation>Второй компьютер</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="165"/>
+        <location filename="../../ui/clipboard_page.py" line="192"/>
         <source>Получение {0} / {1}</source>
         <translation>Получение {0} / {1}</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="210"/>
-        <location filename="../../ui/clipboard_page.py" line="233"/>
-        <location filename="../../ui/clipboard_page.py" line="239"/>
+        <location filename="../../ui/clipboard_page.py" line="254"/>
+        <location filename="../../ui/clipboard_page.py" line="293"/>
         <source>введён вручную</source>
         <translation>введён вручную</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="216"/>
+        <location filename="../../ui/clipboard_page.py" line="260"/>
         <source>найден автоматически</source>
         <translation>найден автоматически</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="249"/>
+        <location filename="../../ui/clipboard_page.py" line="306"/>
         <source>Отпечаток: {0}</source>
         <translation>Отпечаток: {0}</translation>
     </message>
     <message>
-        <location filename="../../ui/clipboard_page.py" line="112"/>
-        <location filename="../../ui/clipboard_page.py" line="114"/>
+        <location filename="../../ui/clipboard_page.py" line="138"/>
+        <location filename="../../ui/clipboard_page.py" line="140"/>
         <source>Последние события</source>
         <translation>Последние события</translation>
     </message>
@@ -1611,13 +1620,13 @@
 <context>
     <name>PairingDialog</name>
     <message>
-        <location filename="../../app.py" line="158"/>
+        <location filename="../../app.py" line="177"/>
         <source>Подтвердите связывание</source>
-        <extracomment>Console script target declared in ``pyproject.toml``. Аргумент командной строки, которым автозапуск просит не показывать окно - см. persistence/autostart.py и §4 спецификации.</extracomment>
+        <extracomment>Console script target declared in ``pyproject.toml``. Аргумент командной строки, которым автозапуск просит не показывать окно - см. persistence/autostart.py и §4 спецификации. Ключи, которыми установщик и деинсталлятор ставят и убирают правила брандмауэра, - см. persistence/firewall.py. Человек ответил &quot;Позже&quot; (или отказал в UAC): окно о брандмауэре больше не всплывает, остаётся строка с кнопкой на странице общего буфера.</extracomment>
         <translation>Подтвердите связывание</translation>
     </message>
     <message>
-        <location filename="../../app.py" line="159"/>
+        <location filename="../../app.py" line="178"/>
         <source>Компьютер «{0}» показывает тот же код?
 
 Код: {1}</source>
@@ -1626,12 +1635,12 @@
 Код: {1}</translation>
     </message>
     <message>
-        <location filename="../../app.py" line="169"/>
+        <location filename="../../app.py" line="188"/>
         <source>Связать</source>
         <translation>Связать</translation>
     </message>
     <message>
-        <location filename="../../app.py" line="173"/>
+        <location filename="../../app.py" line="192"/>
         <source>Отказать</source>
         <translation>Отказать</translation>
     </message>
@@ -1965,13 +1974,33 @@
 <context>
     <name>_ClipboardRuntime</name>
     <message>
-        <location filename="../../app.py" line="623"/>
+        <location filename="../../app.py" line="512"/>
+        <source>Брандмауэр Windows</source>
+        <extracomment>Результаты фоновой работы с брандмауэром - доставляются в поток интерфейса очередью Qt, потому что излучаются из другого потока. Окно о брандмауэре уже показывали в этом запуске - выключение и включение общего буфера не повод спрашивать снова. The macOS receiver, when the platform branch of ``_start_files`` built one - ``None`` on win32, where the receiver role is played by ``self.transfer`` itself (driven by Explorer through the callback gateway) rather than by a standalone object.</extracomment>
+        <translation>Брандмауэр Windows</translation>
+    </message>
+    <message>
+        <location filename="../../app.py" line="516"/>
+        <source>Чтобы второй компьютер мог подключиться, Windows должна разрешить Duo Input входящие соединения в локальной сети.</source>
+        <translation>Чтобы второй компьютер мог подключиться, Windows должна разрешить Duo Input входящие соединения в локальной сети.</translation>
+    </message>
+    <message>
+        <location filename="../../app.py" line="520"/>
+        <source>Разрешить</source>
+        <translation>Разрешить</translation>
+    </message>
+    <message>
+        <location filename="../../app.py" line="521"/>
+        <source>Позже</source>
+        <translation>Позже</translation>
+    </message>
+    <message>
+        <location filename="../../app.py" line="844"/>
         <source>Входящие файлы</source>
-        <extracomment>The macOS receiver, when the platform branch of ``_start_files`` built one - ``None`` on win32, where the receiver role is played by ``self.transfer`` itself (driven by Explorer through the callback gateway) rather than by a standalone object.</extracomment>
         <translation>Входящие файлы</translation>
     </message>
     <message>
-        <location filename="../../app.py" line="626"/>
+        <location filename="../../app.py" line="847"/>
         <source>Другой компьютер хочет передать {0} объект(ов) ({1:.1f} МБ).</source>
         <translation>Другой компьютер хочет передать {0} объект(ов) ({1:.1f} МБ).</translation>
     </message>
