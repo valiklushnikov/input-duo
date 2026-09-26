@@ -7,6 +7,15 @@
 ; installs drivers is exactly the shape of thing operators are told not to
 ; trust, and this program has no reason to look like one.
 ;
+; The one exception is the Windows Firewall: without an inbound rule the other
+; computer cannot connect whenever the network profile is not the one the user
+; answered Windows' own prompt for. At the end of setup DuoInput.exe itself is
+; run elevated with --install-firewall-rules (one UAC prompt), and the
+; uninstaller runs --remove-firewall-rules the same way, so the rules are
+; described in exactly one place - the program. Declining the prompt fails
+; nothing: the program checks the rules when the shared clipboard starts and
+; offers the same repair from there.
+;
 ; Build with:
 ;   ISCC.exe configurator\packaging\duo-input.iss
 ; after configurator\packaging\nuitka-build.ps1 has produced dist\DuoInput.
@@ -83,3 +92,35 @@ Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; \
 ; operator's logs and settings, and their .duoinput.json projects live
 ; wherever they chose to save them; uninstalling must not touch either.
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+const
+  InstallFirewallRulesArgument = '--install-firewall-rules';
+  RemoveFirewallRulesArgument = '--remove-firewall-rules';
+
+// ShellExec with the 'runas' verb raises exactly one UAC prompt. It returns
+// False when the prompt is declined; that is logged and otherwise ignored, so
+// neither setup nor uninstall can fail because of the firewall.
+procedure RunProgramElevated(const Parameters: String);
+var
+  Code: Integer;
+begin
+  if ShellExec('runas', ExpandConstant('{app}\{#AppExeName}'), Parameters, '',
+               SW_HIDE, ewWaitUntilTerminated, Code) then
+    Log(Format('%s finished, code %d', [Parameters, Code]))
+  else
+    Log(Format('%s did not run: %s', [Parameters, SysErrorMessage(Code)]));
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    RunProgramElevated(InstallFirewallRulesArgument);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  // usUninstall comes before any file is deleted: the program is still there.
+  if CurUninstallStep = usUninstall then
+    RunProgramElevated(RemoveFirewallRulesArgument);
+end;
