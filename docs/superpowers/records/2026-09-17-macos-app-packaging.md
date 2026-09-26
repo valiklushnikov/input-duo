@@ -153,3 +153,21 @@ IP:47654, минуя мультикаст.
 
 Developer ID signing, notarization, `.dmg`, Apple Developer Program — отдельный
 distribution-milestone.
+
+## Поправка 2026-09-26: multicast-entitlement на macOS не нужен
+
+Опыт выше (ad-hoc + `com.apple.developer.networking.multicast` → error 153)
+верен, но вывод «мультикаст-discovery в .app без платного аккаунта недостижим»
+ошибочен. Apple TN3179: «The multicast entitlement isn't required on macOS» —
+entitlement нужен только iOS/iPadOS/visionOS. На macOS multicast — обычная
+local-network операция под Local Network privacy; достаточно
+`NSLocalNetworkUsageDescription` и разрешения пользователя. Подтверждено
+spike'ом: `docs/superpowers/records/2026-09-26-macos-multicast-discovery-spike.md`.
+
+Там же уточнены ещё два пункта этого record:
+
+- для `.app`, подписанного Personal Team, на macOS 27.0 разрешение Local
+  Network подействовало **без перезапуска** процесса;
+- мультикаст «не проходящий» с Windows объясняется выбором интерфейса на
+  Windows с Ethernet и Wi-Fi одновременно: при рассылке через маршрут по
+  умолчанию не доходит ничего, при рассылке через каждый интерфейс — всё.
