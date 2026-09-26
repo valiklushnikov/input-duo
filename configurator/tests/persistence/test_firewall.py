@@ -53,6 +53,15 @@ PROMPT_RULES_PROGRAM = (
 #: То, что present.json считает программой Duo Input.
 INSTALLED = r"C:\Users\Operator\AppData\Local\Programs\Duo Input\DuoInput.exe"
 POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+#: Тот же INSTALLED в коротких именах 8.3 - так его видит собранный exe в
+#: sys.executable, если его запустили по короткому пути.
+SHORT = r"C:\Users\Operator\APPDAT~1\Local\PROGRA~1\DUOINP~1\DuoInput.exe"
+#: Файл, куда повышенный скрипт пишет ошибку; в тестах - несуществующий.
+ERROR_FILE = r"C:\DuoInputTest\duo-input-firewall-error.txt"
+CATCH = (
+    "catch { try { (($_ | Out-String) + $_.Exception.GetType().FullName)"
+    f" | Out-File -LiteralPath '{ERROR_FILE}' -Encoding UTF8 }} catch {{}}; exit 1 }}"
+)
 BLOCK_ID = "TCP Query User{0A1B2C3D-0000-4000-8000-000000000001}" + INSTALLED.lower()
 
 
@@ -95,8 +104,14 @@ class FakeSystem:
         elevated: bool = False,
         elevated_code: int | None = 0,
         direct_code: int | None = 0,
+        error_text: str | None = None,
+        long_paths: dict[str, str] | None = None,
     ) -> None:
         self.output = _fixture("present.json") if output is None else output
+        #: То, что повышенный скрипт "напишет" в файл ошибки, если упадёт.
+        self.error_text = error_text
+        #: Короткие пути 8.3 и их длинные формы; остальное - как есть.
+        self.long_paths = long_paths or {}
         self.code = code
         self.elevated = elevated
         self.elevated_code = elevated_code
@@ -110,11 +125,21 @@ class FakeSystem:
             self.queries.append((executable, parameters))
             return self.code, self.output
         self.runs.append((executable, parameters))
-        return self.direct_code, b""
+        return self._finish(parameters, self.direct_code), b""
 
     def run_elevated(self, executable: str, parameters: str, hwnd: int | None) -> int | None:
         self.elevated_runs.append((executable, parameters, hwnd))
-        return self.elevated_code
+        return self._finish(parameters, self.elevated_code)
+
+    def _finish(self, parameters: str, code: int | None) -> int | None:
+        """Как PowerShell с Out-File -Encoding UTF8: файл с BOM, если упал."""
+        if code not in (0, None) and self.error_text is not None:
+            path = parameters.split("Out-File -LiteralPath '")[1].split("'")[0]
+            Path(path).write_bytes(b"\xef\xbb\xbf" + self.error_text.encode("utf-8"))
+        return code
+
+    def long_path(self, path: str) -> str:
+        return self.long_paths.get(path, path)
 
     def is_elevated(self) -> bool:
         return self.elevated
@@ -131,6 +156,7 @@ def frozen_windows(monkeypatch):
     monkeypatch.setattr(firewall, "_is_windows", lambda: True)
     monkeypatch.setattr(firewall, "_is_frozen", lambda: True)
     monkeypatch.setenv("SystemRoot", r"D:\NotWindows")
+    monkeypatch.setattr(firewall, "_error_file_path", lambda: ERROR_FILE)
 
 
 def _status(output: bytes, exe: str = INSTALLED) -> firewall.FirewallStatus:
@@ -393,7 +419,7 @@ def _statements(parameters: str) -> list[str]:
     script = _script_of(parameters)
     head, _, rest = script.partition("try { ")
     assert head == "$ErrorActionPreference='Stop'; "
-    body, _, tail = rest.rpartition(" } catch { exit 1 }")
+    body, _, tail = rest.rpartition(" } " + CATCH)
     assert tail == ""
     return body.split("; ")
 
@@ -421,7 +447,7 @@ def test_apply_runs_one_elevated_command_that_replaces_both_rules(frozen_windows
             " -Group 'Duo Input' -Direction Inbound"
             " -Action Allow -Profile Private,Public -RemoteAddress LocalSubnet"
             f" -Protocol UDP -LocalPort 47655 -Program {program} | Out-Null; "
-            "exit 0 } catch { exit 1 }\"",
+            f"exit 0 }} {CATCH}\"",
             0x1234,
         )
     ]
@@ -524,7 +550,7 @@ def test_remove_deletes_only_our_two_rules(frozen_windows):
             "$ErrorActionPreference='Stop'; try { "
             "Get-NetFirewallRule -Name 'DuoInput-Link','DuoInput-Discovery'"
             " -ErrorAction SilentlyContinue | Remove-NetFirewallRule; "
-            "exit 0 } catch { exit 1 }\"",
+            f"exit 0 }} {CATCH}\"",
             None,
         )
     ]
@@ -660,3 +686,144 @@ def test_a_failed_system_directory_lookup_is_an_error_not_a_relative_path(monkey
 
     with pytest.raises(OSError):
         firewall._WindowsSystem().system_directory()
+
+
+# ------------------------------------------------------------ 8.3 short paths
+
+
+def test_a_short_exe_path_finds_the_rules_stored_with_the_long_path(frozen_windows):
+    """Собранный exe, запущенный по пути 8.3, видит в sys.executable
+    DOCUME~1\\...; Windows хранит в правилах длинный путь."""
+    system = FakeSystem(output=_with_blocks(_block()), long_paths={SHORT: INSTALLED})
+
+    status = firewall.check_rules(SHORT, system=system)
+
+    assert status.missing == ()
+    assert [block.id for block in status.blocks] == [BLOCK_ID]
+
+
+def test_rules_are_created_with_the_long_path_of_a_short_exe_path(frozen_windows):
+    system = FakeSystem(long_paths={SHORT: INSTALLED})
+
+    assert firewall.apply_rules(SHORT, system=system)
+
+    [(_executable, parameters, _hwnd)] = system.elevated_runs
+    assert f"-Program '{INSTALLED}'" in parameters
+    assert "~1" not in parameters
+
+
+def test_a_short_path_stored_by_someone_else_still_matches(frozen_windows):
+    answer = _answer("present.json")
+    for entry in answer["Rules"]:
+        entry["Program"] = SHORT
+    system = FakeSystem(
+        output=_with_blocks(_block(Program=SHORT)),
+        long_paths={SHORT: INSTALLED},
+    )
+    rules_system = FakeSystem(output=_encode(answer), long_paths={SHORT: INSTALLED})
+
+    assert firewall.check_rules(INSTALLED, system=rules_system).missing == ()
+    assert [block.id for block in firewall.check_rules(INSTALLED, system=system).blocks] == [BLOCK_ID]
+
+
+def test_env_variables_are_expanded_before_the_long_path_lookup(frozen_windows, monkeypatch):
+    monkeypatch.setenv("DUOTEST", r"C:\Users\Operator\APPDAT~1")
+    stored = r"%DUOTEST%\Local\PROGRA~1\DUOINP~1\DuoInput.exe"
+    system = FakeSystem(output=_with_blocks(_block(Program=stored)), long_paths={SHORT: INSTALLED})
+
+    assert [block.id for block in firewall.check_rules(INSTALLED, system=system).blocks] == [BLOCK_ID]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="GetLongPathNameW is Windows-only")
+def test_the_real_long_path_expands_8_3_names_of_an_existing_file(tmp_path):
+    import ctypes
+
+    target = tmp_path / "a rather long directory name" / "DuoInput.exe"
+    target.parent.mkdir()
+    target.write_bytes(b"")
+    buffer = ctypes.create_unicode_buffer(1024)
+    ctypes.windll.kernel32.GetShortPathNameW(str(target), buffer, len(buffer))
+    short = buffer.value
+    if short.lower() == str(target).lower():
+        pytest.skip("8.3 names are disabled on this volume")
+
+    assert firewall._WindowsSystem().long_path(short).lower() == str(target).lower()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="GetLongPathNameW is Windows-only")
+def test_the_real_long_path_leaves_a_missing_file_unchanged():
+    missing = r"C:\NO~1\SUCH~1\program.exe"
+
+    assert firewall._WindowsSystem().long_path(missing) == missing
+
+
+# ------------------------------------------------------------ why the elevated script failed
+
+
+def test_the_elevated_scripts_error_is_logged_and_its_file_removed(
+    frozen_windows, monkeypatch, tmp_path, caplog
+):
+    """Из-за UAC виден только код возврата; сам текст ошибки повышенный
+    скрипт кладёт в файл во временной папке пользователя, программа его
+    читает, пишет в журнал и удаляет."""
+    error_file = tmp_path / "duo-input-firewall-x.txt"
+    monkeypatch.setattr(firewall, "_error_file_path", lambda: str(error_file))
+    system = FakeSystem(
+        elevated_code=1,
+        error_text="Отказано в доступе.\r\nSystem.UnauthorizedAccessException",
+    )
+
+    with caplog.at_level("WARNING", logger=firewall.__name__):
+        assert not firewall.apply_rules(INSTALLED, system=system)
+
+    assert "Отказано в доступе." in caplog.text
+    assert "System.UnauthorizedAccessException" in caplog.text
+    assert "\ufeff" not in caplog.text
+    assert not error_file.exists()
+
+
+def test_a_direct_run_logs_its_error_the_same_way(frozen_windows, monkeypatch, tmp_path, caplog):
+    error_file = tmp_path / "duo-input-firewall-y.txt"
+    monkeypatch.setattr(firewall, "_error_file_path", lambda: str(error_file))
+    system = FakeSystem(elevated=True, direct_code=1, error_text="boom")
+
+    with caplog.at_level("WARNING", logger=firewall.__name__):
+        assert not firewall.remove_rules(system=system)
+
+    assert "boom" in caplog.text
+    assert not error_file.exists()
+
+
+def test_a_failure_without_an_error_file_says_so(frozen_windows, monkeypatch, tmp_path, caplog):
+    """Отказ в UAC - скрипт не запускался, файла нет."""
+    monkeypatch.setattr(firewall, "_error_file_path", lambda: str(tmp_path / "none.txt"))
+
+    with caplog.at_level("WARNING", logger=firewall.__name__):
+        assert not firewall.apply_rules(INSTALLED, system=FakeSystem(elevated_code=None))
+
+    assert "подробностей нет" in caplog.text
+
+
+def test_each_run_gets_its_own_error_file_in_the_temp_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(firewall.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    first, second = firewall._error_file_path(), firewall._error_file_path()
+
+    assert first != second
+    assert Path(first).parent == tmp_path and Path(second).parent == tmp_path
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real PowerShell, nothing elevated or changed")
+def test_the_real_catch_clause_writes_the_error_text(tmp_path):
+    """Настоящий PowerShell без повышения и без правил: скрипт падает на
+    throw, и catch должен оставить текст и тип исключения в файле."""
+    error_file = tmp_path / "it's here.txt"
+    system = firewall._WindowsSystem()
+    script = firewall._guarded(["throw 'boom-for-the-test'"], str(error_file))
+
+    code, _output = system.run(firewall._powershell(system), firewall._parameters(script))
+
+    assert code == 1
+    text = error_file.read_text(encoding="utf-8-sig")
+    assert "boom-for-the-test" in text
+    assert "System.Management.Automation.RuntimeException" in text

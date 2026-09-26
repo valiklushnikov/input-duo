@@ -46,7 +46,10 @@ import ntpath
 import re
 import subprocess
 import sys
+import tempfile
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from duo_input.clipboard.coordinator import TCP_PORT
@@ -137,6 +140,10 @@ class FirewallSystem(Protocol):
     def system_directory(self) -> str:
         """Системный каталог Windows (GetSystemDirectoryW)."""
 
+    def long_path(self, path: str) -> str:
+        """Длинная форма пути существующего файла (GetLongPathNameW);
+        несуществующий - как есть."""
+
 
 def required_rules(exe_path: object) -> tuple[FirewallRule, FirewallRule]:
     program = str(exe_path)
@@ -157,7 +164,10 @@ def check_rules(exe_path: object, *, system: FirewallSystem | None = None) -> Fi
     if not is_applicable():
         return FirewallStatus()
     system = system or _SYSTEM
-    rules = required_rules(exe_path)
+    # Короткий путь 8.3 здесь не разворачивается: _same_program разворачивает
+    # обе стороны каждого сравнения.
+    program = str(exe_path)
+    rules = required_rules(program)
     code, output = system.run(_powershell(system), _parameters(_query_script(rules)))
     if code != 0:
         logger.warning("брандмауэр: запрос правил не удался (код %s)", code)
@@ -169,12 +179,14 @@ def check_rules(exe_path: object, *, system: FirewallSystem | None = None) -> Fi
         return FirewallStatus(known=False)
 
     missing = tuple(
-        rule for rule in rules if not any(_satisfies(entry, rule) for entry in answer["Rules"])
+        rule
+        for rule in rules
+        if not any(_satisfies(entry, rule, system) for entry in answer["Rules"])
     )
     blocks: list[BlockRule] = []
     policy_blocked = False
     for entry in answer["Blocks"]:
-        if not _blocks_us(entry, str(exe_path)):
+        if not _blocks_us(entry, program, system):
             continue
         if entry.get("Source") == "Local":
             blocks.append(BlockRule(str(entry.get("Name")), str(entry.get("DisplayName"))))
@@ -206,13 +218,12 @@ def apply_rules(
     if not is_applicable():
         return True
     system = system or _SYSTEM
-    blocks = check_rules(exe_path, system=system).blocks
+    program = _long_exe_path(exe_path, system)
+    blocks = check_rules(program, system=system).blocks
     for block in blocks:
         logger.info("брандмауэр: будет удалено запрещающее правило %s (%s)", block.name, block.id)
-    script = _guarded(
-        _delete_ours() + _delete_blocks(blocks) + _create_statements(required_rules(exe_path))
-    )
-    return _run_privileged(script, system, hwnd, "правила добавлены")
+    statements = _delete_ours() + _delete_blocks(blocks) + _create_statements(required_rules(program))
+    return _run_privileged(statements, system, hwnd, "правила добавлены")
 
 
 def remove_rules(*, system: FirewallSystem | None = None) -> bool:
@@ -220,7 +231,20 @@ def remove_rules(*, system: FirewallSystem | None = None) -> bool:
     if not is_applicable():
         return True
     system = system or _SYSTEM
-    return _run_privileged(_guarded(_delete_ours()), system, None, "правила удалены")
+    return _run_privileged(_delete_ours(), system, None, "правила удалены")
+
+
+def _long_exe_path(exe_path: object, system: FirewallSystem) -> str:
+    """Собранный exe, запущенный по пути 8.3, видит в sys.executable
+    ``DOCUME~1\\...``, а Windows хранит в правилах длинный путь - и в
+    правилах, которые мы создаём, должен стоять он же."""
+    return system.long_path(str(exe_path))
+
+
+def _error_file_path() -> str:
+    """Свой файл на каждый запуск, во временной папке пользователя:
+    повышенный процесс работает от того же пользователя."""
+    return str(Path(tempfile.gettempdir()) / f"duo-input-firewall-{uuid.uuid4().hex}.txt")
 
 
 def is_applicable() -> bool:
@@ -337,25 +361,53 @@ def _create_statements(rules) -> list[str]:
     ]
 
 
-def _guarded(statements: list[str]) -> str:
-    """Код возврата процесса - единственное, что видно из-за UAC."""
+def _guarded(statements: list[str], error_file: str) -> str:
+    """Из-за UAC виден только код возврата процесса - поэтому текст и тип
+    исключения скрипт кладёт в ``error_file``. Если не вышло и это, код 1
+    всё равно остаётся."""
     body = "; ".join([*statements, "exit 0"])
-    return f"$ErrorActionPreference='Stop'; try {{ {body} }} catch {{ exit 1 }}"
+    report = (
+        "(($_ | Out-String) + $_.Exception.GetType().FullName)"
+        f" | Out-File -LiteralPath {_quote(error_file)} -Encoding UTF8"
+    )
+    return (
+        f"$ErrorActionPreference='Stop'; try {{ {body} }}"
+        f" catch {{ try {{ {report} }} catch {{}}; exit 1 }}"
+    )
 
 
 def _run_privileged(
-    script: str, system: FirewallSystem, hwnd: int | None, success: str
+    statements: list[str], system: FirewallSystem, hwnd: int | None, success: str
 ) -> bool:
-    executable, parameters = _powershell(system), _parameters(script)
-    if system.is_elevated():
-        code, _output = system.run(executable, parameters)
-    else:
-        code = system.run_elevated(executable, parameters, hwnd)
-    if code == 0:
-        logger.info("брандмауэр: %s", success)
-        return True
-    logger.warning("брандмауэр: не получилось (код %s; None - отказ в UAC)", code)
-    return False
+    error_file = Path(_error_file_path())
+    executable, parameters = _powershell(system), _parameters(_guarded(statements, str(error_file)))
+    try:
+        if system.is_elevated():
+            code, _output = system.run(executable, parameters)
+        else:
+            code = system.run_elevated(executable, parameters, hwnd)
+        if code == 0:
+            logger.info("брандмауэр: %s", success)
+            return True
+        logger.warning(
+            "брандмауэр: не получилось (код %s; None - отказ в UAC): %s",
+            code,
+            _read_error(error_file),
+        )
+        return False
+    finally:
+        try:
+            error_file.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("брандмауэр: не удалось удалить %s", error_file)
+
+
+def _read_error(error_file: Path) -> str:
+    # Out-File -Encoding UTF8 в Windows PowerShell пишет BOM.
+    try:
+        return error_file.read_text(encoding="utf-8-sig", errors="replace").strip()
+    except OSError:
+        return "подробностей нет"
 
 
 # ------------------------------------------------------------ parsing
@@ -378,14 +430,18 @@ def _parts(value: object) -> set[str]:
     return {part.strip() for part in str(value or "").split(",") if part.strip()}
 
 
-def _same_program(stored: object, program: str) -> bool:
+def _same_program(stored: object, program: str, system: FirewallSystem) -> bool:
+    """Переменные окружения, короткие имена 8.3 (если файл есть) и регистр -
+    не повод считать программы разными."""
+
     def normal(path: str) -> str:
-        return ntpath.normcase(ntpath.normpath(ntpath.expandvars(path)))
+        expanded = ntpath.normpath(ntpath.expandvars(path))
+        return ntpath.normcase(ntpath.normpath(system.long_path(expanded)))
 
     return normal(str(stored or "")) == normal(program)
 
 
-def _satisfies(entry: dict, rule: FirewallRule) -> bool:
+def _satisfies(entry: dict, rule: FirewallRule, system: FirewallSystem) -> bool:
     """Имя не сравнивается: запрос и так возвращает только правила с нашими
     именами, а правило, которое пропускает нужный трафик, годится под любым
     из них."""
@@ -398,18 +454,18 @@ def _satisfies(entry: dict, rule: FirewallRule) -> bool:
         and entry.get("Protocol") == rule.protocol
         and str(rule.local_port) in _parts(entry.get("LocalPort"))
         and "LocalSubnet" in _parts(entry.get("RemoteAddress"))
-        and _same_program(entry.get("Program"), rule.program)
+        and _same_program(entry.get("Program"), rule.program, system)
     )
 
 
-def _blocks_us(entry: dict, program: str) -> bool:
+def _blocks_us(entry: dict, program: str, system: FirewallSystem) -> bool:
     """Включённое входящее запрещающее правило ровно для нашего exe. Правило
     без программы (``Any``) - чужая забота: его не трогаем и не считаем.
     Action не сравнивается: запрос возвращает только правила Block."""
     return (
         entry.get("Enabled") == "True"
         and entry.get("Direction") == "Inbound"
-        and _same_program(entry.get("Program"), program)
+        and _same_program(entry.get("Program"), program, system)
     )
 
 
@@ -447,6 +503,18 @@ class _WindowsSystem:
         if not 0 < length < len(buffer):
             raise OSError("GetSystemDirectoryW failed")
         return buffer.value
+
+    def long_path(self, path: str) -> str:
+        import ctypes
+        from ctypes import wintypes
+
+        function = ctypes.windll.kernel32.GetLongPathNameW
+        function.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        function.restype = wintypes.DWORD
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = function(path, buffer, len(buffer))
+        # 0 - файла нет (или путь не разобрать): сравниваем как есть.
+        return buffer.value if 0 < length < len(buffer) else path
 
 
 def _shell_execute_and_wait(
