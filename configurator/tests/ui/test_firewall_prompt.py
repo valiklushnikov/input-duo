@@ -25,34 +25,47 @@ PROMPT_TEXT = (
     "Чтобы второй компьютер мог подключиться, Windows должна разрешить "
     "Duo Input входящие соединения в локальной сети."
 )
+POLICY_TEXT = "Входящие соединения запрещены политикой администратора этого компьютера."
 
 
 class FakeFirewall:
     """Модуль правил: отвечает из памяти и записывает, из какого потока звали."""
 
+    FirewallStatus = firewall.FirewallStatus
+
     def __init__(self, *, present: bool = False, apply_result: bool = True) -> None:
         self.present = present
         self.apply_result = apply_result
+        #: Если задан - check_rules отвечает им, а не по present.
+        self.status: firewall.FirewallStatus | None = None
         self.check_threads: list[threading.Thread] = []
-        self.applied: list[tuple[Path, threading.Thread]] = []
+        self.check_gate: threading.Event | None = None
+        self.applied: list[tuple[Path, threading.Thread, int | None]] = []
         self.apply_gate: threading.Event | None = None
         self.apply_error: Exception | None = None
 
     def is_applicable(self) -> bool:
         return True
 
-    def missing_rules(self, exe_path):
+    def check_rules(self, exe_path):
         self.check_threads.append(threading.current_thread())
-        return [] if self.present else list(firewall.required_rules(exe_path))
+        if self.check_gate is not None:
+            self.check_gate.wait(10)
+        if self.status is not None:
+            return self.status
+        if self.present:
+            return firewall.FirewallStatus()
+        return firewall.FirewallStatus(missing=firewall.required_rules(exe_path))
 
-    def apply_rules(self, exe_path) -> bool:
-        self.applied.append((exe_path, threading.current_thread()))
+    def apply_rules(self, exe_path, hwnd=None) -> bool:
+        self.applied.append((exe_path, threading.current_thread(), hwnd))
         if self.apply_gate is not None:
             self.apply_gate.wait(10)
         if self.apply_error is not None:
             raise self.apply_error
         if self.apply_result:
             self.present = True
+            self.status = None
         return self.apply_result
 
 
@@ -97,10 +110,13 @@ def launch(qapp, qtbot, tmp_path):
         return window, settings
 
     yield start
-    for dialog in _prompts():
+    for dialog in _prompts() + _prompts(POLICY_TEXT):
         dialog.close()
     for runtime in runtimes:
-        runtime.stop()
+        try:
+            runtime.stop()
+        except RuntimeError:
+            pass  # тест сам удалил объект (см. тест про закрытие во время проверки)
 
 
 def _runtime_of(application):
@@ -112,11 +128,11 @@ def _runtime_of(application):
     raise AssertionError("_ClipboardRuntime was not created")
 
 
-def _prompts() -> list[QMessageBox]:
+def _prompts(text: str = PROMPT_TEXT) -> list[QMessageBox]:
     return [
         widget
         for widget in QApplication.topLevelWidgets()
-        if isinstance(widget, QMessageBox) and widget.isVisible() and widget.text() == PROMPT_TEXT
+        if isinstance(widget, QMessageBox) and widget.isVisible() and widget.text() == text
     ]
 
 
@@ -141,8 +157,10 @@ def test_missing_rules_ask_once_and_allow_applies_them(qtbot, fake, launch):
     qtbot.mouseClick(_button(dialog, "Разрешить"), Qt.MouseButton.LeftButton)
 
     qtbot.waitUntil(lambda: fake.applied and not _hint_shown(window))
-    [(executable, _thread)] = fake.applied
+    [(executable, _thread, hwnd)] = fake.applied
     assert executable == Path(sys.executable)
+    # UAC - над нашим окном, а не мигающей кнопкой на панели задач.
+    assert hwnd == int(window.winId())
     assert _prompts() == []
 
 
@@ -290,3 +308,104 @@ def test_a_crash_while_applying_does_not_leave_the_button_dead(qtbot, fake, laun
     qtbot.waitUntil(lambda: settings.value(DECLINED_KEY, False, type=bool) is True)
     assert window.clipboard_page.firewall_allow_button.isEnabled()
     assert _hint_shown(window)
+
+
+def test_a_local_block_rule_asks_for_the_same_repair(qtbot, fake, launch):
+    """Наши правила на месте, а Windows держит свой запрет: для человека
+    это та же беда и та же кнопка."""
+    fake.status = firewall.FirewallStatus(
+        blocks=(firewall.BlockRule("TCP Query User{1}c:\\x\\duoinput.exe", "duoinput.exe"),)
+    )
+    window, _settings = launch()
+
+    dialog = _wait_for_prompt(qtbot)
+    assert _hint_shown(window)
+    qtbot.mouseClick(_button(dialog, "Разрешить"), Qt.MouseButton.LeftButton)
+
+    qtbot.waitUntil(lambda: fake.applied and not _hint_shown(window))
+
+
+def test_a_policy_block_explains_and_offers_no_repair(qtbot, fake, launch):
+    fake.status = firewall.FirewallStatus(policy_blocked=True)
+    window, settings = launch()
+
+    qtbot.waitUntil(lambda: len(_prompts(POLICY_TEXT)) == 1)
+    [dialog] = _prompts(POLICY_TEXT)
+    page = window.clipboard_page
+    assert [button.text() for button in dialog.buttons()] == ["Понятно"]
+    assert _hint_shown(window)
+    assert page.firewall_label.text() == POLICY_TEXT
+    assert page.firewall_allow_button.isHidden()
+
+    qtbot.mouseClick(_button(dialog, "Понятно"), Qt.MouseButton.LeftButton)
+
+    qtbot.waitUntil(lambda: _prompts(POLICY_TEXT) == [])
+    assert settings.value(DECLINED_KEY, False, type=bool) is True
+    assert fake.applied == []
+
+
+def test_a_policy_block_wins_over_a_repairable_problem(qtbot, fake, launch):
+    """Поставить наши правила можно, но связи это не даст - не обещаем."""
+    fake.status = firewall.FirewallStatus(
+        missing=firewall.required_rules("x"), policy_blocked=True
+    )
+    window, _settings = launch()
+
+    qtbot.waitUntil(lambda: len(_prompts(POLICY_TEXT)) == 1)
+    assert _prompts() == []
+    assert window.clipboard_page.firewall_allow_button.isHidden()
+
+
+def test_the_repair_hint_shows_its_own_text_and_button(qtbot, fake, launch):
+    window, _settings = launch()
+    dialog = _wait_for_prompt(qtbot)
+    qtbot.mouseClick(_button(dialog, "Позже"), Qt.MouseButton.LeftButton)
+    page = window.clipboard_page
+
+    assert page.firewall_label.text() == (
+        "Windows не разрешает Duo Input входящие соединения в локальной "
+        "сети - второй компьютер не сможет подключиться."
+    )
+    assert not page.firewall_allow_button.isHidden()
+
+
+def test_an_unknown_status_shows_nothing(qtbot, fake, launch):
+    """Запрос не удался - программа не знает, есть ли беда, и не пугает."""
+    fake.status = firewall.FirewallStatus(known=False)
+    window, _settings = launch()
+
+    qtbot.waitUntil(lambda: len(fake.check_threads) == 1)
+    qtbot.wait(50)
+    assert _prompts() == [] and _prompts(POLICY_TEXT) == []
+    assert not _hint_shown(window)
+
+
+def test_an_answer_that_arrives_after_the_runtime_is_gone_is_dropped_quietly(
+    qtbot, fake, launch, monkeypatch
+):
+    """Программу закрыли, пока PowerShell ещё отвечал: фоновый поток не
+    должен падать на излучении сигнала удалённого объекта."""
+    import shiboken6
+
+    threads: list[threading.Thread] = []
+    errors: list[BaseException] = []
+
+    def start_thread(work) -> None:
+        thread = threading.Thread(target=work, daemon=True)
+        threads.append(thread)
+        thread.start()
+
+    monkeypatch.setattr(app_module, "_run_in_background", start_thread)
+    monkeypatch.setattr(threading, "excepthook", lambda args: errors.append(args.exc_value))
+    fake.check_gate = threading.Event()
+    launch()
+    runtime = _runtime_of(QApplication.instance())
+    qtbot.waitUntil(lambda: len(fake.check_threads) == 1)
+
+    runtime.stop()
+    shiboken6.delete(runtime)
+    fake.check_gate.set()
+    threads[0].join(10)
+
+    assert not threads[0].is_alive()
+    assert errors == []

@@ -116,14 +116,10 @@ class ClipboardPage(QWidget):
 
         # Строка-напоминание о брандмауэре: видна, пока правил нет, и после
         # "Позже" остаётся единственным местом, откуда их можно поставить.
+        # Если входящие запрещены политикой, кнопки нет - починить это
+        # программа не может.
         self.firewall_hint = QWidget(self)
-        self.firewall_label = QLabel(
-            self.tr(
-                "Windows не разрешает Duo Input входящие соединения в локальной "
-                "сети - второй компьютер не сможет подключиться."
-            ),
-            self.firewall_hint,
-        )
+        self.firewall_label = QLabel(self.firewall_hint)
         self.firewall_label.setWordWrap(True)
         self.firewall_allow_button = QPushButton(self.tr("Разрешить"), self.firewall_hint)
         self.firewall_allow_button.clicked.connect(self.firewall_allow_requested)
@@ -209,8 +205,22 @@ class ClipboardPage(QWidget):
         self.auto_incoming_checkbox.setChecked(checked)
         self.auto_incoming_checkbox.blockSignals(False)
 
-    def set_firewall_hint_visible(self, visible: bool) -> None:
-        self.firewall_hint.setVisible(visible)
+    def set_firewall_state(self, state: str) -> None:
+        """``"ok"`` - строки нет; ``"repair"`` - строка с кнопкой
+        «Разрешить»; ``"policy"`` - объяснение без кнопки."""
+        if state == "policy":
+            self.firewall_label.setText(
+                self.tr("Входящие соединения запрещены политикой администратора этого компьютера.")
+            )
+        else:
+            self.firewall_label.setText(
+                self.tr(
+                    "Windows не разрешает Duo Input входящие соединения в локальной "
+                    "сети - второй компьютер не сможет подключиться."
+                )
+            )
+        self.firewall_allow_button.setVisible(state == "repair")
+        self.firewall_hint.setVisible(state != "ok")
 
     def set_firewall_busy(self, busy: bool) -> None:
         """Пока правила ставятся (идёт UAC), второе нажатие открыло бы

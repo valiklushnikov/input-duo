@@ -163,3 +163,56 @@ def test_the_firewall_switches_are_the_ones_the_rule_module_defines():
         firewall.INSTALL_ARGUMENT,
         firewall.REMOVE_ARGUMENT,
     ]
+    assert firewall.CHECK_ARGUMENT == "--check-firewall-rules"
+
+
+def _status(**fields):
+    from duo_input.persistence import firewall
+
+    if "missing" in fields:
+        fields["missing"] = firewall.required_rules("x")
+    if "blocks" in fields:
+        fields["blocks"] = (firewall.BlockRule("id", "name"),)
+    return firewall.FirewallStatus(**fields)
+
+
+CHECK_OUTCOMES = {
+    "satisfied": ({}, 0),
+    "rules missing": ({"missing": True}, 1),
+    "local block": ({"blocks": True}, 1),
+    "unknown": ({"known": False}, 1),
+    "policy": ({"policy_blocked": True}, 2),
+    "policy and missing": ({"policy_blocked": True, "missing": True}, 2),
+}
+
+
+@pytest.mark.parametrize("fields, exit_code", CHECK_OUTCOMES.values(), ids=CHECK_OUTCOMES.keys())
+def test_the_check_switch_tells_the_installer_whether_elevating_would_help(
+    monkeypatch, fields, exit_code
+):
+    """0 - всё в порядке, UAC не нужен (обновление поверх рабочей установки);
+    1 - нужна починка, или проверить не удалось - тогда лучше поставить;
+    2 - запрет политикой: повышение не поможет, UAC не показываем."""
+    import sys
+
+    from duo_input import app
+    from duo_input.persistence import firewall
+
+    calls: list[tuple] = []
+
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("the check switch must not start the application or elevate")
+
+    monkeypatch.setattr(app, "single_instance_lock", must_not_run)
+    monkeypatch.setattr(app, "configure_application", lambda: calls.append(("log",)))
+    monkeypatch.setattr(firewall, "apply_rules", must_not_run)
+    monkeypatch.setattr(
+        firewall, "check_rules", lambda exe: calls.append(("check_rules", exe)) or _status(**fields)
+    )
+
+    with monkeypatch.context() as context:
+        context.setattr(app.QApplication, "instance", must_not_run)
+        result = main(["DuoInput.exe", "--check-firewall-rules"])
+
+    assert result == exit_code
+    assert calls == [("log",), ("check_rules", Path(sys.executable))]

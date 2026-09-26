@@ -51,14 +51,20 @@ SINGLE_INSTANCE_NAME = "duo-input-single-instance"
 #: см. persistence/autostart.py и §4 спецификации.
 HIDDEN_START_ARGUMENT = autostart.HIDDEN_START_ARGUMENT
 
-#: Ключи, которыми установщик и деинсталлятор ставят и убирают правила
-#: брандмауэра, - см. persistence/firewall.py.
+# Ключи, которыми установщик и деинсталлятор проверяют, ставят и убирают
+# правила брандмауэра, - см. persistence/firewall.py.
 INSTALL_FIREWALL_RULES_ARGUMENT = firewall.INSTALL_ARGUMENT
 REMOVE_FIREWALL_RULES_ARGUMENT = firewall.REMOVE_ARGUMENT
+CHECK_FIREWALL_RULES_ARGUMENT = firewall.CHECK_ARGUMENT
 
-#: Человек ответил "Позже" (или отказал в UAC): окно о брандмауэре больше не
-#: всплывает, остаётся строка с кнопкой на странице общего буфера.
+# Человек ответил "Позже" (или отказал в UAC): окно о брандмауэре больше не
+# всплывает, остаётся строка с кнопкой на странице общего буфера.
 FIREWALL_PROMPT_DECLINED_KEY = "clipboard/firewall_prompt_declined"
+
+# Что показывает строка о брандмауэре на странице общего буфера.
+FIREWALL_OK = "ok"
+FIREWALL_REPAIR = "repair"
+FIREWALL_POLICY = "policy"
 
 
 def configure_application() -> Path:
@@ -267,8 +273,8 @@ class _ClipboardRuntime(QObject):
     открывает.
     """
 
-    #: Результаты фоновой работы с брандмауэром - доставляются в поток
-    #: интерфейса очередью Qt, потому что излучаются из другого потока.
+    # Результаты фоновой работы с брандмауэром - доставляются в поток
+    # интерфейса очередью Qt, потому что излучаются из другого потока.
     _firewall_checked = Signal(object)
     _firewall_applied = Signal(bool)
 
@@ -277,8 +283,8 @@ class _ClipboardRuntime(QObject):
         self._application = application
         self._window = window
         self._settings = settings
-        #: Окно о брандмауэре уже показывали в этом запуске - выключение и
-        #: включение общего буфера не повод спрашивать снова.
+        # Окно о брандмауэре уже показывали в этом запуске - выключение и
+        # включение общего буфера не повод спрашивать снова.
         self._firewall_prompted = False
         self._firewall_checked.connect(self._on_firewall_checked)
         self._firewall_applied.connect(self._on_firewall_applied)
@@ -294,10 +300,10 @@ class _ClipboardRuntime(QObject):
         self._file_capabilities_source: ClipboardCoordinator | None = None
         self._file_snapshot_source = None
         self._file_link = None
-        #: The macOS receiver, when the platform branch of ``_start_files``
-        #: built one - ``None`` on win32, where the receiver role is played by
-        #: ``self.transfer`` itself (driven by Explorer through the callback
-        #: gateway) rather than by a standalone object.
+        # The macOS receiver, when the platform branch of ``_start_files``
+        # built one - ``None`` on win32, where the receiver role is played by
+        # ``self.transfer`` itself (driven by Explorer through the callback
+        # gateway) rather than by a standalone object.
         self._file_receiver: QObject | None = None
         from duo_input.clipboard.backend import ClipboardBackend
 
@@ -481,7 +487,9 @@ class _ClipboardRuntime(QObject):
             return
         executable = Path(sys.executable)
         self._in_background(
-            lambda: firewall.missing_rules(executable), self._firewall_checked, []
+            lambda: firewall.check_rules(executable),
+            self._firewall_checked,
+            firewall.FirewallStatus(known=False),
         )
 
     def _in_background(self, work, signal, fallback) -> None:
@@ -491,41 +499,64 @@ class _ClipboardRuntime(QObject):
             except Exception:  # noqa: BLE001 - кнопка не должна остаться мёртвой
                 logger.exception("брандмауэр: фоновая операция упала")
                 result = fallback
-            signal.emit(result)
+            try:
+                signal.emit(result)
+            except RuntimeError:
+                # Программу закрыли, пока шла проверка или ждал UAC: объекта,
+                # которому нёс ответ, уже нет - и сообщать некому.
+                logger.info("брандмауэр: ответ пришёл после закрытия программы")
 
         _run_in_background(run)
 
-    def _on_firewall_checked(self, missing: list) -> None:
-        self._window.clipboard_page.set_firewall_hint_visible(bool(missing))
-        if not missing or self._firewall_prompted:
+    def _on_firewall_checked(self, status: firewall.FirewallStatus) -> None:
+        # Запрет политикой важнее починки: починить его программа не может,
+        # и предлагать "Разрешить" было бы обещанием, которое не выполнить.
+        if status.policy_blocked:
+            state = FIREWALL_POLICY
+        elif status.needs_repair:
+            state = FIREWALL_REPAIR
+        else:
+            state = FIREWALL_OK
+        self._window.clipboard_page.set_firewall_state(state)
+        if state == FIREWALL_OK or self._firewall_prompted:
             return
         if self._settings.value(FIREWALL_PROMPT_DECLINED_KEY, False, type=bool):
             return
         self._firewall_prompted = True
-        self._show_firewall_prompt()
+        self._show_firewall_prompt(state)
 
-    def _show_firewall_prompt(self) -> None:
+    def _show_firewall_prompt(self, state: str) -> None:
         """Немодально для запуска: ``open()``, а не ``exec()`` - окно ждёт
         ответа, но старт программы его не ждёт."""
         dialog = QMessageBox(self._window)
-        dialog.setIcon(QMessageBox.Icon.Question)
         dialog.setWindowTitle(self.tr("Брандмауэр Windows"))
         dialog.setTextFormat(Qt.TextFormat.PlainText)
-        dialog.setText(
-            self.tr(
-                "Чтобы второй компьютер мог подключиться, Windows должна "
-                "разрешить Duo Input входящие соединения в локальной сети."
+        if state == FIREWALL_POLICY:
+            dialog.setIcon(QMessageBox.Icon.Information)
+            dialog.setText(
+                self.tr("Входящие соединения запрещены политикой администратора этого компьютера.")
             )
-        )
-        allow_button = dialog.addButton(self.tr("Разрешить"), QMessageBox.ButtonRole.AcceptRole)
-        later_button = dialog.addButton(self.tr("Позже"), QMessageBox.ButtonRole.RejectRole)
-        dialog.setDefaultButton(allow_button)
-        dialog.setEscapeButton(later_button)
+            allow_button = None
+            close_button = dialog.addButton(self.tr("Понятно"), QMessageBox.ButtonRole.RejectRole)
+        else:
+            dialog.setIcon(QMessageBox.Icon.Question)
+            dialog.setText(
+                self.tr(
+                    "Чтобы второй компьютер мог подключиться, Windows должна "
+                    "разрешить Duo Input входящие соединения в локальной сети."
+                )
+            )
+            allow_button = dialog.addButton(self.tr("Разрешить"), QMessageBox.ButtonRole.AcceptRole)
+            close_button = dialog.addButton(self.tr("Позже"), QMessageBox.ButtonRole.RejectRole)
+            dialog.setDefaultButton(allow_button)
+        dialog.setEscapeButton(close_button)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         # finished, а не buttonClicked: закрытие крестиком кнопку не нажимает,
         # и тоже должно считаться ответом "Позже".
         dialog.finished.connect(
-            lambda _result: self._on_firewall_answer(dialog.clickedButton() is allow_button)
+            lambda _result: self._on_firewall_answer(
+                allow_button is not None and dialog.clickedButton() is allow_button
+            )
         )
         dialog.open()
 
@@ -539,8 +570,11 @@ class _ClipboardRuntime(QObject):
         """Одно окно UAC; и из диалога, и из строки на странице."""
         self._window.clipboard_page.set_firewall_busy(True)
         executable = Path(sys.executable)
+        # Окно UAC - над нашим окном, а не мигающей кнопкой на панели задач.
+        # winId() читается здесь, в потоке интерфейса.
+        hwnd = int(self._window.winId())
         self._in_background(
-            lambda: firewall.apply_rules(executable), self._firewall_applied, False
+            lambda: firewall.apply_rules(executable, hwnd=hwnd), self._firewall_applied, False
         )
 
     def _on_firewall_applied(self, succeeded: bool) -> None:
@@ -1025,16 +1059,35 @@ def _raise_existing_window(lock: QLocalServer, window: MainWindow) -> None:
     window.activateWindow()
 
 
+def firewall_check_exit_code(status: firewall.FirewallStatus) -> int:
+    """Код возврата ``--check-firewall-rules`` для установщика: 0 - всё в
+    порядке, повышать не нужно; 2 - запрет политикой, повышение не поможет;
+    1 - нужна починка или проверить не удалось (тогда лучше поставить)."""
+    if status.satisfied:
+        return 0
+    if status.policy_blocked:
+        return 2
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the configurator; returns the Qt exit code."""
     arguments = list(argv) if argv is not None else sys.argv
-    if INSTALL_FIREWALL_RULES_ARGUMENT in arguments or REMOVE_FIREWALL_RULES_ARGUMENT in arguments:
-        # Установщик запускает exe повышенным и ждёт код возврата. До
-        # QApplication и замка единственного экземпляра: уже работающая копия
-        # программы не должна ничего заметить, окна и трея нет.
+    firewall_switches = (
+        CHECK_FIREWALL_RULES_ARGUMENT,
+        INSTALL_FIREWALL_RULES_ARGUMENT,
+        REMOVE_FIREWALL_RULES_ARGUMENT,
+    )
+    if any(switch in arguments for switch in firewall_switches):
+        # Установщик запускает exe и ждёт код возврата. До QApplication и
+        # замка единственного экземпляра: уже работающая копия программы не
+        # должна ничего заметить, окна и трея нет.
         configure_application()
+        executable = Path(sys.executable)
+        if CHECK_FIREWALL_RULES_ARGUMENT in arguments:
+            return firewall_check_exit_code(firewall.check_rules(executable))
         if INSTALL_FIREWALL_RULES_ARGUMENT in arguments:
-            succeeded = firewall.apply_rules(Path(sys.executable))
+            succeeded = firewall.apply_rules(executable)
         else:
             succeeded = firewall.remove_rules()
         return 0 if succeeded else 1
@@ -1157,6 +1210,7 @@ if __name__ == "__main__":  # pragma: no cover - manual launch
 
 __all__ = [
     "ENTRY_POINT",
+    "CHECK_FIREWALL_RULES_ARGUMENT",
     "HIDDEN_START_ARGUMENT",
     "INSTALL_FIREWALL_RULES_ARGUMENT",
     "ORGANISATION_NAME",
