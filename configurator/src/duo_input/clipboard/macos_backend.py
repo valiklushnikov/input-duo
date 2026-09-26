@@ -61,6 +61,10 @@ class MacOSClipboardBackend(QObject):
     """Граница платформы для macOS."""
 
     snapshot_taken = Signal(object)
+    #: The native workspace reports wake before a user can make the first
+    #: post-sleep copy.  Runtime uses this edge to discard the half-dead TCP
+    #: session instead of letting that copy disappear into it.
+    resume_detected = Signal()
 
     def __init__(self, clipboard, parent: QObject | None = None, pasteboard=None) -> None:
         super().__init__(parent)
@@ -72,6 +76,7 @@ class MacOSClipboardBackend(QObject):
         self._last_seen_change_count: int | None = None
         self._own_change_count: int | None = None
         self._local: ClipboardSnapshot = ClipboardSnapshot({})
+        self._wake_observer = None
 
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_MS)
@@ -82,6 +87,7 @@ class MacOSClipboardBackend(QObject):
             return
         self._last_seen_change_count = self._pasteboard.change_count()
         self._own_change_count = None
+        self._wake_observer = self._pasteboard.observe_wake(self._on_wake)
         self._timer.start()
         self._running = True
 
@@ -89,6 +95,9 @@ class MacOSClipboardBackend(QObject):
         if not self._running:
             return
         self._timer.stop()
+        if self._wake_observer is not None:
+            self._pasteboard.stop_observing_wake(self._wake_observer)
+            self._wake_observer = None
         self._last_seen_change_count = None
         self._own_change_count = None
         self._local = ClipboardSnapshot({})
@@ -109,6 +118,16 @@ class MacOSClipboardBackend(QObject):
         return self._local.payload(mime)
 
     # ------------------------------------------------------------------ внутреннее
+
+    def _on_wake(self) -> None:
+        # Re-arm the periodic observer as part of the same recovery edge.
+        # QTimer normally resumes by itself, but explicitly restarting it
+        # avoids depending on a timer deadline inherited from before sleep.
+        if not self._running:
+            return
+        self._timer.stop()
+        self._timer.start()
+        self.resume_detected.emit()
 
     def _poll(self) -> None:
         current = self._pasteboard.change_count()

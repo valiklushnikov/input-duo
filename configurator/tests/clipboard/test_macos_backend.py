@@ -24,6 +24,7 @@ class _FakePasteboard:
         self._count = count
         self.published: list[ClipboardOffer] = []
         self._concealed = False
+        self._wake_callback = None
 
     def change_count(self) -> int:
         return self._count
@@ -41,6 +42,18 @@ class _FakePasteboard:
         self.published.append(offer)
         self._count += 1
         return self._count
+
+    def observe_wake(self, callback):
+        self._wake_callback = callback
+        return callback
+
+    def stop_observing_wake(self, observer) -> None:
+        if self._wake_callback is observer:
+            self._wake_callback = None
+
+    def wake(self) -> None:
+        assert self._wake_callback is not None
+        self._wake_callback()
 
 
 class _FakeMimeData:
@@ -130,6 +143,19 @@ def test_a_local_change_emits_a_snapshot():
 
     assert len(emitted) == 1
     assert emitted[0].payloads["text/plain"] == b"hello"
+
+
+def test_a_system_wake_notifies_the_runtime_before_the_next_clipboard_change(qapp):
+    """Without this signal a half-dead pre-sleep link can swallow one OFFER."""
+    backend, pasteboard = _backend(count=10)
+    resumes: list[bool] = []
+    backend.resume_detected.connect(lambda: resumes.append(True))
+    backend.start()
+
+    pasteboard.wake()
+
+    assert resumes == [True]
+    assert backend._timer.isActive() is True
 
 
 def test_an_unchanged_count_does_nothing():

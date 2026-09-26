@@ -19,6 +19,8 @@ from AppKit import (
     NSPasteboard,
     NSPasteboardContentsCurrentHostOnly,
     NSPasteboardItem,
+    NSWorkspace,
+    NSWorkspaceDidWakeNotification,
 )
 from Foundation import NSData, NSObject
 
@@ -73,6 +75,41 @@ def is_concealed() -> bool:
     types = NSPasteboard.generalPasteboard().types() or []
     marker_set = set(PRIVACY_MARKERS)
     return any(str(uti) in marker_set for uti in types)
+
+
+class _WorkspaceWakeObserver(NSObject):
+    """Small ObjC bridge retaining a Python callback for NSWorkspace."""
+
+    def initWithCallback_(self, callback):  # noqa: N802 - ObjC initializer
+        self = objc.super(_WorkspaceWakeObserver, self).init()
+        if self is None:
+            return None
+        self._callback = callback
+        return self
+
+    def workspaceDidWake_(self, _notification):  # noqa: N802 - ObjC selector
+        self._callback()
+
+
+def observe_wake(callback):
+    """Subscribe to the system wake edge and return the retained observer."""
+    observer = _WorkspaceWakeObserver.alloc().initWithCallback_(callback)
+    NSWorkspace.sharedWorkspace().notificationCenter().addObserver_selector_name_object_(
+        observer,
+        b"workspaceDidWake:",
+        NSWorkspaceDidWakeNotification,
+        None,
+    )
+    return observer
+
+
+def stop_observing_wake(observer) -> None:
+    """Remove a wake subscription created by :func:`observe_wake`."""
+    NSWorkspace.sharedWorkspace().notificationCenter().removeObserver_name_object_(
+        observer,
+        NSWorkspaceDidWakeNotification,
+        None,
+    )
 
 
 def _to_nsdata(payload: bytes) -> NSData:
@@ -157,5 +194,7 @@ __all__ = [
     "PasteboardPublishError",
     "change_count",
     "is_concealed",
+    "observe_wake",
     "publish_with_origin",
+    "stop_observing_wake",
 ]

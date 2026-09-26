@@ -51,6 +51,11 @@ class ClipboardService(QObject):
         self._seq = 0
         self._last_sent: ClipboardOffer | None = None
         self._last_sent_payloads: dict[str, bytes] = {}
+        # A copy made while the transport is being rebuilt (notably just
+        # after wake) must be announced on the replacement link.  Keep only
+        # the newest offer: its payload cache already supersedes older ones.
+        self._pending_local_offer: ClipboardOffer | None = None
+        self._buffer_local_offers = False
         self._last_received: ClipboardOffer | None = None
         self._link = None
         # Ожидания содержимого - по ключу (seq, mime), а не одно на весь объект.
@@ -115,6 +120,8 @@ class ClipboardService(QObject):
         )
         self._last_sent = offer
         self._last_sent_payloads = dict(snapshot.payloads)
+        if self._link is None and self._buffer_local_offers:
+            self._pending_local_offer = offer
         self.offer_ready.emit(offer)
 
     def content_for(self, mime: str, seq: int) -> bytes | None:
@@ -186,6 +193,21 @@ class ClipboardService(QObject):
 
     # ------------------------------------------------------------------ связь
 
+    def prepare_for_reconnect(self) -> None:
+        """Buffer copies made during the upcoming, explicitly requested reconnect.
+
+        This is deliberately opt-in rather than the default disconnected
+        behavior: clipboard history from before first pairing must never be
+        sent to a newly trusted computer.
+        """
+        self._pending_local_offer = None
+        self._buffer_local_offers = True
+
+    def cancel_reconnect(self) -> None:
+        """Discard wake-recovery state before stopping or changing trust."""
+        self._pending_local_offer = None
+        self._buffer_local_offers = False
+
     def attach_link(self, link) -> None:
         """Взять готовое соединение и начать по нему разговаривать."""
         self._link = link
@@ -193,6 +215,11 @@ class ClipboardService(QObject):
         link.disconnected.connect(self._on_link_lost)
         self.offer_ready.connect(self._send_offer)
         self._heartbeat.start()
+        pending = self._pending_local_offer
+        self._pending_local_offer = None
+        self._buffer_local_offers = False
+        if pending is not None:
+            self._send_offer(pending)
         self.link_state_changed.emit("connected")
 
     def detach_link(self) -> None:

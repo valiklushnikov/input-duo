@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QMessageBox
 from duo_input import app as app_module
 from duo_input.app import build_main_window, configure_runtime, single_instance_lock
 from duo_input.clipboard.identity import load_or_create
+from duo_input.clipboard.coordinator import ClipboardCoordinator
 from duo_input.clipboard.pairing import PairingCandidate
 from duo_input.clipboard.peer import PeerLink
 from duo_input.clipboard.wire import (
@@ -54,6 +55,58 @@ def _runtime_of(application):
         if isinstance(child, _ClipboardRuntime):
             return child
     raise AssertionError("_ClipboardRuntime was not created")
+
+
+class _ResumeBackend(QObject):
+    snapshot_taken = Signal(object)
+    resume_detected = Signal()
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def publish(self, _offer, _fetcher) -> None: ...
+
+    def payload(self, _mime):
+        return None
+
+
+class _ResumeCountingCoordinator(ClipboardCoordinator):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.resume_count = 0
+
+    def start(self) -> None:
+        """The wiring test does not need to bind the production TCP port."""
+
+    def recover_after_resume(self) -> None:
+        self.resume_count += 1
+
+
+def test_macos_wake_signal_reaches_the_clipboard_coordinator(
+    qapp, qtbot, tmp_path, monkeypatch
+):
+    """Without runtime wiring the native wake observer cannot replace the stale link."""
+    made: list[_ResumeBackend] = []
+
+    def create_backend(_clipboard, parent=None):
+        backend = _ResumeBackend(parent)
+        made.append(backend)
+        return backend
+
+    monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
+    monkeypatch.setattr(app_module, "ClipboardCoordinator", _ResumeCountingCoordinator)
+    monkeypatch.setattr(app_module, "create_backend", create_backend)
+    settings = _settings(tmp_path, True)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+    coordinator = configure_runtime(qapp, window, settings)
+
+    try:
+        made[0].resume_detected.emit()
+        assert coordinator.resume_count == 1
+    finally:
+        _runtime_of(qapp).stop()
 
 
 class _FileBackend(QObject):

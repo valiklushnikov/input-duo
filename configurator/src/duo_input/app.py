@@ -397,6 +397,9 @@ class _ClipboardRuntime(QObject):
         backend = create_backend(application.clipboard(), coordinator)
         coordinator.service.attach_backend(backend)
         backend.snapshot_taken.connect(coordinator.service.on_local_snapshot)
+        resume_detected = getattr(backend, "resume_detected", None)
+        if resume_detected is not None:
+            resume_detected.connect(coordinator.recover_after_resume)
         backend.start()
 
         self.tray.set_link_state(coordinator.state.value)

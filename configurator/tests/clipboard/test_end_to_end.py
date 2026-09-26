@@ -222,6 +222,58 @@ def test_attaching_a_link_starts_the_heartbeat(qapp):
     assert service._heartbeat.isActive() is True
 
 
+def test_a_copy_made_while_reconnecting_is_offered_on_the_new_link(qapp):
+    """A post-wake copy must not disappear in the link's offline window."""
+    service = ClipboardService(OURS)
+    service.prepare_for_reconnect()
+    service.on_local_snapshot(ClipboardSnapshot({"text/plain": b"after wake"}))
+    link = _FakeLink()
+
+    service.attach_link(link)
+
+    offers = [message for message in link.sent if message.type is MessageType.OFFER]
+    assert len(offers) == 1
+    assert offers[0].header["seq"] == 1
+
+
+def test_a_copy_made_before_any_connection_is_not_sent_to_a_newly_paired_peer(qapp):
+    """Reconnect buffering must not widen into pre-pair clipboard history."""
+    service = ClipboardService(OURS)
+    service.on_local_snapshot(ClipboardSnapshot({"text/plain": b"before pairing"}))
+    link = _FakeLink()
+
+    service.attach_link(link)
+
+    assert [message for message in link.sent if message.type is MessageType.OFFER] == []
+
+
+def test_cancelling_wake_recovery_drops_its_buffered_copy(qapp):
+    """A wake-era snapshot must not survive an abandoned trust relationship."""
+    service = ClipboardService(OURS)
+    service.prepare_for_reconnect()
+    service.on_local_snapshot(ClipboardSnapshot({"text/plain": b"old peer only"}))
+
+    service.cancel_reconnect()
+    replacement = _FakeLink()
+    service.attach_link(replacement)
+
+    assert [message for message in replacement.sent if message.type is MessageType.OFFER] == []
+
+
+def test_an_ordinary_disconnect_does_not_replay_later_copies(qapp):
+    """Replay is exclusive to explicit wake recovery, not every disconnect."""
+    service = ClipboardService(OURS)
+    first = _FakeLink()
+    service.attach_link(first)
+    service.detach_link()
+    service.on_local_snapshot(ClipboardSnapshot({"text/plain": b"ordinary offline"}))
+
+    replacement = _FakeLink()
+    service.attach_link(replacement)
+
+    assert [message for message in replacement.sent if message.type is MessageType.OFFER] == []
+
+
 def test_detaching_a_link_stops_the_heartbeat(qapp):
     service = ClipboardService(OURS)
     link = _FakeLink()

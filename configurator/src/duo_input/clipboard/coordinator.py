@@ -250,6 +250,7 @@ class ClipboardCoordinator(QObject):
     def stop(self) -> None:
         self._retry.stop()
         self._silence.stop()
+        self._service.cancel_reconnect()
         self._dialing = False
         self._candidate_index = 0
         self._clear_pairing_attempt(close_link=True)
@@ -260,6 +261,19 @@ class ClipboardCoordinator(QObject):
             self._link = None
         self._service.detach_link()
         self._set_state(LinkState.UNPAIRED if self.peer is None else LinkState.DISCONNECTED)
+
+    def recover_after_resume(self) -> None:
+        """Replace a pre-sleep link before it can swallow a clipboard offer.
+
+        TCP can remain ESTABLISHED locally across sleep even though the peer
+        has already discarded the session.  Waiting for its eventual socket
+        error leaves a window in which the UI says connected and writes are
+        accepted locally but never reach the peer.
+        """
+        if self._link is None:
+            return
+        self._service.prepare_for_reconnect()
+        self._drop("компьютер вышел из сна")
 
     def set_manual_address(self, address: str) -> None:
         """Оператор ввёл адрес вручную - соединиться по нему заново.
@@ -414,6 +428,7 @@ class ClipboardCoordinator(QObject):
         self._attempt = 0
         self._dialing = False
         self._candidate_index = 0
+        self._service.cancel_reconnect()
         self._trust.forget()
         if self._link is not None:
             self._link.close()

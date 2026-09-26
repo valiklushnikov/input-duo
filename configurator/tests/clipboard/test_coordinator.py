@@ -31,6 +31,7 @@ from duo_input.clipboard.coordinator import (
     LinkState,
     reconnect_delay_ms,
 )
+from duo_input.clipboard.backend import ClipboardSnapshot
 from duo_input.clipboard.identity import load_or_create
 from duo_input.clipboard.pairing import PairingCandidate
 from duo_input.clipboard.peer import PeerLink
@@ -462,6 +463,45 @@ def test_the_silence_watchdog_drops_a_quiet_link(tmp_path, qtbot):
 
     assert coordinator.state is LinkState.DISCONNECTED
     assert link.closed is True
+    coordinator.stop()
+
+
+def test_resume_drops_the_pre_sleep_link_before_accepting_new_copies(tmp_path):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=SMALLEST_ORIGIN_ID)
+    link = _FakeLink()
+    coordinator._on_connected(link)
+
+    coordinator.recover_after_resume()
+
+    coordinator.service.on_local_snapshot(
+        ClipboardSnapshot({"text/plain": b"copied while reconnecting"})
+    )
+    replacement = _FakeLink()
+    coordinator._on_connected(replacement)
+
+    assert link.closed is True
+    offers = [message for message in replacement.sent if message.type is MessageType.OFFER]
+    assert len(offers) == 1
+    coordinator.stop()
+
+
+def test_forgetting_a_peer_cancels_a_buffered_post_wake_copy(tmp_path):
+    coordinator, trust = _make_coordinator(tmp_path, peer_origin_id=SMALLEST_ORIGIN_ID)
+    coordinator._on_connected(_FakeLink())
+    coordinator.recover_after_resume()
+    coordinator.service.on_local_snapshot(
+        ClipboardSnapshot({"text/plain": b"belongs to forgotten peer"})
+    )
+
+    coordinator.forget_peer()
+    trust.remember(
+        TrustedPeer(LARGEST_ORIGIN_ID, "NEW-PEER", "e" * 64, "192.168.1.9")
+    )
+    replacement = _FakeLink(peer_fingerprint="e" * 64)
+    coordinator._on_connected(replacement)
+
+    offers = [message for message in replacement.sent if message.type is MessageType.OFFER]
+    assert offers == []
     coordinator.stop()
 
 
