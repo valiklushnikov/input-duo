@@ -377,8 +377,9 @@ final class FetchControllerTests: XCTestCase {
                                          scheduler: now)
         let done = expectation(description: "failed immediately")
         _ = controller.fetch(item(), request: NSFileProviderRequest()) { _, _, error in
-            XCTAssertEqual((error as NSError?)?.domain, NSFileProviderErrorDomain)
-            XCTAssertEqual((error as NSError?)?.code, NSFileProviderError.cannotSynchronize.rawValue)
+            // sourceChanged reaches Finder as POSIX EBUSY ("item is in use").
+            XCTAssertEqual((error as NSError?)?.domain, NSPOSIXErrorDomain)
+            XCTAssertEqual((error as NSError?)?.code, Int(EBUSY))
             done.fulfill()
         }
         wait(for: [done], timeout: 3)

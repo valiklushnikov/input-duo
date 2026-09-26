@@ -39,7 +39,7 @@ to the per-offer active backend as before. New host events `fp_file_error`
 | snapshot unknown/evicted (after reattach) | terminal for generation | FILE_ERROR source_missing | 1 | noSuchItem | no |
 | entry missing / not a file | terminal | source_missing | 1 | noSuchItem | no |
 | file open/read OSError on Windows | UNKNOWN (deleted = terminal; sharing violation = maybe transient) — shares `source_missing` | source_missing | 1 | noSuchItem | no |
-| file changed since offer | terminal | source_changed | 2 | cannotSynchronize | no |
+| file changed since offer | terminal | source_changed | 2 | POSIX EBUSY (was cannotSynchronize; changed 2026-09-26 for a readable Finder message) | no |
 | bad request / protocol | terminal | bad_request / other | 7 | cannotSynchronize | no |
 | cancel | local | — | cancel | NSUserCancelledError | no |
 

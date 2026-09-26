@@ -1066,7 +1066,7 @@ Python сторона (если жив, но link упал): link.disconnected �
 | Duo Input/Python failure | IPC result | File Provider error |
 |---|---|---|
 | source missing (SourceMissing/RETENTION вытеснил) | error `source_missing` | `NSFileProviderError.noSuchItem` или `cannotSynchronize` |
-| source changed (`SourceChanged`) | error `source_changed` | `NSFileProviderError.serverUnreachable`/`cannotSynchronize` (ре-enumerate версии) |
+| source changed (`SourceChanged`) | error `source_changed` | `NSError POSIX EBUSY` — «объект используется»; было `cannotSynchronize`, но Finder показывает на него только «Внутренняя ошибка расширения» и игнорирует свой текст (spike 2026-09-26) |
 | peer disconnected | error `peer_lost` | `NSFileProviderError.serverUnreachable` |
 | auth revoked / files off | error `unauthorized` | `NSFileProviderError.notAuthenticated` |
 | session timeout (watchdog) | error `timeout` | `NSFileProviderError.serverUnreachable` |

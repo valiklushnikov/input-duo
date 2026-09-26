@@ -36,8 +36,12 @@ enum ErrorMap {
             return NSError(domain: NSFileProviderErrorDomain,
                             code: NSFileProviderError.noSuchItem.rawValue)
         case 2: // DuoFPErrorSourceChanged
-            return NSError(domain: NSFileProviderErrorDomain,
-                            code: NSFileProviderError.cannotSynchronize.rawValue)
+            // Not cannotSynchronize: Finder shows that as a canned "internal
+            // extension error" and ignores any custom description (runtime
+            // spike 2026-09-26). EBUSY reads "…the item «name» is in use" -
+            // which is what a file rewritten on Windows mid-copy is - and
+            // fileproviderd does not auto-retry it.
+            return NSError(domain: NSPOSIXErrorDomain, code: Int(EBUSY))
         case 3: // DuoFPErrorPeerLost
             return NSError(domain: NSFileProviderErrorDomain,
                             code: NSFileProviderError.serverUnreachable.rawValue)

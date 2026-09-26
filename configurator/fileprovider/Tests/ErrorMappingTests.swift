@@ -43,10 +43,15 @@ final class ErrorMappingTests: XCTestCase {
         XCTAssertEqual(mapped.code, NSFileProviderError.noSuchItem.rawValue)
     }
 
-    func testSourceChangedMapsToCannotSynchronize() {
+    /// Runtime spike 2026-09-26 (macOS 27): for `cannotSynchronize` Finder
+    /// shows the canned "internal extension error" and ignores any
+    /// NSLocalizedDescriptionKey; POSIX EBUSY gives a system-localized,
+    /// file-named "…the item «name» is in use", and fileproviderd does not
+    /// auto-retry it. A file rewritten on Windows mid-copy is exactly "busy".
+    func testSourceChangedMapsToPosixEBUSY() {
         let mapped = ErrorMap.toNSFileProviderError(duoFPError(2))
-        XCTAssertEqual(mapped.domain, NSFileProviderErrorDomain)
-        XCTAssertEqual(mapped.code, NSFileProviderError.cannotSynchronize.rawValue)
+        XCTAssertEqual(mapped.domain, NSPOSIXErrorDomain)
+        XCTAssertEqual(mapped.code, Int(EBUSY))
     }
 
     func testUnauthorizedMapsToNotAuthenticated() {
