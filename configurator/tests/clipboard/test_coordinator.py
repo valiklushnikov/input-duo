@@ -340,7 +340,7 @@ def test_the_smaller_origin_id_calls_the_other_side(tmp_path, monkeypatch):
 
 
 def test_a_failed_last_known_address_starts_discovery_and_uses_the_new_address(
-    tmp_path, monkeypatch
+    qapp, tmp_path, monkeypatch
 ):
     """A moved trusted peer must be rediscovered after its saved address fails."""
     coordinator, trust = _make_coordinator(
