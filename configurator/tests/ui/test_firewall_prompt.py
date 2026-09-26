@@ -409,3 +409,19 @@ def test_an_answer_that_arrives_after_the_runtime_is_gone_is_dropped_quietly(
 
     assert not threads[0].is_alive()
     assert errors == []
+
+
+def test_a_policy_notice_closed_by_the_program_itself_does_not_apply(qtbot, fake, launch):
+    """Закрытие без кнопки (например, при выходе) даёт clickedButton() None -
+    у объяснения о политике кнопки «Разрешить» нет, и None не должен сойти
+    за неё."""
+    fake.status = firewall.FirewallStatus(policy_blocked=True)
+    launch()
+    qtbot.waitUntil(lambda: len(_prompts(POLICY_TEXT)) == 1)
+    [dialog] = _prompts(POLICY_TEXT)
+
+    dialog.done(0)
+
+    qtbot.waitUntil(lambda: _prompts(POLICY_TEXT) == [])
+    qtbot.wait(50)
+    assert fake.applied == []

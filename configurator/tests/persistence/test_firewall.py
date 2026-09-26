@@ -646,3 +646,16 @@ def test_run_passes_the_command_line_unchanged_and_captures_output():
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows process boundary")
 def test_run_of_a_missing_program_returns_none():
     assert firewall._WindowsSystem().run(r"C:\no\such\program.exe", "") == (None, b"")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows system directory")
+def test_a_failed_system_directory_lookup_is_an_error_not_a_relative_path(monkeypatch):
+    """Пустой ответ GetSystemDirectoryW дал бы относительный путь
+    "WindowsPowerShell\v1.0\powershell.exe" - его нашли бы в текущем
+    каталоге, а команда может выполняться повышенной."""
+    import ctypes
+
+    monkeypatch.setattr(ctypes.windll.kernel32, "GetSystemDirectoryW", lambda buffer, size: 0)
+
+    with pytest.raises(OSError):
+        firewall._WindowsSystem().system_directory()
