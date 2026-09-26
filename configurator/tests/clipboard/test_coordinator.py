@@ -2320,32 +2320,38 @@ def test_waking_from_sleep_forgets_the_beacon_addresses(tmp_path, dial, qapp):
         coordinator.stop()
 
 
-def test_stop_resets_dialing_and_candidate_index(tmp_path, dial):
-    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+def test_stop_resets_dialing_and_candidate_index(tmp_path, dial, qapp):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=_Clock())
     coordinator._retry = _FakeTimer()
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")  # закешированный адрес маячка
     coordinator.set_board_addresses(["10.0.0.2", "10.0.0.3"])
     coordinator._try_connect()
     dial[-1].disconnected.emit("refused")
     assert coordinator._candidate_index == 1
+    assert coordinator._fresh_discovered_addresses() == ["192.168.1.99"]
 
     coordinator.stop()
 
     assert coordinator._candidate_index == 0
     assert coordinator._dialing is False
+    assert coordinator._fresh_discovered_addresses() == []
 
 
-def test_forget_peer_resets_dialing_and_candidate_index(tmp_path, dial):
-    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+def test_forget_peer_resets_dialing_and_candidate_index(tmp_path, dial, qapp):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=_Clock())
     coordinator._retry = _FakeTimer()
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")  # закешированный адрес маячка
     coordinator.set_board_addresses(["10.0.0.2", "10.0.0.3"])
     coordinator._try_connect()
     dial[-1].disconnected.emit("refused")
     assert coordinator._candidate_index == 1
+    assert coordinator._fresh_discovered_addresses() == ["192.168.1.99"]
 
     coordinator.forget_peer()
 
     assert coordinator._candidate_index == 0
     assert coordinator._dialing is False
+    assert coordinator._fresh_discovered_addresses() == []
 
 
 def test_update_address_is_skipped_when_the_address_did_not_change(tmp_path):
