@@ -1,28 +1,39 @@
 """Правила брандмауэра Windows для Duo Input.
 
-Ни один тест здесь не запускает настоящий PowerShell и не вызывает UAC: всё,
-что выходит за пределы процесса, идёт через подменяемую ``system``.
+Ни один тест здесь не запускает настоящий PowerShell с записью и не вызывает
+UAC: всё, что выходит за пределы процесса, идёт через подменяемую ``system``.
 
 Фикстуры в ``fixtures/firewall`` - байты настоящего вывода запроса этого
-модуля на этой машине (Windows 10, русская локаль):
+модуля на этой машине (Windows 10, русская локаль). Каждая - объект
+``{"Rules": [...], "Blocks": [...], "Profiles": [...]}``:
 
-- ``absent.json`` - запрос наших двух имён, правил нет;
-- ``windows_prompt_rules.json`` - запрос имени ``duoinput.exe``: правила,
-  которые сама Windows создала по ответу на своё окно брандмауэра (любой
-  порт, любой адрес; профиль - какой был активен, когда человек ответил);
-- ``cyrillic_builtin_rule.json`` - запрос встроенного правила с русским
-  именем: доказывает, что вывод приходит в UTF-8, а не в OEM-кодировке.
+- ``absent.json`` - наших правил нет; в ``Blocks`` - три настоящих
+  локальных исходящих запрещающих правила без программы, которые есть на
+  этой машине; ``Profiles`` - настоящие три профиля;
+- ``windows_prompt_rules.json`` - в ``Rules`` правила, которые сама Windows
+  создала по ответу на своё окно брандмауэра (любой порт, любой адрес;
+  профиль - какой был активен, когда человек ответил), запрошенные по их
+  постоянным именам;
+- ``cyrillic_builtin_rule.json`` - встроенное правило с русским именем:
+  доказывает, что вывод приходит в UTF-8, а не в OEM-кодировке.
 
 ``present.json`` - производная: настоящих правил Duo Input на машине нет
-(создавать их при разработке запрещено), поэтому это вывод той же формы с
-нашими именами и значениями, в том виде, в каком их печатает PowerShell
-(``"Private, Public"``, ``"LocalSubnet"``).
+(создавать их при разработке запрещено), поэтому ``Rules`` - записи той же
+формы с нашими именами и значениями в том виде, в каком их печатает
+PowerShell (``"Private, Public"``, ``"LocalSubnet"``, ``"Local"``);
+``Blocks`` и ``Profiles`` взяты из ``absent.json`` как есть.
+
+Запрещающие правила для наших тестов собираются из настоящей записи
+``windows_prompt_rules.json`` - Windows создаёт свои Block-правила той же
+формы, с ``Action: Block``.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -41,10 +52,36 @@ PROMPT_RULES_PROGRAM = (
 )
 #: То, что present.json считает программой Duo Input.
 INSTALLED = r"C:\Users\Operator\AppData\Local\Programs\Duo Input\DuoInput.exe"
+POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+BLOCK_ID = "TCP Query User{0A1B2C3D-0000-4000-8000-000000000001}" + INSTALLED.lower()
 
 
 def _fixture(name: str) -> bytes:
     return (FIXTURES / name).read_bytes()
+
+
+def _answer(name: str) -> dict:
+    return json.loads(_fixture(name))
+
+
+def _encode(answer: dict) -> bytes:
+    return json.dumps(answer, ensure_ascii=False).encode("utf-8")
+
+
+def _block(**changes) -> dict:
+    """Запрещающее правило Windows для нашего exe - из настоящей записи."""
+    entry = copy.deepcopy(_answer("windows_prompt_rules.json")["Rules"][0])
+    entry.update(
+        Name=BLOCK_ID, Action="Block", Program=INSTALLED.lower(), Profile="Public"
+    )
+    entry.update(changes)
+    return entry
+
+
+def _with_blocks(*blocks: dict, base: str = "present.json") -> bytes:
+    answer = _answer(base)
+    answer["Blocks"] = answer["Blocks"] + list(blocks)
+    return _encode(answer)
 
 
 class FakeSystem:
@@ -53,36 +90,51 @@ class FakeSystem:
     def __init__(
         self,
         *,
-        output: bytes = b"[]\r\n",
+        output: bytes | None = None,
         code: int | None = 0,
         elevated: bool = False,
         elevated_code: int | None = 0,
+        direct_code: int | None = 0,
     ) -> None:
-        self.output = output
+        self.output = _fixture("present.json") if output is None else output
         self.code = code
         self.elevated = elevated
         self.elevated_code = elevated_code
+        self.direct_code = direct_code
+        self.queries: list[tuple[str, str]] = []
         self.runs: list[tuple[str, str]] = []
-        self.elevated_runs: list[tuple[str, str]] = []
+        self.elevated_runs: list[tuple[str, str, int | None]] = []
 
     def run(self, executable: str, parameters: str) -> tuple[int | None, bytes]:
+        if "ConvertTo-Json" in parameters:
+            self.queries.append((executable, parameters))
+            return self.code, self.output
         self.runs.append((executable, parameters))
-        return self.code, self.output
+        return self.direct_code, b""
 
-    def run_elevated(self, executable: str, parameters: str) -> int | None:
-        self.elevated_runs.append((executable, parameters))
+    def run_elevated(self, executable: str, parameters: str, hwnd: int | None) -> int | None:
+        self.elevated_runs.append((executable, parameters, hwnd))
         return self.elevated_code
 
     def is_elevated(self) -> bool:
         return self.elevated
 
+    def system_directory(self) -> str:
+        return r"C:\Windows\System32"
+
 
 @pytest.fixture
 def frozen_windows(monkeypatch):
-    """Как в собранном DuoInput.exe на Windows - на любой машине с тестами."""
+    """Как в собранном DuoInput.exe на Windows - на любой машине с тестами.
+    SystemRoot нарочно неверный: путь к PowerShell берётся из системного
+    каталога, а не из окружения, которое можно подменить."""
     monkeypatch.setattr(firewall, "_is_windows", lambda: True)
     monkeypatch.setattr(firewall, "_is_frozen", lambda: True)
-    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.setenv("SystemRoot", r"D:\NotWindows")
+
+
+def _status(output: bytes, exe: str = INSTALLED) -> firewall.FirewallStatus:
+    return firewall.check_rules(exe, system=FakeSystem(output=output))
 
 
 # ------------------------------------------------------------ what is required
@@ -91,75 +143,69 @@ def frozen_windows(monkeypatch):
 def test_required_rules_are_one_tcp_link_and_one_udp_discovery_rule():
     link, discovery = firewall.required_rules(INSTALLED)
 
-    assert link == firewall.FirewallRule("Duo Input — связь", "TCP", TCP_PORT, INSTALLED)
+    assert link == firewall.FirewallRule(
+        "DuoInput-Link", "Duo Input — связь", "TCP", TCP_PORT, INSTALLED
+    )
     assert discovery == firewall.FirewallRule(
-        "Duo Input — поиск", "UDP", BEACON_PORT, INSTALLED
+        "DuoInput-Discovery", "Duo Input — поиск", "UDP", BEACON_PORT, INSTALLED
     )
     # Сами порты - из модулей, которые их слушают, а не вторая копия числа.
     assert (link.local_port, discovery.local_port) == (47654, 47655)
 
 
-# ------------------------------------------------------------ what is missing
+# ------------------------------------------------------------ our allow rules
 
 
-def test_nothing_is_missing_when_both_rules_are_present(frozen_windows):
-    system = FakeSystem(output=_fixture("present.json"))
+def test_both_rules_present_and_no_block_is_satisfied(frozen_windows):
+    """present.json несёт и три настоящих исходящих Block-правила без
+    программы - они к нам отношения не имеют."""
+    status = _status(_fixture("present.json"))
 
-    assert firewall.missing_rules(INSTALLED, system=system) == []
+    assert status == firewall.FirewallStatus()
+    assert status.satisfied
 
 
 def test_everything_is_missing_when_no_rule_exists(frozen_windows):
-    system = FakeSystem(output=_fixture("absent.json"))
+    status = _status(_fixture("absent.json"))
 
-    assert firewall.missing_rules(INSTALLED, system=system) == list(
-        firewall.required_rules(INSTALLED)
-    )
+    assert status.missing == firewall.required_rules(INSTALLED)
+    assert status.needs_repair and not status.satisfied
 
 
 def test_rules_for_a_moved_program_count_as_missing(frozen_windows):
     """Папку перенесли: правила есть, но разрешают старый exe."""
     moved = r"D:\Tools\Duo Input\DuoInput.exe"
-    system = FakeSystem(output=_fixture("present.json"))
 
-    assert firewall.missing_rules(moved, system=system) == list(
-        firewall.required_rules(moved)
-    )
+    assert _status(_fixture("present.json"), moved).missing == firewall.required_rules(moved)
 
 
 def test_the_program_path_is_compared_without_regard_to_case(frozen_windows):
     """Windows хранит путь так, как его записали, - сама она пишет в нижнем
     регистре (см. windows_prompt_rules.json)."""
-    system = FakeSystem(output=_fixture("present.json"))
-
-    assert firewall.missing_rules(INSTALLED.upper(), system=system) == []
+    assert _status(_fixture("present.json"), INSTALLED.upper()).missing == ()
 
 
 def test_environment_variables_in_a_stored_program_path_are_expanded(
     frozen_windows, monkeypatch
 ):
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Operator\AppData\Local")
-    entries = json.loads(_fixture("present.json"))
-    for entry in entries:
+    answer = _answer("present.json")
+    for entry in answer["Rules"]:
         entry["Program"] = r"%LOCALAPPDATA%\Programs\Duo Input\DuoInput.exe"
-    system = FakeSystem(output=json.dumps(entries).encode("utf-8"))
 
-    assert firewall.missing_rules(INSTALLED, system=system) == []
+    assert _status(_encode(answer)).missing == ()
 
 
 def test_windows_own_prompt_rules_are_not_ours(frozen_windows):
     """Правила, которые Windows создала по своему окну: любой порт с любого
-    адреса для одного exe и профиль, какой был активен, когда человек
-    ответил. Наш запрос их не вернёт (другое имя), но и попади они в ответ -
-    это не то, что мы ставим, и за наши сойти не должны."""
-    system = FakeSystem(output=_fixture("windows_prompt_rules.json"))
+    адреса для одного exe. Наш запрос их не вернёт (другое имя), но и попади
+    они в ответ - это не то, что мы ставим, и за наши сойти не должны."""
+    status = _status(_fixture("windows_prompt_rules.json"), PROMPT_RULES_PROGRAM)
 
-    missing = firewall.missing_rules(PROMPT_RULES_PROGRAM, system=system)
-
-    assert missing == list(firewall.required_rules(PROMPT_RULES_PROGRAM))
+    assert status.missing == firewall.required_rules(PROMPT_RULES_PROGRAM)
 
 
-#: Каждое поле, которое делает правило непригодным, - по одному. Каждый
-#: случай ловит свою проверку в _satisfies: убери её, и упадёт ровно он.
+#: Каждое поле, которое делает правило непригодным, - по одному.
 UNUSABLE = {
     "disabled": ("Enabled", "False"),
     "outbound": ("Direction", "Outbound"),
@@ -177,116 +223,260 @@ UNUSABLE = {
 def test_a_rule_that_would_not_let_the_peer_in_counts_as_missing(
     frozen_windows, field, value
 ):
-    entries = json.loads(_fixture("present.json"))
-    entries[0][field] = value
-    system = FakeSystem(output=json.dumps(entries).encode("utf-8"))
+    answer = _answer("present.json")
+    answer["Rules"][0][field] = value
 
-    missing = firewall.missing_rules(INSTALLED, system=system)
-
-    assert [rule.name for rule in missing] == [entries[0]["DisplayName"]]
+    assert [rule.id for rule in _status(_encode(answer)).missing] == ["DuoInput-Link"]
 
 
 def test_all_profiles_satisfy_the_profile_requirement(frozen_windows):
     """"Any" - так PowerShell печатает правило для всех профилей."""
-    entries = json.loads(_fixture("present.json"))
-    for entry in entries:
+    answer = _answer("present.json")
+    for entry in answer["Rules"]:
         entry["Profile"] = "Any"
-    system = FakeSystem(output=json.dumps(entries).encode("utf-8"))
 
-    assert firewall.missing_rules(INSTALLED, system=system) == []
+    assert _status(_encode(answer)).missing == ()
 
 
 def test_one_good_rule_among_duplicates_is_enough(frozen_windows):
-    entries = json.loads(_fixture("present.json"))
-    broken = dict(entries[0], Enabled="False")
-    system = FakeSystem(output=json.dumps([broken, *entries]).encode("utf-8"))
+    answer = _answer("present.json")
+    answer["Rules"].insert(0, dict(answer["Rules"][0], Enabled="False"))
 
-    assert firewall.missing_rules(INSTALLED, system=system) == []
+    assert _status(_encode(answer)).missing == ()
+
+
+# ------------------------------------------------------------ block rules
+
+
+def test_a_local_block_rule_for_our_exe_needs_repair_even_with_our_rules(frozen_windows):
+    """Block важнее любого Allow: наши правила на месте, а связи нет."""
+    status = _status(_with_blocks(_block()))
+
+    assert status.missing == ()
+    assert status.blocks == (firewall.BlockRule(BLOCK_ID, "duoinput.exe"),)
+    assert status.needs_repair and not status.policy_blocked
+    assert not status.satisfied
+
+
+def test_a_block_rule_for_our_exe_is_matched_like_the_allow_rules(frozen_windows, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Operator\AppData\Local")
+    stored = r"%LOCALAPPDATA%\PROGRAMS\Duo Input\DuoInput.exe"
+
+    assert _status(_with_blocks(_block(Program=stored))).blocks != ()
+
+
+IGNORED_BLOCKS = {
+    "another program": {"Program": r"C:\Other\Other.exe"},
+    "no program": {"Program": "Any"},
+    "disabled": {"Enabled": "False"},
+    "outbound": {"Direction": "Outbound"},
+}
+
+
+@pytest.mark.parametrize("changes", IGNORED_BLOCKS.values(), ids=IGNORED_BLOCKS.keys())
+def test_block_rules_that_are_not_about_our_inbound_traffic_are_ignored(
+    frozen_windows, changes
+):
+    status = _status(_with_blocks(_block(**changes)))
+
+    assert status == firewall.FirewallStatus()
+
+
+def test_a_group_policy_block_for_our_exe_is_a_distinct_status(frozen_windows):
+    """Программа его убрать не может - и не должна пытаться."""
+    status = _status(_with_blocks(_block(Source="GroupPolicy")))
+
+    assert status.policy_blocked
+    assert status.blocks == ()
+    assert not status.satisfied
+
+
+def test_a_policy_that_ignores_local_rules_on_our_profile_is_a_policy_block(frozen_windows):
+    answer = _answer("present.json")
+    [public] = [profile for profile in answer["Profiles"] if profile["Name"] == "Public"]
+    public["AllowLocalFirewallRules"] = "False"
+
+    assert _status(_encode(answer)).policy_blocked
+
+
+def test_the_domain_profile_is_not_ours(frozen_windows):
+    """Наши правила - для частных и общедоступных сетей; что делает
+    политика доменного профиля, к ним не относится."""
+    answer = _answer("present.json")
+    [domain] = [profile for profile in answer["Profiles"] if profile["Name"] == "Domain"]
+    domain["AllowLocalFirewallRules"] = "False"
+
+    assert not _status(_encode(answer)).policy_blocked
+
+
+# ------------------------------------------------------------ the query
 
 
 def test_the_query_output_is_read_as_utf8_not_as_the_console_code_page():
     """Настоящий вывод с русским именем правила (русская Windows, консоль в
     cp866): имя приходит целым, а значения полей - неизменными английскими
     именами перечислений, от языка системы не зависящими."""
-    (entry, _domain) = firewall._parse_query_output(_fixture("cyrillic_builtin_rule.json"))
+    answer = firewall._parse_query_output(_fixture("cyrillic_builtin_rule.json"))
+    entry = answer["Rules"][0]
 
     assert entry["DisplayName"] == "Служба ловушек SNMP (UDP In)"
-    assert (entry["Enabled"], entry["Direction"], entry["Profile"]) == (
+    assert (entry["Enabled"], entry["Direction"], entry["Profile"], entry["Source"]) == (
         "False",
         "Inbound",
         "Private, Public",
+        "Local",
     )
     assert entry["RemoteAddress"] == "LocalSubnet"
 
 
-def test_the_query_asks_only_for_our_two_names_and_changes_nothing(frozen_windows):
-    system = FakeSystem(output=_fixture("absent.json"))
+def test_the_query_reads_our_rules_by_id_every_block_rule_and_the_profiles(frozen_windows):
+    system = FakeSystem()
 
-    firewall.missing_rules(INSTALLED, system=system)
+    firewall.check_rules(INSTALLED, system=system)
 
-    [(executable, parameters)] = system.runs
-    assert executable == r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-    assert "Get-NetFirewallRule -PolicyStore ActiveStore -DisplayName " \
-        "'Duo Input — связь','Duo Input — поиск'" in parameters
-    assert "Remove-" not in parameters and "New-" not in parameters.replace("New-Object", "")
-    assert system.elevated_runs == []
+    [(executable, parameters)] = system.queries
+    assert executable == POWERSHELL
+    assert (
+        "Get-NetFirewallRule -PolicyStore ActiveStore -Name 'DuoInput-Link','DuoInput-Discovery'"
+        in parameters
+    )
+    assert "Get-NetFirewallRule -PolicyStore ActiveStore -Action Block" in parameters
+    assert "Get-NetFirewallProfile -PolicyStore ActiveStore" in parameters
+    assert "Remove-" not in parameters and "New-NetFirewallRule" not in parameters
+    assert system.runs == [] and system.elevated_runs == []
 
 
 @pytest.mark.parametrize(
     "code, output",
     [
         (1, b""),
-        (1, _fixture("absent.json")),
+        (1, _fixture("present.json")),
         (None, b""),
         (0, b"not json"),
-        (0, b'{"DisplayName": "Duo Input \xe2\x80\x94 \xd1\x81\xd0\xb2\xd1\x8f\xd0\xb7\xd1\x8c"}'),
+        (0, b"[]"),
+        (0, b'{"Rules": [], "Blocks": []}'),
+        (0, b'{"Rules": [], "Blocks": [], "Profiles": {"Name": "Public"}}'),
+        (0, b'{"Rules": [1], "Blocks": [], "Profiles": []}'),
         (0, b"\xff\xfe"),
     ],
-    ids=["powershell failed", "failed after printing", "powershell did not run", "garbage", "not a list", "not utf-8"],
+    ids=[
+        "powershell failed",
+        "failed after printing",
+        "powershell did not run",
+        "garbage",
+        "not an object",
+        "a key missing",
+        "not a list",
+        "not objects",
+        "not utf-8",
+    ],
 )
-def test_a_failed_query_reports_nothing_missing(frozen_windows, code, output):
-    """Не видим - не просим: запрос, который не удался, не повод показывать
-    окно UAC. Правила ставит установщик; окно в программе - ремонт того, что
-    мы видим сломанным."""
-    system = FakeSystem(output=output, code=code)
+def test_a_failed_query_is_unknown_not_missing(frozen_windows, code, output):
+    """Не видим - так и говорим: программа по неизвестному статусу UAC не
+    просит, а установщик - просит (см. --check-firewall-rules)."""
+    status = firewall.check_rules(INSTALLED, system=FakeSystem(output=output, code=code))
 
-    assert firewall.missing_rules(INSTALLED, system=system) == []
+    assert status == firewall.FirewallStatus(known=False)
+    assert not status.needs_repair and not status.satisfied
 
 
 # ------------------------------------------------------------ applying
 
 
+def _script_of(parameters: str) -> str:
+    prefix = '-NoProfile -NonInteractive -WindowStyle Hidden -Command "'
+    assert parameters.startswith(prefix) and parameters.endswith('"')
+    return parameters[len(prefix) : -1]
+
+
+def _statements(parameters: str) -> list[str]:
+    script = _script_of(parameters)
+    head, _, rest = script.partition("try { ")
+    assert head == "$ErrorActionPreference='Stop'; "
+    body, _, tail = rest.rpartition(" } catch { exit 1 }")
+    assert tail == ""
+    return body.split("; ")
+
+
 def test_apply_runs_one_elevated_command_that_replaces_both_rules(frozen_windows):
+    exe = r"C:\Users\O'Brien\Duo Input\DuoInput.exe"
     system = FakeSystem()
 
-    assert firewall.apply_rules(r"C:\Users\O'Brien\Duo Input\DuoInput.exe", system=system)
+    assert firewall.apply_rules(exe, system=system, hwnd=0x1234)
 
     program = r"'C:\Users\O''Brien\Duo Input\DuoInput.exe'"
     assert system.runs == []
     assert system.elevated_runs == [
         (
-            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            POWERSHELL,
             "-NoProfile -NonInteractive -WindowStyle Hidden -Command \""
             "$ErrorActionPreference='Stop'; try { "
-            "Get-NetFirewallRule -DisplayName 'Duo Input — связь','Duo Input — поиск'"
+            "Get-NetFirewallRule -Name 'DuoInput-Link','DuoInput-Discovery'"
             " -ErrorAction SilentlyContinue | Remove-NetFirewallRule; "
-            "New-NetFirewallRule -DisplayName 'Duo Input — связь' -Direction Inbound"
+            "New-NetFirewallRule -Name 'DuoInput-Link' -DisplayName 'Duo Input — связь'"
+            " -Group 'Duo Input' -Direction Inbound"
             " -Action Allow -Profile Private,Public -RemoteAddress LocalSubnet"
             f" -Protocol TCP -LocalPort 47654 -Program {program} | Out-Null; "
-            "New-NetFirewallRule -DisplayName 'Duo Input — поиск' -Direction Inbound"
+            "New-NetFirewallRule -Name 'DuoInput-Discovery' -DisplayName 'Duo Input — поиск'"
+            " -Group 'Duo Input' -Direction Inbound"
             " -Action Allow -Profile Private,Public -RemoteAddress LocalSubnet"
             f" -Protocol UDP -LocalPort 47655 -Program {program} | Out-Null; "
             "exit 0 } catch { exit 1 }\"",
+            0x1234,
         )
     ]
+
+
+def test_apply_removes_exactly_the_local_block_rule_found_by_its_id(frozen_windows):
+    """Одно окно UAC: сперва наши правила, потом ровно этот запрет - по
+    постоянному имени, а не по отображаемому (у Windows их много с одним
+    и тем же "duoinput.exe") - и только потом новые правила."""
+    other = _block(Name="Other{1}", Program=r"C:\Other\Other.exe")
+    policy = _block(Name="GPO{2}", Source="GroupPolicy")
+    system = FakeSystem(output=_with_blocks(_block(), other, policy))
+
+    assert firewall.apply_rules(INSTALLED, system=system)
+
+    [(_executable, parameters, _hwnd)] = system.elevated_runs
+    statements = _statements(parameters)
+    assert statements[:2] == [
+        "Get-NetFirewallRule -Name 'DuoInput-Link','DuoInput-Discovery'"
+        " -ErrorAction SilentlyContinue | Remove-NetFirewallRule",
+        f"Get-NetFirewallRule -Name '{BLOCK_ID}'"
+        " -ErrorAction SilentlyContinue | Remove-NetFirewallRule",
+    ]
+    assert [s.split(" -DisplayName")[0] for s in statements[2:4]] == [
+        "New-NetFirewallRule -Name 'DuoInput-Link'",
+        "New-NetFirewallRule -Name 'DuoInput-Discovery'",
+    ]
+    assert statements[4:] == ["exit 0"]
+    assert "Other{1}" not in parameters and "GPO{2}" not in parameters
+
+
+def test_apply_logs_each_block_rule_it_is_about_to_remove(frozen_windows, caplog):
+    system = FakeSystem(output=_with_blocks(_block()))
+
+    with caplog.at_level("INFO", logger=firewall.__name__):
+        firewall.apply_rules(INSTALLED, system=system)
+
+    assert f"будет удалено запрещающее правило duoinput.exe ({BLOCK_ID})" in caplog.text
+
+
+def test_a_block_rule_id_is_matched_literally_not_as_a_wildcard(frozen_windows):
+    """-Name принимает шаблон, а в имени правила Windows - путь к exe."""
+    tricky = r"UDP Query User{X}C:\apps[1]\what?\*\duoinput.exe"
+    system = FakeSystem(output=_with_blocks(_block(Name=tricky)))
+
+    firewall.apply_rules(INSTALLED, system=system)
+
+    [(_executable, parameters, _hwnd)] = system.elevated_runs
+    assert r"-Name 'UDP Query User{X}C:\apps`[1`]\what`?\`*\duoinput.exe'" in parameters
 
 
 def test_every_single_quote_form_powershell_honours_is_doubled():
     """PowerShell закрывает строку в одинарных кавычках и типографскими
     ‘ ’ ‚ ‛ - путь с апострофом из раскладки не должен разорвать команду."""
-    quoted = firewall._quote("a'b‘c’d‚e‛f")
-
-    assert quoted == "'a''b‘‘c’’d‚‚e‛‛f'"
+    assert firewall._quote("a'b‘c’d‚e‛f") == "'a''b‘‘c’’d‚‚e‛‛f'"
 
 
 def test_a_double_quote_cannot_reach_the_command_line():
@@ -305,7 +495,7 @@ def test_apply_runs_directly_when_already_elevated(frozen_windows):
 
     assert system.elevated_runs == []
     [(executable, parameters)] = system.runs
-    assert executable.endswith("powershell.exe")
+    assert executable == POWERSHELL
     assert "New-NetFirewallRule" in parameters
 
 
@@ -315,22 +505,26 @@ def test_apply_reports_failure(frozen_windows, code):
 
 
 def test_apply_reports_failure_of_a_direct_run(frozen_windows):
-    assert not firewall.apply_rules(INSTALLED, system=FakeSystem(elevated=True, code=1))
+    assert not firewall.apply_rules(INSTALLED, system=FakeSystem(elevated=True, direct_code=1))
 
 
 def test_remove_deletes_only_our_two_rules(frozen_windows):
-    system = FakeSystem()
+    """Деинсталлятор убирает своё и только своё - и запреты Windows тоже
+    оставляет в покое."""
+    system = FakeSystem(output=_with_blocks(_block()))
 
     assert firewall.remove_rules(system=system)
 
+    assert system.queries == []
     assert system.elevated_runs == [
         (
-            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            POWERSHELL,
             "-NoProfile -NonInteractive -WindowStyle Hidden -Command \""
             "$ErrorActionPreference='Stop'; try { "
-            "Get-NetFirewallRule -DisplayName 'Duo Input — связь','Duo Input — поиск'"
+            "Get-NetFirewallRule -Name 'DuoInput-Link','DuoInput-Discovery'"
             " -ErrorAction SilentlyContinue | Remove-NetFirewallRule; "
             "exit 0 } catch { exit 1 }\"",
+            None,
         )
     ]
 
@@ -361,10 +555,10 @@ def test_outside_a_windows_build_everything_is_a_no_op(monkeypatch, windows, fro
     monkeypatch.setattr(firewall, "_is_frozen", lambda: frozen)
     system = FakeSystem(output=_fixture("absent.json"))
 
-    assert firewall.missing_rules(INSTALLED, system=system) == []
+    assert firewall.check_rules(INSTALLED, system=system).satisfied
     assert firewall.apply_rules(INSTALLED, system=system) is True
     assert firewall.remove_rules(system=system) is True
-    assert system.runs == [] and system.elevated_runs == []
+    assert system.queries == [] and system.runs == [] and system.elevated_runs == []
 
 
 def test_a_python_run_is_not_frozen(monkeypatch):
@@ -390,15 +584,30 @@ def test_a_pyinstaller_style_build_is_frozen(monkeypatch):
 # ------------------------------------------------------------ the real boundary
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="ShellExecuteExW is Windows-only")
-def test_shell_execute_waits_and_returns_the_exit_code():
-    """Настоящий ShellExecuteExW - с глаголом "open", без UAC: проверяет
-    структуру и ожидание кода возврата, которыми пользуется "runas"."""
-    code = firewall._shell_execute_and_wait(
-        "open", r"C:\Windows\System32\cmd.exe", "/d /c exit 7"
-    )
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows system directory")
+def test_the_real_system_directory_holds_powershell():
+    system = firewall._WindowsSystem()
 
-    assert code == 7
+    assert Path(firewall._powershell(system)).is_file()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="ShellExecuteExW is Windows-only")
+def test_shell_execute_waits_and_returns_the_exit_code_from_a_worker_thread():
+    """Настоящий ShellExecuteExW - с глаголом "open", без UAC, из рабочего
+    потока, как в программе: проверяет структуру, COM на потоке и ожидание
+    кода возврата, которыми пользуется "runas"."""
+    result: list[int | None] = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            firewall._shell_execute_and_wait(
+                "open", r"C:\Windows\System32\cmd.exe", "/d /c exit 7", None
+            )
+        )
+    )
+    worker.start()
+    worker.join(30)
+
+    assert result == [7]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="ShellExecuteExW is Windows-only")
@@ -412,16 +621,16 @@ def test_shell_execute_that_cannot_start_returns_none_and_logs_why(caplog):
     assert "ошибка 2;" in caplog.text
 
 
-def test_run_elevated_asks_for_the_runas_verb(monkeypatch):
+def test_run_elevated_asks_for_the_runas_verb_over_the_given_window(monkeypatch):
     calls = []
     monkeypatch.setattr(
         firewall,
         "_shell_execute_and_wait",
-        lambda verb, executable, parameters: calls.append((verb, executable, parameters)) or 0,
+        lambda *arguments: calls.append(arguments) or 0,
     )
 
-    assert firewall._WindowsSystem().run_elevated("x.exe", "-a") == 0
-    assert calls == [("runas", "x.exe", "-a")]
+    assert firewall._WindowsSystem().run_elevated("x.exe", "-a", 0x42) == 0
+    assert calls == [("runas", "x.exe", "-a", 0x42)]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows process boundary")
