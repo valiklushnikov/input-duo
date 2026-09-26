@@ -97,6 +97,11 @@ Type: filesandordirs; Name: "{app}"
 const
   InstallFirewallRulesArgument = '--install-firewall-rules';
   RemoveFirewallRulesArgument = '--remove-firewall-rules';
+  CheckFirewallRulesArgument = '--check-firewall-rules';
+  // --check-firewall-rules exits 1 when a repair is needed (or the check could
+  // not tell); 0 means the rules already work, 2 that a policy blocks them and
+  // elevating would not help.
+  FirewallRepairNeeded = 1;
 
 // ShellExec with the 'runas' verb raises exactly one UAC prompt. It returns
 // False when the prompt is declined; that is logged and otherwise ignored, so
@@ -112,10 +117,39 @@ begin
     Log(Format('%s did not run: %s', [Parameters, SysErrorMessage(Code)]));
 end;
 
+// Asks the program itself, without elevation, whether the rules need work, so
+// that an upgrade over a working install raises no UAC prompt at all. If the
+// check cannot even run, installing is the safer answer.
+function FirewallRepairIsNeeded: Boolean;
+var
+  Code: Integer;
+begin
+  if Exec(ExpandConstant('{app}\{#AppExeName}'), CheckFirewallRulesArgument, '',
+          SW_HIDE, ewWaitUntilTerminated, Code) then
+  begin
+    Log(Format('%s: code %d', [CheckFirewallRulesArgument, Code]));
+    Result := Code = FirewallRepairNeeded;
+  end
+  else
+  begin
+    Log(Format('%s did not run: %s', [CheckFirewallRulesArgument, SysErrorMessage(Code)]));
+    Result := True;
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
-    RunProgramElevated(InstallFirewallRulesArgument);
+  begin
+    // A silent install must not stop for a UAC prompt; the program checks the
+    // rules when the shared clipboard starts and offers the repair itself.
+    if WizardSilent then
+      Log('Silent install: firewall rules are left to the program')
+    else if FirewallRepairIsNeeded then
+      RunProgramElevated(InstallFirewallRulesArgument)
+    else
+      Log('Firewall rules need no elevation');
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
