@@ -163,6 +163,7 @@ class ClipboardCoordinator(QObject):
         # живой связи - к обычной паузе переподключения.
         self._candidate_index = 0
         self._dialing = False
+        self._dialing_address = ""
         self._state = LinkState.UNPAIRED if trust.peer() is None else LinkState.DISCONNECTED
 
         # Состояние самого связывания - отдельное от рабочей связи: рабочая
@@ -636,6 +637,7 @@ class ClipboardCoordinator(QObject):
             return
 
         address = candidates[self._candidate_index % len(candidates)]
+        self._dialing_address = address
         self._dialing = True
         link = PeerLink(self._identity, self)
         link.connected.connect(lambda _fingerprint: self._on_connected(link))
@@ -767,11 +769,20 @@ class ClipboardCoordinator(QObject):
             return
         if self._dialing:
             self._dialing = False
-            if self._candidate_index + 1 < len(self._candidates()):
+            candidates = self._candidates()
+            # Список мог измениться, пока шёл набор (плата прислала другой,
+            # адрес маячка устарел или появился). Следующим идёт тот, что
+            # стоит сразу за набранным СЕЙЧАС; если набранного в списке уже
+            # нет, его место занял следующий кандидат - он и идёт дальше.
+            if self._dialing_address in candidates:
+                next_index = candidates.index(self._dialing_address) + 1
+            else:
+                next_index = self._candidate_index
+            if next_index < len(candidates):
                 # Этот адрес не ответил - следующий пробуем сразу: пауза
                 # переподключения нужна после неудачи всего списка, а не
                 # каждого адреса в нём.
-                self._candidate_index += 1
+                self._candidate_index = next_index
                 self._set_state(LinkState.DISCONNECTED)
                 self._retry.start(0)
                 return

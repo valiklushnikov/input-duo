@@ -1548,6 +1548,29 @@ def test_an_empty_board_address_is_not_a_candidate(tmp_path, dial):
     assert coordinator._candidates() == ["192.168.1.5", "10.0.0.2"]
 
 
+def test_a_candidate_that_vanished_mid_dial_does_not_make_the_round_skip_the_next(tmp_path, dial, qapp):
+    """Пока шёл набор 10.0.0.2, плата прислала список уже без него. Следующим
+    должен быть 10.0.0.3 - тот, кто занял его место, - а не конец круга с
+    паузой, как было бы при сдвиге индекса по старому списку."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    timer = _FakeTimer()
+    coordinator._retry = timer
+    coordinator._board_addresses = ["10.0.0.2", "10.0.0.3"]
+    coordinator._candidate_index = 1
+    coordinator._try_connect()
+    assert dial[-1].address == "10.0.0.2"
+
+    coordinator.set_board_addresses(["10.0.0.3"])  # набор идёт - только запомнить
+    dial[-1].disconnected.emit("refused")
+
+    try:
+        assert timer.starts == [0]  # следующий кандидат сразу, без паузы
+        coordinator._try_connect()
+        assert dial[-1].address == "10.0.0.3"
+    finally:
+        coordinator.stop()
+
+
 # ------------------------------------------------------- автонабор при новом списке адресов платы
 
 
