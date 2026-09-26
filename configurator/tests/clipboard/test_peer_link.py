@@ -167,6 +167,25 @@ def test_shutdown_disconnect_survives_an_already_destroyed_deadline(
     assert link._socket is None
 
 
+def test_shutdown_failure_survives_an_already_destroyed_socket(
+    qapp, tmp_path
+):
+    """A final Qt callback can outlive the socket's underlying C++ object."""
+    import shiboken6
+
+    link = PeerLink(load_or_create(tmp_path))
+    failures = []
+    link.disconnected.connect(failures.append)
+    socket = QSslSocket(link)
+    link._wire_up(socket)
+    shiboken6.delete(socket)
+
+    link._fail("соединение закрыто")
+
+    assert failures == ["соединение закрыто"]
+    assert link._socket is None
+
+
 def test_close_cancels_an_outbound_connection_deadline(
     qtbot, tmp_path, monkeypatch
 ):
@@ -191,9 +210,10 @@ def test_an_outbound_connection_has_a_deadline(qtbot, tmp_path, monkeypatch):
 
     with qtbot.waitSignal(link.disconnected, timeout=1000) as blocker:
         link.connect_to("192.0.2.1", 47654, "f" * 64)
+        socket = _ConnectingSocket.instances[-1]
 
     assert blocker.args == ["время подключения истекло"]
-    assert _ConnectingSocket.instances[-1].aborted is True
+    assert socket.aborted is True
 
 
 def test_a_fresh_identity_completes_a_real_tls_handshake_on_the_active_backend(

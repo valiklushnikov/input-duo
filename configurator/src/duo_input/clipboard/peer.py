@@ -322,7 +322,7 @@ class PeerLink(QObject):
     def close(self) -> None:
         self._stop_connect_timeout()
         if self._socket is not None:
-            self._socket.abort()
+            self._abort_socket(self._socket)
             self._socket = None
         self._pending_write_frames.clear()
         # Закрытие обязано означать "не в заторе". Без этой проверки
@@ -352,6 +352,15 @@ class PeerLink(QObject):
         except RuntimeError:
             # При завершении QApplication Qt может уничтожить дочерний QTimer
             # раньше, чем сокет испустит свой последний disconnected.
+            pass
+
+    @staticmethod
+    def _abort_socket(socket: QSslSocket) -> None:
+        try:
+            socket.abort()
+        except RuntimeError:
+            # Та же последовательность shutdown возможна для самого сокета:
+            # Python wrapper ещё участвует в callback, а C++ QObject уже удалён.
             pass
 
     def _wire_up(self, socket: QSslSocket) -> None:
@@ -553,7 +562,7 @@ class PeerLink(QObject):
         # и повторный вход не должен дважды сообщить координатору об одном сбое.
         self._socket = None
         self._stop_connect_timeout()
-        socket.abort()
+        self._abort_socket(socket)
         self._pending_write_frames.clear()
         self.disconnected.emit(reason)
 
