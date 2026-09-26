@@ -1571,6 +1571,84 @@ def test_a_candidate_that_vanished_mid_dial_does_not_make_the_round_skip_the_nex
         coordinator.stop()
 
 
+def test_a_dialled_address_pushed_deeper_by_growth_does_not_get_dialled_twice(tmp_path, dial):
+    """Пока шёл набор 10.0.0.2, плата прислала список, где перед прежними
+    кандидатами появился новый адрес - 10.0.0.2 сдвинулся на другое место в
+    списке. Следующим должен быть тот, кто стоит за НИМ на НОВОМ месте
+    (10.0.0.3), а не тот, кто просто оказался на старом индексе набранного
+    адреса плюс один - иначе набор впустую повторил бы уже испытанный адрес."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    timer = _FakeTimer()
+    coordinator._retry = timer
+    coordinator._board_addresses = ["10.0.0.2", "10.0.0.3"]
+    coordinator._candidate_index = 1
+    coordinator._try_connect()
+    assert dial[-1].address == "10.0.0.2"
+
+    coordinator.set_board_addresses(["10.0.0.9", "10.0.0.2", "10.0.0.3"])  # набор идёт - только запомнить
+    dial[-1].disconnected.emit("refused")
+
+    try:
+        assert timer.starts == [0]  # следующий кандидат сразу, без паузы
+        coordinator._try_connect()
+        assert dial[-1].address == "10.0.0.3"  # не повтор 10.0.0.2
+    finally:
+        coordinator.stop()
+
+
+def test_a_wrapped_index_still_advances_from_the_dialled_address(tmp_path, dial):
+    """Индекс уже был перенесён через край списка (не первый круг по
+    кандидатам), а затем набранный адрес не ответил. Следующий кандидат
+    ищется от НАБРАННОГО адреса, а не слепым сдвигом уже перенесённого
+    индекса - здесь оба пути совпадают, но это и есть проверка, что найденная
+    ветка не портит уже проверенный перенос через край."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    timer = _FakeTimer()
+    coordinator._retry = timer
+    coordinator._board_addresses = ["10.0.0.2"]
+    coordinator._candidate_index = 2  # за пределами списка ["192.168.1.5", "10.0.0.2"]
+    coordinator._try_connect()
+    assert dial[-1].address == "192.168.1.5"
+
+    dial[-1].disconnected.emit("refused")
+
+    try:
+        assert timer.starts == [0]
+        coordinator._try_connect()
+        assert dial[-1].address == "10.0.0.2"
+    finally:
+        coordinator.stop()
+
+
+def test_an_unnormalized_index_still_finds_slot_zero_when_the_dialled_address_vanishes(tmp_path, dial):
+    """``_candidate_index`` переносится через край СРАЗУ при наборе (см.
+    ``_try_connect``), а не только при чтении: если набранный адрес пропал из
+    списка, а его место в слоте 0 занял новый (плата обновила last_address,
+    пока шёл старый набор), ``_drop`` обязан попасть именно на этот новый
+    адрес, а не решить, что круг уже кончился из-за индекса, оставшегося не
+    перенесённым через край с прошлого набора."""
+    coordinator, trust = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    timer = _FakeTimer()
+    coordinator._retry = timer
+    coordinator._board_addresses = ["10.0.0.2"]
+    coordinator._candidate_index = 2  # за пределами списка ["192.168.1.5", "10.0.0.2"]
+    coordinator._try_connect()
+    assert dial[-1].address == "192.168.1.5"
+
+    # Адрес пира сменился, пока шёл старый набор (например, входящее
+    # соединение по новому адресу обновило last_address) - слот 0 теперь
+    # занимает не тот, кого набирали.
+    trust.update_address("192.168.1.77")
+    dial[-1].disconnected.emit("refused")
+
+    try:
+        assert timer.starts == [0]
+        coordinator._try_connect()
+        assert dial[-1].address == "192.168.1.77"
+    finally:
+        coordinator.stop()
+
+
 # ------------------------------------------------------- автонабор при новом списке адресов платы
 
 

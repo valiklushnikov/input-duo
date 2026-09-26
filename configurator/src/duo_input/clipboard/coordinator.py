@@ -636,7 +636,13 @@ class ClipboardCoordinator(QObject):
             self._silence.start()
             return
 
-        address = candidates[self._candidate_index % len(candidates)]
+        # Индекс нормализуем ДО набора, а не только при чтении: _drop() при
+        # исчезнувшем адресе откатывается на self._candidate_index как есть -
+        # ненормализованное значение (например после сжатия списка) увело бы
+        # его мимо конца списка и оборвало бы круг, не дойдя до кандидата в
+        # слоте 0.
+        self._candidate_index %= len(candidates)
+        address = candidates[self._candidate_index]
         self._dialing_address = address
         self._dialing = True
         link = PeerLink(self._identity, self)
