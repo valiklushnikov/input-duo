@@ -146,6 +146,27 @@ def test_a_socket_error_emits_disconnect_once_and_cancels_its_deadline(
     assert link._connect_timeout.isActive() is False
 
 
+def test_shutdown_disconnect_survives_an_already_destroyed_deadline(
+    qapp, tmp_path, monkeypatch
+):
+    """Qt can destroy child timers before sockets emit their final disconnect."""
+    import shiboken6
+
+    _install_connecting_socket(monkeypatch)
+    link = PeerLink(load_or_create(tmp_path))
+    failures = []
+    link.disconnected.connect(failures.append)
+    link.connect_to("192.0.2.1", 47654, "f" * 64)
+    socket = _ConnectingSocket.instances[-1]
+    shiboken6.delete(link._connect_timeout)
+
+    socket.disconnected.emit()
+
+    assert failures == ["соединение закрыто"]
+    assert socket.aborted is True
+    assert link._socket is None
+
+
 def test_close_cancels_an_outbound_connection_deadline(
     qtbot, tmp_path, monkeypatch
 ):

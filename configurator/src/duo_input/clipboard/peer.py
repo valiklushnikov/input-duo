@@ -320,7 +320,7 @@ class PeerLink(QObject):
         return True
 
     def close(self) -> None:
-        self._connect_timeout.stop()
+        self._stop_connect_timeout()
         if self._socket is not None:
             self._socket.abort()
             self._socket = None
@@ -345,6 +345,14 @@ class PeerLink(QObject):
         return self.bytes_to_write > WRITE_HIGH_WATER_BYTES
 
     # ------------------------------------------------------------------ внутреннее
+
+    def _stop_connect_timeout(self) -> None:
+        try:
+            self._connect_timeout.stop()
+        except RuntimeError:
+            # При завершении QApplication Qt может уничтожить дочерний QTimer
+            # раньше, чем сокет испустит свой последний disconnected.
+            pass
 
     def _wire_up(self, socket: QSslSocket) -> None:
         self._socket = socket
@@ -471,7 +479,7 @@ class PeerLink(QObject):
         socket = self._socket
         if socket is None:
             return
-        self._connect_timeout.stop()
+        self._stop_connect_timeout()
         # Включить TCP keepalive теперь, когда сокет реально подключён (нативный
         # дескриптор существует - до connect опция не применяется). Молчащий/
         # NAT-осиротевший путь иначе умирает тихо, и разрыв всплывает лишь при
@@ -544,7 +552,7 @@ class PeerLink(QObject):
         # Сначала убрать ссылку: abort() может синхронно испустить disconnected,
         # и повторный вход не должен дважды сообщить координатору об одном сбое.
         self._socket = None
-        self._connect_timeout.stop()
+        self._stop_connect_timeout()
         socket.abort()
         self._pending_write_frames.clear()
         self.disconnected.emit(reason)
