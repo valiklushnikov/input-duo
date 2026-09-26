@@ -31,11 +31,13 @@ PAIR_CONFIRM с согласием получен И отправлен, то е
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from enum import StrEnum
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from .discovery import Beacon, Discovery
+from .discovery import BEACON_INTERVAL_MS, Beacon, Discovery
 from .identity import NodeIdentity
 from .listener import PeerListener
 from .pairing import PAIRING_WINDOW_MS, PairingCandidate, pairing_code
@@ -60,6 +62,24 @@ TCP_PORT = 47654
 #: Пауза перед повторной попыткой: растёт и упирается в потолок. Бесконечно
 #: частые попытки были бы фоновой работой навсегда.
 RECONNECT_DELAYS_MS = (1000, 2000, 4000, 8000, 30000)
+
+#: Сколько живёт адрес из маячка без подтверждения следующим маячком.
+#: Политика, а не протокол: маячок о ней не знает, значение можно менять без
+#: вопросов совместимости. Пять интервалов маячка: multicast по Wi-Fi теряется,
+#: и несколько пропущенных маячков подряд не должны выбрасывать живой адрес;
+#: каждый новый маячок продлевает срок своего адреса.
+DISCOVERED_ADDRESS_TTL_MS = 5 * BEACON_INTERVAL_MS
+
+#: Тоже политика: сколько адресов маячка держать одновременно. Настоящий пир
+#: рекламируется не более чем через 8 интерфейсов (как MAX_HOST_ADDRESSES у
+#: обмена через плату); поток поддельных маячков с разными IP не должен
+#: раздувать перебор кандидатов.
+MAX_DISCOVERED_ADDRESSES = 8
+
+
+def _monotonic_ms() -> float:
+    return time.monotonic() * 1000.0
+
 
 #: Отпечаток, которому не может соответствовать ни один настоящий сертификат
 #: (тот всегда - непустая шестнадцатеричная строка). Используется вместо
@@ -137,6 +157,7 @@ class ClipboardCoordinator(QObject):
         machine_name: str,
         service: ClipboardService | None = None,
         parent: QObject | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         super().__init__(parent)
         self._identity = identity
@@ -158,6 +179,13 @@ class ClipboardCoordinator(QObject):
         self._attempt = 0
         self._manual_address = ""
         self._board_addresses: list[str] = []
+        # Адреса из маячков доверенного пира - подсказки, а не доверие: только
+        # в памяти, каждый до своего срока (адрес -> момент протухания, мс).
+        # Адресов может быть несколько: пир с Wi-Fi и Ethernet рекламируется
+        # через оба. На диск (last_address) попадает лишь адрес, по которому
+        # прошло TLS с закреплённым отпечатком - см. _on_connected.
+        self._clock = clock if clock is not None else _monotonic_ms
+        self._discovered_addresses: dict[str, float] = {}
         # Какой по счёту кандидат набирается сейчас и идёт ли набор вообще:
         # неудача набора ведёт к следующему кандидату без паузы, а разрыв
         # живой связи - к обычной паузе переподключения.
@@ -254,6 +282,7 @@ class ClipboardCoordinator(QObject):
         self._service.cancel_reconnect()
         self._dialing = False
         self._candidate_index = 0
+        self._forget_discovered_addresses()
         self._clear_pairing_attempt(close_link=True)
         self._end_pairing()
         self._listener.stop()
@@ -271,6 +300,10 @@ class ClipboardCoordinator(QObject):
         error leaves a window in which the UI says connected and writes are
         accepted locally but never reach the peer.
         """
+        # time.monotonic на macOS не считает сон: адреса из маячков,
+        # услышанных до сна, выглядели бы свежими. После сна они не
+        # свидетельство ни о чём.
+        self._forget_discovered_addresses()
         if self._link is None:
             return
         self._service.prepare_for_reconnect()
@@ -439,6 +472,7 @@ class ClipboardCoordinator(QObject):
         self._attempt = 0
         self._dialing = False
         self._candidate_index = 0
+        self._forget_discovered_addresses()
         self._service.cancel_reconnect()
         self._trust.forget()
         if self._link is not None:
@@ -506,12 +540,14 @@ class ClipboardCoordinator(QObject):
                 or beacon.fingerprint != peer.fingerprint
             ):
                 return
-            if peer.last_address != address:
-                self._trust.update_address(address)
+            is_new = self._remember_discovered_address(address)
+            if is_new:
+                logger.info("discovery_hint address=%s", address)
             # Маячок - подсказка адреса, как и список от платы, и звонит по
-            # тому же правилу: не поверх живой связи, идущего набора или
-            # тикающего повтора и не из BLOCKED/PROTOCOL_MISMATCH.
-            if not self._may_dial_on_hint():
+            # тому же правилу: только на новую подсказку, не поверх живой
+            # связи, набора или тикающего повтора и не из
+            # BLOCKED/PROTOCOL_MISMATCH.
+            if not is_new or not self._may_dial_on_hint():
                 return
             self._candidate_index = 0
             self._try_connect()
@@ -606,14 +642,43 @@ class ClipboardCoordinator(QObject):
 
     # ------------------------------------------------------------------ рабочая связь
 
+    def _fresh_discovered_addresses(self) -> list[str]:
+        """Свежие адреса маячка - в порядке, в каком они впервые услышаны."""
+        now = self._clock()
+        return [
+            address for address, until in self._discovered_addresses.items() if now < until
+        ]
+
+    def _remember_discovered_address(self, address: str) -> bool:
+        """Запомнить адрес маячка или продлить его срок. True - адрес новый.
+
+        Протухшие вычищаются здесь же, лениво, без отдельного таймера.
+        Повторный маячок продлевает срок, не двигая адрес в очереди.
+        """
+        now = self._clock()
+        self._discovered_addresses = {
+            known: until for known, until in self._discovered_addresses.items() if now < until
+        }
+        is_new = address not in self._discovered_addresses
+        self._discovered_addresses[address] = now + DISCOVERED_ADDRESS_TTL_MS
+        if len(self._discovered_addresses) > MAX_DISCOVERED_ADDRESSES:
+            soonest = min(self._discovered_addresses, key=self._discovered_addresses.__getitem__)
+            del self._discovered_addresses[soonest]
+        return is_new
+
+    def _forget_discovered_addresses(self) -> None:
+        self._discovered_addresses = {}
+
     def _candidates(self) -> list[str]:
         """Куда звонить, по порядку: ручной адрес - единственный кандидат;
-        иначе последний удачный, затем адреса от платы, без повторов."""
+        иначе свежие адреса из маячков (пир виден прямо сейчас), последний
+        удачный, затем адреса от платы, без повторов."""
         if self._manual_address:
             return [self._manual_address]
         peer = self.peer
+        head = self._fresh_discovered_addresses() + ([peer.last_address] if peer else [])
         result: list[str] = []
-        for address in ([peer.last_address] if peer else []) + self._board_addresses:
+        for address in head + self._board_addresses:
             if address and address not in result:
                 result.append(address)
         return result
@@ -689,6 +754,7 @@ class ClipboardCoordinator(QObject):
         self._link = link
         self._dialing = False
         self._candidate_index = 0
+        self._forget_discovered_addresses()
         address = _plain_ipv4(getattr(link, "peer_address", "") or "")
         if address:
             peer = self.peer
@@ -801,6 +867,8 @@ class ClipboardCoordinator(QObject):
 
 
 __all__ = [
+    "DISCOVERED_ADDRESS_TTL_MS",
+    "MAX_DISCOVERED_ADDRESSES",
     "RECONNECT_DELAYS_MS",
     "TCP_PORT",
     "ClipboardCoordinator",

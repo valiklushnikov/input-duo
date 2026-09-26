@@ -25,6 +25,8 @@ import duo_input.clipboard.coordinator as coordinator_module
 from PySide6.QtCore import QObject, Signal
 
 from duo_input.clipboard.coordinator import (
+    DISCOVERED_ADDRESS_TTL_MS,
+    MAX_DISCOVERED_ADDRESSES,
     RECONNECT_DELAYS_MS,
     TCP_PORT,
     ClipboardCoordinator,
@@ -136,6 +138,16 @@ class _FakeTimer:
         return self._active
 
 
+class _Clock:
+    """Монотонные миллисекунды, которые тест двигает сам."""
+
+    def __init__(self) -> None:
+        self.now_ms = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now_ms
+
+
 class _DialLink(QObject):
     """PeerLink, который только записывает, куда его попросили позвонить."""
 
@@ -168,12 +180,16 @@ def dial(monkeypatch):
     return _DialLink.made
 
 
-def _make_coordinator(tmp_path, peer_origin_id: str | None = None) -> tuple[ClipboardCoordinator, TrustStore]:
+def _make_coordinator(
+    tmp_path, peer_origin_id: str | None = None, clock=None
+) -> tuple[ClipboardCoordinator, TrustStore]:
     identity = load_or_create(tmp_path / "id")
     trust = TrustStore(tmp_path / "peers.json")
     if peer_origin_id is not None:
         trust.remember(TrustedPeer(peer_origin_id, "LAPTOP-TWO", "f" * 64, "192.168.1.5"))
-    coordinator = ClipboardCoordinator(identity=identity, trust=trust, machine_name="LAPTOP-ONE")
+    coordinator = ClipboardCoordinator(
+        identity=identity, trust=trust, machine_name="LAPTOP-ONE", clock=clock
+    )
     return coordinator, trust
 
 
@@ -381,6 +397,9 @@ def test_a_failed_last_known_address_starts_discovery_and_uses_the_new_address(
             ("192.168.1.5", TCP_PORT, "f" * 64),
             ("192.168.1.99", TCP_PORT, "f" * 64),
         ]
+        # Адрес из маячка набран первым, но на диск не записан: это делает
+        # только успешное соединение (_on_connected).
+        assert trust.peer().last_address == "192.168.1.5"
     finally:
         coordinator.stop()
 
@@ -1952,6 +1971,288 @@ def test_an_active_retry_timer_defers_a_beacon_dial(tmp_path, dial, qapp):
     coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
 
     assert dial == []
+
+
+# ---------------------------------------------------------------------- адреса маячка: память и TTL
+
+
+def _deferred(coordinator) -> None:
+    """Таймер повтора тикает - маячок только запоминается, не звонит."""
+    fake_retry = _FakeTimer()
+    coordinator._retry = fake_retry
+    fake_retry.start(reconnect_delay_ms(0))
+
+
+def test_a_beacon_address_is_never_written_to_the_trust_store(tmp_path, dial, qapp):
+    """Маячок - подсказка, а не доверие: на диск он не попадает."""
+    coordinator, trust = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=_Clock())
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+
+    try:
+        assert trust.peer().last_address == "192.168.1.5"
+        assert TrustStore(tmp_path / "peers.json").peer().last_address == "192.168.1.5"
+    finally:
+        coordinator.stop()
+
+
+def test_fresh_beacon_addresses_come_before_the_last_good_and_the_boards(tmp_path, dial, qapp):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=_Clock())
+    coordinator._board_addresses = ["10.0.0.2"]
+    _deferred(coordinator)
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+
+    assert coordinator._candidates() == ["192.168.1.99", "192.168.1.5", "10.0.0.2"]
+
+
+def test_a_beacon_address_expires_after_the_ttl(tmp_path, dial, qapp):
+    clock = _Clock()
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=clock)
+    coordinator._board_addresses = ["10.0.0.2"]
+    _deferred(coordinator)
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+
+    clock.now_ms += DISCOVERED_ADDRESS_TTL_MS
+
+    assert coordinator._candidates() == ["192.168.1.5", "10.0.0.2"]
+
+
+def test_a_new_address_of_the_peer_does_not_evict_its_other_fresh_addresses(tmp_path, dial, qapp):
+    """DHCP выдал новый адрес или у пира поднялся второй интерфейс - прежний
+    свежий адрес остаётся кандидатом, пока сам не протухнет."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=_Clock())
+    _deferred(coordinator)
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.20")
+    coordinator._on_peer_seen(_peer_beacon(), "10.0.0.20")
+
+    assert coordinator._candidates() == ["192.168.1.20", "10.0.0.20", "192.168.1.5"]
+
+
+def test_one_discovered_address_expires_while_the_other_stays_fresh(tmp_path, dial, qapp):
+    clock = _Clock()
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=clock)
+    _deferred(coordinator)
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.20")
+    clock.now_ms += 6_000
+    coordinator._on_peer_seen(_peer_beacon(), "10.0.0.20")
+
+    clock.now_ms += DISCOVERED_ADDRESS_TTL_MS - 6_000  # первый ровно протух
+
+    assert coordinator._candidates() == ["10.0.0.20", "192.168.1.5"]
+
+
+def test_a_duplicate_beacon_only_refreshes_its_own_address(tmp_path, dial, qapp):
+    """Повторный маячок продлевает срок именно этого адреса, не двигает его в
+    очереди и не трогает срок других."""
+    clock = _Clock()
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=clock)
+    _deferred(coordinator)
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.20")
+    coordinator._on_peer_seen(_peer_beacon(), "10.0.0.20")
+    clock.now_ms += DISCOVERED_ADDRESS_TTL_MS - 1
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.20")
+    assert coordinator._candidates() == ["192.168.1.20", "10.0.0.20", "192.168.1.5"]
+
+    clock.now_ms += 2
+    assert coordinator._candidates() == ["192.168.1.20", "192.168.1.5"]
+
+
+def test_a_flood_of_beacon_addresses_is_capped(tmp_path, dial, qapp):
+    """Поток поддельных маячков с разными IP не раздувает перебор: сверх
+    предела вытесняется адрес, который протухнет раньше всех."""
+    clock = _Clock()
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=clock)
+    _deferred(coordinator)
+
+    for n in range(MAX_DISCOVERED_ADDRESSES + 1):
+        coordinator._on_peer_seen(_peer_beacon(), f"10.1.0.{n}")
+        clock.now_ms += 1
+
+    fresh = coordinator._fresh_discovered_addresses()
+    assert len(fresh) == MAX_DISCOVERED_ADDRESSES
+    assert "10.1.0.0" not in fresh
+    assert fresh[-1] == f"10.1.0.{MAX_DISCOVERED_ADDRESSES}"
+
+
+def test_a_manual_address_stays_the_only_candidate_despite_beacons(tmp_path, dial, qapp):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=_Clock())
+    coordinator.restore_manual_address("192.168.7.7")
+    _deferred(coordinator)
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+    coordinator._on_peer_seen(_peer_beacon(), "10.0.0.20")
+
+    assert coordinator._candidates() == ["192.168.7.7"]
+
+
+def test_the_same_beacon_address_again_does_not_redial(tmp_path, dial, qapp):
+    """Как у платы: звонок - только на новую подсказку."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=_Clock())
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+    assert len(dial) == 1
+    coordinator._dialing = False  # как будто первая попытка уже разрешилась
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+
+    try:
+        assert len(dial) == 1
+    finally:
+        coordinator.stop()
+
+
+def test_a_connection_through_a_beacon_address_persists_it_and_clears_the_cache(tmp_path, dial, qapp):
+    """На диск попадает адрес, по которому прошло TLS с закреплённым отпечатком."""
+    coordinator, trust = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=_Clock())
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+    coordinator._on_peer_seen(_peer_beacon(), "10.0.0.20")
+    assert dial[-1].address == "192.168.1.99"
+
+    dial[-1].connected.emit("f" * 64)
+
+    try:
+        assert trust.peer().last_address == "192.168.1.99"
+        assert coordinator._fresh_discovered_addresses() == []
+    finally:
+        coordinator.stop()
+
+
+def test_a_spoofed_beacon_address_costs_one_attempt_and_is_never_persisted(tmp_path, dial, qapp):
+    """Чужой узел повторил публичные origin_id и отпечаток пира со своим адресом."""
+    coordinator, trust = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=_Clock())
+    coordinator._retry = _FakeTimer()
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.66")
+    assert dial[-1].address == "192.168.1.66"
+    assert trust.peer().last_address == "192.168.1.5"
+
+    dial[-1].disconnected.emit("отпечаток не совпал")  # TLS-закрепление отвергло
+    coordinator._try_connect()  # то, что сделал бы _retry.start(0)
+    assert dial[-1].address == "192.168.1.5"
+    dial[-1].connected.emit("f" * 64)
+
+    try:
+        assert trust.peer().last_address == "192.168.1.5"
+        assert coordinator.state is LinkState.CONNECTED
+    finally:
+        coordinator.stop()
+
+
+def test_a_stale_beacon_address_is_not_dialled(tmp_path, dial, qapp):
+    clock = _Clock()
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=clock)
+    _deferred(coordinator)
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+    clock.now_ms += DISCOVERED_ADDRESS_TTL_MS
+    coordinator._retry.stop()
+
+    coordinator._try_connect()
+
+    try:
+        assert dial[-1].address == "192.168.1.5"
+    finally:
+        coordinator.stop()
+
+
+def test_a_multi_homed_peer_gets_every_fresh_address_tried_before_the_known_ones(tmp_path, dial, qapp):
+    """Пир на Wi-Fi и Ethernet. Второй адрес, услышанный во время набора
+    первого, не создаёт вторую PeerLink, но и не теряется: он следующий в том
+    же круге - раньше last_address и адресов платы."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=_Clock())
+    coordinator._retry = _FakeTimer()
+    coordinator._board_addresses = ["10.0.0.2"]
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.20")
+    assert [link.address for link in dial] == ["192.168.1.20"]
+    coordinator._on_peer_seen(_peer_beacon(), "10.0.0.20")  # набор идёт - только запомнить
+    assert len(dial) == 1
+
+    for _ in range(3):
+        dial[-1].disconnected.emit("refused")
+        coordinator._try_connect()  # то, что сделал бы _retry.start(0)
+
+    try:
+        assert [link.address for link in dial] == [
+            "192.168.1.20",
+            "10.0.0.20",
+            "192.168.1.5",
+            "10.0.0.2",
+        ]
+    finally:
+        coordinator.stop()
+
+
+def test_a_beacon_heard_during_a_board_dial_is_tried_first_on_the_next_round(tmp_path, dial, qapp):
+    """Плата и маячок одновременно: одна PeerLink за раз, ни один адрес не
+    набирается дважды за круг, адрес маячка - первым в следующем круге."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=_Clock())
+    timer = _FakeTimer()
+    coordinator._retry = timer
+    coordinator.set_board_addresses(["10.0.0.2"])  # звонит 192.168.1.5 сразу
+    assert dial[-1].address == "192.168.1.5"
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+    assert len(dial) == 1
+
+    dial[-1].disconnected.emit("refused")
+    coordinator._try_connect()
+    assert dial[-1].address == "10.0.0.2"
+    dial[-1].disconnected.emit("refused")
+    assert timer.starts[-1] == reconnect_delay_ms(0)  # круг закончен
+
+    coordinator._try_connect()
+    try:
+        assert dial[-1].address == "192.168.1.99"
+    finally:
+        coordinator.stop()
+
+
+def test_alternating_beacon_addresses_during_a_dial_create_no_second_link(tmp_path, dial, qapp):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=_Clock())
+
+    for address in ["192.168.1.20", "10.0.0.20"] * 3:
+        coordinator._on_peer_seen(_peer_beacon(), address)
+
+    try:
+        assert len(dial) == 1
+    finally:
+        coordinator.stop()
+
+
+def test_a_beacon_address_expiring_mid_round_does_not_skip_the_last_good_address(tmp_path, dial, qapp):
+    clock = _Clock()
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=clock)
+    coordinator._retry = _FakeTimer()
+    coordinator._board_addresses = ["10.0.0.2"]
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+    assert dial[-1].address == "192.168.1.99"
+
+    clock.now_ms += DISCOVERED_ADDRESS_TTL_MS
+    dial[-1].disconnected.emit("время подключения истекло")
+    coordinator._try_connect()
+
+    try:
+        assert dial[-1].address == "192.168.1.5"
+    finally:
+        coordinator.stop()
+
+
+def test_waking_from_sleep_forgets_the_beacon_addresses(tmp_path, dial, qapp):
+    """time.monotonic на macOS не считает сон: без сброса адреса из маячков,
+    услышанных до сна, выглядели бы свежими и набирались первыми."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=_Clock())
+    _deferred(coordinator)
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+    coordinator._on_peer_seen(_peer_beacon(), "10.0.0.20")
+
+    coordinator.recover_after_resume()
+
+    try:
+        assert coordinator._candidates()[0] == "192.168.1.5"
+        assert coordinator._fresh_discovered_addresses() == []
+    finally:
+        coordinator.stop()
 
 
 def test_stop_resets_dialing_and_candidate_index(tmp_path, dial):
