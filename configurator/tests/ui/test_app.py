@@ -5,6 +5,8 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from duo_input.app import ENTRY_POINT, build_main_window, main
 from duo_input.device.service import DeviceService
 from duo_input.ui.main_window import MainWindow
@@ -109,3 +111,55 @@ def test_the_program_carries_an_icon(qapp):
 
     assert icon_path().is_file()
     assert icon_path().suffix == ".ico"
+
+
+FIREWALL_SWITCHES = {
+    "install": ("--install-firewall-rules", "apply_rules"),
+    "remove": ("--remove-firewall-rules", "remove_rules"),
+}
+
+
+@pytest.mark.parametrize("succeeded, exit_code", [(True, 0), (False, 1)], ids=["ok", "failed"])
+@pytest.mark.parametrize("argument, action", FIREWALL_SWITCHES.values(), ids=FIREWALL_SWITCHES.keys())
+def test_firewall_switch_acts_and_exits_without_a_window(
+    monkeypatch, argument, action, succeeded, exit_code
+):
+    """Установщик вызывает exe с ключом и ждёт код возврата: ни окна, ни
+    трея, ни замка единственного экземпляра - работающая копия программы не
+    должна ничего заметить."""
+    import sys
+
+    from duo_input import app
+    from duo_input.persistence import firewall
+
+    calls: list[tuple] = []
+
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("a firewall switch must not start the application")
+
+    monkeypatch.setattr(app, "single_instance_lock", must_not_run)
+    monkeypatch.setattr(app, "configure_application", lambda: calls.append(("log",)))
+    monkeypatch.setattr(
+        firewall, "apply_rules", lambda exe: calls.append(("apply_rules", exe)) or succeeded
+    )
+    monkeypatch.setattr(
+        firewall, "remove_rules", lambda: calls.append(("remove_rules",)) or succeeded
+    )
+
+    with monkeypatch.context() as context:
+        # Только на время вызова: pytest-qt сам зовёт instance() при разборе.
+        context.setattr(app.QApplication, "instance", must_not_run)
+        result = main(["DuoInput.exe", argument])
+
+    expected = ("apply_rules", Path(sys.executable)) if action == "apply_rules" else (action,)
+    assert result == exit_code
+    assert calls == [("log",), expected]
+
+
+def test_the_firewall_switches_are_the_ones_the_rule_module_defines():
+    from duo_input.persistence import firewall
+
+    assert [argument for argument, _ in FIREWALL_SWITCHES.values()] == [
+        firewall.INSTALL_ARGUMENT,
+        firewall.REMOVE_ARGUMENT,
+    ]

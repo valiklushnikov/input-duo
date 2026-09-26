@@ -29,7 +29,7 @@ from duo_input.clipboard.platform_backend import create_backend
 from duo_input.device.endpoint_service import EndpointService
 from duo_input.device.service import DeviceService
 from duo_input.i18n import TranslationManager
-from duo_input.persistence import autostart
+from duo_input.persistence import autostart, firewall
 from duo_input.persistence.locations import application_directory, configure_logging
 from duo_input.transfer.platform_files import UnsupportedPlatformError, create_file_backend
 from duo_input.transfer.service import FileTransferService
@@ -49,6 +49,11 @@ SINGLE_INSTANCE_NAME = "duo-input-single-instance"
 #: Аргумент командной строки, которым автозапуск просит не показывать окно -
 #: см. persistence/autostart.py и §4 спецификации.
 HIDDEN_START_ARGUMENT = autostart.HIDDEN_START_ARGUMENT
+
+#: Ключи, которыми установщик и деинсталлятор ставят и убирают правила
+#: брандмауэра, - см. persistence/firewall.py.
+INSTALL_FIREWALL_RULES_ARGUMENT = firewall.INSTALL_ARGUMENT
+REMOVE_FIREWALL_RULES_ARGUMENT = firewall.REMOVE_ARGUMENT
 
 
 def configure_application() -> Path:
@@ -917,6 +922,17 @@ def _raise_existing_window(lock: QLocalServer, window: MainWindow) -> None:
 def main(argv: list[str] | None = None) -> int:
     """Run the configurator; returns the Qt exit code."""
     arguments = list(argv) if argv is not None else sys.argv
+    if INSTALL_FIREWALL_RULES_ARGUMENT in arguments or REMOVE_FIREWALL_RULES_ARGUMENT in arguments:
+        # Установщик запускает exe повышенным и ждёт код возврата. До
+        # QApplication и замка единственного экземпляра: уже работающая копия
+        # программы не должна ничего заметить, окна и трея нет.
+        configure_application()
+        if INSTALL_FIREWALL_RULES_ARGUMENT in arguments:
+            succeeded = firewall.apply_rules(Path(sys.executable))
+        else:
+            succeeded = firewall.remove_rules()
+        return 0 if succeeded else 1
+
     if "--self-check-tls" in arguments:
         # Собранная программа должна уметь доказать, что TLS в ней работает:
         # недостающая криптографическая библиотека выглядит у пользователя
@@ -1036,7 +1052,9 @@ if __name__ == "__main__":  # pragma: no cover - manual launch
 __all__ = [
     "ENTRY_POINT",
     "HIDDEN_START_ARGUMENT",
+    "INSTALL_FIREWALL_RULES_ARGUMENT",
     "ORGANISATION_NAME",
+    "REMOVE_FIREWALL_RULES_ARGUMENT",
     "SINGLE_INSTANCE_NAME",
     "build_main_window",
     "configure_application",
