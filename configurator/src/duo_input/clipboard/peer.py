@@ -363,6 +363,14 @@ class PeerLink(QObject):
             # Python wrapper ещё участвует в callback, а C++ QObject уже удалён.
             pass
 
+    def _emit_disconnected(self, reason: str) -> None:
+        try:
+            self.disconnected.emit(reason)
+        except RuntimeError:
+            # Последний socket callback может исполняться уже после удаления
+            # C++ PeerLink при завершении QApplication; слушателей тогда нет.
+            pass
+
     def _wire_up(self, socket: QSslSocket) -> None:
         self._socket = socket
         self._pending_write_frames.clear()
@@ -564,7 +572,7 @@ class PeerLink(QObject):
         self._stop_connect_timeout()
         self._abort_socket(socket)
         self._pending_write_frames.clear()
-        self.disconnected.emit(reason)
+        self._emit_disconnected(reason)
 
 
 __all__ = [

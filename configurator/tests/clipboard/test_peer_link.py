@@ -186,6 +186,20 @@ def test_shutdown_failure_survives_an_already_destroyed_socket(
     assert link._socket is None
 
 
+def test_shutdown_failure_survives_an_already_destroyed_link(qapp, tmp_path):
+    """The socket's final callback can reach a deleted PeerLink wrapper."""
+    import shiboken6
+
+    link = PeerLink(load_or_create(tmp_path))
+    socket = QSslSocket(link)
+    link._wire_up(socket)
+    shiboken6.delete(link)
+
+    link._fail("соединение закрыто")
+
+    assert link._socket is None
+
+
 def test_close_cancels_an_outbound_connection_deadline(
     qtbot, tmp_path, monkeypatch
 ):
