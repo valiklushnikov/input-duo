@@ -552,12 +552,13 @@ class _ClipboardRuntime(QObject):
         dialog.setEscapeButton(close_button)
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         # finished, а не buttonClicked: закрытие крестиком кнопку не нажимает,
-        # и тоже должно считаться ответом "Позже".
-        dialog.finished.connect(
-            lambda _result: self._on_firewall_answer(
-                allow_button is not None and dialog.clickedButton() is allow_button
+        # и тоже должно считаться ответом "Позже". Объяснение о политике - не
+        # вопрос: «Понятно» значит "прочитал", а не "не предлагай починку",
+        # и запоминать его как отказ нельзя.
+        if allow_button is not None:
+            dialog.finished.connect(
+                lambda _result: self._on_firewall_answer(dialog.clickedButton() is allow_button)
             )
-        )
         dialog.open()
 
     def _on_firewall_answer(self, allowed: bool) -> None:

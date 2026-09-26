@@ -340,8 +340,28 @@ def test_a_policy_block_explains_and_offers_no_repair(qtbot, fake, launch):
     qtbot.mouseClick(_button(dialog, "Понятно"), Qt.MouseButton.LeftButton)
 
     qtbot.waitUntil(lambda: _prompts(POLICY_TEXT) == [])
-    assert settings.value(DECLINED_KEY, False, type=bool) is True
     assert fake.applied == []
+
+
+def test_dismissing_the_policy_notice_does_not_silence_a_later_repair_prompt(
+    qtbot, fake, launch
+):
+    """«Понятно» - это "прочитал", а не "не спрашивай меня о починке": когда
+    политику сняли и появилась беда, которую программа может исправить,
+    окно с «Разрешить»/«Позже» обязано появиться."""
+    fake.status = firewall.FirewallStatus(policy_blocked=True)
+    _window, settings = launch()
+    qtbot.waitUntil(lambda: len(_prompts(POLICY_TEXT)) == 1)
+    [notice] = _prompts(POLICY_TEXT)
+    qtbot.mouseClick(_button(notice, "Понятно"), Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: _prompts(POLICY_TEXT) == [])
+    assert settings.value(DECLINED_KEY, False, type=bool) is False
+
+    fake.status = firewall.FirewallStatus(missing=firewall.required_rules("x"))
+    launch()
+
+    dialog = _wait_for_prompt(qtbot)
+    assert {button.text() for button in dialog.buttons()} == {"Разрешить", "Позже"}
 
 
 def test_a_policy_block_wins_over_a_repairable_problem(qtbot, fake, launch):

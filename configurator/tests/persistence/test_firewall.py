@@ -442,8 +442,9 @@ def test_apply_removes_exactly_the_local_block_rule_found_by_its_id(frozen_windo
     assert statements[:2] == [
         "Get-NetFirewallRule -Name 'DuoInput-Link','DuoInput-Discovery'"
         " -ErrorAction SilentlyContinue | Remove-NetFirewallRule",
-        f"Get-NetFirewallRule -Name '{BLOCK_ID}'"
-        " -ErrorAction SilentlyContinue | Remove-NetFirewallRule",
+        f"Get-NetFirewallRule -Name '{BLOCK_ID}' -ErrorAction SilentlyContinue"
+        " | Where-Object { $_.Action -eq 'Block' -and $_.Direction -eq 'Inbound' }"
+        " | Remove-NetFirewallRule",
     ]
     assert [s.split(" -DisplayName")[0] for s in statements[2:4]] == [
         "New-NetFirewallRule -Name 'DuoInput-Link'",

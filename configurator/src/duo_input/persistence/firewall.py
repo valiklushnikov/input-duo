@@ -315,8 +315,12 @@ def _delete_ours() -> list[str]:
 def _delete_blocks(blocks) -> list[str]:
     # Get без -PolicyStore читает только локальное хранилище (PersistentStore):
     # правило из групповой политики этой командой не найти и не удалить.
+    # Where-Object - на случай, если между чтением и UAC правило с этим именем
+    # успели превратить в разрешающее или исходящее: удаляем только то, что
+    # по-прежнему запрещает входящие.
     return [
         f"Get-NetFirewallRule -Name {_literal_name(block.id)} -ErrorAction SilentlyContinue"
+        " | Where-Object { $_.Action -eq 'Block' -and $_.Direction -eq 'Inbound' }"
         " | Remove-NetFirewallRule"
         for block in blocks
     ]

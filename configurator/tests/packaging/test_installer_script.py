@@ -71,22 +71,26 @@ def test_a_silent_install_never_stops_for_a_uac_prompt():
     assert body.index("if WizardSilent then") < body.index("RunProgramElevated")
 
 
-def test_the_check_runs_unelevated_and_only_its_repair_code_elevates():
+def test_the_check_runs_unelevated_and_elevates_unless_fine_or_policy():
     """An upgrade over a working install must raise no UAC prompt: the
     program answers 0 (fine) or 2 (policy - elevating would not help), and
-    only 1 leads to the prompt. The number is the program's own."""
+    every other code leads to the prompt. The numbers are the program's own."""
     body = _body("FirewallRepairIsNeeded")
     code = _code_section()
     repair = firewall.FirewallStatus(missing=firewall.required_rules("x"))
 
     assert "Exec(ExpandConstant('{app}\\{#AppExeName}'), CheckFirewallRulesArgument" in body
     assert "ShellExec" not in body and "runas" not in body
-    assert "Result := Code = FirewallRepairNeeded;" in body
-    assert f"FirewallRepairNeeded = {firewall_check_exit_code(repair)};" in code
-    assert firewall_check_exit_code(firewall.FirewallStatus()) != firewall_check_exit_code(repair)
-    assert firewall_check_exit_code(firewall.FirewallStatus(policy_blocked=True)) != (
-        firewall_check_exit_code(repair)
+    # Only the two answers that mean "elevating would not help" skip the
+    # prompt; a crashed check (0xC0000005) or any unexpected code elevates.
+    assert (
+        "Result := (Code <> FirewallRulesSatisfied) and (Code <> FirewallPolicyBlocked);" in body
     )
+    satisfied = firewall_check_exit_code(firewall.FirewallStatus())
+    policy = firewall_check_exit_code(firewall.FirewallStatus(policy_blocked=True))
+    assert f"FirewallRulesSatisfied = {satisfied};" in code
+    assert f"FirewallPolicyBlocked = {policy};" in code
+    assert firewall_check_exit_code(repair) not in (satisfied, policy)
 
 
 def test_a_check_that_cannot_run_falls_back_to_installing():

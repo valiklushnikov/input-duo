@@ -98,10 +98,12 @@ const
   InstallFirewallRulesArgument = '--install-firewall-rules';
   RemoveFirewallRulesArgument = '--remove-firewall-rules';
   CheckFirewallRulesArgument = '--check-firewall-rules';
-  // --check-firewall-rules exits 1 when a repair is needed (or the check could
-  // not tell); 0 means the rules already work, 2 that a policy blocks them and
-  // elevating would not help.
-  FirewallRepairNeeded = 1;
+  // --check-firewall-rules exits 0 when the rules already work and 2 when a
+  // policy blocks them and elevating would not help. Everything else - 1
+  // (repair needed, or the check could not tell), a crashed check, any code
+  // nobody expected - leads to the UAC prompt.
+  FirewallRulesSatisfied = 0;
+  FirewallPolicyBlocked = 2;
 
 // ShellExec with the 'runas' verb raises exactly one UAC prompt. It returns
 // False when the prompt is declined; that is logged and otherwise ignored, so
@@ -128,7 +130,7 @@ begin
           SW_HIDE, ewWaitUntilTerminated, Code) then
   begin
     Log(Format('%s: code %d', [CheckFirewallRulesArgument, Code]));
-    Result := Code = FirewallRepairNeeded;
+    Result := (Code <> FirewallRulesSatisfied) and (Code <> FirewallPolicyBlocked);
   end
   else
   begin
