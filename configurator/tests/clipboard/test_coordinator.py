@@ -370,7 +370,13 @@ def test_a_failed_last_known_address_starts_discovery_and_uses_the_new_address(
             "192.168.1.99",
         )
 
-        assert trust.peer().last_address == "192.168.1.99"
+        # После неудачи тикает таймер повтора - маячок его не обгоняет
+        # (то же правило, что у платы), а лишь даёт адрес следующему набору.
+        assert calls == [("192.168.1.5", TCP_PORT, "f" * 64)]
+
+        coordinator._retry.stop()
+        coordinator._try_connect()  # то, что сделал бы сработавший _retry
+
         assert calls == [
             ("192.168.1.5", TCP_PORT, "f" * 64),
             ("192.168.1.99", TCP_PORT, "f" * 64),
@@ -1718,6 +1724,121 @@ def test_pairing_blocks_a_new_board_address_dial(tmp_path, dial, qapp):
         coordinator.stop()
 
 
+# ---------------------------------------------------------------------- маячок доверенного пира
+
+
+def _peer_beacon(origin_id: str = LARGEST_ORIGIN_ID, fingerprint: str = "f" * 64):
+    return coordinator_module.Beacon(
+        origin_id=origin_id,
+        machine_name="LAPTOP-TWO",
+        fingerprint=fingerprint,
+        port=TCP_PORT,
+        protocol_major=PROTOCOL_MAJOR,
+    )
+
+
+def test_a_beacon_during_a_dial_in_flight_does_not_start_a_second_link(tmp_path, dial, qapp):
+    """Маячок приходит каждые 2 с, а набор длится до 10 с: без проверки
+    `_dialing` каждый маячок запускал бы ещё одну PeerLink поверх идущей."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator._try_connect()
+    assert len(dial) == 1
+    assert coordinator._dialing is True
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+
+    try:
+        assert len(dial) == 1
+        assert coordinator._dialing is True
+    finally:
+        coordinator.stop()
+
+
+def test_a_stream_of_beacons_creates_at_most_one_link(tmp_path, dial, qapp):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+
+    for _ in range(5):
+        coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+
+    try:
+        assert len(dial) == 1
+    finally:
+        coordinator.stop()
+
+
+def test_a_beacon_does_not_dial_while_connected(tmp_path, dial, qapp):
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator._on_connected(_FakeLink("f" * 64, peer_address="192.168.1.5"))
+    assert coordinator.state is LinkState.CONNECTED
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+
+    try:
+        assert dial == []
+        assert coordinator.state is LinkState.CONNECTED
+    finally:
+        coordinator.stop()
+
+
+def test_a_beacon_does_not_dial_while_blocked(tmp_path, dial, monkeypatch, qapp):
+    """Занятый порт слушателя маячок не чинит - BLOCKED остаётся BLOCKED."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    monkeypatch.setattr(coordinator._listener, "listen", lambda port: False)
+    coordinator.start()
+    assert coordinator.state is LinkState.BLOCKED
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+
+    try:
+        assert dial == []
+        assert coordinator.state is LinkState.BLOCKED
+    finally:
+        coordinator.stop()
+
+
+def test_a_beacon_does_not_redial_after_protocol_mismatch(tmp_path, dial, qapp):
+    """Несовместимая версия не лечится переподключением (§11)."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator._on_connected(_FakeLink())
+    coordinator._on_message(
+        Message(MessageType.HELLO, {"protocol_major": PROTOCOL_MAJOR + 1}, b"")
+    )
+    assert coordinator.state is LinkState.PROTOCOL_MISMATCH
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+
+    try:
+        assert dial == []
+        assert coordinator.state is LinkState.PROTOCOL_MISMATCH
+    finally:
+        coordinator.stop()
+
+
+def test_the_waiting_side_does_not_react_to_a_beacon(tmp_path, dial, qapp):
+    """Ждущая сторона не звонит и не перезапускает сторож молчания на каждый маячок."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=SMALLEST_ORIGIN_ID)
+
+    coordinator._on_peer_seen(_peer_beacon(origin_id=SMALLEST_ORIGIN_ID), "192.168.1.99")
+
+    try:
+        assert dial == []
+        assert coordinator._silence.isActive() is False
+    finally:
+        coordinator.stop()
+
+
+def test_an_active_retry_timer_defers_a_beacon_dial(tmp_path, dial, qapp):
+    """То же правило, что у платы: тикающий повтор не обгоняется."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    fake_retry = _FakeTimer()
+    coordinator._retry = fake_retry
+    fake_retry.start(reconnect_delay_ms(0))
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
+
+    assert dial == []
+
+
 def test_stop_resets_dialing_and_candidate_index(tmp_path, dial):
     coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
     coordinator._retry = _FakeTimer()
@@ -1806,27 +1927,16 @@ def test_the_candidate_index_wraps_when_the_list_shrinks(tmp_path, dial):
         coordinator.stop()
 
 
-def test_on_peer_seen_restarts_the_dial_from_the_fresh_address(tmp_path, dial):
-    """Маячок от уже доверенного пира с новым адресом - самый достоверный
-    кандидат сейчас; набор должен начаться с него, а не продолжаться с
-    середины прежнего списка, в которой мог застрять неудачный набор."""
-    coordinator, trust = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
-    coordinator.set_board_addresses(["10.0.0.2", "10.0.0.3"])
-    coordinator._candidate_index = 2  # где-то в середине прежнего списка
+def test_on_peer_seen_restarts_the_dial_from_the_fresh_address(tmp_path, dial, qapp):
+    """Маячок от доверенного пира в простое - набор начинается с его адреса,
+    а не с середины прежнего списка, где мог застрять неудачный набор."""
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+    coordinator._board_addresses = ["10.0.0.2", "10.0.0.3"]  # список без автонабора
+    coordinator._candidate_index = 2
 
-    coordinator._on_peer_seen(
-        coordinator_module.Beacon(
-            origin_id=LARGEST_ORIGIN_ID,
-            machine_name="LAPTOP-TWO",
-            fingerprint="f" * 64,
-            port=TCP_PORT,
-            protocol_major=PROTOCOL_MAJOR,
-        ),
-        "192.168.1.99",
-    )
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.99")
 
     try:
-        assert trust.peer().last_address == "192.168.1.99"
         assert dial[-1].address == "192.168.1.99"
     finally:
         coordinator.stop()

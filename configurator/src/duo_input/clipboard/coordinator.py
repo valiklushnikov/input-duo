@@ -300,6 +300,25 @@ class ClipboardCoordinator(QObject):
         """Сохранённый ручной адрес при запуске - без немедленного звонка."""
         self._manual_address = address.strip()
 
+    def _may_dial_on_hint(self) -> bool:
+        """Можно ли прямо сейчас звонить из-за новой подсказки адреса.
+
+        Одно правило для обоих источников подсказок - платы и маячка. Звонит
+        только звонящая сторона (peer.origin_id не меньше нашего), только из
+        DISCONNECTED/SEARCHING и только в простое: ни живой связи, ни набора,
+        ни связывания, ни тикающего таймера повтора. BLOCKED (порт слушателя
+        занят) и PROTOCOL_MISMATCH (пир несовместим) новый адрес не чинит, а
+        набор поверх идущего набора плодил бы параллельные PeerLink.
+        """
+        peer = self.peer
+        if peer is None or peer.origin_id < self._identity.origin_id:
+            return False
+        if self._state not in (LinkState.DISCONNECTED, LinkState.SEARCHING):
+            return False
+        if self._link is not None or self._dialing or self._pairing:
+            return False
+        return not self._retry.isActive()
+
     def set_board_addresses(self, addresses: list[str]) -> None:
         """Адреса второго компьютера, которые сообщила плата.
 
@@ -320,16 +339,7 @@ class ClipboardCoordinator(QObject):
         filtered = [address for address in addresses if address]
         changed = filtered != self._board_addresses
         self._board_addresses = filtered
-        if not changed:
-            return
-        peer = self.peer
-        if peer is None or peer.origin_id < self._identity.origin_id:
-            return
-        if self._state not in (LinkState.DISCONNECTED, LinkState.SEARCHING):
-            return
-        if self._link is not None or self._dialing or self._pairing:
-            return
-        if self._retry.isActive():
+        if not changed or not self._may_dial_on_hint():
             return
         self._candidate_index = 0
         self._try_connect()
@@ -485,15 +495,18 @@ class ClipboardCoordinator(QObject):
 
     def _on_peer_seen(self, beacon: Beacon, address: str) -> None:
         if not self._pairing:
-            # Спаренный компьютер сменил адрес - этого достаточно, чтобы позвонить.
-            if self.peer is not None and beacon.origin_id == self.peer.origin_id:
+            peer = self.peer
+            if peer is None or beacon.origin_id != peer.origin_id:
+                return
+            if peer.last_address != address:
                 self._trust.update_address(address)
-                # Свежий адрес из маячка - самый достоверный кандидат сейчас;
-                # набор должен начаться с него, а не продолжаться с середины
-                # прежнего списка, в которой мог застрять неудачный набор.
-                self._candidate_index = 0
-                self._dialing = False
-                self._try_connect()
+            # Маячок - подсказка адреса, как и список от платы, и звонит по
+            # тому же правилу: не поверх живой связи, идущего набора или
+            # тикающего повтора и не из BLOCKED/PROTOCOL_MISMATCH.
+            if not self._may_dial_on_hint():
+                return
+            self._candidate_index = 0
+            self._try_connect()
             return
         if self._pairing_link is not None:
             return  # кандидат на связывание уже есть - маячки остальных не трогаем
