@@ -150,23 +150,39 @@ class MockUdpSocket(QObject):
         self.multicast_groups = set()
         self.is_closed = False
         self.should_bind_fail = False
+        self.bind_count = 0
+        self.join_count = 0
+        self.leave_count = 0
+        self.close_count = 0
+        self.operations = []
 
     def bind(self, host, port, flags):
+        self.bind_count += 1
+        self.operations.append("bind")
         if self.should_bind_fail:
             return False
         self.is_bound = True
+        self.is_closed = False
         return True
 
     def joinMulticastGroup(self, address):
+        self.join_count += 1
+        self.operations.append("join")
         self.multicast_groups.add(str(address.toString()))
 
     def leaveMulticastGroup(self, address):
+        self.leave_count += 1
+        self.operations.append("leave")
         self.multicast_groups.discard(str(address.toString()))
 
     def close(self):
+        self.close_count += 1
+        self.operations.append("close")
+        self.is_bound = False
         self.is_closed = True
 
     def writeDatagram(self, data, address, port):
+        self.operations.append("announce")
         self.sent_datagrams.append((bytes(data), str(address.toString()), port))
 
     def hasPendingDatagrams(self):
@@ -196,6 +212,30 @@ def test_discovery_sends_beacon_on_start():
     assert discovery.start(beacon) is True
     assert socket.is_bound is True
     assert len(socket.sent_datagrams) >= 1
+
+
+def test_restarting_discovery_rebinds_and_rejoins_multicast(qapp):
+    """A network adapter can invalidate multicast membership across sleep.
+
+    The coordinator calls start() again while disconnected, so that call must
+    rebuild the UDP session instead of binding over an already-bound socket.
+    """
+    socket = MockUdpSocket()
+    first = Beacon(OURS, "LAPTOP-ONE", "a" * 64, 47654, PROTOCOL_MAJOR)
+    refreshed = Beacon(OURS, "LAPTOP-ONE", "b" * 64, 47654, PROTOCOL_MAJOR)
+    discovery = Discovery(OURS, socket=socket)
+
+    assert discovery.start(first) is True
+    socket.operations.clear()
+    assert discovery.start(refreshed) is True
+
+    assert socket.bind_count == 2
+    assert socket.join_count == 2
+    assert socket.leave_count == 1
+    assert socket.close_count == 1
+    assert socket.operations == ["leave", "close", "bind", "join", "announce"]
+    assert decode_beacon(socket.sent_datagrams[-1][0], THEIRS) == refreshed
+    assert discovery._timer.isActive() is True
 
 
 def test_discovery_emits_peer_seen_on_valid_beacon():

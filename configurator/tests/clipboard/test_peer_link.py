@@ -8,8 +8,10 @@ import logging
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtNetwork import QSslSocket
+from PySide6.QtCore import QObject, Signal
+from PySide6.QtNetwork import QAbstractSocket, QSslSocket
 
+import duo_input.clipboard.peer as peer_module
 from duo_input.clipboard.identity import load_or_create
 from duo_input.clipboard.listener import PeerListener
 from duo_input.clipboard.peer import PeerLink, fingerprint_of_socket
@@ -31,6 +33,53 @@ def _perf_events(caplog) -> list[dict[str, str]]:
 @pytest.fixture
 def identities(tmp_path):
     return load_or_create(tmp_path / "one"), load_or_create(tmp_path / "two")
+
+
+class _ConnectingSocket(QObject):
+    """Minimal QSslSocket double for pre-TLS connection failures."""
+
+    bytesWritten = Signal(int)
+    connected = Signal()
+    sslErrors = Signal(object)
+    encrypted = Signal()
+    readyRead = Signal()
+    disconnected = Signal()
+    errorOccurred = Signal(object)
+
+    instances = []
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.aborted = False
+        self.emit_disconnected_on_abort = False
+        self.target = None
+        self.__class__.instances.append(self)
+
+    def setSslConfiguration(self, _configuration):
+        pass
+
+    def setReadBufferSize(self, _size):
+        pass
+
+    def connectToHostEncrypted(self, address, port):
+        self.target = (address, port)
+
+    def abort(self):
+        self.aborted = True
+        if self.emit_disconnected_on_abort:
+            self.disconnected.emit()
+
+    def errorString(self):
+        return "Connection refused"
+
+    def bytesToWrite(self):
+        return 0
+
+
+def _install_connecting_socket(monkeypatch):
+    _ConnectingSocket.instances.clear()
+    monkeypatch.setattr(peer_module, "QSslSocket", _ConnectingSocket)
+    monkeypatch.setattr(peer_module, "ssl_configuration", lambda _identity: object())
 
 
 def test_a_message_crosses_a_real_tls_connection(qtbot, identities):
@@ -61,6 +110,71 @@ def test_a_message_crosses_a_real_tls_connection(qtbot, identities):
     client.close()
 
 
+def test_a_pre_tls_socket_error_releases_the_link_for_retry(
+    qapp, tmp_path, monkeypatch
+):
+    _install_connecting_socket(monkeypatch)
+    link = PeerLink(load_or_create(tmp_path))
+    failures = []
+    link.disconnected.connect(failures.append)
+
+    link.connect_to("192.0.2.1", 47654, "f" * 64)
+    socket = _ConnectingSocket.instances[-1]
+    socket.errorOccurred.emit(QAbstractSocket.SocketError.ConnectionRefusedError)
+
+    assert failures == ["Connection refused"]
+    assert socket.aborted is True
+    assert link._socket is None
+
+
+def test_a_socket_error_emits_disconnect_once_and_cancels_its_deadline(
+    qtbot, tmp_path, monkeypatch
+):
+    _install_connecting_socket(monkeypatch)
+    monkeypatch.setattr(peer_module, "CONNECT_TIMEOUT_MS", 20)
+    link = PeerLink(load_or_create(tmp_path))
+    failures = []
+    link.disconnected.connect(failures.append)
+    link.connect_to("192.0.2.1", 47654, "f" * 64)
+    socket = _ConnectingSocket.instances[-1]
+    socket.emit_disconnected_on_abort = True
+
+    socket.errorOccurred.emit(QAbstractSocket.SocketError.ConnectionRefusedError)
+    qtbot.wait(50)
+
+    assert failures == ["Connection refused"]
+    assert link._connect_timeout.isActive() is False
+
+
+def test_close_cancels_an_outbound_connection_deadline(
+    qtbot, tmp_path, monkeypatch
+):
+    _install_connecting_socket(monkeypatch)
+    monkeypatch.setattr(peer_module, "CONNECT_TIMEOUT_MS", 20)
+    link = PeerLink(load_or_create(tmp_path))
+    failures = []
+    link.disconnected.connect(failures.append)
+    link.connect_to("192.0.2.1", 47654, "f" * 64)
+
+    link.close()
+    assert link._connect_timeout.isActive() is False
+    qtbot.wait(50)
+
+    assert failures == []
+
+
+def test_an_outbound_connection_has_a_deadline(qtbot, tmp_path, monkeypatch):
+    _install_connecting_socket(monkeypatch)
+    monkeypatch.setattr(peer_module, "CONNECT_TIMEOUT_MS", 20, raising=False)
+    link = PeerLink(load_or_create(tmp_path))
+
+    with qtbot.waitSignal(link.disconnected, timeout=1000) as blocker:
+        link.connect_to("192.0.2.1", 47654, "f" * 64)
+
+    assert blocker.args == ["время подключения истекло"]
+    assert _ConnectingSocket.instances[-1].aborted is True
+
+
 def test_a_fresh_identity_completes_a_real_tls_handshake_on_the_active_backend(
     qtbot, tmp_path
 ):
@@ -77,6 +191,23 @@ def test_a_fresh_identity_completes_a_real_tls_handshake_on_the_active_backend(
         client.connect_to("127.0.0.1", listener.port, server_identity.fingerprint)
     qtbot.waitUntil(lambda: bool(incoming), timeout=5000)
 
+    listener.stop()
+    client.close()
+
+
+def test_successful_tls_cancels_the_outbound_connection_deadline(
+    qtbot, identities, monkeypatch
+):
+    monkeypatch.setattr(peer_module, "CONNECT_TIMEOUT_MS", 1000)
+    server_identity, client_identity = identities
+    listener = PeerListener(server_identity)
+    assert listener.listen(0) is True
+    client = PeerLink(client_identity)
+
+    with qtbot.waitSignal(client.connected, timeout=5000):
+        client.connect_to("127.0.0.1", listener.port, server_identity.fingerprint)
+
+    assert client._connect_timeout.isActive() is False
     listener.stop()
     client.close()
 

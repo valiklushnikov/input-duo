@@ -17,7 +17,7 @@ import sys
 import uuid
 from collections import deque
 
-from PySide6.QtCore import QByteArray, QCryptographicHash, QObject, Signal
+from PySide6.QtCore import QByteArray, QCryptographicHash, QObject, QTimer, Signal
 from PySide6.QtNetwork import (
     QAbstractSocket,
     QSsl,
@@ -68,6 +68,11 @@ WRITE_HIGH_WATER_BYTES = MAX_FILE_CHUNK_BYTES * 4
 #: кадру (CONTENT буфера обмена) поверх водораздела; кто его пробивает,
 #: нарушает окно, и соединение с ним разрывается.
 WRITE_LIMIT_BYTES = MAX_FRAME_BYTES + WRITE_HIGH_WATER_BYTES
+
+#: Предельное время на TCP connect и TLS handshake. Системный connect timeout
+#: на разных ОС может длиться минуты; после сна это навсегда оставляло
+#: координатор с ``_dialing = True`` и без следующей попытки.
+CONNECT_TIMEOUT_MS = 10_000
 
 
 def ssl_configuration(identity: NodeIdentity) -> QSslConfiguration:
@@ -124,6 +129,12 @@ class PeerLink(QObject):
         self._peer_fingerprint = ""
         self._congested = False
         self._pending_write_frames: deque[dict[str, object]] = deque()
+        self._connect_timeout = QTimer(self)
+        self._connect_timeout.setSingleShot(True)
+        self._connect_timeout.setInterval(CONNECT_TIMEOUT_MS)
+        self._connect_timeout.timeout.connect(
+            lambda: self._fail("время подключения истекло")
+        )
         clock_domain = (
             "windows_python_monotonic" if sys.platform == "win32" else "python_monotonic"
         )
@@ -231,6 +242,7 @@ class PeerLink(QObject):
         socket = QSslSocket(self)
         socket.setSslConfiguration(ssl_configuration(self._identity))
         self._wire_up(socket)
+        self._connect_timeout.start()
         socket.connectToHostEncrypted(address, port)
 
     def adopt(self, socket: QSslSocket, expected_fingerprint: str | None) -> None:
@@ -308,6 +320,7 @@ class PeerLink(QObject):
         return True
 
     def close(self) -> None:
+        self._connect_timeout.stop()
         if self._socket is not None:
             self._socket.abort()
             self._socket = None
@@ -344,6 +357,9 @@ class PeerLink(QObject):
             )
         )
         socket.connected.connect(self._on_tcp_connected)
+        socket.errorOccurred.connect(
+            lambda _error, bound_socket=socket: self._on_socket_error(bound_socket)
+        )
         socket.sslErrors.connect(self._on_ssl_errors)
         socket.encrypted.connect(self._on_encrypted)
         socket.readyRead.connect(self._on_ready_read)
@@ -395,6 +411,10 @@ class PeerLink(QObject):
             self._connection_generation,
             self._direction,
         )
+
+    def _on_socket_error(self, socket: QSslSocket) -> None:
+        if self._socket is socket:
+            self._fail(socket.errorString() or "ошибка сетевого соединения")
 
     def _check_congestion(self) -> None:
         """Сообщать о ПЕРЕХОДАХ, а не о состоянии на каждый записанный байт.
@@ -451,6 +471,7 @@ class PeerLink(QObject):
         socket = self._socket
         if socket is None:
             return
+        self._connect_timeout.stop()
         # Включить TCP keepalive теперь, когда сокет реально подключён (нативный
         # дескриптор существует - до connect опция не применяется). Молчащий/
         # NAT-осиротевший путь иначе умирает тихо, и разрыв всплывает лишь при
@@ -517,15 +538,21 @@ class PeerLink(QObject):
             self.message_received.emit(message)
 
     def _fail(self, reason: str) -> None:
-        if self._socket is not None:
-            self._socket.abort()
-            self._socket = None
+        socket = self._socket
+        if socket is None:
+            return
+        # Сначала убрать ссылку: abort() может синхронно испустить disconnected,
+        # и повторный вход не должен дважды сообщить координатору об одном сбое.
+        self._socket = None
+        self._connect_timeout.stop()
+        socket.abort()
         self._pending_write_frames.clear()
         self.disconnected.emit(reason)
 
 
 __all__ = [
     "READ_BUFFER_BYTES",
+    "CONNECT_TIMEOUT_MS",
     "WRITE_HIGH_WATER_BYTES",
     "WRITE_LIMIT_BYTES",
     "PeerLink",

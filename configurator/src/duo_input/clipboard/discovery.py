@@ -97,6 +97,7 @@ class Discovery(QObject):
         self._beacon: Beacon | None = None
         self._socket = socket if socket is not None else QUdpSocket(self)
         self._socket.readyRead.connect(self._on_ready_read)
+        self._active = False
         self._timer = QTimer(self)
         self._timer.setInterval(BEACON_INTERVAL_MS)
         self._timer.timeout.connect(self._announce)
@@ -104,6 +105,14 @@ class Discovery(QObject):
     def start(self, beacon: Beacon) -> bool:
         """Начать рассылку маячка и приём чужих. Вернуть True при успехе."""
         self._beacon = beacon
+        if self._active:
+            # После sleep/wake прежний fd может выглядеть открытым, но уже не
+            # состоять в multicast-группе нового сетевого интерфейса. Каждый
+            # повторный recovery начинает настоящую новую UDP-сессию.
+            self._timer.stop()
+            self._socket.leaveMulticastGroup(QHostAddress(GROUP_ADDRESS))
+            self._socket.close()
+            self._active = False
         bound = self._socket.bind(
             QHostAddress.SpecialAddress.AnyIPv4,
             BEACON_PORT,
@@ -112,6 +121,7 @@ class Discovery(QObject):
         if not bound:
             return False
         self._socket.joinMulticastGroup(QHostAddress(GROUP_ADDRESS))
+        self._active = True
         self._announce()
         self._timer.start()
         return True
@@ -119,8 +129,10 @@ class Discovery(QObject):
     def stop(self) -> None:
         """Остановить рассылку и приём."""
         self._timer.stop()
-        self._socket.leaveMulticastGroup(QHostAddress(GROUP_ADDRESS))
+        if self._active:
+            self._socket.leaveMulticastGroup(QHostAddress(GROUP_ADDRESS))
         self._socket.close()
+        self._active = False
 
     def _announce(self) -> None:
         """Отправить свой маячок в группу."""
