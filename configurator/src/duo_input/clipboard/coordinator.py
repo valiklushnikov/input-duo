@@ -496,7 +496,14 @@ class ClipboardCoordinator(QObject):
     def _on_peer_seen(self, beacon: Beacon, address: str) -> None:
         if not self._pairing:
             peer = self.peer
-            if peer is None or beacon.origin_id != peer.origin_id:
+            # Отпечаток в маячке публичен, так что это фильтр, а не
+            # аутентификация (её даёт TLS с закреплённым отпечатком): маячок
+            # прежней установки пира не должен становиться подсказкой вовсе.
+            if (
+                peer is None
+                or beacon.origin_id != peer.origin_id
+                or beacon.fingerprint != peer.fingerprint
+            ):
                 return
             if peer.last_address != address:
                 self._trust.update_address(address)

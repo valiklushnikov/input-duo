@@ -1737,6 +1737,20 @@ def _peer_beacon(origin_id: str = LARGEST_ORIGIN_ID, fingerprint: str = "f" * 64
     )
 
 
+def test_a_beacon_with_a_foreign_fingerprint_is_ignored(tmp_path, dial, qapp):
+    """Совпал origin_id, но не отпечаток - это не наш пир (или его прежняя
+    установка): ни звонка, ни адреса."""
+    coordinator, trust = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID)
+
+    coordinator._on_peer_seen(_peer_beacon(fingerprint="e" * 64), "192.168.1.66")
+
+    try:
+        assert dial == []
+        assert trust.peer().last_address == "192.168.1.5"
+    finally:
+        coordinator.stop()
+
+
 def test_a_beacon_during_a_dial_in_flight_does_not_start_a_second_link(tmp_path, dial, qapp):
     """Маячок приходит каждые 2 с, а набор длится до 10 с: без проверки
     `_dialing` каждый маячок запускал бы ещё одну PeerLink поверх идущей."""
