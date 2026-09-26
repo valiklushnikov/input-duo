@@ -26,11 +26,15 @@ macOS эти UTI из formats() не отдаёт (проверено вручн
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from .backend import ORIGIN_MIME, ClipboardSnapshot, ContentFetcher
 from .formats import collect_payloads, local_file_paths
 from .offer import ClipboardOffer
+
+logger = logging.getLogger(__name__)
 
 #: Как часто опрашивать changeCount. 300 мс - хороший баланс отзывчивости и CPU.
 POLL_MS = 300
@@ -136,17 +140,53 @@ class MacOSClipboardBackend(QObject):
         if current == self._own_change_count:
             self._last_seen_change_count = current
             self._own_change_count = None
+            _log_skipped(current, "own_publish")
             return
         self._last_seen_change_count = current
         if self._pasteboard.is_concealed():
             # Qt на macOS не отдаёт org.nspasteboard.Concealed/TransientType
             # через QMimeData.formats(), поэтому единственный надёжный гейт -
             # нативный, до чтения mimeData() и снятия снапшота.
+            _log_skipped(current, "concealed")
             return
-        snapshot = snapshot_from(self._clipboard.mimeData())
-        if snapshot.payloads:
-            self._local = snapshot
-            self.snapshot_taken.emit(snapshot)
+        mime_data = self._clipboard.mimeData()
+        formats = list(mime_data.formats())
+        if is_private(formats):
+            _log_skipped(current, "own_marker")
+            return
+        snapshot = snapshot_from(mime_data)
+        if not snapshot.payloads:
+            # Только файлы - их везёт передача файлов, а не буфер обмена.
+            # Иначе - типы, а не содержимое: по ним видно, почему копия не ушла.
+            if snapshot.file_paths:
+                _log_skipped(current, "files_only")
+            else:
+                _log_skipped(current, "no_supported_formats", formats)
+            return
+        logger.info(
+            "clipboard_local_change platform=macos change_count=%d mimes=%s bytes=%d",
+            current,
+            ",".join(snapshot.payloads),
+            sum(len(payload) for payload in snapshot.payloads.values()),
+        )
+        self._local = snapshot
+        self.snapshot_taken.emit(snapshot)
+
+
+def _log_skipped(change_count: int, reason: str, formats: list[str] | None = None) -> None:
+    if formats is None:
+        logger.info(
+            "clipboard_local_skipped platform=macos change_count=%d reason=%s",
+            change_count,
+            reason,
+        )
+        return
+    logger.info(
+        "clipboard_local_skipped platform=macos change_count=%d reason=%s formats=%s",
+        change_count,
+        reason,
+        ",".join(formats) or "-",
+    )
 
 
 __all__ = [

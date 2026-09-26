@@ -119,6 +119,7 @@ class WindowsClipboardBackend(QObject):
 
     def _on_data_changed(self) -> None:
         if self._suspended:
+            logger.info("clipboard_local_skipped platform=windows reason=own_publish")
             return
         self._attempts = 0
         self._debounce.start()
@@ -134,7 +135,18 @@ class WindowsClipboardBackend(QObject):
             self._debounce.start()
             return
         if snapshot.is_empty:
+            # Типы, а не содержимое: по ним видно, почему копия не ушла.
+            logger.info(
+                "clipboard_local_skipped platform=windows reason=no_supported_formats formats=%s",
+                ",".join(self._clipboard.mimeData().formats()) or "-",
+            )
             return
+        logger.info(
+            "clipboard_local_change platform=windows mimes=%s bytes=%d files=%d",
+            ",".join(snapshot.payloads) or "-",
+            sum(len(payload) for payload in snapshot.payloads.values()),
+            len(snapshot.file_paths),
+        )
         self._local = snapshot
         self.snapshot_taken.emit(snapshot)
 

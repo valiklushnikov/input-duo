@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 
 from PySide6.QtCore import QEventLoop, QObject, QTimer, Signal
 
@@ -35,6 +36,11 @@ SILENCE_LIMIT_MS = 30_000
 #: (M1 ревью) был объявлен и не мог быть задействован честно. См. правку
 #: спецификации §5.
 TRANSFER_TIMEOUT_MS = 30_000
+
+
+def _mimes(mimes) -> str:
+    """Типы через запятую - для журнала. Только типы, не содержимое."""
+    return ",".join(mimes) or "-"
 
 
 class ClipboardService(QObject):
@@ -96,6 +102,9 @@ class ClipboardService(QObject):
         if not snapshot.payloads:
             return
         if self._echoes_what_we_received(snapshot):
+            logger.info(
+                "clipboard_offer_skipped reason=echo mimes=%s", _mimes(snapshot.payloads)
+            )
             return
 
         try:
@@ -110,6 +119,10 @@ class ClipboardService(QObject):
             # что и на границе платформы, а не в необработанное исключение
             # посреди слота, подключённого к сигналу Qt.
             logger.warning("снимок буфера не объявлен: %s", error)
+            logger.info(
+                "clipboard_offer_skipped reason=undescribable mimes=%s",
+                _mimes(snapshot.payloads),
+            )
             return
 
         self._seq += 1
@@ -120,8 +133,21 @@ class ClipboardService(QObject):
         )
         self._last_sent = offer
         self._last_sent_payloads = dict(snapshot.payloads)
-        if self._link is None and self._buffer_local_offers:
-            self._pending_local_offer = offer
+        logger.info(
+            "clipboard_offer_created seq=%d mimes=%s bytes=%d linked=%s",
+            offer.seq,
+            _mimes(offer.mimes()),
+            sum(len(payload) for payload in snapshot.payloads.values()),
+            self._link is not None,
+        )
+        if self._link is None:
+            # Без связи offer_ready ни к чему не подключён, и объявление
+            # пропало бы молча - именно такую потерю раньше было не увидеть.
+            if self._buffer_local_offers:
+                self._pending_local_offer = offer
+                logger.info("clipboard_offer_buffered seq=%d", offer.seq)
+            else:
+                logger.info("clipboard_offer_dropped seq=%d reason=no_link", offer.seq)
         self.offer_ready.emit(offer)
 
     def content_for(self, mime: str, seq: int) -> bytes | None:
@@ -133,16 +159,27 @@ class ClipboardService(QObject):
     # ------------------------------------------------------------------ удалённое
 
     def on_remote_offer(self, offer: ClipboardOffer) -> None:
+        logger.info(
+            "clipboard_offer_received seq=%d mimes=%s", offer.seq, _mimes(offer.mimes())
+        )
         # Третий пояс: объявление вернулось к нам же.
         if offer.origin_id == self._own_origin_id:
+            logger.info("clipboard_offer_ignored seq=%d reason=own", offer.seq)
             return
         if self._last_received is not None and offer.seq <= self._last_received.seq:
+            logger.info(
+                "clipboard_offer_ignored seq=%d reason=stale last_seq=%d",
+                offer.seq,
+                self._last_received.seq,
+            )
             return
         if self._backend is None:
+            logger.info("clipboard_offer_ignored seq=%d reason=no_backend", offer.seq)
             return
 
         self._last_received = offer
         self._backend.publish(offer, lambda mime: self._fetch(mime, offer))
+        logger.info("clipboard_offer_published seq=%d", offer.seq)
 
     def _fetch(self, mime: str, offer: ClipboardOffer) -> bytes:
         """Забрать содержимое у пира. Синхронно - этого требует буфер обмена.
@@ -164,6 +201,9 @@ class ClipboardService(QObject):
         _receive_content и _receive_content_error.
         """
         if self._link is None:
+            logger.info(
+                "clipboard_fetch_failed seq=%d mime=%s reason=no_link ms=0", offer.seq, mime
+            )
             raise TimeoutError("нет связи со вторым компьютером")
 
         key = (offer.seq, mime)
@@ -171,6 +211,8 @@ class ClipboardService(QObject):
         self._pending_fetches.setdefault(key, []).append(entry)
 
         self._send(Message(MessageType.FETCH, {"seq": offer.seq, "mime": mime}, b""))
+        logger.info("clipboard_fetch_sent seq=%d mime=%s", offer.seq, mime)
+        started = time.monotonic()
 
         loop = QEventLoop()
         entry["loop"] = loop
@@ -183,12 +225,33 @@ class ClipboardService(QObject):
             if not waiters:
                 del self._pending_fetches[key]
 
+        elapsed_ms = int((time.monotonic() - started) * 1000)
         if entry["error"] is not None:
+            logger.info(
+                "clipboard_fetch_failed seq=%d mime=%s reason=%r ms=%d",
+                offer.seq,
+                mime,
+                entry["error"],
+                elapsed_ms,
+            )
             self.content_failed.emit(entry["error"])
             raise TimeoutError(entry["error"])
         if entry["payload"] is None:
+            logger.info(
+                "clipboard_fetch_failed seq=%d mime=%s reason=timeout ms=%d",
+                offer.seq,
+                mime,
+                elapsed_ms,
+            )
             self.content_failed.emit("второй компьютер не ответил")
             raise TimeoutError("второй компьютер не ответил")
+        logger.info(
+            "clipboard_fetch_done seq=%d mime=%s bytes=%d ms=%d",
+            offer.seq,
+            mime,
+            len(entry["payload"]),
+            elapsed_ms,
+        )
         return entry["payload"]
 
     # ------------------------------------------------------------------ связь
@@ -267,6 +330,11 @@ class ClipboardService(QObject):
 
     def _send_offer(self, offer: ClipboardOffer) -> None:
         self._send(Message(MessageType.OFFER, offer.to_dict(), b""))
+        logger.info(
+            "clipboard_offer_sent seq=%d connection_generation=%s",
+            offer.seq,
+            getattr(self._link, "connection_generation", "unknown"),
+        )
 
     def _on_link_lost(self, reason: str) -> None:
         self._heartbeat.stop()
@@ -299,6 +367,15 @@ class ClipboardService(QObject):
         seq = int(message.header.get("seq", -1))
         payload = self.content_for(mime, seq)
         if payload is None:
+            last_sent_seq = self._last_sent.seq if self._last_sent is not None else -1
+            reason = "stale_seq" if seq != last_sent_seq else "unknown_mime"
+            logger.info(
+                "clipboard_fetch_refused seq=%d mime=%s reason=%s last_sent_seq=%d",
+                seq,
+                mime,
+                reason,
+                last_sent_seq,
+            )
             self._send(
                 Message(
                     MessageType.CONTENT_ERROR,
@@ -308,6 +385,7 @@ class ClipboardService(QObject):
             )
             return
         self._send(Message(MessageType.CONTENT, {"seq": seq, "mime": mime}, payload))
+        logger.info("clipboard_fetch_served seq=%d mime=%s bytes=%d", seq, mime, len(payload))
 
     def _receive_content(self, message: Message) -> None:
         key = (int(message.header.get("seq", -1)), str(message.header.get("mime", "")))
