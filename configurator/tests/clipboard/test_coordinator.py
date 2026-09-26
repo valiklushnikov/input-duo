@@ -2043,6 +2043,71 @@ def test_one_discovered_address_expires_while_the_other_stays_fresh(tmp_path, di
     assert coordinator._candidates() == ["10.0.0.20", "192.168.1.5"]
 
 
+def test_a_round_does_not_skip_the_last_good_address_when_both_beacons_expire_mid_dial(
+    tmp_path, dial, qapp
+):
+    """A и B услышаны, A набирается первым и не отвечает - набирается B.
+    Пока B в наборе, оба адреса маячка протухают (TTL). Следующий кандидат
+    обязан быть last_address, а не адрес платы - иначе круг пропускает
+    last_address, потому что после исчезновения B из кандидатов старый откат
+    на self._candidate_index как есть указывал бы уже на адрес платы."""
+    clock = _Clock()
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=clock)
+    coordinator._retry = _FakeTimer()
+    coordinator._board_addresses = ["10.0.0.2"]
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.20")
+    assert dial[-1].address == "192.168.1.20"
+    coordinator._on_peer_seen(_peer_beacon(), "10.0.0.20")  # набор идёт - только запомнить
+
+    dial[-1].disconnected.emit("refused")
+    coordinator._try_connect()  # то, что сделал бы _retry.start(0)
+    assert dial[-1].address == "10.0.0.20"
+
+    clock.now_ms += DISCOVERED_ADDRESS_TTL_MS  # оба адреса маячка протухли
+
+    dial[-1].disconnected.emit("время подключения истекло")
+
+    try:
+        assert coordinator._retry.starts[-1] == 0
+        coordinator._try_connect()
+        assert dial[-1].address == "192.168.1.5"
+    finally:
+        coordinator.stop()
+
+
+def test_a_round_does_not_skip_the_last_good_address_when_resume_clears_the_cache_mid_dial(
+    tmp_path, dial, qapp
+):
+    """Тот же сценарий, но вместо TTL - пробуждение из сна во время набора B.
+    recover_after_resume() только очищает кэш адресов маячка (``_link`` ещё
+    None, набор в процессе), а не рвёт живую связь - и всё равно следующий
+    кандидат обязан быть last_address, а не адрес платы."""
+    clock = _Clock()
+    coordinator, _ = _make_coordinator(tmp_path, peer_origin_id=LARGEST_ORIGIN_ID, clock=clock)
+    coordinator._retry = _FakeTimer()
+    coordinator._board_addresses = ["10.0.0.2"]
+
+    coordinator._on_peer_seen(_peer_beacon(), "192.168.1.20")
+    assert dial[-1].address == "192.168.1.20"
+    coordinator._on_peer_seen(_peer_beacon(), "10.0.0.20")  # набор идёт - только запомнить
+
+    dial[-1].disconnected.emit("refused")
+    coordinator._try_connect()  # то, что сделал бы _retry.start(0)
+    assert dial[-1].address == "10.0.0.20"
+
+    assert coordinator._link is None  # пробуждение только чистит кэш, не рвёт связь
+    coordinator.recover_after_resume()
+
+    dial[-1].disconnected.emit("refused")
+
+    try:
+        coordinator._try_connect()
+        assert dial[-1].address == "192.168.1.5"
+    finally:
+        coordinator.stop()
+
+
 def test_a_duplicate_beacon_only_refreshes_its_own_address(tmp_path, dial, qapp):
     """Повторный маячок продлевает срок именно этого адреса, не двигает его в
     очереди и не трогает срок других."""

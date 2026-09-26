@@ -192,6 +192,11 @@ class ClipboardCoordinator(QObject):
         self._candidate_index = 0
         self._dialing = False
         self._dialing_address = ""
+        # Кто уже был набран в ЭТОМ круге (включая набранного сейчас) - см.
+        # _restart_round() и _drop(): без этого откат при исчезнувшем
+        # адресе мог попасть на уже пройденного кандидата и пропустить
+        # last_address, если адресов маячка исчезло сразу два или больше.
+        self._round_passed: set[str] = set()
         self._state = LinkState.UNPAIRED if trust.peer() is None else LinkState.DISCONNECTED
 
         # Состояние самого связывания - отдельное от рабочей связи: рабочая
@@ -281,7 +286,7 @@ class ClipboardCoordinator(QObject):
         self._silence.stop()
         self._service.cancel_reconnect()
         self._dialing = False
-        self._candidate_index = 0
+        self._restart_round()
         self._forget_discovered_addresses()
         self._clear_pairing_attempt(close_link=True)
         self._end_pairing()
@@ -375,7 +380,7 @@ class ClipboardCoordinator(QObject):
         self._board_addresses = filtered
         if not changed or not self._may_dial_on_hint():
             return
-        self._candidate_index = 0
+        self._restart_round()
         self._try_connect()
 
     # ------------------------------------------------------------------ парринг: вход и код
@@ -398,7 +403,7 @@ class ClipboardCoordinator(QObject):
             # Набор начинается заново, не оттуда, где мог застрять прежний
             # неудачный набор: оператор нажал «Связать» именно для того,
             # чтобы попробовать снова, начиная с последнего удачного адреса.
-            self._candidate_index = 0
+            self._restart_round()
             self._dialing = False
             self._try_connect()
             return
@@ -471,7 +476,7 @@ class ClipboardCoordinator(QObject):
         self._discovery.stop()
         self._attempt = 0
         self._dialing = False
-        self._candidate_index = 0
+        self._restart_round()
         self._forget_discovered_addresses()
         self._service.cancel_reconnect()
         self._trust.forget()
@@ -549,7 +554,7 @@ class ClipboardCoordinator(QObject):
             # BLOCKED/PROTOCOL_MISMATCH.
             if not is_new or not self._may_dial_on_hint():
                 return
-            self._candidate_index = 0
+            self._restart_round()
             self._try_connect()
             return
         if self._pairing_link is not None:
@@ -669,6 +674,17 @@ class ClipboardCoordinator(QObject):
     def _forget_discovered_addresses(self) -> None:
         self._discovered_addresses = {}
 
+    def _restart_round(self) -> None:
+        """Начать перебор кандидатов с начала - и с чистым учётом круга.
+
+        Каждое место, что раньше просто обнуляло ``_candidate_index``, обязано
+        обнулять и ``_round_passed`` вместе с ним: иначе список "уже набранных
+        в этом круге" пережил бы сам круг и по ошибке считал бы пройденным
+        кандидата нового круга, случайно совпавшего адресом со старым.
+        """
+        self._candidate_index = 0
+        self._round_passed = set()
+
     def _candidates(self) -> list[str]:
         """Куда звонить, по порядку: ручной адрес - единственный кандидат;
         иначе свежие адреса из маячков (пир виден прямо сейчас), последний
@@ -707,6 +723,10 @@ class ClipboardCoordinator(QObject):
         # его мимо конца списка и оборвало бы круг, не дойдя до кандидата в
         # слоте 0.
         self._candidate_index %= len(candidates)
+        # Каждый кандидат до набираемого включительно засчитан пройденным в
+        # ЭТОМ круге - см. _drop(): без этого адрес, исчезнувший из списка не
+        # последним, увёл бы откат мимо ещё не пройденного last_address.
+        self._round_passed.update(candidates[: self._candidate_index + 1])
         address = candidates[self._candidate_index]
         self._dialing_address = address
         self._dialing = True
@@ -753,7 +773,7 @@ class ClipboardCoordinator(QObject):
     def _on_connected(self, link: PeerLink) -> None:
         self._link = link
         self._dialing = False
-        self._candidate_index = 0
+        self._restart_round()
         self._forget_discovered_addresses()
         address = _plain_ipv4(getattr(link, "peer_address", "") or "")
         if address:
@@ -845,11 +865,23 @@ class ClipboardCoordinator(QObject):
             # Список мог измениться, пока шёл набор (плата прислала другой,
             # адрес маячка устарел или появился). Следующим идёт тот, что
             # стоит сразу за набранным СЕЙЧАС; если набранного в списке уже
-            # нет, его место занял следующий кандидат - он и идёт дальше.
+            # нет, следующий - первый кандидат, ещё НЕ пройденный в этом
+            # круге. Просто self._candidate_index как есть мог указывать на
+            # адрес платы, если из списка пропал не только набранный, но и
+            # last_address вместе с ним (два и более адреса маячка протухли
+            # или пробуждение из сна очистило кэш прямо во время набора) -
+            # тогда откат на старый индекс пропустил бы last_address вовсе.
             if self._dialing_address in candidates:
                 next_index = candidates.index(self._dialing_address) + 1
             else:
-                next_index = self._candidate_index
+                next_index = next(
+                    (
+                        index
+                        for index, address in enumerate(candidates)
+                        if address not in self._round_passed
+                    ),
+                    len(candidates),
+                )
             if next_index < len(candidates):
                 # Этот адрес не ответил - следующий пробуем сразу: пауза
                 # переподключения нужна после неудачи всего списка, а не
@@ -858,7 +890,7 @@ class ClipboardCoordinator(QObject):
                 self._set_state(LinkState.DISCONNECTED)
                 self._retry.start(0)
                 return
-        self._candidate_index = 0
+        self._restart_round()
         if not self._manual_address:
             self._start_looking()
         self._set_state(LinkState.DISCONNECTED)
