@@ -64,3 +64,35 @@ behaviour (D2 at 10:43:59). A paste survives an outage only when TCP survives
 `SnapshotRegistry.release_all()`, which contradicts the intent documented in
 `SnapshotRegistry.close_descriptors` (keep the snapshot across sessions, spec §1013).
 Separate follow-up (Windows-side), not addressed here.
+
+## Phase D — clean post-fetch timeline (2026-09-27, bundle with 16d0c4ed, W4/B8, no env)
+Dataset B-mixed-22 (100 files, 42,158,741 B), gen e2254a07…, 100/100 byte-exact,
+maxG 8, per-fetch 4, 0 errors, 0 dead-generation events. Gate before paste: 0
+old-generation events in the last 10 s, 0 active fetches.
+
+| boundary | s (rel. T0) |
+|---|---|
+| T0 first destination placeholder | 0.000 |
+| T9 all 100 placeholders | 0.328 |
+| T1 first extension fetch_enter | 0.309 |
+| T2 first FILE_READ | 0.315 |
+| T3 last FILE_READ | 12.776 |
+| T4 last FILE_CHUNK | 12.796 |
+| T5 last host fetch completed | 12.796 |
+| T6/T7 last completionHandler invoked/returned | 12.798 / 12.798 |
+| first destination byte | 12.932 (T6 + 134 ms) |
+| T10 = T11 all sized / byte-stable | 15.694 |
+| T12 Finder UI | not observed |
+
+- Paste → first fetch 0.31 s (the 9.2 s in T1 was dead-generation contamination).
+- Zero-active demand gaps before the final fetch survive: 0.88 s (after entry 0),
+  0.69 s (after 9), 0.10 s (after 18), 0.75 s (after 90) ≈ 2.4 s total.
+- Destination bytes start only after the LAST materialization completes (confirmed
+  for this workload/path): 5 large files (~41 MB) land in ~1.3 s, the ~93 small
+  files then trickle ~16 ms each for ~1.5 s.
+- Local Finder control (same 100 files, ordinary local folder → empty folder, same
+  APFS volume): first entry → stable 0.80 s (large files ~58 ms, clone-like; small
+  ~7 ms/file) vs File Provider first byte → stable 2.76 s: ratio ≈ 3.5x.
+  => the post-fetch tail is File Provider-backed read/copy overhead after
+  materialization, not normal Finder copy cost. fileproviderd vs Finder share of it
+  is not yet separated (PARTIAL).
