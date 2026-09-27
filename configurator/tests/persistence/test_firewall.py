@@ -827,3 +827,32 @@ def test_the_real_catch_clause_writes_the_error_text(tmp_path):
     text = error_file.read_text(encoding="utf-8-sig")
     assert "boom-for-the-test" in text
     assert "System.Management.Automation.RuntimeException" in text
+
+
+# ------------------------------------------------------------ diagnostics
+
+
+def test_the_check_leaves_its_diagnostics_in_the_log(frozen_windows, caplog):
+    """Эти строки читают на стенде, когда собранный exe видит не то, что
+    запуск из исходников: что за exe, во что развернулся, что ответил
+    запрос и как сравнивались запреты с тем же именем файла."""
+    unrelated = _block(Name="Other{9}", Program=r"C:\Other\Other.exe")
+    ours_short = _block(Program=SHORT)
+    system = FakeSystem(output=_with_blocks(ours_short, unrelated), long_paths={SHORT: INSTALLED})
+
+    with caplog.at_level("INFO", logger=firewall.__name__):
+        firewall.check_rules(SHORT, system=system)
+
+    lines = [record.getMessage() for record in caplog.records]
+    [exe_line] = [line for line in lines if line.startswith("брандмауэр: exe ")]
+    assert repr(SHORT) in exe_line and repr(INSTALLED) in exe_line
+    [query_line] = [line for line in lines if line.startswith("брандмауэр: запрос правил: код")]
+    assert f"код 0, {len(system.output)} байт" in query_line
+    assert "брандмауэр: разобрано: правил 2, запрещающих 5, профилей 3" in lines
+    [block_line] = [line for line in lines if line.startswith("брандмауэр: запрет ")]
+    assert BLOCK_ID in block_line
+    assert repr(SHORT) in block_line
+    assert repr(INSTALLED.lower()) in block_line
+    assert "Enabled True, Direction Inbound, Source Local; наш: True" in block_line
+    # Три настоящих исходящих запрета без программы и чужой exe - не в журнале.
+    assert "Other{9}" not in caplog.text

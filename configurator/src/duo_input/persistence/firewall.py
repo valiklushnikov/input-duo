@@ -167,8 +167,12 @@ def check_rules(exe_path: object, *, system: FirewallSystem | None = None) -> Fi
     # Короткий путь 8.3 здесь не разворачивается: _same_program разворачивает
     # обе стороны каждого сравнения.
     program = str(exe_path)
+    logger.info(
+        "брандмауэр: exe %r, длинный путь %r", program, _long_exe_path(program, system)
+    )
     rules = required_rules(program)
     code, output = system.run(_powershell(system), _parameters(_query_script(rules)))
+    logger.info("брандмауэр: запрос правил: код %s, %d байт", code, len(output))
     if code != 0:
         logger.warning("брандмауэр: запрос правил не удался (код %s)", code)
         return FirewallStatus(known=False)
@@ -177,6 +181,12 @@ def check_rules(exe_path: object, *, system: FirewallSystem | None = None) -> Fi
     except ValueError:
         logger.warning("брандмауэр: не удалось разобрать ответ: %r", output[:200])
         return FirewallStatus(known=False)
+    logger.info(
+        "брандмауэр: разобрано: правил %d, запрещающих %d, профилей %d",
+        len(answer["Rules"]),
+        len(answer["Blocks"]),
+        len(answer["Profiles"]),
+    )
 
     missing = tuple(
         rule
@@ -186,6 +196,7 @@ def check_rules(exe_path: object, *, system: FirewallSystem | None = None) -> Fi
     blocks: list[BlockRule] = []
     policy_blocked = False
     for entry in answer["Blocks"]:
+        _log_block_candidate(entry, program, system)
         if not _blocks_us(entry, program, system):
             continue
         if entry.get("Source") == "Local":
@@ -430,15 +441,36 @@ def _parts(value: object) -> set[str]:
     return {part.strip() for part in str(value or "").split(",") if part.strip()}
 
 
-def _same_program(stored: object, program: str, system: FirewallSystem) -> bool:
+def _normal_program(path: object, system: FirewallSystem) -> str:
     """Переменные окружения, короткие имена 8.3 (если файл есть) и регистр -
     не повод считать программы разными."""
+    expanded = ntpath.normpath(ntpath.expandvars(str(path or "")))
+    return ntpath.normcase(ntpath.normpath(system.long_path(expanded)))
 
-    def normal(path: str) -> str:
-        expanded = ntpath.normpath(ntpath.expandvars(path))
-        return ntpath.normcase(ntpath.normpath(system.long_path(expanded)))
 
-    return normal(str(stored or "")) == normal(program)
+def _same_program(stored: object, program: str, system: FirewallSystem) -> bool:
+    return _normal_program(stored, system) == _normal_program(program, system)
+
+
+def _log_block_candidate(entry: dict, program: str, system: FirewallSystem) -> None:
+    """Одна строка на каждое запрещающее правило с тем же ИМЕНЕМ файла, что у
+    нашего exe: что хранится, что с чем сравнили и чем кончилось. Остальные
+    запреты (их на машине бывают сотни) в журнал не попадают."""
+    stored = str(entry.get("Program") or "")
+    if ntpath.basename(stored).lower() != ntpath.basename(program).lower():
+        return
+    logger.info(
+        "брандмауэр: запрет %s: Program %r; сравнение %r с %r; "
+        "Enabled %s, Direction %s, Source %s; наш: %s",
+        entry.get("Name"),
+        stored,
+        _normal_program(stored, system),
+        _normal_program(program, system),
+        entry.get("Enabled"),
+        entry.get("Direction"),
+        entry.get("Source"),
+        _blocks_us(entry, program, system),
+    )
 
 
 def _satisfies(entry: dict, rule: FirewallRule, system: FirewallSystem) -> bool:
