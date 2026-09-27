@@ -167,6 +167,8 @@ class FileTransferService(QObject):
         self._link_lost_slot = None
         self._peer_capabilities: frozenset[str] = frozenset()
         self._snapshots = SnapshotRegistry(perf=self._perf)
+        #: Отпечаток пира, которому предложены текущие снимки ("" - неизвестен).
+        self._snapshot_peer = ""
         self._state = TransferState.IDLE
         self._offered: TransferManifest | None = None
         self._session_id: str | None = None
@@ -205,7 +207,24 @@ class FileTransferService(QObject):
         self._release_link_lost_slot()
         self._reset_receiver(TransferState.IDLE)
         self._peer_capabilities = frozenset()
-        self._snapshots.release_all()
+        # Снимки переживают переподключение ТОГО ЖЕ закреплённого пира (спека
+        # §9, сценарий 2): прерванная вставка продолжается чтениями того же
+        # transfer_id. Другой или неизвестный пир (новый парринг) их не получит.
+        peer = getattr(link, "peer_fingerprint", "") or ""
+        if peer and peer == self._snapshot_peer:
+            self._snapshots.close_all_descriptors()
+            logger.info(
+                "snapshots_retained_on_reconnect count=%d", len(self._snapshots.transfer_ids)
+            )
+        else:
+            if self._snapshots.transfer_ids:
+                logger.info(
+                    "snapshots_released reason=%s count=%d",
+                    "peer_changed" if peer else "peer_unknown",
+                    len(self._snapshots.transfer_ids),
+                )
+            self._snapshots.release_all()
+        self._snapshot_peer = peer
         self._link = link
 
         def on_disconnected(reason, attached_link=link):
@@ -225,6 +244,7 @@ class FileTransferService(QObject):
         self._link = None
         self._peer_capabilities = frozenset()
         self._snapshots.release_all()
+        self._snapshot_peer = ""
         self._reset_receiver(TransferState.DISCONNECTED)
 
     def set_peer_capabilities(self, capabilities: frozenset[str]) -> None:
@@ -253,7 +273,9 @@ class FileTransferService(QObject):
         self._release_link_lost_slot()
         self._link = None
         self._peer_capabilities = frozenset()
-        self._snapshots.release_all()
+        # Разрыв завершает СЕССИЮ, не снимок: дескрипторы закрыты (файлы не
+        # заблокированы), снимки ждут того же пира (см. attach_link).
+        self._snapshots.close_all_descriptors()
         self._reset_receiver(TransferState.DISCONNECTED)
 
     def _reset_receiver(self, state: TransferState) -> None:

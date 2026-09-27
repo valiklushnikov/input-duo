@@ -399,7 +399,7 @@ def test_a_copy_during_an_active_transfer_does_not_release_the_earlier_snapshot(
     assert first in service.snapshots.serving
 
 
-def test_losing_the_link_releases_every_snapshot(sender, tmp_path):
+def test_losing_the_link_ends_the_session_but_keeps_the_snapshot(sender, tmp_path):
     service, link = sender
     source = tmp_path / "a.bin"
     source.write_bytes(b"0123456789")
@@ -408,7 +408,10 @@ def test_losing_the_link_releases_every_snapshot(sender, tmp_path):
 
     link.disconnected.emit("connection closed")
 
-    assert service.snapshots.transfer_ids == ()
+    # спека §9, сценарий 2: дескрипторы закрыты (файл не заблокирован),
+    # снимок ждёт переподключения того же пира
+    assert transfer_id in service.snapshots.transfer_ids
+    assert transfer_id not in service.snapshots.serving
     os.remove(source)
 
 

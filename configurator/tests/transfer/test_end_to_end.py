@@ -352,4 +352,7 @@ def test_a_flood_of_injected_reads_cannot_grow_the_senders_write_queue(
 
     assert peak <= WRITE_LIMIT_BYTES
     assert lost, "нарушитель окна не был отключён"
-    assert sender.snapshots.transfer_ids == ()
+    # Разрыв завершил сессию: дескрипторы закрыты. Снимок остаётся ждать
+    # того же закреплённого пира (спека §9, сценарий 2) - этот пир и так
+    # вправе его читать, новых возможностей сохранение не даёт.
+    assert transfer_id not in sender.snapshots.serving

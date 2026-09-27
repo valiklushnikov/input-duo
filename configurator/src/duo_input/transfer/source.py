@@ -238,6 +238,14 @@ class SnapshotRegistry:
         for transfer_id in list(self._order):
             self.release(transfer_id)
 
+    def close_all_descriptors(self) -> None:
+        """Конец сессии для всех снимков сразу (разрыв связи): дескрипторы
+        закрыты, файлы больше не заблокированы, снимки остаются PUBLISHED.
+        Повторные чтения того же transfer_id после восстановления связи
+        откроют файл заново через _open_and_verify (спека §9, сценарий 2)."""
+        for transfer_id in list(self._order):
+            self.close_descriptors(transfer_id)
+
     # ------------------------------------------------------------------ внутреннее
 
     def _open_and_verify(self, snapshot: _Snapshot, entry_index: int, entry) -> int:
