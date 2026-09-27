@@ -26,6 +26,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     private let serviceSource: DuoServiceSource
     private let fetchController: FetchController
     private let burstDownloads: FinderBurstDownloadCoordinator
+    private let prefetchQueue = DispatchQueue(label: "com.duoinput.configurator.fileprovider.prefetch")
     private let perf: PerfTrace
 
     required convenience init(domain: NSFileProviderDomain) {
@@ -43,7 +44,11 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
          perf: PerfTrace = .live) {
         self.domain = domain
         self.perf = perf
-        self.burstDownloads = FinderBurstDownloadCoordinator()
+        // Rolling prefetch replenishes only while the generation is current:
+        // a completion of a retired generation must never open new downloads.
+        self.burstDownloads = FinderBurstDownloadCoordinator(
+            isGenerationCurrent: { [replicaStore] id in replicaStore.record(for: id)?.isActive ?? false }
+        )
         let manager = NSFileProviderManager(for: domain)
         self.manager = manager
         self.replicaStore = replicaStore
@@ -192,51 +197,15 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             ("entry_index", String(index))
         ] + traceFields)
         if !decision.downloads.isEmpty {
-            let waveId = decision.downloads[0].waveId
             perf.mark("finder_burst_triggered", fields: [
                 ("entry_index", String(index)),
                 ("perf_fetch_id", perfFetchId),
                 ("request_count", String(decision.downloads.count)),
                 ("trigger_item", itemIdentifier.rawValue),
-                ("wave_id", String(waveId)),
+                ("wave_id", String(decision.downloads[0].waveId)),
                 ("transfer_id", parsed.transferId)
             ])
-            for download in decision.downloads {
-                guard burstDownloads.markBurstRequestIssued(download), let manager else {
-                    burstDownloads.burstRequestFailed(download)
-                    perf.mark("finder_burst_download_suppressed", fields: [
-                        ("item_identifier", download.identifier.rawValue),
-                        ("reason", manager == nil ? "manager_unavailable" : "finder_took_ownership"),
-                        ("transfer_id", parsed.transferId),
-                        ("wave_id", String(download.waveId)),
-                        ("wave_position", String(download.wavePosition))
-                    ])
-                    continue
-                }
-                perf.mark("request_download_call", fields: [
-                    ("item_identifier", download.identifier.rawValue),
-                    ("transfer_id", parsed.transferId),
-                    ("trigger_item", download.triggerItem),
-                    ("wave_id", String(download.waveId)),
-                    ("wave_position", String(download.wavePosition))
-                ])
-                manager.requestDownloadForItem(
-                    withIdentifier: download.identifier,
-                    requestedRange: NSRange(location: NSNotFound, length: 0)
-                ) { [perf, burstDownloads] error in
-                    if error != nil { burstDownloads.burstRequestFailed(download) }
-                    let nsError = error as NSError?
-                    perf.mark("finder_burst_download_ack", fields: [
-                        ("error_code", String(nsError?.code ?? 0)),
-                        ("item_identifier", download.identifier.rawValue),
-                        ("status", error == nil ? "ok" : "error"),
-                        ("transfer_id", parsed.transferId),
-                        ("trigger_item", download.triggerItem),
-                        ("wave_id", String(download.waveId)),
-                        ("wave_position", String(download.wavePosition))
-                    ])
-                }
-            }
+            issuePrefetch(decision.downloads, transferId: parsed.transferId)
         }
         // fetchContents completion transfers ownership of the local copy to
         // File Provider. It is not a consumer-completion signal: Finder may
@@ -244,7 +213,18 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         // item purgeable, but leave dehydration to the system cache policy.
         let transferId = parsed.transferId
         let scheduling: (URL?, NSFileProviderItem?, Error?) -> Void = { url, fetchedItem, error in
-            self.burstDownloads.completeFetch(context)
+            let replenish = self.burstDownloads.completeFetch(context, error: error)
+            if !replenish.isEmpty {
+                // Asynchronous boundary: a completion never issues requests
+                // re-entrantly; the horizon bound is enforced by the coordinator.
+                self.perf.mark("prefetch_replenished", fields: [
+                    ("request_count", String(replenish.count)),
+                    ("trigger_item", itemIdentifier.rawValue),
+                    ("outstanding", String(self.burstDownloads.outstandingCount(transferId: transferId))),
+                    ("transfer_id", transferId)
+                ])
+                self.prefetchQueue.async { self.issuePrefetch(replenish, transferId: transferId) }
+            }
             self.perf.mark("fetch_contents_complete", fields: [
                 ("item_identifier", itemIdentifier.rawValue),
                 ("transfer_id", transferId),
@@ -263,6 +243,49 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
             item, request: request, fetchStartedAt: fetchStartedAt,
             extraTraceFields: traceFields, completion: scheduling
         )
+    }
+
+    /// Issue coordinator-scheduled prefetch requests (from a genuine Finder
+    /// fetch or from rolling replenishment). Each request is claimed first; a
+    /// failed claim or request releases its horizon slot and stops rolling.
+    private func issuePrefetch(_ downloads: [FinderBurstDownloadCoordinator.Download], transferId: String) {
+        for download in downloads {
+            guard burstDownloads.markBurstRequestIssued(download), let manager else {
+                if manager == nil { burstDownloads.burstRequestFailed(download) }
+                perf.mark("finder_burst_download_suppressed", fields: [
+                    ("item_identifier", download.identifier.rawValue),
+                    ("reason", manager == nil ? "manager_unavailable" : "finder_took_ownership_or_stopped"),
+                    ("transfer_id", transferId),
+                    ("wave_id", String(download.waveId)),
+                    ("wave_position", String(download.wavePosition))
+                ])
+                continue
+            }
+            perf.mark("request_download_call", fields: [
+                ("item_identifier", download.identifier.rawValue),
+                ("transfer_id", transferId),
+                ("trigger_item", download.triggerItem),
+                ("wave_id", String(download.waveId)),
+                ("wave_position", String(download.wavePosition)),
+                ("outstanding", String(burstDownloads.outstandingCount(transferId: transferId)))
+            ])
+            manager.requestDownloadForItem(
+                withIdentifier: download.identifier,
+                requestedRange: NSRange(location: NSNotFound, length: 0)
+            ) { [perf, burstDownloads] error in
+                if error != nil { burstDownloads.burstRequestFailed(download) }
+                let nsError = error as NSError?
+                perf.mark("finder_burst_download_ack", fields: [
+                    ("error_code", String(nsError?.code ?? 0)),
+                    ("item_identifier", download.identifier.rawValue),
+                    ("status", error == nil ? "ok" : "error"),
+                    ("transfer_id", transferId),
+                    ("trigger_item", download.triggerItem),
+                    ("wave_id", String(download.waveId)),
+                    ("wave_position", String(download.wavePosition))
+                ])
+            }
+        }
     }
 
     func enumerator(

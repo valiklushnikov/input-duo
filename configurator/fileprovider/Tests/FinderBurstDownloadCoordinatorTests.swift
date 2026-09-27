@@ -104,7 +104,7 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
         XCTAssertEqual(secondWave.map(\.rawValue), ["generation:4"])
     }
 
-    func testBurstFetchesCannotRecursivelyTriggerAnotherWave() {
+    func testBurstFetchesCannotRecursivelyTriggerPrefetch() {
         let coordinator = FinderBurstDownloadCoordinator(burstWaveSize: 1)
         let manyEntries = fileEntries(20)
 
@@ -138,7 +138,9 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
             transferId: "generation", index: 3, entries: manyEntries,
             isFileViewerRequest: true
         )
-        XCTAssertEqual(nextGenuineDemand.downloads.first?.waveId, 2)
+        // Rolling prefetch: genuine demand continues the SAME rolling wave; the
+        // burst callbacks above still produced no downloads (recursion guard).
+        XCTAssertEqual(nextGenuineDemand.downloads.first?.waveId, 1)
     }
 
     func testOverlappingGenuineDemandCannotOpenAnotherWave() {
@@ -176,7 +178,7 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
         XCTAssertEqual(later.downloads.map(\.index), [5])
     }
 
-    func testFinderDemandTakesOwnershipBeforeBurstRequestIsIssuedWithoutAdvancingWave() {
+    func testFinderDemandTakesOwnershipBeforeBurstRequestIsIssuedRefillsHorizonWithoutDuplicate() {
         let coordinator = FinderBurstDownloadCoordinator(burstWaveSize: 1)
         let manyEntries = fileEntries(20)
         _ = coordinator.beginFetch(
@@ -195,7 +197,11 @@ final class FinderBurstDownloadCoordinatorTests: XCTestCase {
         )
 
         XCTAssertEqual(finder.context.origin, .finder)
-        XCTAssertTrue(finder.downloads.isEmpty)
+        // Finder owns the raced item; its horizon slot is refilled with the next
+        // item of the same rolling wave (not a new wave), and the raced request
+        // is never issued (no duplicate).
+        XCTAssertEqual(finder.downloads.map(\.index), [raced.index + 1])
+        XCTAssertEqual(finder.downloads.first?.waveId, raced.waveId)
         XCTAssertFalse(coordinator.markBurstRequestIssued(raced))
     }
 

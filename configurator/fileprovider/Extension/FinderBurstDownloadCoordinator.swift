@@ -1,13 +1,42 @@
 import FileProvider
 import Foundation
 
-/// Turns genuine multi-item Finder demand into small, non-recursive
-/// materialization waves. Requests created by a wave are explicitly tracked so
-/// their fetch callbacks can never be mistaken for new Finder demand.
+/// Turns genuine multi-item Finder demand into a bounded ROLLING prefetch of the
+/// following items of the same generation.
+///
+/// Why the bounds exist (Phase H, replacing the Finder-gated fixed waves):
+/// - Recursion guard (kept): fetch callbacks caused by our own
+///   `requestDownloadForItem` are tracked and can never count as Finder demand,
+///   so they can neither open prefetch nor extend its demand lease. Otherwise
+///   every prefetched item would open more prefetch - a chain reaction that
+///   materializes a whole generation nobody asked for.
+/// - Opening still requires two distinct genuine Finder requests, so opening a
+///   single file (Quick Look / double-click) never starts speculation.
+/// - Horizon: at most `prefetchHorizon` coordinator-owned requests are
+///   outstanding (scheduled/issued but not yet fetched, or fetching). A
+///   completed prefetch replenishes the horizon without waiting for another
+///   Finder request - the old fixed waves left the transport idle for one
+///   Finder step (~0.67 s) at every wave boundary (Phase G).
+/// - Demand lease: Finder's cancel of a copy is invisible to the extension
+///   (fileproviderd does not cancel fetchContents), so replenishment is only
+///   allowed within `demandLease` seconds of the last genuine Finder request
+///   for the generation. After an unobservable cancel, speculative work stops
+///   within one lease; during a live paste Finder's next dataless hit renews it.
+/// - Observable stops: a cancelled fetch of the generation, a failed
+///   coordinator-owned fetch or request, or a generation that is no longer
+///   current stop replenishment until new genuine Finder demand.
 final class FinderBurstDownloadCoordinator {
-    /// Production producer bound. Completion of these requests never opens
-    /// another wave; only later genuine Finder demand can advance the frontier.
-    static let productionPrefetchWaveSize = 8
+    /// Production bound on outstanding coordinator-owned prefetch requests.
+    /// Independent of the host FILE_READ budget (8) and per-file window (4).
+    static let productionPrefetchHorizon = 8
+    /// Kept for callers/telemetry that still name the bound a "wave size".
+    static let productionPrefetchWaveSize = productionPrefetchHorizon
+    /// Replenishment is allowed only this long after the last genuine Finder
+    /// request of the generation (bounds work after an invisible Finder cancel).
+    static let productionDemandLeaseSeconds: TimeInterval = 10
+    /// An issued request whose fetch never arrives (item already materialized,
+    /// or dropped by fileproviderd) releases its horizon slot after this long.
+    static let productionIssuedRequestExpirySeconds: TimeInterval = 10
 
     enum FetchOrigin: String {
         case finder = "FINDER"
@@ -50,26 +79,49 @@ final class FinderBurstDownloadCoordinator {
     private struct Assignment {
         let download: Download
         var state: RequestState
+        var issuedAt: TimeInterval?
     }
 
     private struct TransferState {
+        var entries: [DuoManifestEntry] = []
         var fileIndices: Set<Int> = []
         var seenIndices: Set<Int> = []
         var genuineIndices: Set<Int> = []
         var assignments: [Int: Assignment] = [:]
         var activeBurst: [Int: Download] = [:]
+        /// Issued requests that expired without a fetch: a late fetch for one of
+        /// these is still ours (never genuine Finder demand).
+        var expiredRequests: [Int: Download] = [:]
         var activeFetchCounts: [Int: Int] = [:]
         var nextWaveId = 1
-        var openedWaveCount = 0
+        var rollingWaveId: Int?
+        var rollingPosition = 0
+        var frontier = -1
+        var lastGenuineDemandAt: TimeInterval?
+        var maxOutstanding = 0
+
+        var outstanding: Int { assignments.count + activeBurst.count }
     }
 
     private let lock = NSLock()
-    private let burstWaveSize: Int
+    private let prefetchHorizon: Int
+    private let demandLease: TimeInterval
+    private let issuedExpiry: TimeInterval
+    private let now: () -> TimeInterval
+    private let isGenerationCurrent: (String) -> Bool
     private var transfers: [String: TransferState] = [:]
 
-    init(burstWaveSize: Int = FinderBurstDownloadCoordinator.productionPrefetchWaveSize) {
+    init(burstWaveSize: Int = FinderBurstDownloadCoordinator.productionPrefetchHorizon,
+         demandLease: TimeInterval = FinderBurstDownloadCoordinator.productionDemandLeaseSeconds,
+         issuedExpiry: TimeInterval = FinderBurstDownloadCoordinator.productionIssuedRequestExpirySeconds,
+         now: @escaping () -> TimeInterval = { Double(DispatchTime.now().uptimeNanoseconds) / 1e9 },
+         isGenerationCurrent: @escaping (String) -> Bool = { _ in true }) {
         precondition(burstWaveSize >= 0)
-        self.burstWaveSize = burstWaveSize
+        self.prefetchHorizon = burstWaveSize
+        self.demandLease = demandLease
+        self.issuedExpiry = issuedExpiry
+        self.now = now
+        self.isGenerationCurrent = isGenerationCurrent
     }
 
     func beginFetch(
@@ -82,6 +134,7 @@ final class FinderBurstDownloadCoordinator {
         defer { lock.unlock() }
 
         var state = transfers[transferId, default: TransferState()]
+        state.entries = entries
         state.fileIndices = Set(entries.indices.filter { !entries[$0].isDirectory })
         let itemIdentifier = DuoItemModel.entryIdentifier(
             transferId: transferId, index: index
@@ -99,18 +152,21 @@ final class FinderBurstDownloadCoordinator {
                 classification = .knownPrefetchRequested
                 wave = assignment.download
                 state.activeBurst[index] = assignment.download
-                isGenuineDemand = false
-            } else {
-                // Finder won the race before requestDownloadForItem was issued.
-                // It owns this fetch, but the item was already inside the
-                // current wave and therefore cannot advance the frontier.
-                isGenuineDemand = false
             }
-            // If only scheduled, no internal requestDownload call existed yet;
-            // the later claim fails and no duplicate request is issued.
+            // Scheduled-but-not-issued: Finder won the race and owns this fetch;
+            // the later claim fails, so no duplicate request is issued. Either
+            // way the item was already inside our horizon: not new demand.
+            isGenuineDemand = false
+        } else if let expired = state.expiredRequests.removeValue(forKey: index) {
+            // Late fetch of a request whose horizon slot already expired: ours.
+            origin = .burst
+            classification = .knownPrefetchRequested
+            wave = expired
+            state.activeBurst[index] = expired
+            isGenuineDemand = false
         } else if state.activeBurst[index] != nil {
             // File Provider independently delivered a second callback while the
-            // burst fetch is active. It must not advance the burst frontier.
+            // burst fetch is active. It must not count as new demand.
             isGenuineDemand = false
             classification = .ambiguous
         }
@@ -119,41 +175,27 @@ final class FinderBurstDownloadCoordinator {
         state.activeFetchCounts[index, default: 0] += 1
 
         var downloads: [Download] = []
-        if origin == .finder, isGenuineDemand, !alreadyActive,
-           state.assignments.isEmpty, state.activeBurst.isEmpty {
+        if origin == .finder, isGenuineDemand, !alreadyActive {
             state.genuineIndices.insert(index)
-            let mayOpen = state.openedWaveCount > 0 || state.genuineIndices.count >= 2
-            if mayOpen {
-                let candidates = entries.indices.filter { candidate in
-                    candidate > index
-                        && !entries[candidate].isDirectory
-                        && !state.seenIndices.contains(candidate)
-                        && state.assignments[candidate] == nil
-                        && state.activeBurst[candidate] == nil
-                }.prefix(burstWaveSize)
-                if !candidates.isEmpty {
-                    let waveId = state.nextWaveId
+            state.lastGenuineDemandAt = now()
+            state.frontier = max(state.frontier, index)
+            let mayOpen = state.rollingWaveId != nil || state.genuineIndices.count >= 2
+            if mayOpen, isGenerationCurrent(transferId) {
+                if state.rollingWaveId == nil {
+                    state.rollingWaveId = state.nextWaveId
                     state.nextWaveId += 1
-                    state.openedWaveCount += 1
-                    downloads = candidates.enumerated().map { position, candidate in
-                        Download(
-                            identifier: DuoItemModel.entryIdentifier(
-                                transferId: transferId, index: candidate
-                            ),
-                            index: candidate,
-                            waveId: waveId,
-                            wavePosition: position + 1,
-                            triggerItem: itemIdentifier
-                        )
-                    }
-                    for download in downloads {
-                        state.assignments[download.index] = Assignment(
-                            download: download, state: .scheduled
-                        )
-                    }
+                    state.rollingPosition = 0
                 }
+                downloads = fill(&state, transferId: transferId, trigger: itemIdentifier)
             }
+        } else if origin == .finder, !alreadyActive, mayReplenish(state, transferId: transferId) {
+            // Finder took over an item already inside the horizon (race): its
+            // slot is free again, so keep the rolling horizon full. This is not
+            // new demand - it neither opens prefetch nor renews the lease.
+            downloads = fill(&state, transferId: transferId, trigger: itemIdentifier)
         }
+        // A coordinator-owned (.burst) callback never produces downloads here:
+        // replenishment happens only when a fetch completes (completeFetch).
 
         transfers[transferId] = state
         return Decision(
@@ -173,8 +215,8 @@ final class FinderBurstDownloadCoordinator {
     }
 
     /// Claim immediately before requestDownloadForItem. False means genuine
-    /// Finder demand already took ownership, so a speculative request would be
-    /// duplicate work.
+    /// Finder demand already took ownership (or prefetch was stopped), so a
+    /// speculative request would be duplicate or unwanted work.
     func markBurstRequestIssued(_ download: Download) -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -184,11 +226,14 @@ final class FinderBurstDownloadCoordinator {
               assignment.download == download,
               assignment.state == .scheduled else { return false }
         assignment.state = .issued
+        assignment.issuedAt = now()
         state.assignments[download.index] = assignment
         transfers[parsed.transferId] = state
         return true
     }
 
+    /// requestDownloadForItem failed (or could not be issued): release the slot
+    /// and stop replenishing - a failing request must never become a loop.
     func burstRequestFailed(_ download: Download) {
         lock.lock()
         defer { lock.unlock() }
@@ -196,13 +241,17 @@ final class FinderBurstDownloadCoordinator {
               var state = transfers[parsed.transferId],
               state.assignments[download.index]?.download == download else { return }
         state.assignments[download.index] = nil
+        stop(&state)
         transfers[parsed.transferId] = state
     }
 
-    func completeFetch(_ context: FetchContext) {
+    /// Settle one fetch. Returns the downloads that replenish the horizon (to be
+    /// issued asynchronously by the caller); empty when nothing may be issued.
+    @discardableResult
+    func completeFetch(_ context: FetchContext, error: Error? = nil) -> [Download] {
         lock.lock()
         defer { lock.unlock() }
-        guard var state = transfers[context.transferId] else { return }
+        guard var state = transfers[context.transferId] else { return [] }
         if let count = state.activeFetchCounts[context.index] {
             if count <= 1 {
                 state.activeFetchCounts[context.index] = nil
@@ -214,6 +263,17 @@ final class FinderBurstDownloadCoordinator {
            state.activeBurst[context.index]?.waveId == context.waveId {
             state.activeBurst[context.index] = nil
         }
+        if let error {
+            let ns = error as NSError
+            let cancelled = ns.domain == NSCocoaErrorDomain && ns.code == NSUserCancelledError
+            if cancelled || context.origin == .burst {
+                stop(&state)
+            }
+        }
+        var downloads: [Download] = []
+        if error == nil, mayReplenish(state, transferId: context.transferId) {
+            downloads = fill(&state, transferId: context.transferId, trigger: context.itemIdentifier)
+        }
         if state.assignments.isEmpty,
            state.activeBurst.isEmpty,
            state.activeFetchCounts.isEmpty,
@@ -222,6 +282,21 @@ final class FinderBurstDownloadCoordinator {
         } else {
             transfers[context.transferId] = state
         }
+        return downloads
+    }
+
+    /// Test/telemetry: current coordinator-owned outstanding requests.
+    func outstandingCount(transferId: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return transfers[transferId]?.outstanding ?? 0
+    }
+
+    /// Test/telemetry: highest outstanding count ever observed for a transfer.
+    func maxOutstanding(transferId: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return transfers[transferId]?.maxOutstanding ?? 0
     }
 
     /// Compatibility wrapper for the previous API. Production uses the
@@ -239,5 +314,58 @@ final class FinderBurstDownloadCoordinator {
         for download in decision.downloads { _ = markBurstRequestIssued(download) }
         completeFetch(decision.context)
         return decision.downloads.map(\.identifier)
+    }
+
+    // MARK: - private (lock held)
+
+    private func stop(_ state: inout TransferState) {
+        state.rollingWaveId = nil
+        // Not-yet-issued slots are dropped: nothing was requested for them.
+        state.assignments = state.assignments.filter { $0.value.state == .issued }
+    }
+
+    private func mayReplenish(_ state: TransferState, transferId: String) -> Bool {
+        guard state.rollingWaveId != nil,
+              let last = state.lastGenuineDemandAt,
+              now() - last <= demandLease else { return false }
+        return isGenerationCurrent(transferId)
+    }
+
+    private func fill(_ state: inout TransferState, transferId: String, trigger: String) -> [Download] {
+        guard let waveId = state.rollingWaveId else { return [] }
+        let t = now()
+        for (index, assignment) in state.assignments
+        where assignment.state == .issued && t - (assignment.issuedAt ?? t) > issuedExpiry {
+            state.assignments[index] = nil
+            state.expiredRequests[index] = assignment.download
+        }
+        let free = prefetchHorizon - state.outstanding
+        guard free > 0 else { return [] }
+        var candidates: [Int] = []
+        for candidate in state.entries.indices where candidates.count < free {
+            if candidate > state.frontier
+                && !state.entries[candidate].isDirectory
+                && !state.seenIndices.contains(candidate)
+                && state.assignments[candidate] == nil
+                && state.activeBurst[candidate] == nil
+                && state.expiredRequests[candidate] == nil {
+                candidates.append(candidate)
+            }
+        }
+        var downloads: [Download] = []
+        for candidate in candidates {
+            state.rollingPosition += 1
+            let download = Download(
+                identifier: DuoItemModel.entryIdentifier(transferId: transferId, index: candidate),
+                index: candidate,
+                waveId: waveId,
+                wavePosition: state.rollingPosition,
+                triggerItem: trigger
+            )
+            state.assignments[candidate] = Assignment(download: download, state: .scheduled, issuedAt: nil)
+            downloads.append(download)
+        }
+        state.maxOutstanding = max(state.maxOutstanding, state.outstanding)
+        return downloads
     }
 }
