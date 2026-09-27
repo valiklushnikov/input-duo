@@ -74,6 +74,9 @@ CHECK_ARGUMENT = "--check-firewall-rules"
 # модуля NetSecurity на этой машине - около двух секунд.
 RUN_TIMEOUT_SECONDS = 60
 
+# Начальный размер буфера для GetModuleFileNameW; растёт, пока путь не влезет.
+_MODULE_NAME_START = 260
+
 # Профили, для которых ставятся наши правила: политика, отключающая
 # локальные правила в одном из них, делает наши правила там мёртвыми.
 _OUR_PROFILES = ("Private", "Public")
@@ -260,6 +263,49 @@ def _error_file_path() -> str:
 
 def is_applicable() -> bool:
     return _is_windows() and _is_frozen()
+
+
+def running_program() -> Path:
+    """Путь к тому exe, который сейчас работает.
+
+    Не ``sys.executable``: в сборке Nuitka standalone это ``python.exe``
+    рядом с бинарником, которого на диске нет (стенд, 2026-09-27), - правила
+    для него не пропустили бы DuoInput.exe, а ярлык автозапуска не запустил
+    бы ничего. На Windows - имя загруженного образа (GetModuleFileNameW),
+    иначе ``sys.argv[0]``, если это файл, и только потом ``sys.executable``.
+    На других системах ``sys.executable`` верен и остаётся как есть.
+    """
+    if not _is_windows():
+        return Path(sys.executable)
+    name = _module_file_name()
+    if name:
+        return Path(name)
+    if sys.argv and sys.argv[0]:
+        candidate = Path(sys.argv[0]).resolve()
+        if candidate.is_file():
+            return candidate
+    return Path(sys.executable)
+
+
+def _module_file_name() -> str | None:
+    """GetModuleFileNameW(NULL): полный путь образа процесса. Буфер растёт,
+    пока путь не влезет целиком (функция молча обрезает длинный путь)."""
+    import ctypes
+    from ctypes import wintypes
+
+    function = ctypes.WinDLL("kernel32", use_last_error=True).GetModuleFileNameW
+    function.argtypes = [wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD]
+    function.restype = wintypes.DWORD
+    size = _MODULE_NAME_START
+    while size <= 32768 * 2:
+        buffer = ctypes.create_unicode_buffer(size)
+        length = function(None, buffer, size)
+        if length == 0:
+            return None
+        if length < size:
+            return buffer.value
+        size *= 2
+    return None
 
 
 def _is_windows() -> bool:
@@ -658,4 +704,5 @@ __all__ = [
     "is_applicable",
     "remove_rules",
     "required_rules",
+    "running_program",
 ]

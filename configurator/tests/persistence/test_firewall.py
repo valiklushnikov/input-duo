@@ -856,3 +856,67 @@ def test_the_check_leaves_its_diagnostics_in_the_log(frozen_windows, caplog):
     assert "Enabled True, Direction Inbound, Source Local; наш: True" in block_line
     # Три настоящих исходящих запрета без программы и чужой exe - не в журнале.
     assert "Other{9}" not in caplog.text
+
+
+# ------------------------------------------------------------ the running program
+
+
+FROZEN_BINARY = r"C:\Users\Operator\AppData\Local\Programs\Duo Input\DuoInput.exe"
+#: Так Nuitka standalone заполняет sys.executable: python.exe рядом с
+#: бинарником, которого на диске нет (стенд, 2026-09-27).
+NUITKA_EXECUTABLE = r"C:\Users\Operator\AppData\Local\Programs\Duo Input\python.exe"
+
+
+def test_the_running_program_is_the_loaded_image_not_sys_executable(monkeypatch):
+    monkeypatch.setattr(firewall, "_is_windows", lambda: True)
+    monkeypatch.setattr(firewall.sys, "executable", NUITKA_EXECUTABLE)
+    monkeypatch.setattr(firewall, "_module_file_name", lambda: FROZEN_BINARY)
+
+    assert firewall.running_program() == Path(FROZEN_BINARY)
+
+
+def test_without_a_module_name_argv0_is_used_if_it_is_a_file(monkeypatch, tmp_path):
+    binary = tmp_path / "DuoInput.exe"
+    binary.write_bytes(b"")
+    monkeypatch.setattr(firewall, "_is_windows", lambda: True)
+    monkeypatch.setattr(firewall.sys, "executable", NUITKA_EXECUTABLE)
+    monkeypatch.setattr(firewall, "_module_file_name", lambda: None)
+    monkeypatch.setattr(firewall.sys, "argv", [str(binary), "--hidden"])
+
+    assert firewall.running_program() == binary.resolve()
+
+
+def test_sys_executable_is_the_last_resort(monkeypatch, tmp_path):
+    monkeypatch.setattr(firewall, "_is_windows", lambda: True)
+    monkeypatch.setattr(firewall.sys, "executable", NUITKA_EXECUTABLE)
+    monkeypatch.setattr(firewall, "_module_file_name", lambda: None)
+    monkeypatch.setattr(firewall.sys, "argv", [str(tmp_path / "missing.exe")])
+
+    assert firewall.running_program() == Path(NUITKA_EXECUTABLE)
+
+
+def test_outside_windows_the_running_program_is_sys_executable(monkeypatch):
+    monkeypatch.setattr(firewall, "_is_windows", lambda: False)
+    monkeypatch.setattr(firewall.sys, "executable", "/Applications/Duo Input.app/Contents/MacOS/DuoInput")
+    monkeypatch.setattr(firewall, "_module_file_name", lambda: FROZEN_BINARY)
+
+    assert firewall.running_program() == Path("/Applications/Duo Input.app/Contents/MacOS/DuoInput")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="GetModuleFileNameW is Windows-only")
+def test_the_real_module_file_name_is_the_image_that_is_running():
+    """Под venv sys.executable - Scripts\\python.exe, а загружен базовый
+    интерпретатор: то же расхождение, что у собранного exe, в миниатюре."""
+    name = firewall._module_file_name()
+
+    assert name is not None
+    assert Path(name).samefile(getattr(sys, "_base_executable", sys.executable))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="GetModuleFileNameW is Windows-only")
+def test_the_real_module_file_name_grows_its_buffer(monkeypatch):
+    """Путь длиннее начального буфера не должен обрезаться."""
+    full = firewall._module_file_name()
+    monkeypatch.setattr(firewall, "_MODULE_NAME_START", 8)
+
+    assert firewall._module_file_name() == full

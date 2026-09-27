@@ -39,6 +39,7 @@ class FakeFirewall:
         #: Если задан - check_rules отвечает им, а не по present.
         self.status: firewall.FirewallStatus | None = None
         self.check_threads: list[threading.Thread] = []
+        self.checked: list[Path] = []
         self.check_gate: threading.Event | None = None
         self.applied: list[tuple[Path, threading.Thread, int | None]] = []
         self.apply_gate: threading.Event | None = None
@@ -48,6 +49,7 @@ class FakeFirewall:
         return True
 
     def check_rules(self, exe_path):
+        self.checked.append(exe_path)
         self.check_threads.append(threading.current_thread())
         if self.check_gate is not None:
             self.check_gate.wait(10)
@@ -82,10 +84,16 @@ class _Backend(QObject):
     def stop(self) -> None: ...
 
 
+#: То, что GetModuleFileNameW сообщает о собранной программе; sys.executable
+#: в ней - несуществующий python.exe рядом (Nuitka).
+BINARY = Path(r"C:\Program Files\Duo Input\DuoInput.exe")
+
+
 @pytest.fixture
 def fake(monkeypatch, tmp_path):
     fake = FakeFirewall()
     monkeypatch.setattr(app_module, "firewall", fake)
+    monkeypatch.setattr(app_module, "running_program", lambda: BINARY)
     monkeypatch.setattr(app_module, "application_directory", lambda: tmp_path)
     monkeypatch.setattr(app_module, "ClipboardCoordinator", _QuietCoordinator)
     monkeypatch.setattr(
@@ -158,7 +166,9 @@ def test_missing_rules_ask_once_and_allow_applies_them(qtbot, fake, launch):
 
     qtbot.waitUntil(lambda: fake.applied and not _hint_shown(window))
     [(executable, _thread, hwnd)] = fake.applied
-    assert executable == Path(sys.executable)
+    # Не sys.executable: в собранном exe это несуществующий python.exe.
+    assert executable == BINARY
+    assert fake.checked and set(fake.checked) == {BINARY}
     # UAC - над нашим окном, а не мигающей кнопкой на панели задач.
     assert hwnd == int(window.winId())
     assert _prompts() == []

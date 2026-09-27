@@ -12,6 +12,8 @@ from duo_input.device.service import DeviceService
 from duo_input.ui.main_window import MainWindow
 
 PYPROJECT = Path(__file__).resolve().parents[2] / "pyproject.toml"
+#: То, что GetModuleFileNameW сообщает о собранной программе.
+BINARY = r"C:\Program Files\Duo Input\DuoInput.exe"
 
 
 def test_pyproject_declares_the_console_entry_point():
@@ -139,6 +141,8 @@ def test_firewall_switch_acts_and_exits_without_a_window(
 
     monkeypatch.setattr(app, "single_instance_lock", must_not_run)
     monkeypatch.setattr(app, "configure_application", lambda: calls.append(("log",)))
+    # В собранном exe sys.executable - несуществующий python.exe (Nuitka).
+    monkeypatch.setattr(app, "running_program", lambda: Path(BINARY))
     monkeypatch.setattr(
         firewall, "apply_rules", lambda exe: calls.append(("apply_rules", exe)) or succeeded
     )
@@ -151,7 +155,7 @@ def test_firewall_switch_acts_and_exits_without_a_window(
         context.setattr(app.QApplication, "instance", must_not_run)
         result = main(["DuoInput.exe", argument])
 
-    expected = ("apply_rules", Path(sys.executable)) if action == "apply_rules" else (action,)
+    expected = ("apply_rules", Path(BINARY)) if action == "apply_rules" else (action,)
     assert result == exit_code
     assert calls == [("log",), expected]
 
@@ -205,6 +209,7 @@ def test_the_check_switch_tells_the_installer_whether_elevating_would_help(
 
     monkeypatch.setattr(app, "single_instance_lock", must_not_run)
     monkeypatch.setattr(app, "configure_application", lambda: calls.append(("log",)))
+    monkeypatch.setattr(app, "running_program", lambda: Path(BINARY))
     monkeypatch.setattr(firewall, "apply_rules", must_not_run)
     monkeypatch.setattr(
         firewall, "check_rules", lambda exe: calls.append(("check_rules", exe)) or _status(**fields)
@@ -215,4 +220,4 @@ def test_the_check_switch_tells_the_installer_whether_elevating_would_help(
         result = main(["DuoInput.exe", "--check-firewall-rules"])
 
     assert result == exit_code
-    assert calls == [("log",), ("check_rules", Path(sys.executable))]
+    assert calls == [("log",), ("check_rules", Path(BINARY))]

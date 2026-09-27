@@ -2435,3 +2435,26 @@ def test_stop_then_start_does_not_double_connect_the_manual_address_signal(
     assert calls == ["10.0.0.9"]
 
     runtime.stop()
+
+
+def test_autostart_points_at_the_running_program_not_sys_executable(
+    qtbot, qapp, tmp_path, monkeypatch
+):
+    """В собранном exe sys.executable - несуществующий python.exe рядом с
+    бинарником (Nuitka): ярлык автозапуска на него не запустил бы ничего."""
+    from duo_input.persistence import autostart
+
+    binary = tmp_path / "Duo Input" / "DuoInput.exe"
+    monkeypatch.setattr(app_module, "running_program", lambda: binary)
+    monkeypatch.setattr(app_module.sys, "executable", str(tmp_path / "Duo Input" / "python.exe"))
+    monkeypatch.setattr(autostart, "startup_directory", lambda: tmp_path / "Startup")
+    settings = _settings(tmp_path, False)
+    window = build_main_window(settings=settings)
+    qtbot.addWidget(window)
+    configure_runtime(qapp, window, settings)
+
+    window.clipboard_page.autostart_checkbox.setChecked(True)
+
+    content = autostart.shortcut_path().read_text("utf-8")
+    assert f'"{binary}"' in content
+    assert "python.exe" not in content

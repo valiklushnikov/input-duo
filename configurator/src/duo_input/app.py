@@ -31,6 +31,7 @@ from duo_input.device.endpoint_service import EndpointService
 from duo_input.device.service import DeviceService
 from duo_input.i18n import TranslationManager
 from duo_input.persistence import autostart, firewall
+from duo_input.persistence.firewall import running_program
 from duo_input.persistence.locations import application_directory, configure_logging
 from duo_input.transfer.platform_files import UnsupportedPlatformError, create_file_backend
 from duo_input.transfer.service import FileTransferService
@@ -357,7 +358,9 @@ class _ClipboardRuntime(QObject):
         self._window.clipboard_page.set_autostart_checked(enabled)
         try:
             if enabled:
-                autostart.enable(Path(sys.executable))
+                # Не sys.executable: в сборке Nuitka это несуществующий
+                # python.exe рядом с бинарником.
+                autostart.enable(running_program())
             else:
                 autostart.disable()
         except OSError:
@@ -485,7 +488,7 @@ class _ClipboardRuntime(QObject):
     def _check_firewall(self) -> None:
         if not firewall.is_applicable():
             return
-        executable = Path(sys.executable)
+        executable = running_program()
         self._in_background(
             lambda: firewall.check_rules(executable),
             self._firewall_checked,
@@ -570,7 +573,7 @@ class _ClipboardRuntime(QObject):
     def allow_firewall(self) -> None:
         """Одно окно UAC; и из диалога, и из строки на странице."""
         self._window.clipboard_page.set_firewall_busy(True)
-        executable = Path(sys.executable)
+        executable = running_program()
         # Окно UAC - над нашим окном, а не мигающей кнопкой на панели задач.
         # winId() читается здесь, в потоке интерфейса.
         hwnd = int(self._window.winId())
@@ -1084,7 +1087,8 @@ def main(argv: list[str] | None = None) -> int:
         # замка единственного экземпляра: уже работающая копия программы не
         # должна ничего заметить, окна и трея нет.
         configure_application()
-        executable = Path(sys.executable)
+        # Не sys.executable: в сборке Nuitka это несуществующий python.exe.
+        executable = running_program()
         if CHECK_FIREWALL_RULES_ARGUMENT in arguments:
             return firewall_check_exit_code(firewall.check_rules(executable))
         if INSTALL_FIREWALL_RULES_ARGUMENT in arguments:
