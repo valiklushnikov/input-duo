@@ -19,9 +19,13 @@ import logging.handlers
 import sys
 
 import pytest
-from _pytest.faulthandler import fault_handler_stderr_fd_key
 
 from duo_input.persistence import locations
+
+try:  # private pytest API: a rename must not break every test at import
+    from _pytest.faulthandler import fault_handler_stderr_fd_key
+except ImportError:  # pragma: no cover - depends on the pytest version
+    fault_handler_stderr_fd_key = None
 
 
 class UserFilesGuard:
@@ -42,7 +46,11 @@ class UserFilesGuard:
                 # pytest's own dup of stderr, not sys.__stderr__: fd 2 is
                 # redirected into the per-test capture file, and a native
                 # crash would vanish with it.
-                target = self._config.stash.get(fault_handler_stderr_fd_key, None)
+                target = (
+                    None
+                    if fault_handler_stderr_fd_key is None
+                    else self._config.stash.get(fault_handler_stderr_fd_key, None)
+                )
                 faulthandler.enable(
                     sys.__stderr__ if target is None else target, all_threads=True
                 )
