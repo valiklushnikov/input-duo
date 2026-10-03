@@ -29,6 +29,15 @@ WM_CLIPBOARDUPDATE ставится в очередь (Post), поэтому п�
 Единственный ctypes в clipboard/ (исключение в test_boundaries.py): MSG
 читается по адресу, который Qt передаёт фильтру, и окно узнаётся по
 заголовку через user32.
+
+Известный предел: это нативный фильтр ПРИЛОЖЕНИЯ Qt
+(QAbstractNativeEventFilter), и он видит только то, что проходит через
+диспетчер событий Qt. Сообщение, которое доставил ЧУЖОЙ модальный цикл
+(например, COM во время исходящего межпроцессного вызова - тот самый
+вложенный цикл, которым OLE крутит retrieveData), идёт прямо в оконную
+процедуру Qt, минуя этот фильтр: задержки не будет. Если это когда-нибудь
+проявится на практике, эскалация - SetWindowSubclass на самом окне
+"QtClipboardView" (перехват на уровне WNDPROC, а не диспетчера Qt).
 """
 
 from __future__ import annotations
@@ -48,12 +57,28 @@ WM_CLIPBOARDUPDATE = 0x031D
 #: Заголовок окна буфера Qt: createDummyWindow(..., L"QtClipboardView", ...).
 QT_CLIPBOARD_WINDOW_TITLE = "QtClipboardView"
 
+#: HWND_MESSAGE: псевдо-хэндл родителя для окон message-only (winuser.h).
+_HWND_MESSAGE = -3
+
+#: Два имени события, которыми диспетчер Qt на Windows несёт MSG* фильтру
+#: (QAbstractEventDispatcher::filterNativeEvent); всё остальное - не MSG*,
+#: и лезть в message по адресу для него нельзя.
+_MSG_EVENT_TYPES = (b"windows_generic_MSG", b"windows_dispatcher_MSG")
+
+
 class _POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_int32), ("y", ctypes.c_int32)]
 
 
 class _MSG(ctypes.Structure):
-    """winuser.h MSG; ctypes.wintypes не годится для импорта вне Windows."""
+    """winuser.h MSG; ctypes.wintypes не годится для импорта вне Windows.
+
+    В заголовке у MSG есть ещё поле ``lPrivate`` - но оно существует только
+    под ``#ifdef _MAC`` и на Windows в реальном winuser.h его нет вовсе.
+    Здесь структура читается только до ``pt`` включительно: Qt заполняет MSG
+    целиком, но нам нужны лишь первые четыре поля (hwnd, message, wParam,
+    lParam) - ``time``/``pt`` в разметке только ради правильных смещений.
+    """
 
     _fields_ = [
         ("hwnd", ctypes.c_void_p),
@@ -62,7 +87,6 @@ class _MSG(ctypes.Structure):
         ("lParam", ctypes.c_ssize_t),
         ("time", ctypes.c_uint32),
         ("pt", _POINT),
-        ("lPrivate", ctypes.c_uint32),
     ]
 
 
@@ -72,6 +96,11 @@ def _user32():
     user32.PostMessageW.argtypes = [
         ctypes.c_void_p, ctypes.c_uint32, ctypes.c_size_t, ctypes.c_ssize_t
     ]
+    user32.PostMessageW.restype = ctypes.c_int
+    user32.FindWindowExW.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p
+    ]
+    user32.FindWindowExW.restype = ctypes.c_void_p
     return user32
 
 
@@ -94,6 +123,10 @@ class ClipboardUpdateDeferral(QAbstractNativeEventFilter):
     def install(self, application) -> None:
         if self._user32 is None or application is None:
             return
+        if not self._user32.FindWindowExW(_HWND_MESSAGE, None, None, QT_CLIPBOARD_WINDOW_TITLE):
+            # Будущая Qt могла переименовать окно - тогда задержка молча не
+            # сработает ни разу. Это не повод отказаться ставить фильтр.
+            logger.warning("clipboard_update_deferral_window_missing")
         application.installNativeEventFilter(self)
         self._application = application
 
@@ -105,9 +138,17 @@ class ClipboardUpdateDeferral(QAbstractNativeEventFilter):
 
     def nativeEventFilter(self, event_type, message):  # noqa: N802 - Qt API
         # Оба типа событий Qt на Windows ("windows_generic_MSG" и
-        # "windows_dispatcher_MSG") передают MSG*.
+        # "windows_dispatcher_MSG") передают MSG*; всё остальное - не MSG*
+        # и трогать message по адресу для него нельзя.
+        if bytes(event_type) not in _MSG_EVENT_TYPES:
+            return False, 0
+        # reads_in_progress() - дешёвый счётчик; до него никакого ctypes на
+        # КАЖДОЕ сообщение, которое видит приложение (а это почти все):
+        # должен быть хоть один открытый RemoteMimeData.retrieveData.
+        if not reads_in_progress():
+            return False, 0
         msg = _MSG.from_address(int(message))
-        if msg.message != WM_CLIPBOARDUPDATE or not reads_in_progress():
+        if msg.message != WM_CLIPBOARDUPDATE:
             return False, 0
         if _window_title(self._user32, msg.hwnd) != QT_CLIPBOARD_WINDOW_TITLE:
             return False, 0
@@ -124,9 +165,13 @@ class ClipboardUpdateDeferral(QAbstractNativeEventFilter):
     def _redeliver(self) -> None:
         # Если новая вставка началась раньше, чем очередь дошла сюда, фильтр
         # заберёт это сообщение снова и дождётся конца уже её.
+        if self._held is None:
+            return  # случайная повторная доставка - нет-оп, а не падение
         hwnd, w_param, l_param = self._held
         self._held = None
-        self._user32.PostMessageW(hwnd, WM_CLIPBOARDUPDATE, w_param, l_param)
+        if not self._user32.PostMessageW(hwnd, WM_CLIPBOARDUPDATE, w_param, l_param):
+            logger.warning("clipboard_update_redelivery_failed err=%s", ctypes.get_last_error())
+            return
         logger.info("clipboard_update_redelivered")
 
 

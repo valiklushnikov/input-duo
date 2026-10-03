@@ -19,6 +19,23 @@ def qapp():
     # Не удаляем приложение в scope="session", оно нужно всей сессии
 
 
+@pytest.fixture(autouse=True)
+def _reset_global_read_state():
+    """``_reads_in_progress``/``_when_no_reads`` - на весь процесс, не на объект.
+
+    retrieveData рассчитывает на них для «буфер сейчас занят где угодно»
+    (windows_clipboard_events.py), и один тест, упавший с чтением в разгаре,
+    оставил бы счётчик ненулевым или обратный вызов висящим для следующего.
+    """
+    from duo_input.clipboard import backend
+
+    backend._reads_in_progress = 0
+    backend._when_no_reads = []
+    yield
+    backend._reads_in_progress = 0
+    backend._when_no_reads = []
+
+
 @pytest.fixture
 def real_clipboard(qapp):
     """Настоящий буфер обмена QApplication, пустой к концу теста.

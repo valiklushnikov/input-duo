@@ -32,7 +32,7 @@ from PySide6.QtCore import QAbstractNativeEventFilter, QObject, Signal
 from duo_input.clipboard.backend import RemoteMimeData
 from duo_input.clipboard.offer import ClipboardOffer, describe
 from duo_input.clipboard.windows_backend import WindowsClipboardBackend
-from duo_input.clipboard.windows_clipboard_events import ClipboardUpdateDeferral
+from duo_input.clipboard.windows_clipboard_events import _MSG, ClipboardUpdateDeferral
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows message queue")
 
@@ -117,6 +117,16 @@ def _while_reading(work) -> None:
 def _settle(qapp) -> None:
     for _ in range(3):  # singleShot(0), затем повторно отправленное сообщение
         qapp.processEvents()
+
+
+def _raw_msg(hwnd: int, message: int, w: int = 1, l: int = 2) -> int:
+    """Собрать настоящий MSG в памяти и вернуть его адрес - как Qt передал бы filter'у."""
+    msg = _MSG(hwnd=hwnd, message=message, wParam=w, lParam=l)
+    _raw_msg.keepalive.append(msg)  # from_address не продлевает жизнь буфера
+    return ctypes.addressof(msg)
+
+
+_raw_msg.keepalive = []
 
 
 def test_an_update_while_nothing_is_read_reaches_qt(qapp, windows, deferral):
@@ -342,3 +352,134 @@ def test_waiting_for_no_reads_is_one_shot_and_deduplicated(qapp):
     _while_reading(lambda: None)
 
     assert calls == ["idle"]
+
+
+# ------------------------------------------------------------- hardening (8 minors)
+
+
+def test_a_failed_redelivery_is_logged_and_not_claimed_successful(qapp, windows, deferral, caplog):
+    """PostMessageW к уже закрытому окну возвращает FALSE - Minor 1."""
+    caplog.set_level(logging.INFO, logger="duo_input.clipboard")
+    qt_window, _other, _spy = windows
+
+    def work() -> None:
+        _post(qapp, qt_window)
+        user32.DestroyWindow(qt_window)  # к моменту redelivery hwnd уже мёртв
+
+    _while_reading(work)
+    _settle(qapp)
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("clipboard_update_redelivery_failed err=") for m in messages)
+    assert "clipboard_update_redelivered" not in messages
+
+
+def test_install_warns_when_qts_clipboard_window_is_missing(qapp, monkeypatch, caplog):
+    """Minor 2: Qt могла бы переименовать окно - install() не должен молчать об этом.
+
+    Настоящая QApplication уже создала собственное окно "QtClipboardView"
+    (видно даже на offscreen - это окно нативного диспетчера, не рендера),
+    так что "окна нет" симулируется чужим заголовком - ровно то же самое,
+    чем было бы будущее переименование в Qt.
+    """
+    caplog.set_level(logging.WARNING, logger="duo_input.clipboard")
+    monkeypatch.setattr(
+        "duo_input.clipboard.windows_clipboard_events.QT_CLIPBOARD_WINDOW_TITLE",
+        "NotTheRealQtClipboardViewTitle",
+    )
+    deferral = ClipboardUpdateDeferral()
+
+    deferral.install(qapp)
+    try:
+        messages = [r.getMessage() for r in caplog.records]
+        assert "clipboard_update_deferral_window_missing" in messages
+    finally:
+        deferral.uninstall()
+
+
+def test_install_does_not_warn_when_the_window_exists(qapp, caplog):
+    caplog.set_level(logging.WARNING, logger="duo_input.clipboard")
+    deferral = ClipboardUpdateDeferral()
+
+    deferral.install(qapp)
+    try:
+        messages = [r.getMessage() for r in caplog.records]
+        assert "clipboard_update_deferral_window_missing" not in messages
+    finally:
+        deferral.uninstall()
+
+
+def test_install_still_installs_the_filter_when_the_window_is_missing(qapp, monkeypatch, caplog):
+    """Minor 2 говорит «не проваливать install» - фильтр обязан встать как обычно."""
+    caplog.set_level(logging.WARNING, logger="duo_input.clipboard")
+    monkeypatch.setattr(
+        "duo_input.clipboard.windows_clipboard_events.QT_CLIPBOARD_WINDOW_TITLE",
+        "NotTheRealQtClipboardViewTitle",
+    )
+    deferral = ClipboardUpdateDeferral()
+
+    deferral.install(qapp)
+    try:
+        assert deferral._application is qapp
+    finally:
+        deferral.uninstall()
+
+
+def test_a_stray_redelivery_with_nothing_held_is_a_no_op(deferral):
+    """Minor 3: без защиты это тот самый мутант, что падал 0xC0000005."""
+    deferral._redeliver()
+
+
+def test_event_types_other_than_windows_msg_pass_through_untouched(qapp, windows, deferral):
+    """Minor 5: чужой event_type не должен даже заглядывать в message.
+
+    Исключение раскрыто бы RemoteMimeData._retrieve (``except Exception`` -
+    пустая вставка честнее, чем падение), поэтому assert нельзя делать внутри
+    fetcher: результат собирается здесь и проверяется СНАРУЖИ _while_reading.
+    """
+    qt_window, _other, spy = windows
+    results: list[tuple[bool, int]] = []
+
+    def work() -> None:
+        results.append(
+            deferral.nativeEventFilter(b"cocoa_generic_NSEvent", _raw_msg(qt_window, WM_CLIPBOARDUPDATE))
+        )
+
+    _while_reading(work)
+
+    assert results == [(False, 0)]
+
+
+def test_no_read_in_progress_never_constructs_the_msg_struct(qapp, deferral):
+    """Minor 4: message=0 - если reads_in_progress() не проверена первой, это NULL-деref."""
+    result = deferral.nativeEventFilter(b"windows_generic_MSG", 0)
+
+    assert result == (False, 0)
+
+
+def test_windows_dispatcher_msg_is_recognized_like_generic_msg(qapp, windows, deferral):
+    """Minor 5 - положительная ветка: второй тип Qt тоже несёт MSG* и должен перехватываться."""
+    qt_window, _other, spy = windows
+    held: list[tuple[bool, int]] = []
+
+    def work() -> None:
+        address = _raw_msg(qt_window, WM_CLIPBOARDUPDATE)
+        held.append(deferral.nativeEventFilter(b"windows_dispatcher_MSG", address))
+
+    _while_reading(work)
+
+    assert held == [(True, 0)]
+
+
+def test_uninstall_while_held_still_redelivers_after_the_read_ends(qapp, windows, deferral):
+    """Minor 7: uninstall() посреди чтения не должен терять уже забранное сообщение."""
+    qt_window, _other, spy = windows
+
+    def work() -> None:
+        _post(qapp, qt_window)
+        deferral.uninstall()
+
+    _while_reading(work)
+    _settle(qapp)
+
+    assert [entry[1] for entry in spy.seen] == [WM_CLIPBOARDUPDATE]
