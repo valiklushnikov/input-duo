@@ -29,8 +29,9 @@ class _Backend:
 
     def stop(self) -> None: ...
 
-    def publish(self, offer, fetcher) -> None:
+    def publish(self, offer, fetcher) -> bool:
         self.published.append(offer)
+        return True
 
     def payload(self, mime):
         return None

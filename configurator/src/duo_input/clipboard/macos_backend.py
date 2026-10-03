@@ -107,7 +107,7 @@ class MacOSClipboardBackend(QObject):
         self._local = ClipboardSnapshot({})
         self._running = False
 
-    def publish(self, offer: ClipboardOffer, fetcher: ContentFetcher) -> None:
+    def publish(self, offer: ClipboardOffer, fetcher: ContentFetcher) -> bool:
         """Объявить в локальном буфере то, что лежит на втором компьютере.
 
         Provider удерживается живым внутри macos_pasteboard; здесь нужен только
@@ -117,6 +117,7 @@ class MacOSClipboardBackend(QObject):
         count = self._pasteboard.publish_with_origin(offer, fetcher)
         self._own_change_count = count
         self._last_seen_change_count = count
+        return True
 
     def payload(self, mime: str) -> bytes | None:
         return self._local.payload(mime)

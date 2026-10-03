@@ -64,17 +64,44 @@ class ClipboardSnapshot:
 class RemoteMimeData(QMimeData):
     """Содержимое второго компьютера, которого здесь ещё нет."""
 
-    def __init__(self, offer: ClipboardOffer, fetcher: ContentFetcher) -> None:
+    def __init__(
+        self,
+        offer: ClipboardOffer,
+        fetcher: ContentFetcher,
+        on_idle: Callable[[], None] | None = None,
+    ) -> None:
         super().__init__()
         self._offer = offer
         self._fetcher = fetcher
+        self._on_idle = on_idle
         self._cache: dict[str, bytes] = {}
         self._marker = f"{offer.origin_id}:{offer.seq}".encode("ascii")
+        self._reads = 0
+
+    @property
+    def is_busy(self) -> bool:
+        """Читает ли ОС этот объект прямо сейчас.
+
+        Пока читает, заменять его в буфере нельзя: setMimeData удаляет
+        прежний QMimeData, а его retrieveData на стеке - процесс умирает
+        молча, с access violation. Счётчик, а не флаг: вставка может
+        попросить второй формат, пока первый ещё ждёт сеть.
+        """
+        return self._reads > 0
 
     def formats(self):  # noqa: N802 - Qt API
         return [*self._offer.mimes(), ORIGIN_MIME]
 
     def retrieveData(self, mime_type: str, preferred_type):  # noqa: N802 - Qt API
+        self._reads += 1
+        try:
+            return self._retrieve(mime_type)
+        finally:
+            self._reads -= 1
+            if self._reads == 0 and self._on_idle is not None:
+                self._on_idle()
+
+    def _retrieve(self, mime_type: str) -> QByteArray:
         requested = base_mime(mime_type)
         if requested == ORIGIN_MIME:
             return QByteArray(self._marker)
@@ -99,7 +126,9 @@ class ClipboardBackend(Protocol):
 
     def stop(self) -> None: ...
 
-    def publish(self, offer: ClipboardOffer, fetcher: ContentFetcher) -> None: ...
+    def publish(self, offer: ClipboardOffer, fetcher: ContentFetcher) -> bool:
+        """Объявить; False - публикация отложена и будет сделана позже."""
+        ...
 
     def payload(self, mime: str) -> bytes | None: ...
 

@@ -178,8 +178,10 @@ class ClipboardService(QObject):
             return
 
         self._last_received = offer
-        self._backend.publish(offer, lambda mime: self._fetch(mime, offer))
-        logger.info("clipboard_offer_published seq=%d", offer.seq)
+        # False - граница отложила публикацию до конца идущей вставки; строку
+        # clipboard_offer_published она напишет сама, когда опубликует.
+        if self._backend.publish(offer, lambda mime: self._fetch(mime, offer)):
+            logger.info("clipboard_offer_published seq=%d", offer.seq)
 
     def _fetch(self, mime: str, offer: ClipboardOffer) -> bytes:
         """Забрать содержимое у пира. Синхронно - этого требует буфер обмена.

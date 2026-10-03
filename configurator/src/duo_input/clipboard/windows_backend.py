@@ -81,6 +81,8 @@ class WindowsClipboardBackend(QObject):
         self._suspended = False
         self._attempts = 0
         self._published: RemoteMimeData | None = None
+        #: Объявление, пришедшее во время вставки: (offer, fetcher), только новейшее.
+        self._pending: tuple[ClipboardOffer, ContentFetcher] | None = None
         self._local: ClipboardSnapshot = ClipboardSnapshot({})
 
         self._debounce = QTimer(self)
@@ -99,23 +101,54 @@ class WindowsClipboardBackend(QObject):
             return
         self._clipboard.dataChanged.disconnect(self._on_data_changed)
         self._debounce.stop()
+        if self._pending is not None:
+            logger.info("clipboard_offer_dropped seq=%d reason=stopped", self._pending[0].seq)
+            self._pending = None
         self._published = None
         self._local = ClipboardSnapshot({})
         self._running = False
 
-    def publish(self, offer: ClipboardOffer, fetcher: ContentFetcher) -> None:
-        """Объявить в локальном буфере то, что лежит на втором компьютере."""
-        self._published = RemoteMimeData(offer, fetcher)
+    def publish(self, offer: ClipboardOffer, fetcher: ContentFetcher) -> bool:
+        """Объявить в локальном буфере то, что лежит на втором компьютере.
+
+        Вернуть False, если публикация отложена: Windows сейчас читает
+        прежнее объявление (вставка ждёт сеть во вложенном цикле _fetch), а
+        setMimeData удалил бы объект, чей retrieveData на стеке, - процесс
+        умирал молча, с access violation. Отложенное объявление публикуется,
+        когда чтение закончится; из нескольких отложенных - только новейшее.
+        """
+        if self._published is not None and self._published.is_busy:
+            self._pending = (offer, fetcher)
+            logger.info("clipboard_offer_deferred seq=%d reason=paste_in_progress", offer.seq)
+            return False
+        self._pending = None
+        self._published = RemoteMimeData(offer, fetcher, on_idle=self._on_published_idle)
         self._suspended = True
         try:
             self._clipboard.setMimeData(self._published)
         finally:
             self._suspended = False
+        return True
 
     def payload(self, mime: str) -> bytes | None:
         return self._local.payload(mime)
 
     # ------------------------------------------------------------------ внутреннее
+
+    def _on_published_idle(self) -> None:
+        # Вызывается из retrieveData, пока ОС ещё внутри своего вызова: здесь
+        # только ставим публикацию в очередь, сама замена - после возврата.
+        if self._pending is not None:
+            QTimer.singleShot(0, self, self._publish_pending)
+
+    def _publish_pending(self) -> None:
+        if self._pending is None:
+            return  # stop() или уже опубликовано
+        offer, fetcher = self._pending
+        # Если новая вставка успела начаться, publish снова отложит, и это
+        # объявление дождётся её конца.
+        if self.publish(offer, fetcher):
+            logger.info("clipboard_offer_published seq=%d", offer.seq)
 
     def _on_data_changed(self) -> None:
         if self._suspended:

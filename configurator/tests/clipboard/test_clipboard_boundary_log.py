@@ -51,8 +51,9 @@ class _FakeBackend:
     def __init__(self) -> None:
         self.published: list[ClipboardOffer] = []
 
-    def publish(self, offer, fetcher) -> None:
+    def publish(self, offer, fetcher) -> bool:
         self.published.append(offer)
+        return True
 
     def payload(self, mime):
         return None
@@ -163,6 +164,23 @@ def test_a_received_and_published_offer_is_logged(boundary_log):
     assert "mimes=text/plain" in received
     [published] = _lines(boundary_log, "clipboard_offer_published")
     assert "seq=7" in published
+
+
+def test_an_offer_the_backend_deferred_is_not_logged_as_published(boundary_log):
+    """Граница отложила публикацию (идёт вставка) - «published» был бы ложью."""
+
+    class _DeferringBackend(_FakeBackend):
+        def publish(self, offer, fetcher) -> bool:
+            super().publish(offer, fetcher)
+            return False
+
+    service = ClipboardService(own_origin_id=OURS)
+    service.attach_backend(_DeferringBackend())
+
+    service.on_remote_offer(ClipboardOffer(THEIRS, 7, describe({"text/plain": b"hi"})))
+
+    assert _lines(boundary_log, "clipboard_offer_received") != []
+    assert _lines(boundary_log, "clipboard_offer_published") == []
 
 
 def test_an_offer_with_our_own_origin_is_logged_as_ignored(boundary_log):

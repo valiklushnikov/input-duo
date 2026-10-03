@@ -32,9 +32,10 @@ class _RecordingBackend:
 
     def stop(self) -> None: ...
 
-    def publish(self, offer, fetcher) -> None:
+    def publish(self, offer, fetcher) -> bool:
         self.published.append(offer)
         self.fetchers.append(fetcher)
+        return True
 
     def payload(self, mime):
         return None
