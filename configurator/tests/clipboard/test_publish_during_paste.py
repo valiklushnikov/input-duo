@@ -18,9 +18,9 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QMimeData, QObject, Signal
 
-from duo_input.clipboard.backend import ORIGIN_MIME
+from duo_input.clipboard.backend import ORIGIN_MIME, RemoteMimeData
 from duo_input.clipboard.offer import ClipboardOffer, describe
 from duo_input.clipboard.windows_backend import WindowsClipboardBackend
 
@@ -39,16 +39,29 @@ class _ReadingClipboard(QObject):
         self.replaced_while_reading = 0
         #: Объекты, чей retrieveData сейчас на стеке (как у OLE при вставке).
         self.being_read: list = []
+        self.owned = False
 
     def setMimeData(self, data) -> None:  # noqa: N802 - Qt API
         if any(reading is self.current for reading in self.being_read):
             self.replaced_while_reading += 1
         self.current = data
+        self.owned = True
         self.replacements += 1
         self.dataChanged.emit()
 
     def mimeData(self):  # noqa: N802 - Qt API
         return self.current
+
+    def ownsClipboard(self) -> bool:  # noqa: N802 - Qt API
+        return self.owned
+
+    def external_copy(self, text: bytes) -> None:
+        """Пользователь скопировал в другой программе: буфер больше не наш."""
+        data = QMimeData()
+        data.setData("text/plain", text)
+        self.current = data
+        self.owned = False
+        self.dataChanged.emit()
 
     def current_seq(self) -> int:
         marker = bytes(self.current.data(ORIGIN_MIME)).decode("ascii")
@@ -246,3 +259,163 @@ def test_a_deferred_offer_is_logged_as_deferred_then_as_published(qapp, caplog):
     messages = [r.getMessage() for r in caplog.records]
     assert "clipboard_offer_published seq=2" in messages
     backend.stop()
+
+
+def _dropped(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records
+            if r.getMessage().startswith("clipboard_offer_dropped")]
+
+
+def test_a_local_copy_during_the_paste_drops_the_deferred_remote_offer(qapp, caplog):
+    """Свежая локальная копия новее отложенного объявления: B не должен её затереть."""
+    caplog.set_level(logging.INFO, logger="duo_input.clipboard")
+    backend, clipboard = _backend()
+
+    def fetcher(mime: str) -> bytes:
+        backend.publish(_offer(2), lambda m: b"second")
+        clipboard.external_copy(b"typed here")
+        return b"first"
+
+    backend.publish(_offer(1), fetcher)
+    _paste(clipboard)
+    qapp.processEvents()
+
+    assert bytes(clipboard.current.data("text/plain")) == b"typed here"
+    assert clipboard.replacements == 1
+    assert _dropped(caplog) == ["clipboard_offer_dropped seq=2 reason=local_change"]
+    backend.stop()
+
+
+def test_a_late_echo_of_our_own_publish_keeps_the_deferred_offer(qapp, caplog):
+    """dataChanged, пока буфер всё ещё наш, - эхо собственной публикации, а не копия."""
+    caplog.set_level(logging.INFO, logger="duo_input.clipboard")
+    backend, clipboard = _backend()
+
+    def fetcher(mime: str) -> bytes:
+        backend.publish(_offer(2), lambda m: b"second")
+        clipboard.dataChanged.emit()
+        return b"first"
+
+    backend.publish(_offer(1), fetcher)
+    _paste(clipboard)
+    qapp.processEvents()
+
+    assert clipboard.current_seq() == 2
+    assert _dropped(caplog) == []
+    backend.stop()
+
+
+def test_a_deferred_offer_superseded_by_a_newer_one_is_logged(qapp, caplog):
+    caplog.set_level(logging.INFO, logger="duo_input.clipboard")
+    backend, clipboard = _backend()
+
+    def fetcher(mime: str) -> bytes:
+        backend.publish(_offer(2), lambda m: b"second")
+        backend.publish(_offer(3), lambda m: b"third")
+        return b"first"
+
+    backend.publish(_offer(1), fetcher)
+    _paste(clipboard)
+    qapp.processEvents()
+
+    assert _dropped(caplog) == ["clipboard_offer_dropped seq=2 reason=superseded"]
+    backend.stop()
+
+
+def test_a_deferred_offer_superseded_by_a_direct_publish_is_logged(qapp, caplog):
+    caplog.set_level(logging.INFO, logger="duo_input.clipboard")
+    backend, clipboard = _backend()
+
+    def fetcher(mime: str) -> bytes:
+        backend.publish(_offer(2), lambda m: b"second")
+        return b"first"
+
+    backend.publish(_offer(1), fetcher)
+    _paste(clipboard)
+    backend.publish(_offer(3), lambda m: b"third")  # отложенная ещё в очереди
+    qapp.processEvents()
+
+    assert _dropped(caplog) == ["clipboard_offer_dropped seq=2 reason=superseded"]
+    backend.stop()
+
+
+def test_a_flushed_deferred_offer_is_not_logged_as_superseded(qapp, caplog):
+    caplog.set_level(logging.INFO, logger="duo_input.clipboard")
+    backend, clipboard = _backend()
+
+    def fetcher(mime: str) -> bytes:
+        backend.publish(_offer(2), lambda m: b"second")
+        return b"first"
+
+    backend.publish(_offer(1), fetcher)
+    _paste(clipboard)
+    qapp.processEvents()
+
+    assert clipboard.current_seq() == 2
+    assert _dropped(caplog) == []
+    backend.stop()
+
+
+def test_a_new_backend_does_not_replace_an_object_the_old_one_left_being_read(qapp):
+    """Общий буфер выключили и включили, пока вставка ждала сеть (Minor 3)."""
+    old, clipboard = _backend()
+    fresh: list[WindowsClipboardBackend] = []
+
+    def fetcher(mime: str) -> bytes:
+        old.stop()
+        backend = WindowsClipboardBackend(clipboard)
+        backend.start()
+        fresh.append(backend)
+        assert backend.publish(_offer(2), lambda m: b"second") is False
+        qapp.processEvents()
+        return b"first"
+
+    old.publish(_offer(1), fetcher)
+    _paste(clipboard)
+    assert clipboard.replaced_while_reading == 0
+    qapp.processEvents()
+
+    assert clipboard.replaced_while_reading == 0
+    assert clipboard.current_seq() == 2
+    fresh[0].stop()
+
+
+def test_the_real_clipboard_hands_back_our_own_object_while_we_own_it(real_clipboard):
+    """На этом держится проверка занятости через mimeData() (Minor 3)."""
+    backend = WindowsClipboardBackend(real_clipboard)
+    backend.start()
+    backend.publish(_offer(1), lambda m: b"first")
+
+    current = real_clipboard.mimeData()
+
+    assert isinstance(current, RemoteMimeData)
+    assert bytes(current.data(ORIGIN_MIME)) == f"{THEIRS}:1".encode("ascii")
+    backend.stop()
+
+
+def test_an_idle_callback_runs_once_after_the_last_read_only(qapp):
+    """Однократно: остановленная граница не должна получать вызовы вечно."""
+    calls: list[str] = []
+    data = RemoteMimeData(_offer(1), lambda m: b"x")
+    data.call_when_idle(lambda: calls.append("idle"))
+    data.call_when_idle(lambda: calls.append("idle2"))
+
+    data.data("text/plain")
+    data.data("text/html")
+
+    assert calls == ["idle", "idle2"]
+
+
+def test_the_same_idle_callback_registered_twice_runs_once(qapp):
+    calls: list[str] = []
+
+    def callback() -> None:
+        calls.append("idle")
+
+    data = RemoteMimeData(_offer(1), lambda m: b"x")
+    data.call_when_idle(callback)
+    data.call_when_idle(callback)
+
+    data.data("text/plain")
+
+    assert calls == ["idle"]

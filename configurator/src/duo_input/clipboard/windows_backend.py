@@ -101,9 +101,7 @@ class WindowsClipboardBackend(QObject):
             return
         self._clipboard.dataChanged.disconnect(self._on_data_changed)
         self._debounce.stop()
-        if self._pending is not None:
-            logger.info("clipboard_offer_dropped seq=%d reason=stopped", self._pending[0].seq)
-            self._pending = None
+        self._drop_pending("stopped")
         self._published = None
         self._local = ClipboardSnapshot({})
         self._running = False
@@ -117,12 +115,15 @@ class WindowsClipboardBackend(QObject):
         умирал молча, с access violation. Отложенное объявление публикуется,
         когда чтение закончится; из нескольких отложенных - только новейшее.
         """
-        if self._published is not None and self._published.is_busy:
+        reading = self._object_being_read()
+        if reading is not None:
+            self._drop_pending("superseded")
             self._pending = (offer, fetcher)
+            reading.call_when_idle(self._on_reader_idle)
             logger.info("clipboard_offer_deferred seq=%d reason=paste_in_progress", offer.seq)
             return False
-        self._pending = None
-        self._published = RemoteMimeData(offer, fetcher, on_idle=self._on_published_idle)
+        self._drop_pending("superseded")
+        self._published = RemoteMimeData(offer, fetcher)
         self._suspended = True
         try:
             self._clipboard.setMimeData(self._published)
@@ -135,7 +136,24 @@ class WindowsClipboardBackend(QObject):
 
     # ------------------------------------------------------------------ внутреннее
 
-    def _on_published_idle(self) -> None:
+    def _object_being_read(self) -> RemoteMimeData | None:
+        """Наш объект в буфере, который ОС читает прямо сейчас.
+
+        Из буфера, а не из ``_published``: пока буфер наш, QClipboard.mimeData()
+        возвращает тот самый объект - даже если его опубликовала прежняя
+        граница, остановленная посреди вставки.
+        """
+        current = self._clipboard.mimeData()
+        if isinstance(current, RemoteMimeData) and current.is_busy:
+            return current
+        return None
+
+    def _drop_pending(self, reason: str) -> None:
+        if self._pending is not None:
+            logger.info("clipboard_offer_dropped seq=%d reason=%s", self._pending[0].seq, reason)
+            self._pending = None
+
+    def _on_reader_idle(self) -> None:
         # Вызывается из retrieveData, пока ОС ещё внутри своего вызова: здесь
         # только ставим публикацию в очередь, сама замена - после возврата.
         if self._pending is not None:
@@ -143,8 +161,9 @@ class WindowsClipboardBackend(QObject):
 
     def _publish_pending(self) -> None:
         if self._pending is None:
-            return  # stop() или уже опубликовано
+            return  # stop(), локальная копия или уже опубликовано
         offer, fetcher = self._pending
+        self._pending = None  # не «superseded»: это оно и публикуется
         # Если новая вставка успела начаться, publish снова отложит, и это
         # объявление дождётся её конца.
         if self.publish(offer, fetcher):
@@ -154,6 +173,12 @@ class WindowsClipboardBackend(QObject):
         if self._suspended:
             logger.info("clipboard_local_skipped platform=windows reason=own_publish")
             return
+        # Здесь, а не в _take_snapshot: дебаунс 200 мс проиграл бы гонку
+        # отложенной публикации (singleShot(0)), и она затёрла бы копию,
+        # которая уже ушла второму компьютеру. По владению, а не по любому
+        # dataChanged: позднее эхо нашей же публикации - не локальная копия.
+        if self._pending is not None and not self._clipboard.ownsClipboard():
+            self._drop_pending("local_change")
         self._attempts = 0
         self._debounce.start()
 

@@ -64,16 +64,11 @@ class ClipboardSnapshot:
 class RemoteMimeData(QMimeData):
     """Содержимое второго компьютера, которого здесь ещё нет."""
 
-    def __init__(
-        self,
-        offer: ClipboardOffer,
-        fetcher: ContentFetcher,
-        on_idle: Callable[[], None] | None = None,
-    ) -> None:
+    def __init__(self, offer: ClipboardOffer, fetcher: ContentFetcher) -> None:
         super().__init__()
         self._offer = offer
         self._fetcher = fetcher
-        self._on_idle = on_idle
+        self._idle_callbacks: list[Callable[[], None]] = []
         self._cache: dict[str, bytes] = {}
         self._marker = f"{offer.origin_id}:{offer.seq}".encode("ascii")
         self._reads = 0
@@ -89,6 +84,16 @@ class RemoteMimeData(QMimeData):
         """
         return self._reads > 0
 
+    def call_when_idle(self, callback: Callable[[], None]) -> None:
+        """Один раз вызвать ``callback``, когда закончится последнее чтение.
+
+        Ждать может не та граница, что опубликовала объект: общий буфер
+        выключили и включили, пока вставка ждала сеть, - новая граница
+        узнаёт о занятом объекте из буфера, а не из своего поля.
+        """
+        if callback not in self._idle_callbacks:
+            self._idle_callbacks.append(callback)
+
     def formats(self):  # noqa: N802 - Qt API
         return [*self._offer.mimes(), ORIGIN_MIME]
 
@@ -98,8 +103,10 @@ class RemoteMimeData(QMimeData):
             return self._retrieve(mime_type)
         finally:
             self._reads -= 1
-            if self._reads == 0 and self._on_idle is not None:
-                self._on_idle()
+            if self._reads == 0 and self._idle_callbacks:
+                callbacks, self._idle_callbacks = self._idle_callbacks, []
+                for callback in callbacks:
+                    callback()
 
     def _retrieve(self, mime_type: str) -> QByteArray:
         requested = base_mime(mime_type)
