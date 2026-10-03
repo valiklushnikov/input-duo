@@ -9,6 +9,7 @@ switched on. With the shared clipboard off, no socket is ever opened.
 from __future__ import annotations
 
 import logging
+import os
 import socket
 import sys
 import threading
@@ -32,7 +33,11 @@ from duo_input.device.service import DeviceService
 from duo_input.i18n import TranslationManager
 from duo_input.persistence import autostart, firewall
 from duo_input.persistence.firewall import running_program
-from duo_input.persistence.locations import application_directory, configure_logging
+from duo_input.persistence.locations import (
+    application_directory,
+    configure_logging,
+    enable_crash_log,
+)
 from duo_input.transfer.platform_files import UnsupportedPlatformError, create_file_backend
 from duo_input.transfer.service import FileTransferService
 from duo_input.ui.main_window import APPLICATION_NAME, MainWindow
@@ -69,11 +74,43 @@ FIREWALL_POLICY = "policy"
 
 
 def configure_application() -> Path:
-    """Prepare the per-user directories and start the rotating log.
+    """Prepare the per-user directories, start the rotating log and the crash log.
 
     Returns the log file, which the diagnostic report attaches later.
     """
-    return configure_logging()
+    log_file = configure_logging()
+    enable_crash_log()
+    return log_file
+
+
+def install_lifetime_log(application) -> None:
+    """Log the start now and the orderly exit later, with its reason if known.
+
+    A log that ends after ``app_started`` without ``app_exiting`` is a death,
+    not an exit: the two silent deaths of 2026-09-30 and 2026-10-03 could not
+    be told apart from a normal close until this line existed.
+    """
+    logger.info(
+        "app_started version=%s pid=%d executable=%s",
+        __version__,
+        os.getpid(),
+        running_program(),
+    )
+    reason = {"value": "quit"}  # explicit QApplication.quit(): the tray's Exit
+
+    def on_last_window_closed() -> None:
+        # Closing to the tray also emits this, but the program keeps running.
+        if application.quitOnLastWindowClosed():
+            reason["value"] = "last_window_closed"
+
+    def on_session_end(_manager) -> None:
+        reason["value"] = "session_end"
+
+    application.lastWindowClosed.connect(on_last_window_closed)
+    application.commitDataRequest.connect(on_session_end)
+    application.aboutToQuit.connect(
+        lambda: logger.info("app_exiting pid=%d reason=%s", os.getpid(), reason["value"])
+    )
 
 
 def icon_path() -> Path:
@@ -1168,6 +1205,7 @@ def main(argv: list[str] | None = None) -> int:
     application.setApplicationVersion(__version__)
     application.setOrganizationName(ORGANISATION_NAME)
     configure_application()
+    install_lifetime_log(application)
 
     # Set before the first window exists, so nothing is ever shown wearing the
     # platform's default icon and then corrected.
@@ -1225,6 +1263,7 @@ __all__ = [
     "configure_application",
     "configure_runtime",
     "icon_path",
+    "install_lifetime_log",
     "main",
     "single_instance_lock",
     "start_window",
