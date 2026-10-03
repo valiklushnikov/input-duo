@@ -17,11 +17,12 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal
 
 from .backend import ORIGIN_MIME, ClipboardSnapshot, ContentFetcher, RemoteMimeData
 from .formats import SYNCED_MIMES, collect_payloads, local_file_paths
 from .offer import ClipboardOffer
+from .windows_clipboard_events import ClipboardUpdateDeferral
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,8 @@ class WindowsClipboardBackend(QObject):
         #: Объявление, пришедшее во время вставки: (offer, fetcher), только новейшее.
         self._pending: tuple[ClipboardOffer, ContentFetcher] | None = None
         self._local: ClipboardSnapshot = ClipboardSnapshot({})
+        #: Держит «буфер больше не наш» от Qt, пока наш объект читают.
+        self._update_deferral = ClipboardUpdateDeferral()
 
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -94,12 +97,14 @@ class WindowsClipboardBackend(QObject):
         if self._running:
             return
         self._clipboard.dataChanged.connect(self._on_data_changed)
+        self._update_deferral.install(QCoreApplication.instance())
         self._running = True
 
     def stop(self) -> None:
         if not self._running:
             return
         self._clipboard.dataChanged.disconnect(self._on_data_changed)
+        self._update_deferral.uninstall()
         self._debounce.stop()
         self._drop_pending("stopped")
         self._published = None
@@ -137,15 +142,17 @@ class WindowsClipboardBackend(QObject):
     # ------------------------------------------------------------------ внутреннее
 
     def _object_being_read(self) -> RemoteMimeData | None:
-        """Наш объект в буфере, который ОС читает прямо сейчас.
+        """Наш объект, который ОС читает прямо сейчас и который удалит setMimeData.
 
-        Из буфера, а не из ``_published``: пока буфер наш, QClipboard.mimeData()
-        возвращает тот самый объект - даже если его опубликовала прежняя
-        граница, остановленная посреди вставки.
+        Из буфера: пока буфер наш, QClipboard.mimeData() возвращает тот самый
+        объект - даже если его опубликовала прежняя граница, остановленная
+        посреди вставки. И из ``_published``: если буфер уже взяла другая
+        программа, mimeData() отдаёт чужое, а Qt при setMimeData всё равно
+        удалит m_data - наш последний объект, который, может быть, ещё читают.
         """
-        current = self._clipboard.mimeData()
-        if isinstance(current, RemoteMimeData) and current.is_busy:
-            return current
+        for candidate in (self._clipboard.mimeData(), self._published):
+            if isinstance(candidate, RemoteMimeData) and candidate.is_busy:
+                return candidate
         return None
 
     def _drop_pending(self, reason: str) -> None:
@@ -162,6 +169,12 @@ class WindowsClipboardBackend(QObject):
     def _publish_pending(self) -> None:
         if self._pending is None:
             return  # stop(), локальная копия или уже опубликовано
+        if not self._clipboard.ownsClipboard():
+            # Другая программа взяла буфер во время вставки; её
+            # WM_CLIPBOARDUPDATE задержан до конца чтения, и dataChanged
+            # придёт позже этой публикации - она затёрла бы копию.
+            self._drop_pending("local_change")
+            return
         offer, fetcher = self._pending
         self._pending = None  # не «superseded»: это оно и публикуется
         # Если новая вставка успела начаться, publish снова отложит, и это

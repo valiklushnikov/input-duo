@@ -278,7 +278,14 @@ _CTYPES_ALLOWED = ("windows_com.py", "windows_files.py", "fileprovider_proto.py"
 #: возврата: в стандартной библиотеке этого нет (os.startfile не ждёт и кода
 #: не возвращает). Вызовы ctypes там - внутри двух функций на границе
 #: процесса, а не по всему модулю.
-_CTYPES_ALLOWED_OUTSIDE_TRANSFER = ("duo_input/persistence/firewall.py",)
+#: clipboard/windows_clipboard_events.py: нативный фильтр читает MSG по адресу,
+#: который Qt передаёт фильтру, и узнаёт окно буфера Qt по заголовку - без
+#: этого нельзя задержать WM_CLIPBOARDUPDATE, на котором Qt удаляет наш
+#: читаемый объект. ctypes там только в чтении MSG и двух вызовах user32.
+_CTYPES_ALLOWED_OUTSIDE_TRANSFER = (
+    "duo_input/persistence/firewall.py",
+    "duo_input/clipboard/windows_clipboard_events.py",
+)
 #: Task 19: the File Provider slice adds its own pyobjc-touching modules,
 #: mirroring the existing macos_pasteboard.py exception rather than loosening
 #: the rule itself. fileprovider_client.py/fileprovider_domain.py guard their
@@ -336,7 +343,8 @@ def test_only_the_windows_adapters_touch_ctypes():
 
     assert offenders == set(), (
         "ctypes разрешён только в нативных адаптерах transfer/ и в "
-        "persistence/firewall.py — вся нативная грязь должна быть в одном месте: "
+        "persistence/firewall.py и clipboard/windows_clipboard_events.py — "
+        "вся нативная грязь должна быть в одном месте: "
         f"{offenders}"
     )
     # Проверка намеренно на один уровень: утверждение здесь - "в ЭТОМ файле

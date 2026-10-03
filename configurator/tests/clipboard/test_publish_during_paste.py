@@ -380,8 +380,15 @@ def test_a_new_backend_does_not_replace_an_object_the_old_one_left_being_read(qa
     fresh[0].stop()
 
 
-def test_the_real_clipboard_hands_back_our_own_object_while_we_own_it(real_clipboard):
-    """На этом держится проверка занятости через mimeData() (Minor 3)."""
+def test_the_offscreen_clipboard_hands_back_our_own_object(real_clipboard):
+    """QClipboard.mimeData() возвращает наш объект - на offscreen-платформе.
+
+    Доказывает это только для offscreen QPlatformClipboard, на котором идут
+    тесты. Для настоящего Windows опора другая: Qt 6.10.1
+    QWindowsClipboard::mimeData() возвращает ``m_data->mimeData()``, пока
+    ownsClipboard(), и прогон на настоящем буфере (repro_fixed_r1_run.log)
+    показал ``clipboard_offer_deferred`` - занятость нашлась через буфер.
+    """
     backend = WindowsClipboardBackend(real_clipboard)
     backend.start()
     backend.publish(_offer(1), lambda m: b"first")
@@ -419,3 +426,44 @@ def test_the_same_idle_callback_registered_twice_runs_once(qapp):
     data.data("text/plain")
 
     assert calls == ["idle"]
+
+
+def test_a_deferred_offer_is_dropped_if_the_clipboard_was_lost_during_the_paste(qapp, caplog):
+    """Чужое копирование во время вставки: его WM_CLIPBOARDUPDATE задержан до
+    конца чтения, и dataChanged придёт уже после отложенной публикации. Она
+    сама обязана увидеть, что буфер больше не наш, и не затирать копию."""
+    caplog.set_level(logging.INFO, logger="duo_input.clipboard")
+    backend, clipboard = _backend()
+
+    def fetcher(mime: str) -> bytes:
+        backend.publish(_offer(2), lambda m: b"second")
+        clipboard.owned = False  # другая программа взяла буфер; сигнал задержан
+        return b"first"
+
+    backend.publish(_offer(1), fetcher)
+    _paste(clipboard)
+    qapp.processEvents()
+
+    assert clipboard.replacements == 1
+    assert _dropped(caplog) == ["clipboard_offer_dropped seq=2 reason=local_change"]
+    backend.stop()
+
+
+def test_our_last_object_still_being_read_counts_as_busy_after_losing_the_clipboard(qapp):
+    """mimeData() уже отдаёт чужое, а Qt при setMimeData удалит m_data - наш
+    последний объект, который всё ещё читают."""
+    backend, clipboard = _backend()
+    results: list[bool] = []
+
+    def fetcher(mime: str) -> bytes:
+        clipboard.current = QMimeData()  # чужое содержимое, без сигнала
+        clipboard.owned = False
+        results.append(backend.publish(_offer(2), lambda m: b"second"))
+        return b"first"
+
+    backend.publish(_offer(1), fetcher)
+    _paste(clipboard)
+
+    assert results == [False]
+    assert clipboard.replacements == 1
+    backend.stop()

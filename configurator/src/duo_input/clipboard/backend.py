@@ -26,6 +26,27 @@ ORIGIN_MIME = "application/x-duo-input-origin"
 #: Как достать содержимое одного формата. Может бросить - это нормально.
 ContentFetcher = Callable[[str], bytes]
 
+#: Чтения RemoteMimeData, идущие прямо сейчас, по всем объектам процесса.
+#: Нужны тому, кто ждёт не конкретный объект, а «ничего нашего не читают»:
+#: Qt удаляет свой m_data на WM_CLIPBOARDUPDATE, и задержать это можно только
+#: до конца ВСЕХ чтений (windows_clipboard_events.py).
+_reads_in_progress = 0
+_when_no_reads: list[Callable[[], None]] = []
+
+
+def reads_in_progress() -> int:
+    return _reads_in_progress
+
+
+def call_when_no_reads(callback: Callable[[], None]) -> None:
+    """Один раз вызвать ``callback``, когда закончится последнее чтение в процессе.
+
+    Вызывается изнутри retrieveData: callback обязан лишь поставить работу в
+    очередь, а не делать её.
+    """
+    if callback not in _when_no_reads:
+        _when_no_reads.append(callback)
+
 
 def base_mime(mime_type: str) -> str:
     """Имя формата без параметров: ``text/plain;charset=utf-8`` -> ``text/plain``.
@@ -98,14 +119,21 @@ class RemoteMimeData(QMimeData):
         return [*self._offer.mimes(), ORIGIN_MIME]
 
     def retrieveData(self, mime_type: str, preferred_type):  # noqa: N802 - Qt API
+        global _reads_in_progress, _when_no_reads
         self._reads += 1
+        _reads_in_progress += 1
         try:
             return self._retrieve(mime_type)
         finally:
             self._reads -= 1
+            _reads_in_progress -= 1
             if self._reads == 0 and self._idle_callbacks:
                 callbacks, self._idle_callbacks = self._idle_callbacks, []
                 for callback in callbacks:
+                    callback()
+            if _reads_in_progress == 0 and _when_no_reads:
+                waiting, _when_no_reads = _when_no_reads, []
+                for callback in waiting:
                     callback()
 
     def _retrieve(self, mime_type: str) -> QByteArray:
@@ -147,4 +175,6 @@ __all__ = [
     "ContentFetcher",
     "RemoteMimeData",
     "base_mime",
+    "call_when_no_reads",
+    "reads_in_progress",
 ]
