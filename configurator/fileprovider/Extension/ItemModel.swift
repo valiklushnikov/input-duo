@@ -37,6 +37,29 @@ struct DuoManifestEntry {
     }
 }
 
+/// A generation's decoded manifest entries plus a directory path -> entry
+/// index map, built once so resolving many items' parents is O(1) each instead
+/// of a scan of the whole manifest per item (O(N^2) on a 40k-entry paste).
+struct DuoDecodedManifest {
+    let entries: [DuoManifestEntry]
+    /// First directory entry per path - the same match the linear
+    /// `parentIdentifier(transferId:entries:index:)` scan picks.
+    let directoryIndexByPath: [String: Int]
+
+    init(entries: [DuoManifestEntry]) {
+        self.entries = entries
+        var byPath: [String: Int] = [:]
+        for (index, entry) in entries.enumerated() where entry.isDirectory && byPath[entry.path] == nil {
+            byPath[entry.path] = index
+        }
+        self.directoryIndexByPath = byPath
+    }
+
+    init(record: GenerationRecord) {
+        self.init(entries: DuoItemModel.entries(in: record))
+    }
+}
+
 /// Pure mapping from a `GenerationRecord` (Task 4's replica) to the
 /// identifiers/versions the domain namespace is built from. Everything here
 /// is a deterministic function of the record's own bytes - no clocks, no
@@ -120,6 +143,24 @@ enum DuoItemModel {
         // Defensive: manifest referenced a parent directory that isn't
         // itself an entry. Attach to the generation container rather than
         // dropping the item from the tree.
+        return containerIdentifier(transferId: transferId)
+    }
+
+    /// `parentIdentifier(transferId:entries:index:)` resolved through the
+    /// manifest's directory map instead of a linear scan.
+    static func parentIdentifier(
+        transferId: String,
+        manifest: DuoDecodedManifest,
+        index: Int
+    ) -> NSFileProviderItemIdentifier {
+        let parentPath = manifest.entries[index].parentPath
+        if parentPath.isEmpty {
+            return containerIdentifier(transferId: transferId)
+        }
+        if let parentIndex = manifest.directoryIndexByPath[parentPath] {
+            return entryIdentifier(transferId: transferId, index: parentIndex)
+        }
+        // Defensive: see the linear overload.
         return containerIdentifier(transferId: transferId)
     }
 
@@ -222,23 +263,42 @@ enum DuoItemFactory {
     /// `index` is out of range.
     static func item(for record: GenerationRecord, index: Int) -> DuoItem? {
         let entries = DuoItemModel.entries(in: record)
-        return item(for: record, entries: entries, index: index)
+        guard entries.indices.contains(index) else { return nil }
+        return item(
+            for: record,
+            entries: entries,
+            index: index,
+            parent: DuoItemModel.parentIdentifier(transferId: record.transferId, entries: entries, index: index)
+        )
     }
 
     /// Page-building overload: callers that need several entries from the
-    /// same generation decode its manifest once instead of once per item.
+    /// same generation decode its manifest (and directory map) once instead of
+    /// once per item.
     static func item(
         for record: GenerationRecord,
-        entries: [DuoManifestEntry],
+        manifest: DuoDecodedManifest,
         index: Int
     ) -> DuoItem? {
-        guard entries.indices.contains(index) else { return nil }
+        guard manifest.entries.indices.contains(index) else { return nil }
+        return item(
+            for: record,
+            entries: manifest.entries,
+            index: index,
+            parent: DuoItemModel.parentIdentifier(transferId: record.transferId, manifest: manifest, index: index)
+        )
+    }
+
+    private static func item(
+        for record: GenerationRecord,
+        entries: [DuoManifestEntry],
+        index: Int,
+        parent: NSFileProviderItemIdentifier
+    ) -> DuoItem? {
         let entry = entries[index]
         return DuoItem(
             itemIdentifier: DuoItemModel.entryIdentifier(transferId: record.transferId, index: index),
-            parentItemIdentifier: DuoItemModel.parentIdentifier(
-                transferId: record.transferId, entries: entries, index: index
-            ),
+            parentItemIdentifier: parent,
             filename: entry.name,
             contentType: DuoItemModel.contentType(forFilename: entry.name, isDirectory: entry.isDirectory),
             documentSize: entry.isDirectory ? nil : NSNumber(value: entry.size),

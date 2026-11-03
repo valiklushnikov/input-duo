@@ -150,22 +150,22 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
         }
         let endIndex = min(startIndex + DuoEnumerator.workingSetPageSize, all.count)
         let selected = startIndex < endIndex ? all[startIndex..<endIndex] : all[all.endIndex..<all.endIndex]
-        var decodedEntries: [String: [DuoManifestEntry]] = [:]
+        var decodedManifests: [String: DuoDecodedManifest] = [:]
         let items: [NSFileProviderItem] = selected.compactMap { candidate in
             guard let entryIndex = candidate.entryIndex else {
                 return DuoItemFactory.containerItem(for: candidate.record)
             }
-            let entries: [DuoManifestEntry]
-            if let cached = decodedEntries[candidate.record.transferId] {
-                entries = cached
+            let manifest: DuoDecodedManifest
+            if let cached = decodedManifests[candidate.record.transferId] {
+                manifest = cached
             } else {
-                let decoded = DuoItemModel.entries(in: candidate.record)
-                decodedEntries[candidate.record.transferId] = decoded
-                entries = decoded
+                let decoded = DuoDecodedManifest(record: candidate.record)
+                decodedManifests[candidate.record.transferId] = decoded
+                manifest = decoded
             }
             return DuoItemFactory.item(
                 for: candidate.record,
-                entries: entries,
+                manifest: manifest,
                 index: entryIndex
             )
         }
@@ -268,23 +268,23 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
         guard let parsed = DuoItemModel.parse(NSFileProviderItemIdentifier(rawIdentifier)),
               let resolved = cache.resolve(parsed.transferId, store: store) else { return nil }
         if let index = parsed.index {
-            return DuoItemFactory.item(for: resolved.record, entries: resolved.entries, index: index)
+            return DuoItemFactory.item(for: resolved.record, manifest: resolved.manifest, index: index)
         }
         return DuoItemFactory.containerItem(for: resolved.record)
     }
 
-    /// Per-replay memo of `store.record(for:)` + decoded manifest entries,
+    /// Per-replay memo of `store.record(for:)` + decoded manifest,
     /// keyed by transfer id. A missing record is memoized too, so a change
     /// naming thousands of ids of a vanished generation is not re-read per id.
     private struct ResolvedRecordCache {
-        private var byTransferId: [String: (record: GenerationRecord, entries: [DuoManifestEntry])?] = [:]
+        private var byTransferId: [String: (record: GenerationRecord, manifest: DuoDecodedManifest)?] = [:]
 
         mutating func resolve(
             _ transferId: String,
             store: ReplicaStore
-        ) -> (record: GenerationRecord, entries: [DuoManifestEntry])? {
+        ) -> (record: GenerationRecord, manifest: DuoDecodedManifest)? {
             if let cached = byTransferId[transferId] { return cached }
-            let resolved = store.record(for: transferId).map { ($0, DuoItemModel.entries(in: $0)) }
+            let resolved = store.record(for: transferId).map { ($0, DuoDecodedManifest(record: $0)) }
             byTransferId[transferId] = .some(resolved)
             return resolved
         }
@@ -300,7 +300,8 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
             return []
         }
 
-        let entries = DuoItemModel.entries(in: record)
+        let manifest = DuoDecodedManifest(record: record)
+        let entries = manifest.entries
         let parentPath: String
         if let index = parsed.index {
             guard entries.indices.contains(index), entries[index].isDirectory else { return [] }
@@ -313,7 +314,7 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
 
         return entries.indices
             .filter { entries[$0].parentPath == parentPath }
-            .compactMap { DuoItemFactory.item(for: record, index: $0) }
+            .compactMap { DuoItemFactory.item(for: record, manifest: manifest, index: $0) }
     }
 
     /// Lightweight working-set index. It preserves the exact namespace-live

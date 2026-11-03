@@ -480,6 +480,53 @@ final class EnumeratorTests: XCTestCase {
         XCTAssertTrue(observer.moreComing)
     }
 
+    /// Opening a large generation's folder builds every child from ONE decoded
+    /// manifest - not a re-decode (and parent scan) per child, which made a
+    /// 40k-file folder effectively un-openable.
+    func testContainerEnumerationOfLargeGenerationIsLinear() throws {
+        try publishGeneration(transferId: "large", fileEntries: 6_200)
+
+        let started = CFAbsoluteTimeGetCurrent()
+        let observer = enumerate(NSFileProviderItemIdentifier("large"))
+        let elapsed = CFAbsoluteTimeGetCurrent() - started
+
+        XCTAssertEqual(observer.enumeratedItems.count, 6_200)
+        XCTAssertLessThan(elapsed, 2.0, "children must be built from one decoded manifest")
+    }
+
+    /// One change batch deep inside a huge generation's update must cost
+    /// O(manifest) once, not O(manifest) per item: resolving each item's
+    /// parent by scanning all entries made every 200-item batch take ~1s.
+    func testChangeBatchDeepInHugeGenerationIsCheap() throws {
+        // Directories LAST: the worst case for a per-item linear parent scan.
+        var entries: [[String: Any]] = []
+        for i in 0..<41_000 {
+            entries.append(["path": "dir\(i % 40)/f\(i).dat", "kind": "file", "size": 10, "mtime_ns": 100])
+        }
+        for d in 0..<40 { entries.append(["path": "dir\(d)", "kind": "directory", "size": 0, "mtime_ns": 1]) }
+        let recordJSON: [String: Any] = [
+            "schema": 1, "transfer_id": "huge", "state": "active", "created_ns": 1, "lease_deadline_ns": 2,
+            "manifest": ["transfer_id": "huge", "drop_effect": 1, "total_bytes": 0, "skipped": [], "entries": entries],
+        ]
+        let record = try store.publish(recordJSON: try JSONSerialization.data(withJSONObject: recordJSON, options: [.sortedKeys]))
+        _ = try journal.append(kind: .update, itemIdentifiers: DuoItemModel.namespaceIdentifiers(of: record))
+        let observer = BatchedChangeObserver(suggestedBatchSize: 200)
+
+        let started = CFAbsoluteTimeGetCurrent()
+        workingSetEnumerator().enumerateChanges(
+            for: observer,
+            from: DuoEnumerator.encodeChangeCursor(revision: 0, offset: 30_000)
+        )
+        let elapsed = CFAbsoluteTimeGetCurrent() - started
+
+        XCTAssertEqual(observer.updatedItems.count, 200)
+        let first = try XCTUnwrap(observer.updatedItems.first)
+        // Namespace id 30_000 is entry 29_999 = "dir39/f29999.dat"; dir39 is entry 41_039.
+        XCTAssertEqual(first.itemIdentifier.rawValue, "huge:29999")
+        XCTAssertEqual(first.parentItemIdentifier.rawValue, "huge:41039")
+        XCTAssertLessThan(elapsed, 0.6, "a batch must not rescan the manifest per item")
+    }
+
     /// R12: the continuation token is identifier-based, so it stays correct
     /// across a store/journal restart - page 2 continues after page 1 with no
     /// overlap.
