@@ -398,3 +398,105 @@ def test_detach_link_wakes_a_pending_fetch_quickly(qtbot):
 def test_the_content_requested_signal_was_a_stub_and_is_gone() -> None:
     """Бриф требует удалить сигнал `content_requested`: его больше никто не слушает."""
     assert not hasattr(ClipboardService, "content_requested")
+
+
+class _EagerBackend(_RecordingBackend):
+    """Как OleSetClipboard для text/html и text/uri-list: читает прямо в publish.
+
+    Qt на Windows спрашивает первый не-текстовый формат синхронно, изнутри
+    setMimeData - поле лога: clipboard_fetch_sent раньше clipboard_offer_published.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.results: list[tuple[bytes | Exception, float]] = []
+
+    def publish(self, offer, fetcher) -> bool:
+        super().publish(offer, fetcher)
+        started = time.monotonic()
+        try:
+            result: bytes | Exception = fetcher(offer.mimes()[0])
+        except Exception as error:  # noqa: BLE001 - тест записывает, а не падает
+            result = error
+        self.results.append((result, time.monotonic() - started))
+        return True
+
+
+def test_a_fetch_made_while_publishing_is_answered_without_waiting_for_the_heartbeat(
+    qtbot, tmp_path
+):
+    """Объявление приходит в слоте readyRead; publish не должен крутиться там же.
+
+    QAbstractSocket не испускает readyRead повторно, пока его слот не вернулся:
+    ответ CONTENT лежал в сокете непрочитанным, пока его не вытаскивала
+    чужая запись (пульс раз в 10 с). Поле: fetch text/html 0.4-10 с, вставка
+    с Mac на Windows работала только с N-го Ctrl+V.
+    """
+    server_identity = load_or_create(tmp_path / "server")
+    client_identity = load_or_create(tmp_path / "client")
+    listener = PeerListener(server_identity)
+    listener.listen(0)
+    links: list[PeerLink] = []
+    listener.link_ready.connect(links.append)
+
+    server_service = ClipboardService(server_identity.origin_id)
+    server_backend = _EagerBackend()
+    server_service.attach_backend(server_backend)
+    client_service = ClipboardService(client_identity.origin_id)
+    client_service.attach_backend(_RecordingBackend())
+
+    client_link = PeerLink(client_identity)
+    with qtbot.waitSignal(client_link.connected, timeout=5000):
+        client_link.connect_to("127.0.0.1", listener.port, server_identity.fingerprint)
+    qtbot.waitUntil(lambda: bool(links), timeout=5000)
+    client_service.attach_link(client_link)
+    server_service.attach_link(links[0])
+    try:
+        html = b"<b>hi</b>"
+        client_service.on_local_snapshot(
+            ClipboardSnapshot({"text/html": html, "text/plain": b"hi"})
+        )
+        qtbot.waitUntil(lambda: bool(server_backend.results), timeout=15000)
+
+        result, elapsed = server_backend.results[0]
+        assert result == html
+        assert elapsed < 2.0
+    finally:
+        listener.stop()
+        client_link.close()
+
+
+def test_an_offer_queued_from_a_link_that_is_gone_is_not_published(qtbot):
+    """Объявление ждёт очереди; связь за это время разорвалась.
+
+    Новая сессия начинает seq заново: опубликованное старое объявление
+    оставило бы _last_received от мёртвой связи и отбросило бы новые как
+    устаревшие.
+    """
+    service = ClipboardService(OURS)
+    backend = _RecordingBackend()
+    service.attach_backend(backend)
+    link = _FakeLink()
+    service.attach_link(link)
+    offer = ClipboardOffer(THEIRS, 5, describe({"text/plain": b"x"}))
+
+    service.handle_message(Message(MessageType.OFFER, offer.to_dict(), b""))
+    link.disconnected.emit("порвалось")
+    qtbot.wait(50)
+
+    assert backend.published == []
+
+
+def test_an_offer_from_the_live_link_is_published_from_the_queue(qtbot):
+    service = ClipboardService(OURS)
+    backend = _RecordingBackend()
+    service.attach_backend(backend)
+    link = _FakeLink()
+    service.attach_link(link)
+    offer = ClipboardOffer(THEIRS, 5, describe({"text/plain": b"x"}))
+
+    service.handle_message(Message(MessageType.OFFER, offer.to_dict(), b""))
+    assert backend.published == []  # ещё внутри «слота readyRead»
+    qtbot.waitUntil(lambda: bool(backend.published), timeout=1000)
+
+    assert backend.published[0].seq == 5

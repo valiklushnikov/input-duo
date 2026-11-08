@@ -313,7 +313,15 @@ class ClipboardService(QObject):
 
     def handle_message(self, message: Message) -> None:
         if message.type is MessageType.OFFER:
-            self.on_remote_offer(ClipboardOffer.from_dict(message.header))
+            # Не здесь, а из очереди: мы внутри слота readyRead, а publish на
+            # Windows сам читает первый не-текстовый формат (OleSetClipboard
+            # спрашивает text/html и text/uri-list синхронно) и уходит в
+            # _fetch. QAbstractSocket не испускает readyRead повторно, пока его
+            # слот не вернулся, - ответ CONTENT лежал в сокете до следующего
+            # пульса (до 10 с), а вставка всё это время не работала.
+            offer = ClipboardOffer.from_dict(message.header)
+            link = self._link
+            QTimer.singleShot(0, self, lambda: self._on_queued_offer(offer, link))
         elif message.type is MessageType.FETCH:
             self._answer_fetch(message)
         elif message.type is MessageType.CONTENT:
@@ -322,6 +330,15 @@ class ClipboardService(QObject):
             self._receive_content_error(message)
         elif message.type is MessageType.PING:
             self._send(Message(MessageType.PONG, {}, b""))
+
+    def _on_queued_offer(self, offer: ClipboardOffer, link) -> None:
+        if self._link is not link:
+            # Связь сменилась, пока объявление ждало очереди: seq у новой сессии
+            # начинается заново, и старое объявление испортило бы проверку
+            # устаревших номеров.
+            logger.info("clipboard_offer_ignored seq=%d reason=link_changed", offer.seq)
+            return
+        self.on_remote_offer(offer)
 
     def _send(self, message: Message) -> None:
         if self._link is not None:
