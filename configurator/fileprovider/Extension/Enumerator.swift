@@ -59,6 +59,34 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
         return data.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self).bigEndian }
     }
 
+    /// Mid-change cursor: when a batch boundary falls inside one journal
+    /// change, the anchor is 16 bytes - the last FULLY delivered revision plus
+    /// how many identifiers of the next change were already delivered. A
+    /// boundary on a change edge stays the plain 8-byte revision anchor, so a
+    /// finished walk always ends at the plain head anchor.
+    static func encodeChangeCursor(revision: UInt64, offset: Int) -> NSFileProviderSyncAnchor {
+        guard offset > 0 else { return encodeAnchor(revision) }
+        var be = (revision.bigEndian, UInt64(offset).bigEndian)
+        return withUnsafeBytes(of: &be) { NSFileProviderSyncAnchor(Data($0)) }
+    }
+
+    static func decodeChangeCursor(_ anchor: NSFileProviderSyncAnchor) -> (revision: UInt64, offset: Int)? {
+        let data = anchor.rawValue
+        if let revision = decodeAnchor(anchor) { return (revision, 0) }
+        guard data.count == 16 else { return nil }
+        let (revision, offset) = data.withUnsafeBytes {
+            ($0.loadUnaligned(fromByteOffset: 0, as: UInt64.self).bigEndian,
+             $0.loadUnaligned(fromByteOffset: 8, as: UInt64.self).bigEndian)
+        }
+        guard offset > 0, offset <= UInt64(Int.max) else { return nil }
+        return (revision, Int(offset))
+    }
+
+    /// Batch bound when the observer does not advertise `suggestedBatchSize`.
+    /// fileproviderd ABORTS the extension (`__FILEPROVIDER_OBSERVER_TOO_MANY_ITEMS__`)
+    /// on an oversized batch, so a change is never replayed in one shot.
+    static let defaultChangeBatchSize = 200
+
     /// The one KNOWN legacy anchor from before the journal existed (the old
     /// static `currentSyncAnchor`). It is soft-migrated to baseline revision 0,
     /// never expired - see `enumerateChanges`.
@@ -122,22 +150,22 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
         }
         let endIndex = min(startIndex + DuoEnumerator.workingSetPageSize, all.count)
         let selected = startIndex < endIndex ? all[startIndex..<endIndex] : all[all.endIndex..<all.endIndex]
-        var decodedEntries: [String: [DuoManifestEntry]] = [:]
+        var decodedManifests: [String: DuoDecodedManifest] = [:]
         let items: [NSFileProviderItem] = selected.compactMap { candidate in
             guard let entryIndex = candidate.entryIndex else {
                 return DuoItemFactory.containerItem(for: candidate.record)
             }
-            let entries: [DuoManifestEntry]
-            if let cached = decodedEntries[candidate.record.transferId] {
-                entries = cached
+            let manifest: DuoDecodedManifest
+            if let cached = decodedManifests[candidate.record.transferId] {
+                manifest = cached
             } else {
-                let decoded = DuoItemModel.entries(in: candidate.record)
-                decodedEntries[candidate.record.transferId] = decoded
-                entries = decoded
+                let decoded = DuoDecodedManifest(record: candidate.record)
+                decodedManifests[candidate.record.transferId] = decoded
+                manifest = decoded
             }
             return DuoItemFactory.item(
                 for: candidate.record,
-                entries: entries,
+                manifest: manifest,
                 index: entryIndex
             )
         }
@@ -154,8 +182,10 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
 
     func enumerateChanges(for observer: NSFileProviderChangeObserver, from anchor: NSFileProviderSyncAnchor) {
         let from: UInt64
-        if let decoded = DuoEnumerator.decodeAnchor(anchor) {
-            from = decoded
+        var skip = 0
+        if let decoded = DuoEnumerator.decodeChangeCursor(anchor) {
+            from = decoded.revision
+            skip = decoded.offset
         } else if DuoEnumerator.isLegacyV1Anchor(anchor) {
             // SOFT MIGRATION of the KNOWN legacy "v1" anchor: treat it as baseline
             // revision 0, replay the journal, and finish at the current head - do
@@ -175,20 +205,54 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
         }
         journal.noteObserved(from)
         let changes = journal.changes(after: from)
-        for change in changes {
-            switch change.kind {
-            case .update:
-                let items = change.itemIdentifiers.compactMap { resolveItem(for: $0) }
-                if !items.isEmpty { observer.didUpdate(items) }
-            case .delete:
-                observer.didDeleteItems(
-                    withIdentifiers: change.itemIdentifiers.map { NSFileProviderItemIdentifier($0) }
-                )
+        let batchSize = max(1, observer.suggestedBatchSize ?? DuoEnumerator.defaultChangeBatchSize)
+        // A publish journals every identifier of its generation in one change,
+        // so the record and its manifest are decoded once per generation for
+        // the whole replay - never once per identifier (that was O(N^2) and
+        // piled autoreleased bridging garbage on the serial FPX queue).
+        var cache = ResolvedRecordCache()
+        var budget = batchSize
+        var delivered = from
+        var stoppedAt: (revision: UInt64, offset: Int)?
+        for (position, change) in changes.enumerated() {
+            let start = position == 0 ? min(skip, change.itemIdentifiers.count) : 0
+            let end = min(change.itemIdentifiers.count, start + budget)
+            let slice = change.itemIdentifiers[start..<end]
+            autoreleasepool {
+                switch change.kind {
+                case .update:
+                    let items = slice.compactMap { resolveItem(for: $0, cache: &cache) }
+                    if !items.isEmpty { observer.didUpdate(items) }
+                case .delete:
+                    if !slice.isEmpty {
+                        observer.didDeleteItems(withIdentifiers: slice.map { NSFileProviderItemIdentifier($0) })
+                    }
+                }
+            }
+            budget -= slice.count
+            if end < change.itemIdentifiers.count {
+                stoppedAt = (delivered, end)
+                break
+            }
+            delivered = change.revision
+            if budget == 0 {
+                if position < changes.count - 1 { stoppedAt = (delivered, 0) }
+                break
             }
         }
         let head = journal.headRevision()
-        enumeratorLog.info("fp_enumerate_changes from=\(from, privacy: .public) head=\(head, privacy: .public) count=\(changes.count, privacy: .public)")
-        observer.finishEnumeratingChanges(upTo: DuoEnumerator.encodeAnchor(head), moreComing: false)
+        enumeratorLog.info("fp_enumerate_changes from=\(from, privacy: .public) skip=\(skip, privacy: .public) head=\(head, privacy: .public) count=\(changes.count, privacy: .public) batch=\(batchSize, privacy: .public) more=\(stoppedAt != nil, privacy: .public)")
+        if let stop = stoppedAt {
+            observer.finishEnumeratingChanges(
+                upTo: DuoEnumerator.encodeChangeCursor(revision: stop.revision, offset: stop.offset),
+                moreComing: true
+            )
+        } else {
+            // Finish at the last revision actually replayed, not a head read
+            // after listing: a change appended in between must not be skipped.
+            let finishedAt = changes.isEmpty ? max(from, head) : delivered
+            observer.finishEnumeratingChanges(upTo: DuoEnumerator.encodeAnchor(finishedAt), moreComing: false)
+        }
     }
 
     func currentSyncAnchor(completionHandler: @escaping (NSFileProviderSyncAnchor?) -> Void) {
@@ -200,13 +264,30 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
     /// Resolves a `DuoItem` for a journal `update` change's identifier from the
     /// current record (nil if the record is gone or the identifier is a bare
     /// container - a container update carries no fetchable item here).
-    private func resolveItem(for rawIdentifier: String) -> NSFileProviderItem? {
+    private func resolveItem(for rawIdentifier: String, cache: inout ResolvedRecordCache) -> NSFileProviderItem? {
         guard let parsed = DuoItemModel.parse(NSFileProviderItemIdentifier(rawIdentifier)),
-              let record = store.record(for: parsed.transferId) else { return nil }
+              let resolved = cache.resolve(parsed.transferId, store: store) else { return nil }
         if let index = parsed.index {
-            return DuoItemFactory.item(for: record, index: index)
+            return DuoItemFactory.item(for: resolved.record, manifest: resolved.manifest, index: index)
         }
-        return DuoItemFactory.containerItem(for: record)
+        return DuoItemFactory.containerItem(for: resolved.record)
+    }
+
+    /// Per-replay memo of `store.record(for:)` + decoded manifest,
+    /// keyed by transfer id. A missing record is memoized too, so a change
+    /// naming thousands of ids of a vanished generation is not re-read per id.
+    private struct ResolvedRecordCache {
+        private var byTransferId: [String: (record: GenerationRecord, manifest: DuoDecodedManifest)?] = [:]
+
+        mutating func resolve(
+            _ transferId: String,
+            store: ReplicaStore
+        ) -> (record: GenerationRecord, manifest: DuoDecodedManifest)? {
+            if let cached = byTransferId[transferId] { return cached }
+            let resolved = store.record(for: transferId).map { ($0, DuoDecodedManifest(record: $0)) }
+            byTransferId[transferId] = .some(resolved)
+            return resolved
+        }
     }
 
     private func children() -> [NSFileProviderItem] {
@@ -219,7 +300,8 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
             return []
         }
 
-        let entries = DuoItemModel.entries(in: record)
+        let manifest = DuoDecodedManifest(record: record)
+        let entries = manifest.entries
         let parentPath: String
         if let index = parsed.index {
             guard entries.indices.contains(index), entries[index].isDirectory else { return [] }
@@ -232,7 +314,7 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
 
         return entries.indices
             .filter { entries[$0].parentPath == parentPath }
-            .compactMap { DuoItemFactory.item(for: record, index: $0) }
+            .compactMap { DuoItemFactory.item(for: record, manifest: manifest, index: $0) }
     }
 
     /// Lightweight working-set index. It preserves the exact namespace-live

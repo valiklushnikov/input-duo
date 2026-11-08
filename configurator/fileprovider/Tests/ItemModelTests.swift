@@ -29,6 +29,42 @@ final class ItemModelTests: XCTestCase {
         )
     }
 
+    // MARK: - Directory-map parent resolution
+
+    /// The O(1) directory-map parent lookup picks exactly what the linear
+    /// scan picks for every entry: top-level, nested, a duplicated directory
+    /// path (first one wins), a file sharing a directory's path (ignored), and
+    /// an orphan whose parent directory is missing (generation container).
+    func testDecodedManifestParentMatchesLinearScanForEveryEntry() {
+        let record = makeRecord(entries: [
+            ["path": "a", "kind": "file", "size": 1, "mtime_ns": 1],
+            ["path": "top.txt", "kind": "file", "size": 1, "mtime_ns": 1],
+            ["path": "a/x.txt", "kind": "file", "size": 1, "mtime_ns": 1],
+            ["path": "a", "kind": "directory", "size": 0, "mtime_ns": 1],
+            ["path": "a/b", "kind": "directory", "size": 0, "mtime_ns": 1],
+            ["path": "a", "kind": "directory", "size": 0, "mtime_ns": 1],
+            ["path": "a/b/deep.txt", "kind": "file", "size": 1, "mtime_ns": 1],
+            ["path": "ghost/orphan.txt", "kind": "file", "size": 1, "mtime_ns": 1],
+        ])
+        let manifest = DuoDecodedManifest(record: record)
+        for index in manifest.entries.indices {
+            XCTAssertEqual(
+                DuoItemModel.parentIdentifier(transferId: "abc123", manifest: manifest, index: index),
+                DuoItemModel.parentIdentifier(transferId: "abc123", entries: manifest.entries, index: index),
+                "entry \(index)"
+            )
+            XCTAssertEqual(
+                DuoItemFactory.item(for: record, manifest: manifest, index: index)?.parentItemIdentifier,
+                DuoItemFactory.item(for: record, index: index)?.parentItemIdentifier
+            )
+        }
+        XCTAssertEqual(manifest.directoryIndexByPath["a"], 3, "first directory entry wins")
+        XCTAssertEqual(
+            DuoItemModel.parentIdentifier(transferId: "abc123", manifest: manifest, index: 7).rawValue, "abc123"
+        )
+        XCTAssertNil(DuoItemFactory.item(for: record, manifest: manifest, index: 8))
+    }
+
     // MARK: - Determinism
 
     func testSameManifestProducesIdenticalIdentifierAndVersionAcrossConstructions() {

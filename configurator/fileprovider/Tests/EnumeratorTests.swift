@@ -27,19 +27,24 @@ private final class RecordingEnumerationObserver: NSObject, NSFileProviderEnumer
     }
 }
 
-private final class RecordingChangeObserver: NSObject, NSFileProviderChangeObserver {
+private class RecordingChangeObserver: NSObject, NSFileProviderChangeObserver {
     private(set) var updatedItems: [NSFileProviderItem] = []
     private(set) var deletedIdentifiers: [NSFileProviderItemIdentifier] = []
+    /// Per-callback sizes, so batching tests can assert none exceeds the
+    /// suggested batch size.
+    private(set) var callbackSizes: [Int] = []
     private(set) var finishedAnchor: NSFileProviderSyncAnchor?
     private(set) var moreComing = false
     private(set) var finishError: Error?
 
     func didUpdate(_ updatedItems: [NSFileProviderItem]) {
         self.updatedItems.append(contentsOf: updatedItems)
+        callbackSizes.append(updatedItems.count)
     }
 
     func didDeleteItems(withIdentifiers deletedItemIdentifiers: [NSFileProviderItemIdentifier]) {
         self.deletedIdentifiers.append(contentsOf: deletedItemIdentifiers)
+        callbackSizes.append(deletedItemIdentifiers.count)
     }
 
     func finishEnumeratingChanges(upTo anchor: NSFileProviderSyncAnchor, moreComing: Bool) {
@@ -48,6 +53,14 @@ private final class RecordingChangeObserver: NSObject, NSFileProviderChangeObser
     }
 
     func finishEnumeratingWithError(_ error: Error) { finishError = error }
+}
+
+/// A change observer that advertises `suggestedBatchSize`, as fileproviderd's
+/// does. The real observer ABORTS the extension
+/// (`__FILEPROVIDER_OBSERVER_TOO_MANY_ITEMS__`) when a batch is too large.
+private final class BatchedChangeObserver: RecordingChangeObserver {
+    let suggestedBatchSize: Int
+    init(suggestedBatchSize: Int) { self.suggestedBatchSize = suggestedBatchSize }
 }
 
 /// `DuoEnumerator` + `FileProviderExtension.item(for:)`/`enumerator(for:)`
@@ -380,6 +393,138 @@ final class EnumeratorTests: XCTestCase {
             2.0,
             "one 128-item page must leave the serial FPX queue available for service routing"
         )
+    }
+
+    /// A publish journals ONE `update` carrying every namespace identifier of
+    /// the generation. Replaying it must decode that generation's record and
+    /// manifest once, not once per identifier: the per-identifier re-read +
+    /// re-parse was O(N^2) on the serial FPX queue and ballooned the extension
+    /// to tens of GB of autoreleased bridging garbage on a large paste.
+    func testEnumerateChangesLargeGenerationUpdateDecodesOncePerGeneration() throws {
+        try publishGeneration(transferId: "large", fileEntries: 6_200)
+        let record = try XCTUnwrap(store.record(for: "large"))
+        let ids = DuoItemModel.namespaceIdentifiers(of: record)
+        _ = try journal.append(kind: .update, itemIdentifiers: ids)
+
+        let started = CFAbsoluteTimeGetCurrent()
+        let walk = walkChanges(from: DuoEnumerator.encodeAnchor(0), suggestedBatchSize: 200)
+        let elapsed = CFAbsoluteTimeGetCurrent() - started
+
+        XCTAssertEqual(walk.updated.count, ids.count)
+        XCTAssertEqual(Set(walk.updated), Set(ids))
+        XCTAssertLessThan(elapsed, 2.0, "change replay must be linear in the generation size")
+    }
+
+    /// Replays changes call by call, following `moreComing`, the way
+    /// fileproviderd does. Asserts the batch contract on every call.
+    private func walkChanges(
+        from start: NSFileProviderSyncAnchor,
+        suggestedBatchSize: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) -> (updated: [String], deleted: [String], calls: Int, finalAnchor: NSFileProviderSyncAnchor?) {
+        var anchor = start
+        var updated: [String] = []
+        var deleted: [String] = []
+        var calls = 0
+        while calls < 10_000 {
+            calls += 1
+            let observer = BatchedChangeObserver(suggestedBatchSize: suggestedBatchSize)
+            workingSetEnumerator().enumerateChanges(for: observer, from: anchor)
+            XCTAssertNil(observer.finishError, file: file, line: line)
+            XCTAssertLessThanOrEqual(
+                observer.updatedItems.count + observer.deletedIdentifiers.count, suggestedBatchSize,
+                "one enumerateChanges call must not exceed suggestedBatchSize", file: file, line: line
+            )
+            updated += observer.updatedItems.map { $0.itemIdentifier.rawValue }
+            deleted += observer.deletedIdentifiers.map { $0.rawValue }
+            guard let next = observer.finishedAnchor else {
+                XCTFail("enumerateChanges did not finish", file: file, line: line)
+                break
+            }
+            anchor = next
+            if !observer.moreComing { break }
+        }
+        return (updated, deleted, calls, anchor)
+    }
+
+    /// One journal change larger than a batch is split across calls with
+    /// `moreComing`, resuming mid-change from the anchor; every identifier is
+    /// delivered exactly once and the walk ends at the plain head anchor.
+    func testEnumerateChangesSplitsLargeChangeIntoSuggestedBatches() throws {
+        try publishGeneration(transferId: "big", fileEntries: 1_000)
+        let record = try XCTUnwrap(store.record(for: "big"))
+        let ids = DuoItemModel.namespaceIdentifiers(of: record)
+        _ = try journal.append(kind: .update, itemIdentifiers: ids)
+        let tombIds = (0..<450).map { "gone:\($0)" }
+        _ = try journal.recordTombstone(transferId: "gone", itemIdentifiers: tombIds)
+
+        let walk = walkChanges(from: DuoEnumerator.encodeAnchor(0), suggestedBatchSize: 200)
+
+        XCTAssertEqual(walk.updated, ids, "updates delivered once each, in journal order")
+        XCTAssertEqual(walk.deleted, tombIds)
+        XCTAssertEqual(walk.calls, Int(ceil(Double(ids.count + tombIds.count) / 200)))
+        XCTAssertEqual(DuoEnumerator.decodeAnchor(try XCTUnwrap(walk.finalAnchor)), journal.headRevision())
+    }
+
+    /// An observer without `suggestedBatchSize` still gets bounded batches.
+    func testEnumerateChangesBoundsBatchWithoutSuggestedSize() throws {
+        try publishGeneration(transferId: "big", fileEntries: 1_000)
+        let record = try XCTUnwrap(store.record(for: "big"))
+        _ = try journal.append(kind: .update, itemIdentifiers: DuoItemModel.namespaceIdentifiers(of: record))
+        let observer = RecordingChangeObserver()
+
+        workingSetEnumerator().enumerateChanges(for: observer, from: DuoEnumerator.encodeAnchor(0))
+
+        XCTAssertLessThanOrEqual(observer.updatedItems.count, DuoEnumerator.defaultChangeBatchSize)
+        XCTAssertTrue(observer.moreComing)
+    }
+
+    /// Opening a large generation's folder builds every child from ONE decoded
+    /// manifest - not a re-decode (and parent scan) per child, which made a
+    /// 40k-file folder effectively un-openable.
+    func testContainerEnumerationOfLargeGenerationIsLinear() throws {
+        try publishGeneration(transferId: "large", fileEntries: 6_200)
+
+        let started = CFAbsoluteTimeGetCurrent()
+        let observer = enumerate(NSFileProviderItemIdentifier("large"))
+        let elapsed = CFAbsoluteTimeGetCurrent() - started
+
+        XCTAssertEqual(observer.enumeratedItems.count, 6_200)
+        XCTAssertLessThan(elapsed, 2.0, "children must be built from one decoded manifest")
+    }
+
+    /// One change batch deep inside a huge generation's update must cost
+    /// O(manifest) once, not O(manifest) per item: resolving each item's
+    /// parent by scanning all entries made every 200-item batch take ~1s.
+    func testChangeBatchDeepInHugeGenerationIsCheap() throws {
+        // Directories LAST: the worst case for a per-item linear parent scan.
+        var entries: [[String: Any]] = []
+        for i in 0..<41_000 {
+            entries.append(["path": "dir\(i % 40)/f\(i).dat", "kind": "file", "size": 10, "mtime_ns": 100])
+        }
+        for d in 0..<40 { entries.append(["path": "dir\(d)", "kind": "directory", "size": 0, "mtime_ns": 1]) }
+        let recordJSON: [String: Any] = [
+            "schema": 1, "transfer_id": "huge", "state": "active", "created_ns": 1, "lease_deadline_ns": 2,
+            "manifest": ["transfer_id": "huge", "drop_effect": 1, "total_bytes": 0, "skipped": [], "entries": entries],
+        ]
+        let record = try store.publish(recordJSON: try JSONSerialization.data(withJSONObject: recordJSON, options: [.sortedKeys]))
+        _ = try journal.append(kind: .update, itemIdentifiers: DuoItemModel.namespaceIdentifiers(of: record))
+        let observer = BatchedChangeObserver(suggestedBatchSize: 200)
+
+        let started = CFAbsoluteTimeGetCurrent()
+        workingSetEnumerator().enumerateChanges(
+            for: observer,
+            from: DuoEnumerator.encodeChangeCursor(revision: 0, offset: 30_000)
+        )
+        let elapsed = CFAbsoluteTimeGetCurrent() - started
+
+        XCTAssertEqual(observer.updatedItems.count, 200)
+        let first = try XCTUnwrap(observer.updatedItems.first)
+        // Namespace id 30_000 is entry 29_999 = "dir39/f29999.dat"; dir39 is entry 41_039.
+        XCTAssertEqual(first.itemIdentifier.rawValue, "huge:29999")
+        XCTAssertEqual(first.parentItemIdentifier.rawValue, "huge:41039")
+        XCTAssertLessThan(elapsed, 0.6, "a batch must not rescan the manifest per item")
     }
 
     /// R12: the continuation token is identifier-based, so it stays correct
