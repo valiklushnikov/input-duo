@@ -19,6 +19,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     private let domain: NSFileProviderDomain
     private let manager: NSFileProviderManager?
     private let replicaStore: ReplicaStore
+    /// Signature-validated decoded records shared by item lookup, fetch, the
+    /// prefetch gate and every enumerator - never a re-parse per request.
+    private let generations: GenerationCache
     /// Durable namespace-change log, co-located with the replica store. Drives
     /// the working-set sync anchor and deletion reconciliation.
     private let changeJournal: ChangeJournal
@@ -44,10 +47,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
          perf: PerfTrace = .live) {
         self.domain = domain
         self.perf = perf
+        let generations = GenerationCache(store: replicaStore)
+        self.generations = generations
         // Rolling prefetch replenishes only while the generation is current:
         // a completion of a retired generation must never open new downloads.
         self.burstDownloads = FinderBurstDownloadCoordinator(
-            isGenerationCurrent: { [replicaStore] id in replicaStore.record(for: id)?.isActive ?? false }
+            isGenerationCurrent: { [generations] id in generations.summary(for: id)?.isActive ?? false }
         )
         let manager = NSFileProviderManager(for: domain)
         self.manager = manager
@@ -121,19 +126,19 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         // deletion is propagated through the working-set change channel, never by
         // failing a direct request. The ONLY -1005 is a genuinely absent record.
         guard let parsed = DuoItemModel.parse(identifier),
-              let record = replicaStore.record(for: parsed.transferId) else {
+              let generation = generations.decoded(for: parsed.transferId) else {
             completionHandler(nil, noSuchItem)
             return Progress()
         }
 
         if let index = parsed.index {
-            if let item = DuoItemFactory.item(for: record, index: index) {
+            if let item = DuoItemFactory.item(for: generation.record, manifest: generation.manifest, index: index) {
                 completionHandler(item, nil)
             } else {
                 completionHandler(nil, noSuchItem)
             }
         } else {
-            completionHandler(DuoItemFactory.containerItem(for: record), nil)
+            completionHandler(DuoItemFactory.containerItem(for: generation.record), nil)
         }
         return Progress()
     }
@@ -151,8 +156,9 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         // its durable record exists. The only noSuchItem is a genuinely absent
         // record.
         guard let parsed = DuoItemModel.parse(itemIdentifier), let index = parsed.index,
-              let record = replicaStore.record(for: parsed.transferId),
-              let item = DuoItemFactory.item(for: record, index: index), item.documentSize != nil,
+              let generation = generations.decoded(for: parsed.transferId),
+              let item = DuoItemFactory.item(for: generation.record, manifest: generation.manifest, index: index),
+              item.documentSize != nil,
               requestedVersion == nil || requestedVersion == item.itemVersion else {
             perf.mark("fetch_enter", at: fetchStartedAt, fields: [
                 ("item_identifier", itemIdentifier.rawValue),
@@ -178,7 +184,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         let decision = burstDownloads.beginFetch(
             transferId: parsed.transferId,
             index: index,
-            entries: DuoItemModel.entries(in: record),
+            entries: generation.manifest.entries,
             isFileViewerRequest: request.isFileViewerRequest
         )
         let context = decision.context
@@ -292,7 +298,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         for containerItemIdentifier: NSFileProviderItemIdentifier,
         request: NSFileProviderRequest
     ) throws -> NSFileProviderEnumerator {
-        return DuoEnumerator(enumeratedItemIdentifier: containerItemIdentifier, store: replicaStore, journal: changeJournal)
+        return DuoEnumerator(
+            enumeratedItemIdentifier: containerItemIdentifier,
+            store: replicaStore,
+            journal: changeJournal,
+            generations: generations
+        )
     }
 
     // MARK: - Mutating operations: read-only backend, all unsupported.

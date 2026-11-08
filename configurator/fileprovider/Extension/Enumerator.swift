@@ -27,17 +27,26 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
     private let enumeratedItemIdentifier: NSFileProviderItemIdentifier
     private let store: ReplicaStore
     private let journal: ChangeJournal
+    private let generations: GenerationCache
 
     private struct WorkingSetCandidate {
         let identifier: String
-        let record: GenerationRecord
+        let transferId: String
         let entryIndex: Int?
     }
 
-    init(enumeratedItemIdentifier: NSFileProviderItemIdentifier, store: ReplicaStore, journal: ChangeJournal) {
+    /// `generations` is the extension's shared cache; standalone construction
+    /// (tests) gets a private one over the same store.
+    init(
+        enumeratedItemIdentifier: NSFileProviderItemIdentifier,
+        store: ReplicaStore,
+        journal: ChangeJournal,
+        generations: GenerationCache? = nil
+    ) {
         self.enumeratedItemIdentifier = enumeratedItemIdentifier
         self.store = store
         self.journal = journal
+        self.generations = generations ?? GenerationCache(store: store)
         super.init()
     }
 
@@ -150,22 +159,15 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
         }
         let endIndex = min(startIndex + DuoEnumerator.workingSetPageSize, all.count)
         let selected = startIndex < endIndex ? all[startIndex..<endIndex] : all[all.endIndex..<all.endIndex]
-        var decodedManifests: [String: DuoDecodedManifest] = [:]
+        var cache = ResolvedRecordCache()
         let items: [NSFileProviderItem] = selected.compactMap { candidate in
+            guard let generation = cache.resolve(candidate.transferId, generations: generations) else { return nil }
             guard let entryIndex = candidate.entryIndex else {
-                return DuoItemFactory.containerItem(for: candidate.record)
-            }
-            let manifest: DuoDecodedManifest
-            if let cached = decodedManifests[candidate.record.transferId] {
-                manifest = cached
-            } else {
-                let decoded = DuoDecodedManifest(record: candidate.record)
-                decodedManifests[candidate.record.transferId] = decoded
-                manifest = decoded
+                return DuoItemFactory.containerItem(for: generation.record)
             }
             return DuoItemFactory.item(
-                for: candidate.record,
-                manifest: manifest,
+                for: generation.record,
+                manifest: generation.manifest,
                 index: entryIndex
             )
         }
@@ -266,25 +268,24 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
     /// container - a container update carries no fetchable item here).
     private func resolveItem(for rawIdentifier: String, cache: inout ResolvedRecordCache) -> NSFileProviderItem? {
         guard let parsed = DuoItemModel.parse(NSFileProviderItemIdentifier(rawIdentifier)),
-              let resolved = cache.resolve(parsed.transferId, store: store) else { return nil }
+              let resolved = cache.resolve(parsed.transferId, generations: generations) else { return nil }
         if let index = parsed.index {
             return DuoItemFactory.item(for: resolved.record, manifest: resolved.manifest, index: index)
         }
         return DuoItemFactory.containerItem(for: resolved.record)
     }
 
-    /// Per-replay memo of `store.record(for:)` + decoded manifest,
-    /// keyed by transfer id. A missing record is memoized too, so a change
-    /// naming thousands of ids of a vanished generation is not re-read per id.
+    /// Per-call memo over the shared `GenerationCache`, keyed by transfer id,
+    /// so one batch pins one consistent decoded generation and does not `stat`
+    /// the record file per identifier. A missing record is memoized too, so a
+    /// change naming thousands of ids of a vanished generation is not re-read
+    /// per id.
     private struct ResolvedRecordCache {
-        private var byTransferId: [String: (record: GenerationRecord, manifest: DuoDecodedManifest)?] = [:]
+        private var byTransferId: [String: DecodedGeneration?] = [:]
 
-        mutating func resolve(
-            _ transferId: String,
-            store: ReplicaStore
-        ) -> (record: GenerationRecord, manifest: DuoDecodedManifest)? {
+        mutating func resolve(_ transferId: String, generations: GenerationCache) -> DecodedGeneration? {
             if let cached = byTransferId[transferId] { return cached }
-            let resolved = store.record(for: transferId).map { ($0, DuoDecodedManifest(record: $0)) }
+            let resolved = generations.decoded(for: transferId)
             byTransferId[transferId] = .some(resolved)
             return resolved
         }
@@ -296,11 +297,12 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
         }
 
         guard let parsed = DuoItemModel.parse(enumeratedItemIdentifier),
-              let record = store.record(for: parsed.transferId), record.isActive else {
+              let generation = generations.decoded(for: parsed.transferId), generation.record.isActive else {
             return []
         }
 
-        let manifest = DuoDecodedManifest(record: record)
+        let record = generation.record
+        let manifest = generation.manifest
         let entries = manifest.entries
         let parentPath: String
         if let index = parsed.index {
@@ -323,19 +325,19 @@ final class DuoEnumerator: NSObject, NSFileProviderEnumerator {
     private func workingSetCandidates() -> [WorkingSetCandidate] {
         let tombstoned = journal.tombstonedTransferIds()
         var candidates: [WorkingSetCandidate] = []
-        for record in store.allRecords() where !tombstoned.contains(record.transferId) {
+        for summary in generations.summaries() where !tombstoned.contains(summary.transferId) {
             candidates.append(WorkingSetCandidate(
-                identifier: DuoItemModel.containerIdentifier(transferId: record.transferId).rawValue,
-                record: record,
+                identifier: DuoItemModel.containerIdentifier(transferId: summary.transferId).rawValue,
+                transferId: summary.transferId,
                 entryIndex: nil
             ))
-            for index in 0..<DuoItemModel.entryCount(in: record) {
+            for index in 0..<summary.entryCount {
                 candidates.append(WorkingSetCandidate(
                     identifier: DuoItemModel.entryIdentifier(
-                        transferId: record.transferId,
+                        transferId: summary.transferId,
                         index: index
                     ).rawValue,
-                    record: record,
+                    transferId: summary.transferId,
                     entryIndex: index
                 ))
             }

@@ -25,6 +25,15 @@ struct GenerationRecord {
     var isActive: Bool { state == GenerationRecord.activeState }
 }
 
+/// See `ReplicaStore.recordSignature(for:)`.
+struct RecordFileSignature: Equatable {
+    let device: UInt64
+    let inode: UInt64
+    let size: Int64
+    let mtimeSeconds: Int64
+    let mtimeNanoseconds: Int64
+}
+
 enum ReplicaStoreError: Error, Equatable {
     case invalidRecord(String)
     case notFound(String)
@@ -156,6 +165,30 @@ final class ReplicaStore {
             guard let (_, record) = try? parseRecord(data) else { return nil }
             return record.isActive ? record : nil
         }
+    }
+
+    /// On-disk identity of `generationId`'s record file right now, or nil if it
+    /// does not exist. Every mutation is a temp-file + `rename(2)` (and GC is an
+    /// unlink), so any publish/retire/rewrite yields a new inode: an equal
+    /// signature means the same bytes. `GenerationCache` keys decoded records
+    /// on it instead of re-reading + re-parsing the file per request.
+    func recordSignature(for generationId: String) -> RecordFileSignature? {
+        guard (try? requireSafeId(generationId)) != nil else { return nil }
+        var info = stat()
+        guard stat(fileURL(for: generationId).path, &info) == 0 else { return nil }
+        return RecordFileSignature(
+            device: UInt64(info.st_dev),
+            inode: UInt64(info.st_ino),
+            size: Int64(info.st_size),
+            mtimeSeconds: Int64(info.st_mtimespec.tv_sec),
+            mtimeNanoseconds: Int64(info.st_mtimespec.tv_nsec)
+        )
+    }
+
+    /// Transfer ids of every live record file (not parsed - see `allRecords()`
+    /// for the parse-filtered list).
+    func generationIds() -> [String] {
+        listGenerationFiles().map { $0.deletingPathExtension().lastPathComponent }
     }
 
     /// Every durable record, active OR retired (parse failures excluded). The

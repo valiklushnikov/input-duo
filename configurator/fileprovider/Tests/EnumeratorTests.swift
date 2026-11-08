@@ -559,6 +559,27 @@ final class EnumeratorTests: XCTestCase {
         return FileProviderExtension(domain: domain, replicaStore: store)
     }
 
+    /// fileproviderd resolves the items of a large paste one `item(for:)` at a
+    /// time. Each lookup must reuse the decoded generation, not re-read and
+    /// re-parse the whole record: that was O(N^2) and pinned the extension at
+    /// ~100% CPU for minutes after a 40k-file paste.
+    func testItemForEveryEntryOfLargeGenerationReusesDecodedRecord() throws {
+        try publishGeneration(transferId: "large", fileEntries: 6_200)
+        let ext = makeExtension()
+        var resolved = 0
+
+        let started = CFAbsoluteTimeGetCurrent()
+        for index in 0..<6_200 {
+            _ = ext.item(for: NSFileProviderItemIdentifier("large:\(index)"), request: NSFileProviderRequest()) { item, _ in
+                if item != nil { resolved += 1 }
+            }
+        }
+        let elapsed = CFAbsoluteTimeGetCurrent() - started
+
+        XCTAssertEqual(resolved, 6_200)
+        XCTAssertLessThan(elapsed, 2.0, "item(for:) must not re-decode the generation per lookup")
+    }
+
     func testItemForLeafIdentifierReturnsMatchingDuoItem() throws {
         try publishNestedGeneration()
         let ext = makeExtension()
