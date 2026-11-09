@@ -419,20 +419,40 @@ def test_a_chunk_shorter_than_the_advertised_file_closes_that_stream_as_truncate
     assert len(_sent(link, MessageType.FILE_READ)) == 1, "усечённый поток спросил снова"
 
 
-def test_a_file_error_fails_the_session_and_closes_the_pipe(receiver):
+def test_a_file_error_closes_only_that_file_and_the_session_goes_on(receiver, caplog):
+    """Поле: source_changed на 715-м файле закрывал все потоки - "ошибка на диске".
+
+    Отправитель после FILE_ERROR продолжает отдавать остальные записи; закрыться
+    обязан только поток этого файла, чтобы "Пропустить" в Проводнике работал.
+    """
     service, link = receiver
-    _deliver_offer(service, _offer())
-    pipe = service.open_pipe("t-1", 1)
-    service.request_read(pipe, 0, 4)
+    _deliver_offer(service, TransferManifest("t-1", (
+        TransferEntry("Photos", ENTRY_DIRECTORY, 0, 1),
+        TransferEntry("Photos/a.bin", ENTRY_FILE, 10, 2),
+        TransferEntry("Photos/b.bin", ENTRY_FILE, 10, 3),
+    )))
+    broken = service.open_pipe("t-1", 1)
+    healthy = service.open_pipe("t-1", 2)
+    service.request_read(broken, 0, 4)
     failures: list[str] = []
+    skipped: list[tuple[int, object]] = []
     service.transfer_failed.connect(failures.append)
+    service.entries_skipped.connect(lambda count, names: skipped.append((count, names)))
 
-    service.handle_message(_reply(link, MessageType.FILE_ERROR))
+    with caplog.at_level("INFO", logger="duo_input.transfer.service"):
+        service.handle_message(_reply(link, MessageType.FILE_ERROR))
 
-    assert service.state is TransferState.FAILED
-    assert failures == ["source_changed"]
+    assert broken.closed_reason == "source_changed"
     with pytest.raises(PipeClosed):
-        pipe.take(4)
+        broken.take(4)
+    assert service.state is TransferState.TRANSFERRING
+    assert failures == []
+    assert _sent(link, MessageType.TRANSFER_END) == []
+    assert skipped == [(1, ("a.bin",))]
+    assert "file_skipped name='a.bin' reason=source_changed" in caplog.text
+    service.request_read(healthy, 0, 4)
+    service.handle_message(_reply(link))
+    assert healthy.take(4) == b"abcd"
 
 
 @pytest.mark.parametrize("reason", [None, 12, {}, [], "", "x" * 65, "два слова"])
@@ -794,7 +814,7 @@ def test_terminal_paths_wake_all_pipes_and_notify_at_most_once(receiver, termina
         elif terminal == "detach":
             service.detach_link()
         elif terminal == "failed":
-            service.handle_message(error)
+            service.finish_session("failed")
         else:
             service.finish_session(terminal)
     service.finish_session("completed")

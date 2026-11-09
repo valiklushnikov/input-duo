@@ -278,7 +278,7 @@ def test_the_peak_queue_depth_never_exceeds_one_chunk(qtbot, linked_pair, tmp_pa
     )
 
 
-def test_a_source_deleted_before_the_paste_fails_the_session(qtbot, linked_pair, tmp_path):
+def test_a_source_deleted_before_the_paste_skips_that_file_only(qtbot, linked_pair, tmp_path):
     sender, receiver = linked_pair
     source = tmp_path / "vanishing.bin"
     source.write_bytes(deterministic_bytes(1024))
@@ -287,13 +287,17 @@ def test_a_source_deleted_before_the_paste_fails_the_session(qtbot, linked_pair,
     os.remove(source)
 
     failures: list[str] = []
+    skipped: list[tuple[int, object]] = []
     receiver.transfer_failed.connect(failures.append)
+    receiver.entries_skipped.connect(lambda count, names: skipped.append((count, names)))
     pipe = receiver.open_pipe(transfer_id, 0)
     receiver.request_read(pipe, 0, 1024)
-    qtbot.waitUntil(lambda: bool(failures), timeout=5000)
+    qtbot.waitUntil(lambda: pipe.closed_reason is not None, timeout=5000)
 
-    assert failures == ["source_missing"]
-    assert receiver.state is TransferState.FAILED
+    assert pipe.closed_reason == "source_missing"
+    assert skipped == [(1, ("vanishing.bin",))]
+    assert failures == []
+    assert receiver.state is TransferState.TRANSFERRING
 
 
 def test_pasting_twice_transfers_the_same_snapshot_again(qtbot, linked_pair, tmp_path):

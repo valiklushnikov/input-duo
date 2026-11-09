@@ -689,7 +689,22 @@ class FileTransferService(QObject):
             # текста сессию не завершают и строкой "None"/"12" не становятся.
             logger.debug("ошибка отброшена: reason не короткий идентификатор")
             return
-        self._terminate("failed", reason)
+        # Только этот файл, не сессию: отправитель отдаёт остальные записи и
+        # после FILE_ERROR, а Проводник по закрытому потоку спросит
+        # "Пропустить?". Прежде _terminate закрывал все потоки - один
+        # source_changed обрывал папку из сотен файлов.
+        name = self._entry_name(stream)
+        logger.info("file_skipped name=%r reason=%s", name, reason)
+        self._drop_stream(stream, reason)
+        self._touch()
+        self.entries_skipped.emit(1, (name,))
+
+    def _entry_name(self, stream: _Stream) -> str:
+        """Только имя, не путь (спека §15)."""
+        manifest = self._active_manifest
+        if manifest is None or not 0 <= stream.entry_index < len(manifest.entries):
+            return "?"
+        return PurePosixPath(manifest.entries[stream.entry_index].path).name
 
     def close_pipe(self, pipe, reason: str | None = None) -> None:
         """Проводник отпустил ЭТОТ поток. Сессию это само по себе не завершает."""
