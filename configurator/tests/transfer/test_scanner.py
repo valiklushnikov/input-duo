@@ -376,3 +376,85 @@ def test_the_entry_ceiling_also_bounds_many_selected_roots(tmp_path, monkeypatch
         scan(roots, transfer_id="t")
 
     assert len(stats) <= 5
+
+
+def test_a_posix_symlink_is_skipped_not_sent_as_a_file_of_its_link_size(tmp_path, monkeypatch):
+    """macOS: lstat ссылки - S_IFLNK без st_file_attributes, размер = длина цели.
+
+    Поле (Mac -> Windows, папка с .venv): bin/python ушёл в манифест файлом
+    на 82 байта; os.open пошёл по ссылке к настоящему интерпретатору, сверка
+    размера дала source_changed, и FILE_ERROR оборвал всю передачу на 715-м
+    файле - у Проводника "ошибка на диске при чтении".
+    """
+    import stat as stat_module
+    import types
+
+    folder = tmp_path / "project"
+    (folder / "bin").mkdir(parents=True)
+    (folder / "bin" / "activate").write_bytes(b"ok")
+    link = folder / "bin" / "python"
+    link.write_bytes(b"x" * 4096)  # то, что откроет os.open, пройдя по ссылке
+
+    real_stat = os.stat
+
+    def posix_lstat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if os.fspath(path) == os.fspath(link) and kwargs.get("follow_symlinks") is False:
+            # Без st_file_attributes вовсе - как у os.lstat на macOS.
+            return types.SimpleNamespace(
+                st_mode=stat_module.S_IFLNK | 0o755,
+                st_size=82,
+                st_mtime_ns=result.st_mtime_ns,
+            )
+        return result
+
+    monkeypatch.setattr(os, "stat", posix_lstat)
+
+    manifest, roots = scan([folder], transfer_id="t")
+
+    assert "project/bin/python" not in [entry.path for entry in manifest.entries]
+    assert "project/bin/python" not in roots
+    assert [(skip.path, skip.reason) for skip in manifest.skipped] == [
+        ("project/bin/python", REASON_REPARSE_POINT)
+    ]
+
+
+@pytest.mark.parametrize("kind", ["S_IFIFO", "S_IFSOCK", "S_IFCHR", "S_IFBLK"])
+def test_a_special_file_is_skipped_before_anyone_tries_to_open_it(tmp_path, monkeypatch, kind):
+    """FIFO, сокет, устройство: не данные, и os.open на FIFO на Mac висит.
+
+    Отправитель открывает файл в GUI-потоке - открытие FIFO без писателя
+    повесило бы всю программу. Такие записи не идут в манифест вовсе.
+    """
+    import stat as stat_module
+    import types
+
+    from duo_input.transfer.scanner import REASON_SPECIAL_FILE
+
+    folder = tmp_path / "project"
+    folder.mkdir()
+    (folder / "data.txt").write_bytes(b"ok")
+    special = folder / "special"
+    special.write_bytes(b"")
+
+    real_stat = os.stat
+
+    def posix_lstat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if os.fspath(path) == os.fspath(special):
+            return types.SimpleNamespace(
+                st_mode=getattr(stat_module, kind) | 0o644,
+                st_size=0,
+                st_mtime_ns=result.st_mtime_ns,
+            )
+        return result
+
+    monkeypatch.setattr(os, "stat", posix_lstat)
+
+    manifest, roots = scan([folder], transfer_id="t")
+
+    assert sorted(entry.path for entry in manifest.entries) == ["project", "project/data.txt"]
+    assert "project/special" not in roots
+    assert [(skip.path, skip.reason) for skip in manifest.skipped] == [
+        ("project/special", REASON_SPECIAL_FILE)
+    ]

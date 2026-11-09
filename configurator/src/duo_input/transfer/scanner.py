@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 REASON_REPARSE_POINT = "reparse_point"
 REASON_UNREADABLE = "unreadable"
+#: FIFO, сокет, устройство: не данные, а os.open на FIFO без писателя висит.
+REASON_SPECIAL_FILE = "special_file"
 
 
 def _is_reparse_point(entry_stat: os.stat_result) -> bool:
@@ -38,6 +40,11 @@ def _is_reparse_point(entry_stat: os.stat_result) -> bool:
     st_file_attributes есть только на Windows, поэтому проверяется наличие
     атрибута, а не платформа: так функция остаётся тестируемой и на другой ОС.
     """
+    # S_ISLNK - для macOS: там у lstat нет st_file_attributes, и ссылка
+    # уходила в манифест файлом размером с путь цели, а os.open шёл по ней к
+    # настоящему файлу - source_changed обрывал всю передачу (.venv/bin/python).
+    if stat.S_ISLNK(entry_stat.st_mode):
+        return True
     attributes = getattr(entry_stat, "st_file_attributes", 0)
     reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
     return bool(attributes & reparse)
@@ -130,6 +137,12 @@ def _walk(absolute: Path, relative: str, walk: _Walk) -> None:
             _walk(absolute / child, f"{relative}/{child}", walk)
         return
 
+    if not stat.S_ISREG(entry_stat.st_mode):
+        # Отправитель открывает файл в GUI-потоке: FIFO без писателя повесил
+        # бы всю программу, а сокет или устройство - не содержимое вовсе.
+        walk.skipped.append(SkippedEntry(path=relative, reason=REASON_SPECIAL_FILE))
+        return
+
     walk.add_bytes(entry_stat.st_size)
     walk.entries.append(
         TransferEntry(
@@ -158,4 +171,4 @@ def _bounded_names(directory: Path, room: int) -> list[str]:
     return sorted(names)
 
 
-__all__ = ["REASON_REPARSE_POINT", "REASON_UNREADABLE", "scan"]
+__all__ = ["REASON_REPARSE_POINT", "REASON_SPECIAL_FILE", "REASON_UNREADABLE", "scan"]
